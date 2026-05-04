@@ -1,4 +1,3 @@
-import crypto from 'node:crypto'
 import { z } from 'zod'
 
 const onboardingSchema = z.object({
@@ -18,59 +17,6 @@ const onboardingSchema = z.object({
   available_offers: z.string().optional().nullable(),
   live_experience:  z.enum(['none', 'low', 'moderate', 'advanced']),
 })
-
-const WEBHOOK_TIMEOUT_MS = 5000
-
-/**
- * Dispara payload de onboarding pro CRM externo (n8n / webhook custom).
- * Fire-and-forget — caller NÃO aguarda. Erro só vira log warn, nunca propaga.
- */
-function fireBioCrmWebhook(app, payload) {
-  const url = process.env.BIO_CRM_WEBHOOK_URL
-  if (!url) {
-    app.log.info('[bio-crm webhook] BIO_CRM_WEBHOOK_URL não configurado — skip')
-    return
-  }
-
-  const body = JSON.stringify(payload)
-  const headers = { 'Content-Type': 'application/json', 'User-Agent': 'liveshop-saas/1.0' }
-
-  const secret = process.env.BIO_CRM_WEBHOOK_SECRET
-  if (secret) {
-    const sig = crypto.createHmac('sha256', secret).update(body).digest('hex')
-    headers['X-Livelab-Signature'] = `sha256=${sig}`
-  }
-
-  // Mascarar URL no log (mantém origem, esconde path/token)
-  let maskedUrl = url
-  try {
-    const u = new URL(url)
-    maskedUrl = `${u.protocol}//${u.host}${u.pathname.length > 1 ? '/...' : ''}`
-  } catch (_) { /* keep raw */ }
-
-  fetch(url, {
-    method: 'POST',
-    headers,
-    body,
-    signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
-  })
-    .then(async (res) => {
-      if (res.ok) {
-        app.log.info({ status: res.status, url: maskedUrl }, '[bio-crm webhook] sent')
-      } else {
-        app.log.warn(
-          { status: res.status, url: maskedUrl },
-          '[bio-crm webhook] destino respondeu com erro — onboarding já gravado, segue normalmente',
-        )
-      }
-    })
-    .catch((err) => {
-      app.log.warn(
-        { err: err.message, url: maskedUrl },
-        '[bio-crm webhook] falhou — onboarding já gravado, segue normalmente',
-      )
-    })
-}
 
 export default async function onboardingRoutes(app) {
   // POST /v1/onboarding — salva respostas e marca onboarding_completed = true
@@ -116,27 +62,6 @@ export default async function onboardingRoutes(app) {
       `UPDATE users SET onboarding_completed = true WHERE id = $1`,
       [userId]
     )
-
-    // Lookup user metadata pra enriquecer payload (best-effort)
-    let userMeta = { email: null, nome: null }
-    try {
-      const u = await app.db.query(
-        `SELECT email, nome FROM users WHERE id = $1`,
-        [userId]
-      )
-      if (u.rows.length > 0) userMeta = u.rows[0]
-    } catch (_) { /* ignore */ }
-
-    // Fire-and-forget — não bloqueia resposta
-    fireBioCrmWebhook(app, {
-      event: 'onboarding.completed',
-      user_id: userId,
-      tenant_id: tenantId,
-      user_email: userMeta.email,
-      user_nome: userMeta.nome,
-      submitted_at: new Date().toISOString(),
-      data: d,
-    })
 
     return { ok: true }
   })

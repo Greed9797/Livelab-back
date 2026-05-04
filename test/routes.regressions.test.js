@@ -882,6 +882,7 @@ describe('Route regressions: SQL and RBAC', () => {
 
     async function buildTiktokApp() {
       process.env.JWT_SECRET = 'test-secret-32-chars-minimum-please-ok'
+      process.env.TIKTOK_OAUTH_ENABLED = 'true'
       process.env.TIKTOK_CLIENT_KEY = 'test-client-key'
       process.env.TIKTOK_CLIENT_SECRET = 'test-client-secret'
       process.env.TIKTOK_REDIRECT_URI = 'https://api.test.com/v1/tiktok/callback'

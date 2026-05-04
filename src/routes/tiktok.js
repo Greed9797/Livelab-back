@@ -20,11 +20,14 @@ export async function tiktokRoutes(app) {
   const webhookSignatureToleranceSeconds = Number(
     process.env.TIKTOK_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS ?? 300
   )
+  const oauthEnabled = process.env.TIKTOK_OAUTH_ENABLED === 'true'
   const hasOauthConfig = Boolean(
-    TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET && TIKTOK_REDIRECT_URI
+    oauthEnabled && TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET && TIKTOK_REDIRECT_URI
   )
 
-  if (!hasOauthConfig) {
+  if (!oauthEnabled) {
+    app.log.warn('[TikTok OAuth] Desabilitado (TIKTOK_OAUTH_ENABLED!=true). Aguardando aprovação dos escopos pela TikTok.')
+  } else if (!hasOauthConfig) {
     app.log.warn(
       '[TikTok OAuth] Credenciais ausentes; rotas de OAuth ficarão indisponíveis até configurar TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET e TIKTOK_REDIRECT_URI'
     )
@@ -41,6 +44,11 @@ export async function tiktokRoutes(app) {
    * Gera a URL de OAuth do TikTok e retorna para o Frontend (Painel do Franqueado)
    */
   app.get('/v1/tiktok/connect', { preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])] }, async (request, reply) => {
+    if (!oauthEnabled) {
+      return reply.code(503).send({
+        error: 'Integração TikTok OAuth temporariamente indisponível (aguardando aprovação dos escopos pela TikTok).',
+      })
+    }
     if (!hasOauthConfig) {
       return reply.code(503).send({
         error: 'Integração TikTok OAuth não configurada no servidor',
@@ -51,7 +59,9 @@ export async function tiktokRoutes(app) {
     // Substitui o padrão antigo que usava tenant_id raw (vulnerável a CSRF).
     const nonce = crypto.randomBytes(8).toString('hex');
     const state = createSignedState({ tenantId: request.user.tenant_id, nonce });
-    const scope = 'live.info.read,live.commerce.read'; // Escopos necessários
+    // Escopos aprovados no app sandbox TikTok (Live Studio).
+    // live.info.read / live.commerce.read exigem aprovação Live Shop API (programa restrito) — adicionar quando aprovado.
+    const scope = 'user.info.profile,user.info.stats,video.list';
     const responseType = 'code';
 
     // URL oficial de autorização do TikTok V2
@@ -65,6 +75,11 @@ export async function tiktokRoutes(app) {
    * Recebe o 'code' do TikTok após o login do usuário e troca por Access Token
    */
   app.get('/v1/tiktok/callback', async (request, reply) => {
+    if (!oauthEnabled) {
+      return reply.code(503).send({
+        error: 'Integração TikTok OAuth temporariamente indisponível (aguardando aprovação dos escopos pela TikTok).',
+      })
+    }
     if (!hasOauthConfig) {
       return reply.code(503).send({
         error: 'Integração TikTok OAuth não configurada no servidor',

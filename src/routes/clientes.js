@@ -204,9 +204,9 @@ export async function clientesRoutes(app) {
     const db = await app.dbTenant(tenant_id)
     try {
       const upd = await db.query(
-        `UPDATE clientes SET logo_url = $1, atualizado_em = NOW()
+        `UPDATE clientes SET logo_url = $1, site = $3, atualizado_em = NOW()
          WHERE user_id = $2 RETURNING id`,
-        [dataUrl, userId]
+        [dataUrl, userId, website_url.trim()]
       )
       if (upd.rowCount === 0) {
         app.log.warn({ userId }, '[logo favicon] cliente não vinculado ao user_id')

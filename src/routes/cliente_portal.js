@@ -41,6 +41,27 @@ export async function clientePortalRoutes(app) {
     }
   }
 
+  // GET /v1/cliente/perfil — perfil do cliente vinculado ao user logado
+  app.get('/v1/cliente/perfil', {
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+  }, async (request, reply) => {
+    const db = await app.dbTenant(request.user.tenant_id)
+    try {
+      const r = await db.query(
+        `SELECT id, nome, email, celular, cnpj, razao_social,
+                site, logo_url, status, fat_anual, nicho, cidade, estado
+         FROM clientes WHERE user_id = $1 LIMIT 1`,
+        [request.user.sub]
+      )
+      if (r.rows.length === 0) {
+        return reply.code(404).send({ error: 'Cliente não encontrado para este usuário.' })
+      }
+      return r.rows[0]
+    } finally {
+      db.release()
+    }
+  })
+
   // GET /v1/cliente/meta
   app.get('/v1/cliente/meta', {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],

@@ -166,14 +166,14 @@ export async function clientesRoutes(app) {
     }
   })
 
-  // POST /v1/clientes/logo/favicon — cliente_parceiro sets own logo via Google Favicons
+  // POST /v1/clientes/logo/favicon — cliente_parceiro busca logo via Google Favicons
+  // Backend faz proxy + converte pra data URL base64 (evita CORS no frontend).
   app.post('/v1/clientes/logo/favicon', {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
   }, async (request, reply) => {
     const { website_url } = request.body ?? {}
     if (!website_url) return reply.code(400).send({ error: 'website_url obrigatório' })
 
-    // Extract clean domain
     let domain = website_url.trim()
     if (domain.includes('://')) {
       domain = new URL(domain).hostname
@@ -181,16 +181,33 @@ export async function clientesRoutes(app) {
       domain = domain.split('/')[0]
     }
 
-    const faviconUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`
+    const sourceUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`
+
+    let dataUrl
+    try {
+      const r = await fetch(sourceUrl, { signal: AbortSignal.timeout(8000) })
+      if (!r.ok) {
+        return reply.code(502).send({ error: 'Não foi possível obter o favicon do site.' })
+      }
+      const buf = Buffer.from(await r.arrayBuffer())
+      if (buf.length < 100) {
+        return reply.code(404).send({ error: 'Logo não encontrado para este site.' })
+      }
+      const ct = r.headers.get('content-type') || 'image/png'
+      dataUrl = `data:${ct};base64,${buf.toString('base64')}`
+    } catch (err) {
+      app.log.warn({ err: err.message, sourceUrl }, '[logo favicon] fetch failed')
+      return reply.code(502).send({ error: 'Falha ao buscar favicon.' })
+    }
 
     const { tenant_id, email } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
       await db.query(
         `UPDATE clientes SET logo_url = $1, atualizado_em = NOW() WHERE email = $2`,
-        [faviconUrl, email]
+        [dataUrl, email]
       )
-      return { logo_url: faviconUrl }
+      return { logo_url: dataUrl }
     } finally {
       db.release()
     }

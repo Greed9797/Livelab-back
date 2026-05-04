@@ -30,6 +30,7 @@ import { liveApresentadoresRoutes } from './routes/live_apresentadores.js'
 import { clientePortalRoutes } from './routes/cliente_portal.js'
 import onboardingRoutes from './routes/onboarding.js'
 import { tenantsRoutes } from './routes/tenants.js'
+import { webhookBioCrmRoutes } from './routes/webhook_bio_crm.js'
 
 export async function buildApp(opts = {}) {
   const app = Fastify({
@@ -75,6 +76,20 @@ export async function buildApp(opts = {}) {
     errorResponseBuilder: () => ({ error: 'Muitas requisições. Tente novamente em breve.' }),
   })
   await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024 } })
+
+  // Captura rawBody em JSON pra validação HMAC de webhooks (bio-crm, tiktok).
+  // Não muda comportamento de request.body — só anexa request.rawBody.
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    req.rawBody = body
+    if (body === '' || body === null) return done(null, {})
+    try {
+      done(null, JSON.parse(body))
+    } catch (err) {
+      err.statusCode = 400
+      done(err, undefined)
+    }
+  })
+
   await app.register(dbPlugin)
   await app.register(authPlugin)
 
@@ -103,6 +118,7 @@ export async function buildApp(opts = {}) {
   await app.register(clientePortalRoutes)
   await app.register(onboardingRoutes)
   await app.register(tenantsRoutes)
+  await app.register(webhookBioCrmRoutes)
 
   app.get('/health', () => ({ ok: true }))
 

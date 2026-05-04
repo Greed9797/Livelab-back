@@ -83,7 +83,7 @@ describe('POST /v1/webhooks/bio-crm', () => {
     // params: [franqueadora, nome, nicho, cidade, estado, fat, status, etapa, responsavel, origem, email, whatsapp, payload]
     expect(params[0]).toBe(FRANQUEADORA)
     expect(params[1]).toBe('Maria Silva')
-    expect(params[2]).toBe('Moda feminina') // nicho via data.segmento
+    expect(params[2]).toBe('Cliente')
     expect(params[3]).toBe('São Paulo')
     expect(params[4]).toBe('SP')
     expect(params[5]).toBe(500000)
@@ -171,7 +171,24 @@ describe('POST /v1/webhooks/bio-crm', () => {
       payload: body,
     })
     expect(res.statusCode).toBe(201)
+    expect(queryMock.mock.calls[0][1][2]).toBe('Unidade')
     expect(queryMock.mock.calls[0][1][9]).toBe('bio_franqueado')
+    await app.close()
+  })
+
+  it('mapeia apresentador como Creator e origem bio_apresentador', async () => {
+    const { app, queryMock } = await buildApp()
+    const payload = { ...VALID_PAYLOAD, persona: 'apresentador' }
+    const body = JSON.stringify(payload)
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/webhooks/bio-crm',
+      headers: { 'content-type': 'application/json', 'x-livelab-signature': sign(body) },
+      payload: body,
+    })
+    expect(res.statusCode).toBe(201)
+    expect(queryMock.mock.calls[0][1][2]).toBe('Creator')
+    expect(queryMock.mock.calls[0][1][9]).toBe('bio_apresentador')
     await app.close()
   })
 

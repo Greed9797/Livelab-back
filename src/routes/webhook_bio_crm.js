@@ -10,6 +10,11 @@
 import crypto from 'node:crypto'
 
 const ALLOWED_PERSONAS = new Set(['cliente', 'franqueado', 'apresentador'])
+const PERSONA_CRM_TYPE = {
+  cliente: 'Cliente',
+  franqueado: 'Unidade',
+  apresentador: 'Creator',
+}
 
 function verifySignature(rawBody, signatureHeader, secret) {
   if (!signatureHeader || typeof signatureHeader !== 'string') {
@@ -47,7 +52,8 @@ function buildLeadRow(payload, franqueadoraId) {
   const estado = pickFirstNonEmpty(data.estado, data.uf, data.state)
   const email = pickFirstNonEmpty(payload.contact_email, data.email, data.contact_email)
   const whatsapp = pickFirstNonEmpty(payload.whatsapp, data.whatsapp, data.telefone, data.phone)
-  const nicho = pickFirstNonEmpty(data.segmento, data.nicho, data.marca, payload.persona)
+  const persona = ALLOWED_PERSONAS.has(payload.persona) ? payload.persona : null
+  const nicho = pickFirstNonEmpty(persona ? PERSONA_CRM_TYPE[persona] : null, data.nicho, data.segmento, data.marca)
   const responsavel = pickFirstNonEmpty(payload.lead_name, data.responsavel, data.responsible_name)
   const fatNum = (() => {
     const candidates = [data.fat_estimado, data.faturamento, data.fat_anual, data.gmv_expectation]
@@ -58,7 +64,6 @@ function buildLeadRow(payload, franqueadoraId) {
     }
     return 0
   })()
-  const persona = ALLOWED_PERSONAS.has(payload.persona) ? payload.persona : null
   const origem = pickFirstNonEmpty(
     persona ? `bio_${persona}` : null,
     payload.source_path,

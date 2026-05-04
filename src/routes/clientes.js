@@ -200,13 +200,20 @@ export async function clientesRoutes(app) {
       return reply.code(502).send({ error: 'Falha ao buscar favicon.' })
     }
 
-    const { tenant_id, email } = request.user
+    const { tenant_id, sub: userId } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
-      await db.query(
-        `UPDATE clientes SET logo_url = $1, atualizado_em = NOW() WHERE email = $2`,
-        [dataUrl, email]
+      const upd = await db.query(
+        `UPDATE clientes SET logo_url = $1, atualizado_em = NOW()
+         WHERE user_id = $2 RETURNING id`,
+        [dataUrl, userId]
       )
+      if (upd.rowCount === 0) {
+        app.log.warn({ userId }, '[logo favicon] cliente não vinculado ao user_id')
+        return reply.code(404).send({
+          error: 'Conta de cliente não vinculada — peça pro admin associar seu usuário a um cliente.',
+        })
+      }
       return { logo_url: dataUrl }
     } finally {
       db.release()

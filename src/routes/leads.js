@@ -111,6 +111,17 @@ export async function leadsRoutes(app) {
     return result.rows[0]
   })
 
+  // DELETE /v1/leads/:id — remove lead (CRM)
+  app.delete('/v1/leads/:id', { preHandler: access }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const result = await app.db.query(
+      `DELETE FROM leads WHERE id = $1 AND franqueadora_id = $2 RETURNING id`,
+      [request.params.id, tenant_id]
+    )
+    if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+    return reply.code(204).send()
+  })
+
   // POST /v1/leads/:id/contato — adiciona entrada no histórico de contatos
   app.post('/v1/leads/:id/contato', { preHandler: access }, async (request, reply) => {
     const parsed = contatoSchema.safeParse(request.body)

@@ -41,7 +41,13 @@ export async function buildApp(opts = {}) {
   const corsAllowedOrigins = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
     : (process.env.NODE_ENV === 'production'
-        ? ['https://livelab-3601f.web.app', 'https://livelab-3601f.firebaseapp.com']
+        ? [
+            'https://app.grupolivelab.com.br',
+            'https://www.grupolivelab.com.br',
+            'https://grupolivelab.com.br',
+            'https://livelab-3601f.web.app',
+            'https://livelab-3601f.firebaseapp.com',
+          ]
         : null)
 
   const TIKTOK_ORIGINS = [

@@ -66,7 +66,8 @@ export async function recomendacoesRoutes(app) {
     const db = await app.dbTenant(tenant_id)
     try {
       const recQ = await db.query(
-        `SELECT * FROM recomendacoes WHERE id = $1 AND status = 'pendente'`, [request.params.id]
+        `SELECT * FROM recomendacoes WHERE id = $1 AND tenant_id = $2 AND status = 'pendente'`,
+        [request.params.id, tenant_id],
       )
       const rec = recQ.rows[0]
       if (!rec) return reply.code(400).send({ error: 'Recomendação não encontrada ou já convertida' })
@@ -91,8 +92,8 @@ export async function recomendacoesRoutes(app) {
       const altoRisco = score < 60
 
       await db.query(
-        `UPDATE recomendacoes SET status = 'convertido', convertido_em = NOW() WHERE id = $1`,
-        [request.params.id]
+        `UPDATE recomendacoes SET status = 'convertido', convertido_em = NOW() WHERE id = $1 AND tenant_id = $2`,
+        [request.params.id, tenant_id],
       )
 
       return { cliente_id: finalClienteId, score, alto_risco: altoRisco }

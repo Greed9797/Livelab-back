@@ -124,22 +124,27 @@ export async function webhookBioCrmRoutes(app) {
     const row = buildLeadRow(payload, franqueadoraId)
 
     try {
-      const result = await app.db.query(
-        `INSERT INTO leads (
-            franqueadora_id, nome, nicho, cidade, estado, fat_estimado,
-            status, crm_etapa, responsavel_nome, origem,
-            contato_email, contato_whatsapp, payload_externo,
-            criado_em, atualizado_em
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW(), NOW())
-         RETURNING id, nome, origem, criado_em`,
-        [
-          row.franqueadora_id, row.nome, row.nicho, row.cidade, row.estado, row.fat_estimado,
-          row.status, row.crm_etapa, row.responsavel_nome, row.origem,
-          row.contato_email, row.contato_whatsapp,
-          JSON.stringify(row.payload_externo),
-        ],
-      )
-      const lead = result.rows[0]
+      // Usa withTenant pra setar app.tenant_id na conexão — necessário pra
+      // passar pela policy RLS leads_tenant (WITH CHECK herda do USING quando
+      // omitido, então INSERT exige franqueadora_id = current_setting(...)).
+      const lead = await app.withTenant(franqueadoraId, async (db) => {
+        const result = await db.query(
+          `INSERT INTO leads (
+              franqueadora_id, nome, nicho, cidade, estado, fat_estimado,
+              status, crm_etapa, responsavel_nome, origem,
+              contato_email, contato_whatsapp, payload_externo,
+              criado_em, atualizado_em
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW(), NOW())
+           RETURNING id, nome, origem, criado_em`,
+          [
+            row.franqueadora_id, row.nome, row.nicho, row.cidade, row.estado, row.fat_estimado,
+            row.status, row.crm_etapa, row.responsavel_nome, row.origem,
+            row.contato_email, row.contato_whatsapp,
+            JSON.stringify(row.payload_externo),
+          ],
+        )
+        return result.rows[0]
+      })
       app.log.info({ leadId: lead.id, origem: lead.origem }, '[bio-crm webhook] lead criado')
       return reply.code(201).send({ ok: true, lead_id: lead.id })
     } catch (err) {

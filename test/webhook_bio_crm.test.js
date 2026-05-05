@@ -45,6 +45,7 @@ async function buildApp({ insertFails = false } = {}) {
     return { rows: [{ id: 'lead-uuid', nome: 'Maria Silva', origem: 'bio_cliente', criado_em: new Date() }] }
   })
   app.decorate('db', { query: queryMock })
+  app.decorate('withTenant', async (_tid, fn) => fn({ query: queryMock }))
 
   await app.register(webhookBioCrmRoutes)
   return { app, queryMock }

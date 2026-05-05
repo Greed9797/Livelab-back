@@ -424,7 +424,9 @@ export async function clientePortalRoutes(app) {
         LIMIT 1
       `, [clienteId])
 
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Contrato não encontrado' })
+      // Sem contrato ativo é estado válido (cliente novo). Retorna null em vez
+      // de 404 pra evitar ruído no console + simplificar handling no frontend.
+      if (!result.rows[0]) return reply.send(null)
       return result.rows[0]
     } finally {
       db.release()

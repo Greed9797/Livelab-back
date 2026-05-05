@@ -41,6 +41,61 @@ export async function clientePortalRoutes(app) {
     }
   }
 
+  // GET /v1/cliente/historico-mensal?meses=12&ano=YYYY&mes=MM
+  // Retorna até N meses anteriores ao período base (default 12).
+  // Lê tabela cliente_metricas_mensais (snapshots persistentes).
+  app.get('/v1/cliente/historico-mensal', {
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+  }, async (request, reply) => {
+    const meses = Math.min(Math.max(parseInt(request.query.meses) || 12, 1), 36)
+    const ano = parseInt(request.query.ano) || new Date().getFullYear()
+    const mes = parseInt(request.query.mes) || (new Date().getMonth() + 1)
+    if (mes < 1 || mes > 12) return reply.code(400).send({ error: 'mes inválido' })
+
+    const db = await app.dbTenant(request.user.tenant_id)
+    try {
+      const clienteId = await getClienteId(db, request.user.sub)
+      if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
+
+      const r = await db.query(
+        `WITH base AS (
+           SELECT make_date($2::int, $3::int, 1) AS anchor
+         ),
+         meses AS (
+           SELECT
+             EXTRACT(YEAR  FROM (anchor - (offset_n || ' months')::interval))::int AS ano,
+             EXTRACT(MONTH FROM (anchor - (offset_n || ' months')::interval))::int AS mes,
+             (anchor - (offset_n || ' months')::interval)::date AS sort_date
+           FROM base, generate_series($4::int - 1, 0, -1) AS offset_n
+         )
+         SELECT
+           m.ano,
+           m.mes,
+           COALESCE(s.gmv_total, 0)             AS gmv_total,
+           COALESCE(s.total_pedidos, 0)         AS total_pedidos,
+           COALESCE(s.itens_vendidos, 0)        AS itens_vendidos,
+           COALESCE(s.ticket_medio, 0)          AS ticket_medio,
+           COALESCE(s.total_lives, 0)           AS total_lives,
+           COALESCE(s.horas_live, 0)            AS horas_live,
+           COALESCE(s.viewers_total, 0)         AS viewers_total,
+           COALESCE(s.comentarios_total, 0)     AS comentarios_total,
+           COALESCE(s.likes_total, 0)           AS likes_total,
+           COALESCE(s.shares_total, 0)          AS shares_total,
+           COALESCE(s.valor_investido_lives, 0) AS valor_investido_lives,
+           COALESCE(s.roas, 0)                  AS roas,
+           s.fechado_em
+         FROM meses m
+         LEFT JOIN cliente_metricas_mensais s
+           ON s.cliente_id = $1 AND s.ano = m.ano AND s.mes = m.mes
+         ORDER BY m.sort_date`,
+        [clienteId, ano, mes, meses],
+      )
+      return r.rows
+    } finally {
+      db.release()
+    }
+  })
+
   // GET /v1/cliente/perfil — perfil do cliente vinculado ao user logado
   app.get('/v1/cliente/perfil', {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],

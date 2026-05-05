@@ -6,6 +6,7 @@ import { TikTokService } from './services/tiktok.js'
 import { cleanupOrphanContracts } from './jobs/cleanup_orphan_contracts.js'
 import * as connectorManager from './services/tiktok-connector-manager.js'
 import { startBillingEngine } from './jobs/billing_engine.js'
+import { startClienteMetricasSnapshotCron } from './jobs/cliente_metricas_snapshot.js'
 import { runMigrations } from '../apply_migrations.js'
 
 await runMigrations()
@@ -28,6 +29,9 @@ connectorManager.init({ db: app.db, log: app.log })
 
 // Initialize Billing Engine for Batch Billing
 startBillingEngine(app.db.pool)
+
+// Snapshot mensal de métricas por cliente (rolling)
+startClienteMetricasSnapshotCron(app)
 
 await app.listen({ port: Number(process.env.PORT ?? 3001), host: '0.0.0.0' })
 console.log(`LiveShop API rodando na porta ${process.env.PORT ?? 3001}`)

@@ -598,11 +598,21 @@ export async function clienteDashboardRoutes(app) {
         pedidos: toInt(r.pedidos),
       }))
 
+      // Rolling 12 meses até o período selecionado (cross-year). Permite comparar
+      // qualquer mês com qualquer histórico, não só dentro do ano corrente.
       const seriesQ = await db.query(`
-        WITH meses AS (
-          SELECT generate_series(1, 12) AS mes
+        WITH base AS (
+          SELECT make_date($3::int, $4::int, 1) AS anchor
+        ),
+        meses AS (
+          SELECT
+            (anchor - (offset_n || ' months')::interval)::date AS mes_inicio,
+            (EXTRACT(YEAR FROM (anchor - (offset_n || ' months')::interval)))::int AS ano,
+            (EXTRACT(MONTH FROM (anchor - (offset_n || ' months')::interval)))::int AS mes
+          FROM base, generate_series(11, 0, -1) AS offset_n
         )
         SELECT
+          m.ano,
           m.mes,
           COUNT(l.id) AS total_lives,
           COALESCE(SUM(l.fat_gerado), 0) AS gmv_total,
@@ -613,16 +623,16 @@ export async function clienteDashboardRoutes(app) {
           ON l.tenant_id = $1
          AND l.cliente_id = $2
          AND l.status IN ('encerrada', 'em_andamento')
-         AND EXTRACT(YEAR FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int = $3
+         AND EXTRACT(YEAR FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int = m.ano
          AND EXTRACT(MONTH FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int = m.mes
         LEFT JOIN LATERAL (
           SELECT SUM(lp.quantidade) AS itens
           FROM live_products lp
           WHERE lp.live_id = l.id
         ) prod ON true
-        GROUP BY m.mes
-        ORDER BY m.mes
-      `, [tenant_id, cliente_id, periodo.ano])
+        GROUP BY m.ano, m.mes, m.mes_inicio
+        ORDER BY m.mes_inicio
+      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
 
       const seriesMensais = seriesQ.rows.map((r) => {
         const horasLive = round2(r.horas_live)
@@ -631,7 +641,7 @@ export async function clienteDashboardRoutes(app) {
 
         return {
           mes: toInt(r.mes),
-          ano: periodo.ano,
+          ano: toInt(r.ano),
           total_lives: toInt(r.total_lives),
           gmv_total: gmvTotal,
           itens_vendidos: toInt(r.itens_vendidos),

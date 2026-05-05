@@ -495,7 +495,7 @@ describe('Route regressions: SQL and RBAC', () => {
       .mockResolvedValueOnce({ rows: [{ cliente_id: clienteId, total: '3000.00', posicao: '1', total_participantes: '3' }] })
       .mockResolvedValueOnce({ rows: [{ nicho: 'Moda Feminina', meu_gmv: '3000.00', media_gmv_nicho: '2500.00', amostra_nicho: '9', media_gmv_geral: '4000.00', amostra_geral: '26', percentil_nicho: '0.68', percentil_geral: '0.41' }] })
       .mockResolvedValueOnce({ rows: [{ hora: 20, total_lives: '1', gmv_total: '3000.00', pedidos: '24' }] })
-      .mockResolvedValueOnce({ rows: [{ mes: 4, total_lives: '1', gmv_total: '3000.00', itens_vendidos: '30', horas_live: '2.00' }] })
+      .mockResolvedValueOnce({ rows: [{ ano: 2026, mes: 4, total_lives: '1', gmv_total: '3000.00', itens_vendidos: '30', horas_live: '2.00' }] })
     const releaseMock = vi.fn()
 
     app.decorate('requirePapel', (papeis) => async (request, reply) => {

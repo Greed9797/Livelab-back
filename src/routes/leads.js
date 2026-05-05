@@ -39,7 +39,8 @@ const SELECT_CRM = `
          (NOW() - criado_em) < interval '24 hours' AS is_novo,
          crm_etapa, valor_oportunidade, responsavel_nome, origem,
          historico_contatos, observacoes_internas, tarefas,
-         motivo_perda, convertido_cliente_id, ganho_em
+         motivo_perda, convertido_cliente_id, ganho_em,
+         contato_email, contato_whatsapp, payload_externo
   FROM leads`
 
 export async function leadsRoutes(app) {

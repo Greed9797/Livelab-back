@@ -137,7 +137,7 @@ function buildLeadRow(payload, franqueadoraId) {
     origem,
     contato_email: email,
     contato_whatsapp: whatsapp,
-    observacoes_internas: formatLeadFicha(payload),
+    dados_extras: data,
     payload_externo: payload,
   }
 }
@@ -187,14 +187,15 @@ export async function webhookBioCrmRoutes(app) {
           `INSERT INTO leads (
               franqueadora_id, nome, nicho, cidade, estado, fat_estimado,
               status, crm_etapa, responsavel_nome, origem,
-              contato_email, contato_whatsapp, observacoes_internas, payload_externo,
+              contato_email, contato_whatsapp, dados_extras, payload_externo,
               criado_em, atualizado_em
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, NOW(), NOW())
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb, NOW(), NOW())
            RETURNING id, nome, origem, criado_em`,
           [
             row.franqueadora_id, row.nome, row.nicho, row.cidade, row.estado, row.fat_estimado,
             row.status, row.crm_etapa, row.responsavel_nome, row.origem,
-            row.contato_email, row.contato_whatsapp, row.observacoes_internas,
+            row.contato_email, row.contato_whatsapp,
+            JSON.stringify(row.dados_extras ?? {}),
             JSON.stringify(row.payload_externo),
           ],
         )

@@ -3,12 +3,19 @@ import { z } from 'zod'
 const CRM_ETAPAS = ['lead_novo','contato_iniciado','reuniao_agendada','proposta_enviada','em_negociacao','aguardando_assinatura','ganho','perdido']
 
 const crmUpdateSchema = z.object({
+  nome:                 z.string().min(1).optional(),
+  nicho:                z.string().nullable().optional(),
+  cidade:               z.string().nullable().optional(),
+  estado:               z.string().nullable().optional(),
   crm_etapa:            z.enum(CRM_ETAPAS).optional(),
   valor_oportunidade:   z.number().min(0).optional(),
-  responsavel_nome:     z.string().optional(),
-  origem:               z.string().optional(),
-  observacoes_internas: z.string().optional(),
-  motivo_perda:         z.string().optional(),
+  responsavel_nome:     z.string().nullable().optional(),
+  origem:               z.string().nullable().optional(),
+  observacoes_internas: z.string().nullable().optional(),
+  motivo_perda:         z.string().nullable().optional(),
+  contato_email:        z.string().nullable().optional(),
+  contato_whatsapp:     z.string().nullable().optional(),
+  dados_extras:         z.record(z.any()).optional(),
 })
 
 const contatoSchema = z.object({
@@ -40,7 +47,7 @@ const SELECT_CRM = `
          crm_etapa, valor_oportunidade, responsavel_nome, origem,
          historico_contatos, observacoes_internas, tarefas,
          motivo_perda, convertido_cliente_id, ganho_em,
-         contato_email, contato_whatsapp, payload_externo
+         contato_email, contato_whatsapp, payload_externo, dados_extras
   FROM leads`
 
 export async function leadsRoutes(app) {
@@ -105,14 +112,22 @@ export async function leadsRoutes(app) {
     const fields = Object.keys(updates)
     if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
-    const setClauses = fields.map((f, i) => `${f} = $${i + 3}`).join(', ')
-    const values = [request.params.id, tenant_id, ...fields.map((f) => updates[f])]
+    const setClauses = fields
+      .map((f, i) => f === 'dados_extras' ? `${f} = $${i + 3}::jsonb` : `${f} = $${i + 3}`)
+      .join(', ')
+    const values = [
+      request.params.id,
+      tenant_id,
+      ...fields.map((f) => f === 'dados_extras' ? JSON.stringify(updates[f]) : updates[f]),
+    ]
 
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE leads SET ${setClauses}, atualizado_em = NOW()
          WHERE id = $1 AND franqueadora_id = $2
-         RETURNING id, crm_etapa, valor_oportunidade, responsavel_nome, origem, motivo_perda`,
+         RETURNING id, nome, nicho, cidade, estado, crm_etapa, valor_oportunidade,
+                   responsavel_nome, origem, motivo_perda,
+                   contato_email, contato_whatsapp, dados_extras`,
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })

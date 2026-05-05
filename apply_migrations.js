@@ -41,6 +41,7 @@ const MIGRATIONS_LIST = [
   '052_cliente_metricas_mensais.sql',
   '053_rls_hardening.sql',
   '054_tenant_contact_history_rls.sql',
+  '055_leads_dados_extras.sql',
 ]
 
 async function ensureMigrationsTable(client) {

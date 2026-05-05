@@ -93,8 +93,11 @@ describe('POST /v1/webhooks/bio-crm', () => {
     expect(params[9]).toBe('bio_cliente')
     expect(params[10]).toBe('maria@exemplo.com')
     expect(params[11]).toBe('(11) 99999-9999')
-    expect(params[12]).toContain('IDENTIFICAÇÃO')
-    expect(params[12]).toContain('Nome completo: Maria Silva')
+    // params[12] = dados_extras (JSON estruturado, não texto)
+    const dados = JSON.parse(params[12])
+    expect(dados.nome).toBe('Maria Silva')
+    expect(dados.segmento).toBe('Moda feminina')
+    expect(dados.fat_anual).toBe('500000')
     expect(JSON.parse(params[13]).event).toBe('bio.form.submitted')
 
     await app.close()
@@ -195,7 +198,7 @@ describe('POST /v1/webhooks/bio-crm', () => {
     await app.close()
   })
 
-  it('formata dados de franqueado em observacoes_internas como ficha', async () => {
+  it('persiste dados estruturados de franqueado em dados_extras', async () => {
     const { app, queryMock } = await buildApp()
     const payload = {
       ...VALID_PAYLOAD,
@@ -229,15 +232,13 @@ describe('POST /v1/webhooks/bio-crm', () => {
       payload: body,
     })
     expect(res.statusCode).toBe(201)
-    const observacoes = queryMock.mock.calls[0][1][12]
-    expect(observacoes).toContain('IDENTIFICAÇÃO')
-    expect(observacoes).toContain('Nome completo: Vitor Xavier de Castro')
-    expect(observacoes).toContain('PERFIL DO INTERESSADO')
-    expect(observacoes).toContain('Experiência c/ franquias: Sim, tenho experiência')
-    expect(observacoes).toContain('CAPACIDADE & PRONTIDÃO')
-    expect(observacoes).toContain('Capital disponível: Até R$ 40.000')
-    expect(observacoes).toContain('MOTIVAÇÃO & OBSERVAÇÕES')
-    expect(observacoes).toContain('O que mais atrai: Ser pioneiro(a) na minha cidade')
+    const dados = JSON.parse(queryMock.mock.calls[0][1][12])
+    expect(dados.nome).toBe('Vitor Xavier de Castro')
+    expect(dados.situacao).toBe('Já empreendo e busco nova oportunidade')
+    expect(dados.experiencia_franquia).toBe('Sim, tenho experiência')
+    expect(dados.capital).toBe('Até R$ 40.000')
+    expect(dados.atrativos).toEqual(['Ser pioneiro(a) na minha cidade'])
+    expect(dados.interesse).toBe('Alto — quero conversar com um especialista agora')
     await app.close()
   })
 

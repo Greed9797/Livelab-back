@@ -10,6 +10,7 @@ const criarFranquiaSchema = z.object({
   franqueado: z.object({
     nome: z.string().min(2),
     email: z.string().email(),
+    senha_temporaria: z.string().min(6, 'Senha temporária deve ter no mínimo 6 caracteres').optional(),
   }),
 })
 
@@ -68,7 +69,7 @@ export async function tenantsRoutes(app) {
       return reply.code(409).send({ error: 'E-mail do franqueado já cadastrado' })
     }
 
-    const senhaTemp = crypto.randomBytes(8).toString('hex')
+    const senhaTemp = franqueado.senha_temporaria ?? crypto.randomBytes(8).toString('hex')
     const senhaHash = await bcrypt.hash(senhaTemp, 12)
 
     const client = await app.db.pool.connect()

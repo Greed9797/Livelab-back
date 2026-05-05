@@ -38,10 +38,64 @@ function verifySignature(rawBody, signatureHeader, secret) {
 function pickFirstNonEmpty(...vals) {
   for (const v of vals) {
     if (v === null || v === undefined) continue
-    const s = typeof v === 'string' ? v.trim() : String(v).trim()
+    const s = Array.isArray(v)
+      ? v.map((item) => String(item).trim()).filter(Boolean).join(', ')
+      : typeof v === 'string'
+        ? v.trim()
+        : String(v).trim()
     if (s !== '') return s
   }
   return null
+}
+
+function formatLeadFicha(payload) {
+  const data = (payload?.data && typeof payload.data === 'object') ? payload.data : {}
+  const persona = ALLOWED_PERSONAS.has(payload.persona) ? payload.persona : null
+  const lines = []
+
+  const addSection = (title, entries) => {
+    lines.push(title)
+    for (const [label, value] of entries) {
+      const formatted = pickFirstNonEmpty(value)
+      if (formatted) lines.push(`${label}: ${formatted}`)
+    }
+    lines.push('')
+  }
+
+  if (persona === 'franqueado') {
+    addSection('IDENTIFICAÇÃO', [
+      ['Nome completo', pickFirstNonEmpty(payload.lead_name, data.nome, data.name, data.nome_completo)],
+      ['Cidade', pickFirstNonEmpty(payload.city, data.cidade, data.city, data.cidade_estado)],
+      ['WhatsApp', pickFirstNonEmpty(payload.whatsapp, data.whatsapp, data.telefone, data.phone)],
+    ])
+    addSection('PERFIL DO INTERESSADO', [
+      ['Situação atual', data.situacao],
+      ['Experiência c/ franquias', data.experiencia_franquia],
+      ['Conhece live commerce', data.conhece_live_commerce],
+      ['Sócios', data.socios],
+    ])
+    addSection('CAPACIDADE & PRONTIDÃO', [
+      ['Capital disponível', data.capital],
+      ['Prazo para início', data.prazo_inicio],
+      ['Espaço físico', data.espaco_fisico],
+      ['Melhor horário', data.horario],
+    ])
+    addSection('MOTIVAÇÃO & OBSERVAÇÕES', [
+      ['O que mais atrai', data.atrativos],
+      ['Principal receio', data.receio],
+      ['Nível de interesse', data.interesse],
+    ])
+    return lines.join('\n').trim()
+  }
+
+  addSection('IDENTIFICAÇÃO', [
+    ['Nome completo', pickFirstNonEmpty(payload.lead_name, data.nome, data.name, data.nome_completo)],
+    ['Cidade', pickFirstNonEmpty(payload.city, data.cidade, data.city, data.cidade_estado)],
+    ['WhatsApp', pickFirstNonEmpty(payload.whatsapp, data.whatsapp, data.telefone, data.phone)],
+    ['E-mail', pickFirstNonEmpty(payload.contact_email, data.email, data.contact_email)],
+  ])
+  addSection('DADOS DO FORMULÁRIO', Object.entries(data).map(([key, value]) => [key, value]))
+  return lines.join('\n').trim()
 }
 
 function buildLeadRow(payload, franqueadoraId) {
@@ -83,6 +137,7 @@ function buildLeadRow(payload, franqueadoraId) {
     origem,
     contato_email: email,
     contato_whatsapp: whatsapp,
+    observacoes_internas: formatLeadFicha(payload),
     payload_externo: payload,
   }
 }
@@ -132,14 +187,14 @@ export async function webhookBioCrmRoutes(app) {
           `INSERT INTO leads (
               franqueadora_id, nome, nicho, cidade, estado, fat_estimado,
               status, crm_etapa, responsavel_nome, origem,
-              contato_email, contato_whatsapp, payload_externo,
+              contato_email, contato_whatsapp, observacoes_internas, payload_externo,
               criado_em, atualizado_em
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, NOW(), NOW())
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, NOW(), NOW())
            RETURNING id, nome, origem, criado_em`,
           [
             row.franqueadora_id, row.nome, row.nicho, row.cidade, row.estado, row.fat_estimado,
             row.status, row.crm_etapa, row.responsavel_nome, row.origem,
-            row.contato_email, row.contato_whatsapp,
+            row.contato_email, row.contato_whatsapp, row.observacoes_internas,
             JSON.stringify(row.payload_externo),
           ],
         )

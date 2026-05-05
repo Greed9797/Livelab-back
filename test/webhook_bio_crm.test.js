@@ -81,7 +81,7 @@ describe('POST /v1/webhooks/bio-crm', () => {
 
     expect(queryMock).toHaveBeenCalledTimes(1)
     const params = queryMock.mock.calls[0][1]
-    // params: [franqueadora, nome, nicho, cidade, estado, fat, status, etapa, responsavel, origem, email, whatsapp, payload]
+    // params: [franqueadora, nome, nicho, cidade, estado, fat, status, etapa, responsavel, origem, email, whatsapp, observacoes, payload]
     expect(params[0]).toBe(FRANQUEADORA)
     expect(params[1]).toBe('Maria Silva')
     expect(params[2]).toBe('Cliente')
@@ -93,7 +93,9 @@ describe('POST /v1/webhooks/bio-crm', () => {
     expect(params[9]).toBe('bio_cliente')
     expect(params[10]).toBe('maria@exemplo.com')
     expect(params[11]).toBe('(11) 99999-9999')
-    expect(JSON.parse(params[12]).event).toBe('bio.form.submitted')
+    expect(params[12]).toContain('IDENTIFICAÇÃO')
+    expect(params[12]).toContain('Nome completo: Maria Silva')
+    expect(JSON.parse(params[13]).event).toBe('bio.form.submitted')
 
     await app.close()
   })
@@ -190,6 +192,52 @@ describe('POST /v1/webhooks/bio-crm', () => {
     expect(res.statusCode).toBe(201)
     expect(queryMock.mock.calls[0][1][2]).toBe('Creator')
     expect(queryMock.mock.calls[0][1][9]).toBe('bio_apresentador')
+    await app.close()
+  })
+
+  it('formata dados de franqueado em observacoes_internas como ficha', async () => {
+    const { app, queryMock } = await buildApp()
+    const payload = {
+      ...VALID_PAYLOAD,
+      persona: 'franqueado',
+      lead_name: 'Vitor Xavier de Castro',
+      whatsapp: '11949751130',
+      city: 'São Paulo',
+      source_path: '/bio/franqueado',
+      data: {
+        nome: 'Vitor Xavier de Castro',
+        cidade: 'São Paulo ',
+        situacao: 'Já empreendo e busco nova oportunidade',
+        experiencia_franquia: 'Sim, tenho experiência',
+        conhece_live_commerce: 'Sim, acompanho de perto',
+        capital: 'Até R$ 40.000',
+        prazo_inicio: 'Imediatamente — estou pronto(a)',
+        espaco_fisico: 'Sim, já tenho um espaço disponível',
+        socios: 'Sim',
+        atrativos: ['Ser pioneiro(a) na minha cidade'],
+        receio: 'Não tenho tanto capital disponível para aportar, porém tenho espaço e conhecimento.',
+        interesse: 'Alto — quero conversar com um especialista agora',
+        whatsapp: '11949751130',
+        horario: 'Tarde (12h–18h)',
+      },
+    }
+    const body = JSON.stringify(payload)
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/webhooks/bio-crm',
+      headers: { 'content-type': 'application/json', 'x-livelab-signature': sign(body) },
+      payload: body,
+    })
+    expect(res.statusCode).toBe(201)
+    const observacoes = queryMock.mock.calls[0][1][12]
+    expect(observacoes).toContain('IDENTIFICAÇÃO')
+    expect(observacoes).toContain('Nome completo: Vitor Xavier de Castro')
+    expect(observacoes).toContain('PERFIL DO INTERESSADO')
+    expect(observacoes).toContain('Experiência c/ franquias: Sim, tenho experiência')
+    expect(observacoes).toContain('CAPACIDADE & PRONTIDÃO')
+    expect(observacoes).toContain('Capital disponível: Até R$ 40.000')
+    expect(observacoes).toContain('MOTIVAÇÃO & OBSERVAÇÕES')
+    expect(observacoes).toContain('O que mais atrai: Ser pioneiro(a) na minha cidade')
     await app.close()
   })
 

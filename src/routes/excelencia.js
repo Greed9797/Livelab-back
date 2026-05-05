@@ -2,8 +2,7 @@ export async function excelenciaRoutes(app) {
   // GET /v1/excelencia/metricas
   app.get('/v1/excelencia/metricas', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const base = await db.query(`
         SELECT
           COUNT(*) FILTER (WHERE status = 'ativo')     AS ativos,
@@ -48,8 +47,6 @@ export async function excelenciaRoutes(app) {
         crescimento_pct:  crescimento,
         score,
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 }

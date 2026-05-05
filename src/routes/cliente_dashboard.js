@@ -279,9 +279,8 @@ export async function clienteDashboardRoutes(app) {
   }, async (request) => {
     const { sub: user_id, tenant_id } = request.user
     const periodo = parsePeriodo(request.query)
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
+      try {
       const clienteAtual = await getClienteVinculado(db, tenant_id, user_id)
       const cliente_id = clienteAtual?.id
       const clienteNicho = clienteAtual?.nicho ?? null
@@ -669,12 +668,11 @@ export async function clienteDashboardRoutes(app) {
         lives: livesPayload.lives,
       }
 
-    } catch (e) {
-      app.log.error({ err: e }, 'unhandled error')
-      throw e
-    } finally {
-      db.release()
-    }
+      } catch (e) {
+        app.log.error({ err: e }, 'unhandled error')
+        throw e
+      }
+    })
   })
 
   // GET /v1/cliente/vendas — histórico de lives do cliente por mês
@@ -683,9 +681,7 @@ export async function clienteDashboardRoutes(app) {
   }, async (request) => {
     const { sub: user_id, tenant_id } = request.user
     const periodo = parsePeriodo(request.query)
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const clienteAtual = await getClienteVinculado(db, tenant_id, user_id)
       const cliente_id = clienteAtual?.id
       if (!cliente_id) return emptyLivesPayload(periodo)
@@ -693,9 +689,7 @@ export async function clienteDashboardRoutes(app) {
       const contratoAtivo = await getContratoAtivo(db, tenant_id, cliente_id)
       const custoHora = calcularCustoHora(contratoAtivo)
       return fetchClienteLives(db, tenant_id, cliente_id, periodo, custoHora)
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cliente/lives — histórico detalhado de lives do cliente por mês
@@ -704,9 +698,7 @@ export async function clienteDashboardRoutes(app) {
   }, async (request) => {
     const { sub: user_id, tenant_id } = request.user
     const periodo = parsePeriodo(request.query)
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const clienteAtual = await getClienteVinculado(db, tenant_id, user_id)
       const cliente_id = clienteAtual?.id
       if (!cliente_id) return emptyLivesPayload(periodo)
@@ -714,9 +706,7 @@ export async function clienteDashboardRoutes(app) {
       const contratoAtivo = await getContratoAtivo(db, tenant_id, cliente_id)
       const custoHora = calcularCustoHora(contratoAtivo)
       return fetchClienteLives(db, tenant_id, cliente_id, periodo, custoHora)
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cliente/produtos — produtos agregados por mês
@@ -724,9 +714,7 @@ export async function clienteDashboardRoutes(app) {
     preHandler: app.requirePapel(['cliente_parceiro']),
   }, async (request) => {
     const { sub: user_id, tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
       const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return { resumo: { total_produtos: 0, total_qty: 0, total_faturamento: 0 }, produtos: [] }
@@ -764,9 +752,7 @@ export async function clienteDashboardRoutes(app) {
         },
         produtos,
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // ──────────────────────────────────────────────────────────────
@@ -778,9 +764,7 @@ export async function clienteDashboardRoutes(app) {
     preHandler: [app.requirePapel(['cliente_parceiro']), bloquearClienteCabines],
   }, async (request) => {
     const { sub: user_id, tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
       const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return []
@@ -829,9 +813,7 @@ export async function clienteDashboardRoutes(app) {
         gmv_atual:        Number(r.gmv_atual),
         iniciado_em:      r.iniciado_em,
       }))
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cliente/cabines/:cabineId — detalhe da cabine + live atual + histórico
@@ -840,9 +822,7 @@ export async function clienteDashboardRoutes(app) {
   }, async (request, reply) => {
     const { sub: user_id, tenant_id } = request.user
     const { cabineId } = request.params
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
       const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
@@ -953,9 +933,7 @@ export async function clienteDashboardRoutes(app) {
           duracao_min:        Number(r.duracao_min),
         })),
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cliente/cabines/:cabineId/solicitacoes — minhas solicitações desta cabine
@@ -964,9 +942,7 @@ export async function clienteDashboardRoutes(app) {
   }, async (request, reply) => {
     const { sub: user_id, tenant_id } = request.user
     const { cabineId } = request.params
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
       const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
@@ -992,9 +968,7 @@ export async function clienteDashboardRoutes(app) {
         motivo_recusa:   r.motivo_recusa,
         criado_em:       r.criado_em,
       }))
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/cliente/cabines/:cabineId/solicitar-live — criar solicitação de live
@@ -1020,8 +994,7 @@ export async function clienteDashboardRoutes(app) {
       return reply.code(400).send({ error: 'hora_fim deve ser maior que hora_inicio' })
     }
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
       const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
@@ -1066,8 +1039,6 @@ export async function clienteDashboardRoutes(app) {
         status:          r.status,
         criado_em:       r.criado_em,
       })
-    } finally {
-      db.release()
-    }
+    })
   })
 }

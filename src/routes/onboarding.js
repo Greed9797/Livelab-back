@@ -71,9 +71,7 @@ export default async function onboardingRoutes(app) {
     preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'cliente_parceiro'])],
   }, async (request) => {
     const { papel, sub: userId, tenant_id: tenantId } = request.user
-    const db = await app.dbTenant(tenantId)
-
-    try {
+    return app.withTenant(tenantId, async (db) => {
       if (papel === 'cliente_parceiro') {
         const r = await db.query(
           `SELECT * FROM onboarding_responses WHERE user_id = $1`,
@@ -91,8 +89,6 @@ export default async function onboardingRoutes(app) {
         [tenantId]
       )
       return r.rows
-    } finally {
-      db.release()
-    }
+    })
   })
 }

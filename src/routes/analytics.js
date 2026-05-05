@@ -6,10 +6,15 @@ export async function analyticsRoutes(app) {
     ],
   }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-
-    try {
-      const resumoHojeQ = await db.query(`
+    return app.withTenant(tenant_id, async (db) => {
+      const [
+        resumoHojeQ,
+        rankingClosersQ,
+        rankingClientesQ,
+        heatmapHorariosQ,
+        eficienciaCabinesQ,
+      ] = await Promise.all([
+        db.query(`
         WITH lives_ao_vivo AS (
           SELECT c.live_atual_id AS live_id
           FROM cabines c
@@ -34,9 +39,8 @@ export async function analyticsRoutes(app) {
               AND date_trunc('day', l.iniciado_em) = date_trunc('day', NOW())
           ) AS total_lives_hoje
         FROM snapshots_recentes sr
-      `)
-
-      const rankingClosersQ = await db.query(`
+      `),
+        db.query(`
         SELECT
           u.id AS apresentador_id,
           u.nome AS apresentador_nome,
@@ -48,9 +52,8 @@ export async function analyticsRoutes(app) {
         GROUP BY u.id, u.nome
         ORDER BY gmv_total DESC, total_lives DESC, apresentador_nome ASC
         LIMIT 5
-      `)
-
-      const rankingClientesQ = await db.query(`
+      `),
+        db.query(`
         SELECT
           c.id AS cliente_id,
           c.nome AS cliente_nome,
@@ -62,9 +65,8 @@ export async function analyticsRoutes(app) {
         GROUP BY c.id, c.nome
         ORDER BY gmv_total DESC, ultima_live DESC NULLS LAST, cliente_nome ASC
         LIMIT 5
-      `)
-
-      const heatmapHorariosQ = await db.query(`
+      `),
+        db.query(`
         SELECT
           EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS hora,
           COUNT(*) AS total_lives,
@@ -73,9 +75,8 @@ export async function analyticsRoutes(app) {
         WHERE l.status = 'encerrada'
         GROUP BY 1
         ORDER BY 1 ASC
-      `)
-
-      const eficienciaCabinesQ = await db.query(`
+      `),
+        db.query(`
         SELECT
           c.id AS cabine_id,
           CONCAT('Cabine ', LPAD(c.numero::text, 2, '0')) AS cabine_nome,
@@ -88,7 +89,8 @@ export async function analyticsRoutes(app) {
         GROUP BY c.id, c.numero
         ORDER BY gmv_acumulado DESC, total_lives DESC, c.numero ASC
         LIMIT 5
-      `)
+      `),
+      ])
 
       const resumoHoje = resumoHojeQ.rows[0] ?? {}
 
@@ -122,9 +124,7 @@ export async function analyticsRoutes(app) {
           gmv_acumulado: parseFloat(Number(row.gmv_acumulado).toFixed(2)),
         })),
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   app.get('/v1/analytics/dashboard', {
@@ -149,9 +149,7 @@ export async function analyticsRoutes(app) {
     const clienteFilter = cliente_id ? 'AND l.cliente_id = $2' : ''
     const params = cliente_id ? [refDate, cliente_id] : [refDate]
 
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const [faturamentoQ, vendasQ, horasQ, rankingQ] = await Promise.all([
         // Query A — Faturamento Mensal (últimos 12 meses)
         db.query(`
@@ -255,8 +253,6 @@ export async function analyticsRoutes(app) {
           gmv_total: parseFloat(Number(r.gmv_total).toFixed(2)),
         })),
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 }

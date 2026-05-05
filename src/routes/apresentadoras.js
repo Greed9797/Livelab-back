@@ -29,27 +29,25 @@ export async function apresentadorasRoutes(app) {
   // GET /v1/apresentadoras
   app.get('/v1/apresentadoras', { preHandler: access }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT ${COLS} FROM apresentadoras a ORDER BY a.ativo DESC, a.nome ASC`
       )
       return result.rows
-    } finally { db.release() }
+    })
   })
 
   // GET /v1/apresentadoras/:id
   app.get('/v1/apresentadoras/:id', { preHandler: access }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT ${COLS} FROM apresentadoras WHERE id = $1`,
         [request.params.id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
       return result.rows[0]
-    } finally { db.release() }
+    })
   })
 
   // POST /v1/apresentadoras
@@ -59,8 +57,7 @@ export async function apresentadorasRoutes(app) {
 
     const { tenant_id } = request.user
     const d = parsed.data
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `INSERT INTO apresentadoras (tenant_id, nome, telefone, cargo, email, cpf_cnpj, cidade, fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
@@ -70,7 +67,7 @@ export async function apresentadorasRoutes(app) {
          d.link_contrato ?? null, d.data_aniversario ?? null, d.data_inicio ?? null, d.data_fim ?? null]
       )
       return reply.code(201).send(result.rows[0])
-    } finally { db.release() }
+    })
   })
 
   // PATCH /v1/apresentadoras/:id
@@ -86,28 +83,26 @@ export async function apresentadorasRoutes(app) {
     const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(', ')
     const values = [request.params.id, ...fields.map((f) => updates[f])]
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE apresentadoras SET ${setClauses} WHERE id = $1 RETURNING ${COLS}`,
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
       return result.rows[0]
-    } finally { db.release() }
+    })
   })
 
   // DELETE /v1/apresentadoras/:id — desativa (soft delete)
   app.delete('/v1/apresentadoras/:id', { preHandler: access }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE apresentadoras SET ativo = false WHERE id = $1 RETURNING id`,
         [request.params.id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
       return reply.code(204).send()
-    } finally { db.release() }
+    })
   })
 }

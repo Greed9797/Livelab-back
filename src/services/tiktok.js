@@ -1,3 +1,11 @@
+// Logger leve para serviço sem acesso ao app.log do Fastify.
+// Em produção, NODE_ENV=production suprime DEBUG mas mantém WARN/ERROR.
+const log = {
+  debug: (...args) => process.env.NODE_ENV !== 'production' && console.debug('[TikTok]', ...args),
+  warn:  (...args) => console.warn('[TikTok]', ...args),
+  error: (...args) => console.error('[TikTok]', ...args),
+}
+
 export class TikTokService {
   /**
    * Busca dados da live ativa do tenant via API do TikTok
@@ -73,7 +81,7 @@ export class TikTokService {
         products_sold: Array.isArray(liveInfo.products) ? liveInfo.products : []
       }
     } catch (error) {
-      console.error(`[TikTok] Erro ao buscar dados da live do tenant ${tenantId}:`, error.message)
+      log.error(`Erro ao buscar dados da live do tenant ${tenantId}:`, error.message)
       return offlineState
     }
   }
@@ -85,7 +93,7 @@ export class TikTokService {
     const clientKey    = process.env.TIKTOK_CLIENT_KEY
     const clientSecret = process.env.TIKTOK_CLIENT_SECRET
     if (!clientKey || !clientSecret) {
-      console.warn(`[TikTok] Credenciais OAuth ausentes — não é possível renovar token do tenant ${tenantId}`)
+      log.warn(`Credenciais OAuth ausentes — não é possível renovar token do tenant ${tenantId}`)
       return false
     }
     try {
@@ -107,10 +115,10 @@ export class TikTokService {
         `UPDATE tenants SET tiktok_access_token=$1, tiktok_refresh_token=$2, tiktok_token_expires_at=$3 WHERE id=$4`,
         [data.access_token, data.refresh_token, expiresAt, tenantId]
       )
-      console.log(`[TikTok] Token renovado para tenant ${tenantId}`)
+      log.debug(`Token renovado para tenant ${tenantId}`)
       return true
     } catch (error) {
-      console.error(`[TikTok] Erro ao renovar token do tenant ${tenantId}:`, error.message)
+      log.error(`Erro ao renovar token do tenant ${tenantId}:`, error.message)
       return false
     }
   }
@@ -131,7 +139,7 @@ export class TikTokService {
    * Cron job: coleta dados de todos os tenants ativos a cada 60s
    */
   static async pollAllTenants(db) {
-    console.log('[TikTok Cron] Iniciando polling para todos os tenants...');
+    log.debug('[Cron] Iniciando polling para todos os tenants...');
     
     try {
       // Busca tenants ativos e com token do TikTok configurado
@@ -199,7 +207,7 @@ export class TikTokService {
               WHERE id = $2 AND tenant_id = $3
             `, [liveData.total_gmv, liveData.live_id, tenant.id]);
             
-            console.log(`[TikTok Cron] Snapshot salvo para tenant ${tenant.id} - Live: ${liveData.live_id}`);
+            log.debug(`[Cron] Snapshot salvo para tenant ${tenant.id} - Live: ${liveData.live_id}`);
 
           } else if (liveData.status === 'offline') {
             
@@ -231,19 +239,19 @@ export class TikTokService {
                 WHERE live_atual_id = $1 AND tenant_id = $2
               `, [liveId, tenant.id]);
               
-              console.log(`[TikTok Cron] Live ${liveId} do tenant ${tenant.id} encerrada.`);
+              log.debug(`[Cron] Live ${liveId} do tenant ${tenant.id} encerrada.`);
             }
           }
 
         } catch (tenantError) {
-          console.error(`[TikTok Cron] Erro ao processar dados do tenant ${tenant.id}:`, tenantError);
+          log.error(`[Cron] Erro ao processar dados do tenant ${tenant.id}:`, tenantError);
         }
       }
       
-      console.log('[TikTok Cron] Polling finalizado.');
+      log.debug('[Cron] Polling finalizado.');
       
     } catch (error) {
-      console.error('[TikTok Cron] Erro geral ao executar o polling das lives:', error);
+      log.error('[Cron] Erro geral ao executar o polling das lives:', error);
     }
   }
 }

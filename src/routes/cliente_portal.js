@@ -52,8 +52,7 @@ export async function clientePortalRoutes(app) {
     const mes = parseInt(request.query.mes) || (new Date().getMonth() + 1)
     if (mes < 1 || mes > 12) return reply.code(400).send({ error: 'mes inválido' })
 
-    const db = await app.dbTenant(request.user.tenant_id)
-    try {
+    return app.withTenant(request.user.tenant_id, async (db) => {
       const clienteId = await getClienteId(db, request.user.sub)
       if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
 
@@ -91,17 +90,14 @@ export async function clientePortalRoutes(app) {
         [clienteId, ano, mes, meses],
       )
       return r.rows
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cliente/perfil — perfil do cliente vinculado ao user logado
   app.get('/v1/cliente/perfil', {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
   }, async (request, reply) => {
-    const db = await app.dbTenant(request.user.tenant_id)
-    try {
+    return app.withTenant(request.user.tenant_id, async (db) => {
       const r = await db.query(
         `SELECT id, nome, email, celular, cnpj, razao_social,
                 site, logo_url, status, fat_anual, nicho, cidade, estado
@@ -112,9 +108,7 @@ export async function clientePortalRoutes(app) {
         return reply.code(404).send({ error: 'Cliente não encontrado para este usuário.' })
       }
       return r.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cliente/meta
@@ -128,8 +122,7 @@ export async function clientePortalRoutes(app) {
       return reply.code(400).send({ error: 'Parâmetros ano e mes são obrigatórios (mes: 1-12)' })
     }
 
-    const db = await app.dbTenant(request.user.tenant_id)
-    try {
+    return app.withTenant(request.user.tenant_id, async (db) => {
       const clienteId = await getClienteId(db, request.user.sub)
       if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
 
@@ -140,9 +133,7 @@ export async function clientePortalRoutes(app) {
 
       const meta_gmv = res.rows[0] ? parseFloat(res.rows[0].meta_gmv) : 0
       return reply.send({ ano, mes, meta_gmv })
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/cliente/meta
@@ -155,8 +146,7 @@ export async function clientePortalRoutes(app) {
       return reply.code(400).send({ error: 'Campos obrigatórios: ano, mes (1-12), meta_gmv' })
     }
 
-    const db = await app.dbTenant(request.user.tenant_id)
-    try {
+    return app.withTenant(request.user.tenant_id, async (db) => {
       const clienteId = await getClienteId(db, request.user.sub)
       if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
 
@@ -171,9 +161,7 @@ export async function clientePortalRoutes(app) {
 
       const row = res.rows[0]
       return reply.send({ ano: row.ano, mes: row.mes, meta_gmv: parseFloat(row.meta_gmv) })
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cliente/agenda
@@ -216,8 +204,7 @@ export async function clientePortalRoutes(app) {
       sysDb.release()
     }
 
-    const db = await app.dbTenant(tenantId)
-    try {
+    return app.withTenant(tenantId, async (db) => {
       // All active cabines for this tenant
       const cabinesRes = await db.query(
         'SELECT id, numero FROM cabines WHERE ativo IS NOT FALSE ORDER BY numero'
@@ -271,9 +258,7 @@ export async function clientePortalRoutes(app) {
         cabines: cabinesRes.rows,
         slots,
       })
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cliente/reservas — solicitações de live do cliente (agenda pessoal)
@@ -294,8 +279,7 @@ export async function clientePortalRoutes(app) {
       sysDb.release()
     }
 
-    const db = await app.dbTenant(tenantId)
-    try {
+    return app.withTenant(tenantId, async (db) => {
       const result = await db.query(`
         SELECT lr.id, lr.cabine_id, lr.data_solicitada, lr.hora_inicio, lr.hora_fim,
                lr.status, lr.observacao,
@@ -319,9 +303,7 @@ export async function clientePortalRoutes(app) {
         status: r.status === 'aprovada' ? 'confirmada' : r.status,
         observacoes: r.observacao ?? null,
       }))
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/cliente/solicitacao
@@ -353,8 +335,7 @@ export async function clientePortalRoutes(app) {
       sysDb.release()
     }
 
-    const db = await app.dbTenant(tenantId)
-    try {
+    return app.withTenant(tenantId, async (db) => {
       // Check for time overlap conflict
       const conflictRes = await db.query(
         `SELECT id FROM live_requests
@@ -386,9 +367,7 @@ export async function clientePortalRoutes(app) {
         status: row.status,
         message: 'Solicitação enviada! A unidade irá confirmar em breve.',
       })
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/contratos/meu — contrato do cliente_parceiro autenticado
@@ -409,8 +388,7 @@ export async function clientePortalRoutes(app) {
       sysDb.release()
     }
 
-    const db = await app.dbTenant(tenantId)
-    try {
+    return app.withTenant(tenantId, async (db) => {
       const result = await db.query(`
         SELECT c.id, c.status, c.valor_fixo, c.comissao_pct,
                c.horas_contratadas, c.horas_consumidas,
@@ -428,8 +406,6 @@ export async function clientePortalRoutes(app) {
       // de 404 pra evitar ruído no console + simplificar handling no frontend.
       if (!result.rows[0]) return reply.send(null)
       return result.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 }

@@ -29,6 +29,10 @@ function buildApp({ papel = 'franqueado', queryRows = [], queryMock } = {}) {
     if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
   })
   app.decorate('dbTenant', async () => ({ query: _query, release }))
+  app.decorate('withTenant', async (tenantId, fn) => {
+    const db = await app.dbTenant(tenantId)
+    try { return await fn(db) } finally { db.release() }
+  })
   app.decorate('db', { pool: { connect: vi.fn() } })
 
   return { app, _query, release }

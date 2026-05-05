@@ -23,16 +23,13 @@ export async function recomendacoesRoutes(app) {
   // GET /v1/recomendacoes
   app.get('/v1/recomendacoes', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT id, nome_indicado, recomendante, status, lat, lng, convertido_em, criado_em
          FROM recomendacoes ORDER BY criado_em DESC`
       )
       return result.rows
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/recomendacoes
@@ -43,17 +40,14 @@ export async function recomendacoesRoutes(app) {
     const { tenant_id } = request.user
     const { nome_indicado, recomendante, lat, lng } = parsed.data
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `INSERT INTO recomendacoes (tenant_id, nome_indicado, recomendante, lat, lng)
          VALUES ($1,$2,$3,$4,$5) RETURNING id, nome_indicado, recomendante, status, lat, lng`,
         [tenant_id, nome_indicado, recomendante, lat ?? null, lng ?? null]
       )
       return reply.code(201).send(result.rows[0])
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/recomendacoes/:id/converter
@@ -63,8 +57,7 @@ export async function recomendacoesRoutes(app) {
 
     const { tenant_id } = request.user
     const { cliente_id, celular, cnpj, cep, cidade, estado, fat_anual, lat, lng } = parsed.data
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const recQ = await db.query(
         `SELECT * FROM recomendacoes WHERE id = $1 AND tenant_id = $2 AND status = 'pendente'`,
         [request.params.id, tenant_id],
@@ -97,8 +90,6 @@ export async function recomendacoesRoutes(app) {
       )
 
       return { cliente_id: finalClienteId, score, alto_risco: altoRisco }
-    } finally {
-      db.release()
-    }
+    })
   })
 }

@@ -17,8 +17,7 @@ export async function liveApresentadoresRoutes(app) {
     const { liveId } = request.params
     const { apresentador_id } = parsed.data
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Verify live exists and belongs to tenant
       const liveQ = await db.query(
         `SELECT id FROM lives WHERE id = $1`,
@@ -42,9 +41,7 @@ export async function liveApresentadoresRoutes(app) {
       )
 
       return reply.code(201).send({ ok: true })
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // DELETE /v1/lives/:liveId/apresentadores/:apresentadorId — remove an apresentador from a live
@@ -54,8 +51,7 @@ export async function liveApresentadoresRoutes(app) {
     const { tenant_id } = request.user
     const { liveId, apresentadorId } = request.params
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `DELETE FROM live_apresentadores
          WHERE live_id = $1 AND apresentador_id = $2`,
@@ -67,9 +63,7 @@ export async function liveApresentadoresRoutes(app) {
       }
 
       return { ok: true }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/lives/:liveId/apresentadores — list all extra apresentadores for a live
@@ -79,8 +73,7 @@ export async function liveApresentadoresRoutes(app) {
     const { tenant_id } = request.user
     const { liveId } = request.params
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Verify live exists
       const liveQ = await db.query(`SELECT id FROM lives WHERE id = $1`, [liveId])
       if (!liveQ.rows[0]) return reply.code(404).send({ error: 'Live não encontrada' })
@@ -95,8 +88,6 @@ export async function liveApresentadoresRoutes(app) {
       )
 
       return result.rows
-    } finally {
-      db.release()
-    }
+    })
   })
 }

@@ -39,6 +39,17 @@ async function dbPlugin(app) {
     }
   })
 
+  // Wrapper que garante db.release() mesmo em erro/early-return.
+  // Substitui o padrão `const db = await app.dbTenant(t); try { ... } finally { db.release() }`.
+  app.decorate('withTenant', async (tenantId, fn) => {
+    const db = await app.dbTenant(tenantId)
+    try {
+      return await fn(db)
+    } finally {
+      db.release()
+    }
+  })
+
   app.addHook('onClose', async () => pool.end())
 }
 

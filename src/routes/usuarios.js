@@ -44,8 +44,7 @@ export async function usuariosRoutes(app) {
       values.push(ativo === 'true')
     }
 
-    const db = await app.dbTenant(request.user.tenant_id)
-    try {
+    return app.withTenant(request.user.tenant_id, async (db) => {
       const result = await db.query(
         `SELECT id, nome, email, papel, ativo, criado_em, criado_por
          FROM users
@@ -54,9 +53,7 @@ export async function usuariosRoutes(app) {
         values
       )
       return result.rows
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/usuarios/convidar
@@ -76,62 +73,61 @@ export async function usuariosRoutes(app) {
     const senhaTemp = senha_temporaria ?? crypto.randomBytes(8).toString('hex')
     const senhaHash = await bcrypt.hash(senhaTemp, 12)
 
-    const db = await app.dbTenant(tenantId)
-    try {
-      await db.query('BEGIN')
+    return app.withTenant(tenantId, async (db) => {
+      try {
+        await db.query('BEGIN')
 
-      // Pré-validação: cliente_parceiro precisa de cliente DISPONÍVEL (sem user_id já vinculado)
-      // antes de criar o user — evita orphan onde INSERT users sucede mas UPDATE falha,
-      // deixando cliente alheio acessível pelo novo user via fallback de email.
-      if (papel === 'cliente_parceiro') {
-        const check = await db.query(
-          `SELECT user_id FROM clientes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
-          [cliente_id, tenantId],
-        )
-        if (check.rowCount === 0) {
-          await db.query('ROLLBACK')
-          return reply.code(404).send({ error: 'Cliente não encontrado no tenant' })
+        // Pré-validação: cliente_parceiro precisa de cliente DISPONÍVEL (sem user_id já vinculado)
+        // antes de criar o user — evita orphan onde INSERT users sucede mas UPDATE falha,
+        // deixando cliente alheio acessível pelo novo user via fallback de email.
+        if (papel === 'cliente_parceiro') {
+          const check = await db.query(
+            `SELECT user_id FROM clientes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+            [cliente_id, tenantId],
+          )
+          if (check.rowCount === 0) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Cliente não encontrado no tenant' })
+          }
+          if (check.rows[0].user_id) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: 'Cliente já vinculado a outro usuário.' })
+          }
         }
-        if (check.rows[0].user_id) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Cliente já vinculado a outro usuário.' })
-        }
-      }
 
-      const { rows } = await db.query(
-        `INSERT INTO users (tenant_id, nome, email, senha_hash, papel, ativo, criado_por)
-         VALUES ($1, $2, $3, $4, $5, true, $6)
-         RETURNING id, nome, email, papel, ativo, criado_em`,
-        [tenantId, nome, email, senhaHash, papel, request.user.sub]
-      )
-      const newUser = rows[0]
-
-      if (papel === 'cliente_parceiro') {
-        const updated = await db.query(
-          `UPDATE clientes SET user_id = $1 WHERE id = $2 AND tenant_id = $3 AND user_id IS NULL`,
-          [newUser.id, cliente_id, tenantId]
+        const { rows } = await db.query(
+          `INSERT INTO users (tenant_id, nome, email, senha_hash, papel, ativo, criado_por)
+           VALUES ($1, $2, $3, $4, $5, true, $6)
+           RETURNING id, nome, email, papel, ativo, criado_em`,
+          [tenantId, nome, email, senhaHash, papel, request.user.sub]
         )
-        if (updated.rowCount === 0) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Cliente foi vinculado por outra requisição. Tente novamente.' })
+        const newUser = rows[0]
+
+        if (papel === 'cliente_parceiro') {
+          const updated = await db.query(
+            `UPDATE clientes SET user_id = $1 WHERE id = $2 AND tenant_id = $3 AND user_id IS NULL`,
+            [newUser.id, cliente_id, tenantId]
+          )
+          if (updated.rowCount === 0) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: 'Cliente foi vinculado por outra requisição. Tente novamente.' })
+          }
         }
-      }
 
-      if ((papel === 'apresentador' || papel === 'apresentadora') && apresentadora_id) {
-        await db.query(
-          `UPDATE apresentadoras SET user_id = $1 WHERE id = $2 AND tenant_id = $3`,
-          [newUser.id, apresentadora_id, tenantId]
-        )
-      }
+        if ((papel === 'apresentador' || papel === 'apresentadora') && apresentadora_id) {
+          await db.query(
+            `UPDATE apresentadoras SET user_id = $1 WHERE id = $2 AND tenant_id = $3`,
+            [newUser.id, apresentadora_id, tenantId]
+          )
+        }
 
-      await db.query('COMMIT')
-      return reply.code(201).send({ ...newUser, senha_temporaria: senhaTemp })
-    } catch (e) {
-      await db.query('ROLLBACK')
-      throw e
-    } finally {
-      db.release()
-    }
+        await db.query('COMMIT')
+        return reply.code(201).send({ ...newUser, senha_temporaria: senhaTemp })
+      } catch (e) {
+        await db.query('ROLLBACK')
+        throw e
+      }
+    })
   })
 
   // PATCH /v1/usuarios/:id
@@ -160,8 +156,7 @@ export async function usuariosRoutes(app) {
       }
     }
 
-    const db = await app.dbTenant(request.user.tenant_id)
-    try {
+    return app.withTenant(request.user.tenant_id, async (db) => {
       if (fields.ativo === false) {
         await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
       }
@@ -177,9 +172,7 @@ export async function usuariosRoutes(app) {
         return reply.code(404).send({ error: 'Usuário não encontrado' })
       }
       return result.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/usuarios/:id/reset-senha
@@ -191,8 +184,7 @@ export async function usuariosRoutes(app) {
     const novaSenha = crypto.randomBytes(8).toString('hex')
     const senhaHash = await bcrypt.hash(novaSenha, 12)
 
-    const db = await app.dbTenant(request.user.tenant_id)
-    try {
+    return app.withTenant(request.user.tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE users SET senha_hash = $1
          WHERE id = $2 AND tenant_id = $3
@@ -204,9 +196,7 @@ export async function usuariosRoutes(app) {
       }
       await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
       return { senha_temporaria: novaSenha }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // DELETE /v1/usuarios/:id — soft delete
@@ -215,8 +205,7 @@ export async function usuariosRoutes(app) {
       return reply.code(400).send({ error: 'Não é possível desativar a si mesmo' })
     }
 
-    const db = await app.dbTenant(request.user.tenant_id)
-    try {
+    return app.withTenant(request.user.tenant_id, async (db) => {
       await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
 
       const result = await db.query(
@@ -229,8 +218,6 @@ export async function usuariosRoutes(app) {
         return reply.code(404).send({ error: 'Usuário não encontrado' })
       }
       return reply.code(204).send()
-    } finally {
-      db.release()
-    }
+    })
   })
 }

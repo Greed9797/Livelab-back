@@ -115,9 +115,7 @@ export async function cabinesRoutes(app) {
   // GET /v1/cabines
   app.get('/v1/cabines', { preHandler: cabineRoleAccess(app) }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT c.id, c.numero, c.status, c.live_atual_id, c.contrato_id,
                 ct.tiktok_username,
@@ -158,17 +156,13 @@ export async function cabinesRoutes(app) {
         gifts_diamonds: Number(c.gifts_diamonds ?? 0),
         total_orders: Number(c.total_orders ?? 0),
       }))
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cabines/fila-ativacao
   app.get('/v1/cabines/fila-ativacao', { preHandler: cabineRoleAccess(app) }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT ct.id,
                 ct.cliente_id,
@@ -195,9 +189,7 @@ export async function cabinesRoutes(app) {
         valor_fixo: Number(r.valor_fixo ?? 0),
         comissao_pct: Number(r.comissao_pct ?? 0),
       }))
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/cabines — create a new cabine for the authenticated tenant
@@ -210,8 +202,7 @@ export async function cabinesRoutes(app) {
     const { tenant_id } = request.user
     const { nome, tamanho, descricao } = parsed.data
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Atomic: compute next numero and insert in a single statement to avoid race conditions
       const result = await db.query(
         `INSERT INTO cabines (tenant_id, numero, nome, tamanho, descricao, status)
@@ -222,9 +213,7 @@ export async function cabinesRoutes(app) {
         [tenant_id, nome, tamanho ?? null, descricao ?? null]
       )
       return reply.code(201).send(result.rows[0])
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // DELETE /v1/cabines/:id — delete a cabine (only if not in use)
@@ -232,9 +221,7 @@ export async function cabinesRoutes(app) {
     preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])],
   }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const cabineResult = await db.query(
         `SELECT id, status, live_atual_id, contrato_id FROM cabines WHERE id = $1`,
         [request.params.id]
@@ -253,9 +240,7 @@ export async function cabinesRoutes(app) {
 
       await db.query(`DELETE FROM cabines WHERE id = $1`, [request.params.id])
       return { ok: true }
-    } finally {
-      db.release()
-    }
+    })
   })
 
 
@@ -272,15 +257,14 @@ export async function cabinesRoutes(app) {
     const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(', ')
     const values = [request.params.id, ...fields.map((f) => updates[f])]
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE cabines SET ${setClauses} WHERE id = $1 RETURNING id, nome, tamanho, descricao, numero`,
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cabine não encontrada' })
       return result.rows[0]
-    } finally { db.release() }
+    })
   })
 
   // PATCH /v1/cabines/:id/reservar
@@ -291,9 +275,7 @@ export async function cabinesRoutes(app) {
     const { tenant_id, sub, papel } = request.user
     const { contrato_id } = parsed.data
     const ip = getRequestIp(request)
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
 
       try {
@@ -378,18 +360,14 @@ export async function cabinesRoutes(app) {
         await db.query('ROLLBACK')
         throw error
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/cabines/:id/liberar
   app.patch('/v1/cabines/:id/liberar', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
     const { tenant_id, sub, papel } = request.user
     const ip = getRequestIp(request)
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
 
       try {
@@ -439,9 +417,7 @@ export async function cabinesRoutes(app) {
         await db.query('ROLLBACK')
         throw error
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cabines/:id/historico?dias=90
@@ -451,8 +427,7 @@ export async function cabinesRoutes(app) {
     const raw = parseInt(request.query.dias)
     const dias = isNaN(raw) ? 90 : Math.min(Math.max(raw, 1), 365)
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const cabineResult = await db.query(`SELECT id FROM cabines WHERE id = $1`, [cabineId])
       if (cabineResult.rowCount === 0) {
         return reply.code(404).send({ error: 'Cabine não encontrada' })
@@ -538,9 +513,7 @@ export async function cabinesRoutes(app) {
           gmv_total: parseFloat(totaisQ.rows[0].gmv_total || 0),
         },
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/cabines/:id/live-atual
@@ -548,8 +521,7 @@ export async function cabinesRoutes(app) {
     const { tenant_id } = request.user
     const cabineId = request.params.id
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const cabineQ = await db.query(`SELECT live_atual_id, status FROM cabines WHERE id = $1`, [cabineId])
       const cabine = cabineQ.rows[0]
 
@@ -659,9 +631,7 @@ export async function cabinesRoutes(app) {
           valor_total: parseFloat(topProduto.valor_total),
         } : null,
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // ── POST /v1/cabines/:id/closer-notification ──────────────────────────────
@@ -681,8 +651,7 @@ export async function cabinesRoutes(app) {
     const { tenant_id, sub: fromUserId } = request.user
     const cabineId = request.params.id
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Valida que cabine existe e está ao vivo
       const { rows } = await db.query(
         `SELECT c.live_atual_id, l.apresentador_id
@@ -717,9 +686,7 @@ export async function cabinesRoutes(app) {
       request.log?.info({ cabineId, type, message: notification.message.slice(0, 60) },
         'closer-notification enviada')
       return reply.send({ ok: true, notification })
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // ── GET /v1/cabines/:id/closer-notifications/stream ──────────────────────
@@ -773,9 +740,7 @@ export async function cabinesRoutes(app) {
     const { tenant_id, sub, papel } = request.user
     const { status } = parsed.data
     const ip = getRequestIp(request)
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
 
       try {
@@ -841,9 +806,7 @@ export async function cabinesRoutes(app) {
         await db.query('ROLLBACK')
         throw error
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/lives — inicia live a partir da cabine reservada/ativa
@@ -854,9 +817,7 @@ export async function cabinesRoutes(app) {
     const { tenant_id, sub, papel } = request.user
     const { cabine_id } = parsed.data
     const ip = getRequestIp(request)
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
 
       try {
@@ -940,9 +901,7 @@ export async function cabinesRoutes(app) {
         await db.query('ROLLBACK')
         throw error
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/lives/manual — cria live já encerrada (entrada manual pelo gestor)
@@ -956,54 +915,52 @@ export async function cabinesRoutes(app) {
 
     const d = parsed.data
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        await db.query('BEGIN')
 
-    try {
-      await db.query('BEGIN')
-
-      const cab = await db.query(
-        `SELECT c.contrato_id, ct.comissao_pct
-           FROM cabines c
-           LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
-          WHERE c.id = $1`,
-        [d.cabine_id]
-      )
-      const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
-      const comissao = d.fat_gerado * (comissaoPct / 100)
-
-      const iniciado = `${d.data} ${d.hora_inicio}:00`
-      const encerrado = `${d.data} ${d.hora_fim}:00`
-
-      const ins = await db.query(
-        `INSERT INTO lives
-           (tenant_id, cabine_id, cliente_id, apresentador_id, gestor_id,
-            status, iniciado_em, encerrado_em, fat_gerado, comissao_calculada,
-            final_orders_count, resumo)
-         VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11)
-         RETURNING id`,
-        [
-          tenant_id, d.cabine_id, d.cliente_id, d.apresentador_id, d.gestor_id,
-          iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
-        ]
-      )
-      const liveId = ins.rows[0].id
-
-      if (d.apresentador2_id) {
-        await db.query(
-          `INSERT INTO live_apresentadores (live_id, apresentador_id)
-           VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-          [liveId, d.apresentador2_id]
+        const cab = await db.query(
+          `SELECT c.contrato_id, ct.comissao_pct
+             FROM cabines c
+             LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
+            WHERE c.id = $1`,
+          [d.cabine_id]
         )
-      }
+        const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
+        const comissao = d.fat_gerado * (comissaoPct / 100)
 
-      await db.query('COMMIT')
-      return reply.code(201).send({ id: liveId })
-    } catch (e) {
-      await db.query('ROLLBACK')
-      throw e
-    } finally {
-      db.release()
-    }
+        const iniciado = `${d.data} ${d.hora_inicio}:00`
+        const encerrado = `${d.data} ${d.hora_fim}:00`
+
+        const ins = await db.query(
+          `INSERT INTO lives
+             (tenant_id, cabine_id, cliente_id, apresentador_id, gestor_id,
+              status, iniciado_em, encerrado_em, fat_gerado, comissao_calculada,
+              final_orders_count, resumo)
+           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11)
+           RETURNING id`,
+          [
+            tenant_id, d.cabine_id, d.cliente_id, d.apresentador_id, d.gestor_id,
+            iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
+          ]
+        )
+        const liveId = ins.rows[0].id
+
+        if (d.apresentador2_id) {
+          await db.query(
+            `INSERT INTO live_apresentadores (live_id, apresentador_id)
+             VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [liveId, d.apresentador2_id]
+          )
+        }
+
+        await db.query('COMMIT')
+        return reply.code(201).send({ id: liveId })
+      } catch (e) {
+        await db.query('ROLLBACK')
+        throw e
+      }
+    })
   })
 
   // PATCH /v1/lives/:id — edita dados de live encerrada (correção manual)
@@ -1013,93 +970,90 @@ export async function cabinesRoutes(app) {
 
     const d = parsed.data
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        await db.query('BEGIN')
 
-    try {
-      await db.query('BEGIN')
-
-      const liveQ = await db.query(
-        `SELECT id, cabine_id, fat_gerado, iniciado_em, encerrado_em
-           FROM lives WHERE id = $1 AND status = 'encerrada' FOR UPDATE`,
-        [request.params.id]
-      )
-      const live = liveQ.rows[0]
-      if (!live) {
-        await db.query('ROLLBACK')
-        return reply.code(404).send({ error: 'Live não encontrada ou não está encerrada' })
-      }
-
-      const cabineId = d.cabine_id ?? live.cabine_id
-      let comissao = undefined
-      if (d.fat_gerado !== undefined) {
-        const cab = await db.query(
-          `SELECT ct.comissao_pct FROM cabines c
-             LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
-            WHERE c.id = $1`,
-          [cabineId]
+        const liveQ = await db.query(
+          `SELECT id, cabine_id, fat_gerado, iniciado_em, encerrado_em
+             FROM lives WHERE id = $1 AND status = 'encerrada' FOR UPDATE`,
+          [request.params.id]
         )
-        const pct = Number(cab.rows[0]?.comissao_pct ?? 0)
-        comissao = d.fat_gerado * (pct / 100)
-      }
-
-      const updates = []
-      const values = []
-      let idx = 1
-
-      const addField = (col, val) => { updates.push(`${col} = $${idx++}`); values.push(val) }
-
-      if (d.cabine_id    !== undefined) addField('cabine_id',          d.cabine_id)
-      if (d.cliente_id   !== undefined) addField('cliente_id',         d.cliente_id)
-      if (d.apresentador_id !== undefined) addField('apresentador_id', d.apresentador_id)
-      if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
-      if (d.fat_gerado   !== undefined) { addField('fat_gerado', d.fat_gerado); addField('comissao_calculada', comissao) }
-      if (d.qtd_pedidos  !== undefined) addField('final_orders_count', d.qtd_pedidos)
-      if (d.resumo       !== undefined) addField('resumo',             d.resumo)
-
-      if (d.data !== undefined || d.hora_inicio !== undefined || d.hora_fim !== undefined) {
-        const currentInicio = new Date(live.iniciado_em)
-        const currentFim    = new Date(live.encerrado_em)
-        const data    = d.data        ?? currentInicio.toISOString().slice(0, 10)
-        const hInicio = d.hora_inicio ?? `${String(currentInicio.getUTCHours()).padStart(2,'0')}:${String(currentInicio.getUTCMinutes()).padStart(2,'0')}`
-        const hFim    = d.hora_fim    ?? `${String(currentFim.getUTCHours()).padStart(2,'0')}:${String(currentFim.getUTCMinutes()).padStart(2,'0')}`
-        if (hFim <= hInicio) {
+        const live = liveQ.rows[0]
+        if (!live) {
           await db.query('ROLLBACK')
-          return reply.code(400).send({ error: 'hora_fim deve ser maior que hora_inicio' })
+          return reply.code(404).send({ error: 'Live não encontrada ou não está encerrada' })
         }
-        addField('iniciado_em',  `${data} ${hInicio}:00`)
-        addField('encerrado_em', `${data} ${hFim}:00`)
-      }
 
-      if (updates.length > 0) {
-        values.push(request.params.id)
-        await db.query(`UPDATE lives SET ${updates.join(', ')} WHERE id = $${idx}`, values)
-      }
-
-      if ('apresentador2_id' in d) {
-        await db.query(`DELETE FROM live_apresentadores WHERE live_id = $1`, [request.params.id])
-        if (d.apresentador2_id) {
-          await db.query(
-            `INSERT INTO live_apresentadores (live_id, apresentador_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-            [request.params.id, d.apresentador2_id]
+        const cabineId = d.cabine_id ?? live.cabine_id
+        let comissao = undefined
+        if (d.fat_gerado !== undefined) {
+          const cab = await db.query(
+            `SELECT ct.comissao_pct FROM cabines c
+               LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
+              WHERE c.id = $1`,
+            [cabineId]
           )
+          const pct = Number(cab.rows[0]?.comissao_pct ?? 0)
+          comissao = d.fat_gerado * (pct / 100)
         }
-      }
 
-      await db.query('COMMIT')
-      return reply.send({ ok: true })
-    } catch (e) {
-      await db.query('ROLLBACK')
-      throw e
-    } finally {
-      db.release()
-    }
+        const updates = []
+        const values = []
+        let idx = 1
+
+        const addField = (col, val) => { updates.push(`${col} = $${idx++}`); values.push(val) }
+
+        if (d.cabine_id    !== undefined) addField('cabine_id',          d.cabine_id)
+        if (d.cliente_id   !== undefined) addField('cliente_id',         d.cliente_id)
+        if (d.apresentador_id !== undefined) addField('apresentador_id', d.apresentador_id)
+        if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
+        if (d.fat_gerado   !== undefined) { addField('fat_gerado', d.fat_gerado); addField('comissao_calculada', comissao) }
+        if (d.qtd_pedidos  !== undefined) addField('final_orders_count', d.qtd_pedidos)
+        if (d.resumo       !== undefined) addField('resumo',             d.resumo)
+
+        if (d.data !== undefined || d.hora_inicio !== undefined || d.hora_fim !== undefined) {
+          const currentInicio = new Date(live.iniciado_em)
+          const currentFim    = new Date(live.encerrado_em)
+          const data    = d.data        ?? currentInicio.toISOString().slice(0, 10)
+          const hInicio = d.hora_inicio ?? `${String(currentInicio.getUTCHours()).padStart(2,'0')}:${String(currentInicio.getUTCMinutes()).padStart(2,'0')}`
+          const hFim    = d.hora_fim    ?? `${String(currentFim.getUTCHours()).padStart(2,'0')}:${String(currentFim.getUTCMinutes()).padStart(2,'0')}`
+          if (hFim <= hInicio) {
+            await db.query('ROLLBACK')
+            return reply.code(400).send({ error: 'hora_fim deve ser maior que hora_inicio' })
+          }
+          addField('iniciado_em',  `${data} ${hInicio}:00`)
+          addField('encerrado_em', `${data} ${hFim}:00`)
+        }
+
+        if (updates.length > 0) {
+          values.push(request.params.id)
+          await db.query(`UPDATE lives SET ${updates.join(', ')} WHERE id = $${idx}`, values)
+        }
+
+        if ('apresentador2_id' in d) {
+          await db.query(`DELETE FROM live_apresentadores WHERE live_id = $1`, [request.params.id])
+          if (d.apresentador2_id) {
+            await db.query(
+              `INSERT INTO live_apresentadores (live_id, apresentador_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+              [request.params.id, d.apresentador2_id]
+            )
+          }
+        }
+
+        await db.query('COMMIT')
+        return reply.send({ ok: true })
+      } catch (e) {
+        await db.query('ROLLBACK')
+        throw e
+      }
+    })
   })
 
   // GET /v1/lives
   app.get('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT l.*, c.numero AS cabine_numero, c.contrato_id, cl.nome AS cliente_nome,
                 u.nome AS apresentador_nome
@@ -1110,9 +1064,7 @@ export async function cabinesRoutes(app) {
          ORDER BY l.iniciado_em DESC LIMIT 100`
       )
       return result.rows
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/lives/:id/encerrar
@@ -1122,9 +1074,7 @@ export async function cabinesRoutes(app) {
 
     const { tenant_id, sub, papel } = request.user
     const ip = getRequestIp(request)
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
 
       try {
@@ -1230,8 +1180,6 @@ export async function cabinesRoutes(app) {
         await db.query('ROLLBACK')
         throw error
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 }

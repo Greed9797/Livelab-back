@@ -18,9 +18,7 @@ export async function solicitacoesRoutes(app) {
   }, async (request) => {
     const { tenant_id } = request.user
     const statusFilter = request.query.status ?? 'pendente'
-    const db = await app.dbTenant(tenant_id)
-
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const params = [tenant_id]
       let whereStatus = ''
 
@@ -67,9 +65,7 @@ export async function solicitacoesRoutes(app) {
         cliente_nome:     r.cliente_nome,
         solicitante_nome: r.solicitante_nome,
       }))
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/solicitacoes/:id/aprovar — aprovar solicitação com check de overlap
@@ -161,8 +157,7 @@ export async function solicitacoesRoutes(app) {
       return reply.code(400).send({ error: 'motivo_recusa é obrigatório para recusar uma solicitação' })
     }
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const checkQ = await db.query(
         `SELECT status FROM live_requests WHERE id = $1 AND tenant_id = $2`,
         [id, tenant_id]
@@ -182,9 +177,7 @@ export async function solicitacoesRoutes(app) {
       `, [motivo_recusa ?? null, user_id, id, tenant_id])
 
       return updated.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/solicitacoes — franqueado cria agendamento diretamente (já aprovado)

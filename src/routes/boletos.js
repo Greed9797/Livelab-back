@@ -10,9 +10,7 @@ export async function boletosRoutes(app) {
   // GET /v1/boletos/alertas
   app.get('/v1/boletos/alertas', { preHandler: boletoAccess }, async (request) => {
     const { tenant_id, sub: user_id, papel } = request.user
-    const db = await app.dbTenant(tenant_id)
-    
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       let extraFilter = ''
       const values = [tenant_id]
 
@@ -48,63 +46,50 @@ export async function boletosRoutes(app) {
       if (alerta) alerta.valor = Number(alerta.valor ?? 0)
       return alerta || null
 
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/boletos/:id/visto
   app.patch('/v1/boletos/:id/visto', { preHandler: boletoAccess }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const res = await db.query(
         `UPDATE boletos SET notificado_em = NOW() WHERE id = $1 AND tenant_id = $2`,
         [request.params.id, tenant_id]
       )
       if (res.rowCount === 0) return reply.code(404).send({ error: 'Boleto não encontrado' })
       return { ok: true }
-    } finally {
-      db.release()
-    }
+    })
   })
 // GET /v1/boletos
   app.get('/v1/boletos', { preHandler: boletoAccess }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT id, tipo, valor, vencimento, status, pago_em, referencia_externa, competencia,
                 asaas_id, asaas_url, asaas_pix_copia_cola, gerado_automaticamente, asaas_error
          FROM boletos ORDER BY vencimento DESC`
       )
       return result.rows.map(b => ({ ...b, valor: Number(b.valor ?? 0) }))
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/boletos/:id
   app.get('/v1/boletos/:id', { preHandler: boletoAccess }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT * FROM boletos WHERE id = $1`, [request.params.id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Boleto não encontrado' })
       return { ...result.rows[0], url_boleto: `https://sandbox.pagar.me/boletos/${result.rows[0].referencia_externa ?? result.rows[0].id}` }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/boletos/:id/pagar (dev manual)
   app.patch('/v1/boletos/:id/pagar', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE boletos SET status = 'pago', pago_em = NOW()
          WHERE id = $1 AND status != 'pago' RETURNING id, status, pago_em`,
@@ -112,9 +97,7 @@ export async function boletosRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Boleto não encontrado ou já pago' })
       return result.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/webhooks/pagamento (Pagar.me webhook)

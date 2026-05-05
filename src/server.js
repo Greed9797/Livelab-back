@@ -9,8 +9,6 @@ import { startBillingEngine } from './jobs/billing_engine.js'
 import { startClienteMetricasSnapshotCron } from './jobs/cliente_metricas_snapshot.js'
 import { runMigrations } from '../apply_migrations.js'
 
-await runMigrations()
-
 // Auto-create Supabase Storage bucket if not exists
 const _sbUrl = process.env.SUPABASE_URL
 const _sbKey = process.env.SUPABASE_SERVICE_KEY
@@ -23,6 +21,7 @@ if (_sbUrl && _sbKey) {
 }
 
 const app = await buildApp()
+await runMigrations(app.db.pool)
 
 // Initialize ConnectorManager with pool access and logger
 connectorManager.init({ db: app.db, log: app.log })
@@ -39,7 +38,13 @@ console.log(`LiveShop API rodando na porta ${process.env.PORT ?? 3001}`)
 // TikTok data collection every 60s:
 // 1. Polling fallback (keeps live_snapshots updated even without connector)
 // 2. Reconciliation loop (starts/stops connectors for ao_vivo lives)
+let _pollRunning = false
 cron.schedule('*/60 * * * * *', async () => {
+  if (_pollRunning) {
+    app.log.warn('[TikTok cron] Execução anterior ainda em andamento — ciclo pulado.')
+    return
+  }
+  _pollRunning = true
   try {
     await TikTokService.pollAllTenants(app.db)
   } catch (err) {
@@ -49,6 +54,8 @@ cron.schedule('*/60 * * * * *', async () => {
     await connectorManager.syncLives()
   } catch (err) {
     app.log.error({ err }, 'connectorManager.syncLives falhou')
+  } finally {
+    _pollRunning = false
   }
 })
 

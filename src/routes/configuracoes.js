@@ -69,8 +69,7 @@ export async function configuracoesRoutes(app) {
     preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
   }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const { rows } = await db.query(`
         SELECT id, nome, logo_url,
                telefone_contato, email_contato,
@@ -108,9 +107,7 @@ export async function configuracoesRoutes(app) {
         meta_diaria_gmv:      conf.meta_diaria_gmv ? Number(conf.meta_diaria_gmv) : 10000,
         contact_history:      histRows.rows,
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/configuracoes
@@ -123,70 +120,69 @@ export async function configuracoesRoutes(app) {
     const { tenant_id, sub: user_id } = request.user
     const data = parsed.data
 
-    const db = await app.dbTenant(tenant_id)
-    try {
-      await db.query('BEGIN')
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        await db.query('BEGIN')
 
-      const updates = []
-      const values = [tenant_id]
-      let paramIdx = 2
+        const updates = []
+        const values = [tenant_id]
+        let paramIdx = 2
 
-      if (data.nome !== undefined)            { updates.push(`nome = $${paramIdx++}`);            values.push(data.nome) }
-      if (data.logo_url !== undefined)        { updates.push(`logo_url = $${paramIdx++}`);        values.push(data.logo_url) }
-      if (data.asaas_api_key !== undefined)   { updates.push(`asaas_api_key = $${paramIdx++}`);   values.push(data.asaas_api_key) }
-      if (data.asaas_wallet_id !== undefined) { updates.push(`asaas_wallet_id = $${paramIdx++}`); values.push(data.asaas_wallet_id) }
-      if (data.tiktok_access_token !== undefined) { updates.push(`tiktok_access_token = $${paramIdx++}`); values.push(data.tiktok_access_token) }
-      if (data.tiktok_shop_id !== undefined)  { updates.push(`tiktok_shop_id = $${paramIdx++}`);  values.push(data.tiktok_shop_id) }
-      if (data.meta_diaria_gmv !== undefined) { updates.push(`meta_diaria_gmv = $${paramIdx++}`); values.push(data.meta_diaria_gmv) }
+        if (data.nome !== undefined)            { updates.push(`nome = $${paramIdx++}`);            values.push(data.nome) }
+        if (data.logo_url !== undefined)        { updates.push(`logo_url = $${paramIdx++}`);        values.push(data.logo_url) }
+        if (data.asaas_api_key !== undefined)   { updates.push(`asaas_api_key = $${paramIdx++}`);   values.push(data.asaas_api_key) }
+        if (data.asaas_wallet_id !== undefined) { updates.push(`asaas_wallet_id = $${paramIdx++}`); values.push(data.asaas_wallet_id) }
+        if (data.tiktok_access_token !== undefined) { updates.push(`tiktok_access_token = $${paramIdx++}`); values.push(data.tiktok_access_token) }
+        if (data.tiktok_shop_id !== undefined)  { updates.push(`tiktok_shop_id = $${paramIdx++}`);  values.push(data.tiktok_shop_id) }
+        if (data.meta_diaria_gmv !== undefined) { updates.push(`meta_diaria_gmv = $${paramIdx++}`); values.push(data.meta_diaria_gmv) }
 
-      // Campos de contato com histórico
-      if (data.telefone_contato !== undefined || data.email_contato !== undefined) {
-        const currentQ = await db.query(
-          `SELECT telefone_contato, email_contato FROM tenants WHERE id = $1`, [tenant_id]
-        )
-        const current = currentQ.rows[0]
+        // Campos de contato com histórico
+        if (data.telefone_contato !== undefined || data.email_contato !== undefined) {
+          const currentQ = await db.query(
+            `SELECT telefone_contato, email_contato FROM tenants WHERE id = $1`, [tenant_id]
+          )
+          const current = currentQ.rows[0]
 
-        if (data.telefone_contato !== undefined && data.telefone_contato !== current.telefone_contato) {
-          updates.push(`telefone_contato = $${paramIdx++}`)
-          values.push(data.telefone_contato)
+          if (data.telefone_contato !== undefined && data.telefone_contato !== current.telefone_contato) {
+            updates.push(`telefone_contato = $${paramIdx++}`)
+            values.push(data.telefone_contato)
+            await db.query(
+              `INSERT INTO tenant_contact_history (tenant_id, alterado_por, campo, valor_anterior, valor_novo)
+               VALUES ($1, $2, 'telefone', $3, $4)`,
+              [tenant_id, user_id, current.telefone_contato, data.telefone_contato]
+            )
+          }
+          if (data.email_contato !== undefined && data.email_contato !== current.email_contato) {
+            updates.push(`email_contato = $${paramIdx++}`)
+            values.push(data.email_contato)
+            await db.query(
+              `INSERT INTO tenant_contact_history (tenant_id, alterado_por, campo, valor_anterior, valor_novo)
+               VALUES ($1, $2, 'email', $3, $4)`,
+              [tenant_id, user_id, current.email_contato, data.email_contato]
+            )
+          }
+        }
+
+        if (updates.length > 0) {
+          await db.query(`UPDATE tenants SET ${updates.join(', ')} WHERE id = $1`, values)
+        }
+
+        if (data.nova_senha) {
+          const bcrypt = await import('bcrypt')
+          const hash = await bcrypt.default.hash(data.nova_senha, 12)
           await db.query(
-            `INSERT INTO tenant_contact_history (tenant_id, alterado_por, campo, valor_anterior, valor_novo)
-             VALUES ($1, $2, 'telefone', $3, $4)`,
-            [tenant_id, user_id, current.telefone_contato, data.telefone_contato]
+            `UPDATE users SET senha_hash = $1 WHERE id = $2 AND tenant_id = $3`,
+            [hash, user_id, tenant_id]
           )
         }
-        if (data.email_contato !== undefined && data.email_contato !== current.email_contato) {
-          updates.push(`email_contato = $${paramIdx++}`)
-          values.push(data.email_contato)
-          await db.query(
-            `INSERT INTO tenant_contact_history (tenant_id, alterado_por, campo, valor_anterior, valor_novo)
-             VALUES ($1, $2, 'email', $3, $4)`,
-            [tenant_id, user_id, current.email_contato, data.email_contato]
-          )
-        }
-      }
 
-      if (updates.length > 0) {
-        await db.query(`UPDATE tenants SET ${updates.join(', ')} WHERE id = $1`, values)
+        await db.query('COMMIT')
+        return { ok: true, message: 'Configurações atualizadas com sucesso' }
+      } catch (e) {
+        await db.query('ROLLBACK')
+        throw e
       }
-
-      if (data.nova_senha) {
-        const bcrypt = await import('bcrypt')
-        const hash = await bcrypt.default.hash(data.nova_senha, 12)
-        await db.query(
-          `UPDATE users SET senha_hash = $1 WHERE id = $2 AND tenant_id = $3`,
-          [hash, user_id, tenant_id]
-        )
-      }
-
-      await db.query('COMMIT')
-      return { ok: true, message: 'Configurações atualizadas com sucesso' }
-    } catch (e) {
-      await db.query('ROLLBACK')
-      throw e
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/configuracoes/contact-history
@@ -194,8 +190,7 @@ export async function configuracoesRoutes(app) {
     preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado'])],
   }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const rows = await db.query(`
         SELECT h.campo, h.valor_anterior, h.valor_novo, h.alterado_em, u.nome AS alterado_por_nome
         FROM tenant_contact_history h
@@ -205,8 +200,6 @@ export async function configuracoesRoutes(app) {
         LIMIT 50
       `, [tenant_id])
       return rows.rows
-    } finally {
-      db.release()
-    }
+    })
   })
 }

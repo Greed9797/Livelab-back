@@ -18,8 +18,7 @@ export async function financeiroRoutes(app) {
       ? `${ano}-${String(mes).padStart(2, '0')}-01`
       : new Date().toISOString().slice(0, 7) + '-01'
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(`
         WITH contratos_mes AS (
           SELECT
@@ -47,9 +46,7 @@ export async function financeiroRoutes(app) {
       const fat_bruto  = toNum(r.fat_bruto_fixo) + toNum(r.fat_bruto_comissao)
       const fat_liquido = Math.max(0, fat_bruto - toNum(r.total_custos))
       return { fat_bruto, fat_liquido, total_custos: toNum(r.total_custos), periodo }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/financeiro/faturamento?periodo=YYYY-MM
@@ -57,8 +54,7 @@ export async function financeiroRoutes(app) {
     const { tenant_id } = request.user
     const periodo = (request.query.periodo ?? new Date().toISOString().slice(0, 7)) + '-01'
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const porCliente = await db.query(`
         SELECT cl.nome, cl.nicho, COALESCE(SUM(l.fat_gerado), 0) AS total
         FROM clientes cl
@@ -73,9 +69,7 @@ export async function financeiroRoutes(app) {
         periodo,
         por_cliente: porCliente.rows.map(r => ({ ...r, total: toNum(r.total) })),
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/financeiro/fluxo-caixa?mes=&ano=
@@ -86,8 +80,7 @@ export async function financeiroRoutes(app) {
       ? `${ano}-${String(mes).padStart(2, '0')}-01`
       : new Date().toISOString().slice(0, 7) + '-01'
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const entradas = await db.query(`
         SELECT date_trunc('day', encerrado_em) AS dia, SUM(fat_gerado) AS valor
         FROM lives
@@ -107,9 +100,7 @@ export async function financeiroRoutes(app) {
         entradas: entradas.rows.map(r => ({ ...r, valor: toNum(r.valor) })),
         saidas:   saidas.rows.map(r => ({ ...r, valor: toNum(r.valor) })),
       }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/financeiro/custos
@@ -120,8 +111,7 @@ export async function financeiroRoutes(app) {
     const { tenant_id } = request.user
     const { descricao, valor, tipo, competencia } = parsed.data
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `INSERT INTO custos (tenant_id, descricao, valor, tipo, competencia)
          VALUES ($1,$2,$3,$4,$5) RETURNING id, descricao, valor, tipo, competencia`,
@@ -129,17 +119,14 @@ export async function financeiroRoutes(app) {
       )
       const row = result.rows[0]
       return reply.code(201).send({ ...row, valor: toNum(row.valor) })
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/financeiro/custos
   app.get('/v1/financeiro/custos', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
     const mes = request.query.mes ?? new Date().toISOString().slice(0, 7)
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT id, descricao, valor, tipo, competencia
          FROM custos
@@ -148,23 +135,18 @@ export async function financeiroRoutes(app) {
         [mes]
       )
       return result.rows.map(r => ({ ...r, valor: toNum(r.valor) }))
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // DELETE /v1/financeiro/custos/:id
   app.delete('/v1/financeiro/custos/:id', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `DELETE FROM custos WHERE id = $1 RETURNING id`, [request.params.id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Custo não encontrado' })
       return { ok: true }
-    } finally {
-      db.release()
-    }
+    })
   })
 }

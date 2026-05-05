@@ -20,13 +20,12 @@ export async function pacotesRoutes(app) {
   // GET /v1/pacotes
   app.get('/v1/pacotes', { preHandler: access }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT ${COLS} FROM pacotes ORDER BY ativo DESC, valor_fixo ASC`
       )
       return result.rows
-    } finally { db.release() }
+    })
   })
 
   // POST /v1/pacotes
@@ -36,8 +35,7 @@ export async function pacotesRoutes(app) {
 
     const { tenant_id } = request.user
     const { nome, descricao, valor_fixo, comissao_pct, horas_incluidas } = parsed.data
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `INSERT INTO pacotes (tenant_id, nome, descricao, valor_fixo, comissao_pct, horas_incluidas)
          VALUES ($1, $2, $3, $4, $5, $6)
@@ -45,7 +43,7 @@ export async function pacotesRoutes(app) {
         [tenant_id, nome, descricao ?? null, valor_fixo, comissao_pct, horas_incluidas]
       )
       return reply.code(201).send(result.rows[0])
-    } finally { db.release() }
+    })
   })
 
   // PATCH /v1/pacotes/:id
@@ -61,8 +59,7 @@ export async function pacotesRoutes(app) {
     const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(', ')
     const values = [request.params.id, ...fields.map((f) => updates[f])]
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE pacotes SET ${setClauses}
          WHERE id = $1
@@ -71,20 +68,19 @@ export async function pacotesRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Pacote não encontrado' })
       return result.rows[0]
-    } finally { db.release() }
+    })
   })
 
   // DELETE /v1/pacotes/:id — desativa
   app.delete('/v1/pacotes/:id', { preHandler: access }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE pacotes SET ativo = false WHERE id = $1 RETURNING id`,
         [request.params.id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Pacote não encontrado' })
       return reply.code(204).send()
-    } finally { db.release() }
+    })
   })
 }

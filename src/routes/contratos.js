@@ -16,8 +16,7 @@ export async function contratosRoutes(app) {
     }
 
     const { tenant_id, sub } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       let valor_fixo = 0
       let comissao_pct = 0
 
@@ -37,7 +36,7 @@ export async function contratosRoutes(app) {
         [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null]
       )
       return reply.code(201).send(result.rows[0])
-    } finally { db.release() }
+    })
   })
 
   // POST /v1/contratos
@@ -48,8 +47,7 @@ export async function contratosRoutes(app) {
     const { tenant_id, sub } = request.user
     const { cliente_id, valor_fixo, comissao_pct, pacote_id } = parsed.data
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       let horasContratadas = 0
       if (pacote_id) {
         const pacoteQ = await db.query(
@@ -68,14 +66,13 @@ export async function contratosRoutes(app) {
         [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null, horasContratadas]
       )
       return reply.code(201).send(result.rows[0])
-    } finally { db.release() }
+    })
   })
 
   // GET /v1/contratos — lista todos os contratos do tenant
   app.get('/v1/contratos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(`
         SELECT c.id, c.status, c.valor_fixo, c.comissao_pct,
                c.de_risco, c.assinado_em, c.ativado_em, c.cancelado_em,
@@ -88,14 +85,13 @@ export async function contratosRoutes(app) {
         ORDER BY c.criado_em DESC
       `)
       return result.rows
-    } finally { db.release() }
+    })
   })
 
   // GET /v1/contratos/:id — detalhe de um contrato
   app.get('/v1/contratos/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(`
         SELECT c.*,
                (c.horas_contratadas - c.horas_consumidas) AS horas_restantes,
@@ -109,7 +105,7 @@ export async function contratosRoutes(app) {
       `, [request.params.id])
       if (!result.rows[0]) return reply.code(404).send({ error: 'Contrato não encontrado' })
       return result.rows[0]
-    } finally { db.release() }
+    })
   })
 
   // PATCH /v1/contratos/:id — edita pacote/valores de um contrato em rascunho
@@ -117,8 +113,7 @@ export async function contratosRoutes(app) {
     const { tenant_id } = request.user
     const { pacote_id, valor_fixo, comissao_pct } = request.body ?? {}
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       let horasContratadas = null
       if (pacote_id !== undefined) {
         if (pacote_id === null) {
@@ -155,14 +150,13 @@ export async function contratosRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou não está em rascunho' })
       return result.rows[0]
-    } finally { db.release() }
+    })
   })
 
   // POST /v1/contratos/:id/assinar → em_analise
   app.post('/v1/contratos/:id/assinar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE contratos
          SET status = 'em_analise', assinado_em = NOW()
@@ -172,9 +166,7 @@ export async function contratosRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou já assinado' })
       return result.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/contratos/:id/assinar-digital
@@ -192,8 +184,7 @@ export async function contratosRoutes(app) {
       return reply.code(400).send({ error: 'Imagem da assinatura excede o tamanho máximo permitido' })
     }
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const q = await db.query(
         `SELECT c.id, c.status, c.cliente_id,
                 cl.fat_anual, cl.cnpj, cl.score as cliente_score, cl.nicho
@@ -241,16 +232,13 @@ export async function contratosRoutes(app) {
       }
 
       return { aprovado, score, risco, status: novoStatus, requer_backoffice: !aprovado }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/contratos/:id/analisar → score automático → ativo ou cancelado
   app.post('/v1/contratos/:id/analisar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Busca contrato + cliente
       const q = await db.query(
         `SELECT c.*, cl.fat_anual, cl.cnpj, cl.score as cliente_score, cl.nicho
@@ -273,9 +261,7 @@ export async function contratosRoutes(app) {
       )
 
       return { aprovado, score, risco, status: novoStatus }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/contratos/:id/assumir-risco → ativo forçado
@@ -306,8 +292,7 @@ export async function contratosRoutes(app) {
       return reply.code(400).send({ error: 'Senha inválida' })
     }
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
       try {
         const result = await db.query(
@@ -332,9 +317,7 @@ export async function contratosRoutes(app) {
         throw txErr
       }
       return { ok: true, status: 'ativo', de_risco: true }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/contratos/:id/tiktok-username — define o @username do apresentador TikTok
@@ -347,8 +330,7 @@ export async function contratosRoutes(app) {
       : null
 
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const { rows } = await db.query(
         `UPDATE contratos SET tiktok_username = $1 WHERE id = $2 AND tenant_id = $3
          RETURNING id, tiktok_username`,
@@ -356,14 +338,13 @@ export async function contratosRoutes(app) {
       )
       if (!rows.length) return reply.code(404).send({ error: 'Contrato não encontrado' })
       return reply.send(rows[0])
-    } finally { db.release() }
+    })
   })
 
   // PATCH /v1/contratos/:id/cancelar
   app.patch('/v1/contratos/:id/cancelar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE contratos SET status = 'cancelado', cancelado_em = NOW()
          WHERE id = $1 AND status IN ('em_analise', 'ativo') RETURNING id, status`,
@@ -371,16 +352,13 @@ export async function contratosRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou não pode ser cancelado neste estado' })
       return result.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/analise-credito
   app.get('/v1/analise-credito', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT c.id, c.status, c.valor_fixo, c.comissao_pct,
                 c.is_risco_franqueado, c.risco_assumido_em,
@@ -395,9 +373,7 @@ export async function contratosRoutes(app) {
         [tenant_id]
       )
       return result.rows
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/contratos/:id/aprovar
@@ -405,8 +381,7 @@ export async function contratosRoutes(app) {
     preHandler: app.requirePapel(['franqueador_master']),
   }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
       try {
         const q = await db.query(
@@ -431,9 +406,7 @@ export async function contratosRoutes(app) {
         throw txErr
       }
       return { ok: true, status: 'ativo' }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/contratos/:id/arquivar
@@ -442,8 +415,7 @@ export async function contratosRoutes(app) {
   }, async (request, reply) => {
     const { tenant_id } = request.user
     const motivo = (request.body ?? {}).motivo ?? null
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE contratos
          SET status = 'arquivado', arquivado_em = NOW(), arquivado_motivo = $2
@@ -453,9 +425,7 @@ export async function contratosRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não pode ser arquivado' })
       return result.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/contratos/:id/pendencia
@@ -467,8 +437,7 @@ export async function contratosRoutes(app) {
       return reply.code(400).send({ error: 'Motivo deve ter pelo menos 8 caracteres' })
     }
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE contratos SET pendencia_motivo = $2, reviewed_at = NOW()
          WHERE id = $1 AND status = 'em_analise' RETURNING id, status`,
@@ -476,7 +445,7 @@ export async function contratosRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não está em análise' })
       return result.rows[0]
-    } finally { db.release() }
+    })
   })
 
   // PATCH /v1/contratos/:id/reprovar
@@ -488,8 +457,7 @@ export async function contratosRoutes(app) {
       return reply.code(400).send({ error: 'Motivo deve ter pelo menos 8 caracteres' })
     }
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE contratos SET status = 'cancelado', reprovacao_motivo = $2,
          cancelado_em = NOW(), reviewed_at = NOW()
@@ -498,7 +466,7 @@ export async function contratosRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não está em análise' })
       return result.rows[0]
-    } finally { db.release() }
+    })
   })
 
   // PATCH /v1/contratos/:id/sinalizar-risco
@@ -506,8 +474,7 @@ export async function contratosRoutes(app) {
     preHandler: app.requirePapel(['franqueador_master']),
   }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
       try {
         const q = await db.query(
@@ -535,9 +502,7 @@ export async function contratosRoutes(app) {
         throw txErr
       }
       return { ok: true, status: 'ativo', is_risco_franqueado: true }
-    } finally {
-      db.release()
-    }
+    })
   })
 }
 

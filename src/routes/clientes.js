@@ -42,8 +42,7 @@ export async function clientesRoutes(app) {
       estado = estado ?? geo.estado ?? null
     }
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `INSERT INTO clientes (tenant_id, nome, celular, cpf, cnpj, razao_social, email,
           fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga)
@@ -56,7 +55,7 @@ export async function clientesRoutes(app) {
          d.cep ?? null, cidade, estado, d.siga ?? null]
       )
       return reply.code(201).send(result.rows[0])
-    } finally { db.release() }
+    })
   })
 
   // POST /v1/clientes/geocode-pending — preenche lat/lng de clientes existentes
@@ -65,8 +64,7 @@ export async function clientesRoutes(app) {
     preHandler: app.requirePapel(['franqueado', 'gerente']),
   }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const { rows } = await db.query(
         `SELECT id, cep, cidade, estado
          FROM clientes
@@ -98,16 +96,13 @@ export async function clientesRoutes(app) {
         }
       }
       return reply.send(results)
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/clientes/metricas — métricas agregadas: LTV, faturamento, lives, comissão
   app.get('/v1/clientes/metricas', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT
            COALESCE(SUM(l.fat_gerado), 0)           AS ltv_total,
@@ -118,16 +113,13 @@ export async function clientesRoutes(app) {
          WHERE l.status = 'encerrada'`
       )
       return result.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/clientes
   app.get('/v1/clientes', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT cl.id, cl.nome, cl.celular, cl.email, cl.status, cl.lat, cl.lng,
                 cl.fat_anual, cl.nicho, cl.score, cl.cep, cl.cidade, cl.estado,
@@ -146,16 +138,13 @@ export async function clientesRoutes(app) {
          ORDER BY cl.criado_em DESC`
       )
       return result.rows
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // GET /v1/clientes/:id
   app.get('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueador_master', 'franqueado', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       // Defesa em profundidade: além do RLS via dbTenant, filtra explícito
       // por tenant_id pra evitar leak se RLS for desabilitado por engano.
       const result = await db.query(
@@ -164,9 +153,7 @@ export async function clientesRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       return result.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // POST /v1/clientes/logo/favicon — cliente_parceiro busca logo via Google Favicons
@@ -204,8 +191,7 @@ export async function clientesRoutes(app) {
     }
 
     const { tenant_id, sub: userId } = request.user
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const upd = await db.query(
         `UPDATE clientes SET logo_url = $1, site = $3, atualizado_em = NOW()
          WHERE user_id = $2 RETURNING id`,
@@ -218,9 +204,7 @@ export async function clientesRoutes(app) {
         })
       }
       return { logo_url: dataUrl }
-    } finally {
-      db.release()
-    }
+    })
   })
 
   // PATCH /v1/clientes/:id
@@ -246,8 +230,7 @@ export async function clientesRoutes(app) {
     const vals = Object.values(updates)
     const set  = keys.map((k, i) => `${k} = $${i + 1}`).join(', ')
 
-    const db = await app.dbTenant(tenant_id)
-    try {
+    return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE clientes SET ${set}, atualizado_em = NOW()
          WHERE id = $${keys.length + 1} RETURNING id, nome, status, onboarding_step`,
@@ -255,8 +238,6 @@ export async function clientesRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       return result.rows[0]
-    } finally {
-      db.release()
-    }
+    })
   })
 }

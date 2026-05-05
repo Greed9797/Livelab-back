@@ -56,6 +56,10 @@ describe('Route regressions: SQL and RBAC', () => {
       if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
     })
     app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
     await app.register(financeiroRoutes)
 
@@ -210,6 +214,10 @@ describe('Route regressions: SQL and RBAC', () => {
       }
     })
     app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
     await app.register(cabinesRoutes)
 
@@ -310,6 +318,10 @@ describe('Route regressions: SQL and RBAC', () => {
       }
     })
     app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
     await app.register(cabinesRoutes)
 
@@ -359,6 +371,10 @@ describe('Route regressions: SQL and RBAC', () => {
       }
     })
     app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
     await app.register(cabinesRoutes)
 
@@ -397,6 +413,10 @@ describe('Route regressions: SQL and RBAC', () => {
       }
     })
     app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
     await app.register(analyticsRoutes)
 
@@ -505,6 +525,10 @@ describe('Route regressions: SQL and RBAC', () => {
       }
     })
     app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
     await app.register(clienteDashboardRoutes)
 
@@ -625,6 +649,10 @@ describe('Route regressions: SQL and RBAC', () => {
       if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
     })
     app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
     await app.register(clienteDashboardRoutes)
 
@@ -678,6 +706,10 @@ describe('Route regressions: SQL and RBAC', () => {
         if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
       })
       app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
       await app.register(clienteDashboardRoutes)
 
@@ -727,6 +759,10 @@ describe('Route regressions: SQL and RBAC', () => {
       if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
     })
     app.decorate('dbTenant', dbTenantMock)
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
     await app.register(clienteDashboardRoutes)
 
@@ -766,6 +802,10 @@ describe('Route regressions: SQL and RBAC', () => {
       if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
     })
     app.decorate('dbTenant', vi.fn().mockResolvedValue({ query: mockQuery, release: mockRelease }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
     app.decorate('db', { query: vi.fn() })
 
     await app.register(financeiroRoutes)
@@ -849,6 +889,10 @@ describe('Route regressions: SQL and RBAC', () => {
       }
     })
     app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
 
     await app.register((await import('../src/routes/cabines.js')).cabinesRoutes)
 
@@ -896,6 +940,10 @@ describe('Route regressions: SQL and RBAC', () => {
       })
       app.decorate('db', { query: queryMock })
       app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
       const { tiktokRoutes } = await import('../src/routes/tiktok.js')
       await app.register(tiktokRoutes)
       return { app, queryMock }
@@ -951,6 +999,10 @@ describe('Route regressions: SQL and RBAC', () => {
       })
       app.decorate('db', { query: queryMock })
       app.decorate('dbTenant', async () => ({ query: queryMock, release: vi.fn() }))
+      app.decorate('withTenant', async (tenantId, fn) => {
+        const db = await app.dbTenant(tenantId)
+        try { return await fn(db) } finally { db.release() }
+      })
       const { tiktokRoutes } = await import('../src/routes/tiktok.js')
       await app.register(tiktokRoutes)
 
@@ -1052,6 +1104,10 @@ describe('Route regressions: SQL and RBAC', () => {
         if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
       })
       appGerente.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+      appGerente.decorate('withTenant', async (tenantId, fn) => {
+        const db = await appGerente.dbTenant(tenantId)
+        try { return await fn(db) } finally { db.release() }
+      })
       await appGerente.register(financeiroRoutes)
       const resGerente = await appGerente.inject({ method: 'GET', url: '/v1/financeiro/resumo?mes=4&ano=2026' })
       expect(resGerente.statusCode).toBe(200)
@@ -1069,6 +1125,10 @@ describe('Route regressions: SQL and RBAC', () => {
         if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
       })
       appApresentador.decorate('dbTenant', async () => ({ query: cabQueryMock, release: cabReleaseMock }))
+      appApresentador.decorate('withTenant', async (tenantId, fn) => {
+        const db = await appApresentador.dbTenant(tenantId)
+        try { return await fn(db) } finally { db.release() }
+      })
       await appApresentador.register(cabinesRoutes)
       const resApresentador = await appApresentador.inject({ method: 'GET', url: '/v1/cabines' })
       expect(resApresentador.statusCode).toBe(200)

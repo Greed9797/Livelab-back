@@ -4,37 +4,24 @@ export async function homeRoutes(app) {
     preHandler: app.requirePapel(['franqueado', 'gerente']),
   }, async (request) => {
     const { tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-
-    try {
-      // 1. Financeiro: Faturamento Fixo dos contratos ativos
-      const fixoQ = await db.query(`SELECT COALESCE(SUM(valor_fixo), 0) AS valor FROM contratos WHERE status = 'ativo'`)
-
-      // Financeiro: Comissão das Lives do mês (GMV * % da comissão)
-      const varQ = await db.query(`
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+      // ── Grupo 1: queries financeiras + cabines (independentes entre si) ──
+      const [fixoQ, varQ, custosQ, cabinesQ] = await Promise.all([
+        db.query(`SELECT COALESCE(SUM(valor_fixo), 0) AS valor FROM contratos WHERE status = 'ativo'`),
+        db.query(`
         SELECT COALESCE(SUM(l.fat_gerado * (COALESCE(c.comissao_pct, 0) / 100.0)), 0) AS valor
         FROM lives l
         JOIN contratos c ON c.cliente_id = l.cliente_id AND c.status = 'ativo'
         WHERE l.status = 'encerrada'
           AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
-      `)
-
-      // Financeiro: Custos do mês
-      const custosQ = await db.query(`
+      `),
+        db.query(`
         SELECT COALESCE(SUM(valor), 0) AS valor
         FROM custos
         WHERE date_trunc('month', competencia) = date_trunc('month', NOW())
-      `)
-
-      const fatFixo = Number(fixoQ.rows[0].valor)
-      const fatComissao = Number(varQ.rows[0].valor)
-      const totalCustos = Number(custosQ.rows[0].valor)
-
-      const fatBruto = fatFixo + fatComissao
-      const fatLiquido = fatBruto - totalCustos
-
-      // 2. Cabines (Status real-time do TikTok usando snapshots via LATERAL JOIN)
-      const cabinesQ = await db.query(`
+      `),
+        db.query(`
         SELECT
             c.numero, c.status, c.live_atual_id,
             l.iniciado_em,
@@ -68,7 +55,14 @@ export async function homeRoutes(app) {
         ) enc ON true
         WHERE c.ativo IS NOT FALSE
         ORDER BY c.numero
-      `)
+      `),
+      ])
+
+      const fatFixo = Number(fixoQ.rows[0].valor)
+      const fatComissao = Number(varQ.rows[0].valor)
+      const totalCustos = Number(custosQ.rows[0].valor)
+      const fatBruto = fatFixo + fatComissao
+      const fatLiquido = fatBruto - totalCustos
 
       const cabinesFormatadas = cabinesQ.rows.map(c => {
         let duracaoMin = 0;
@@ -92,58 +86,52 @@ export async function homeRoutes(app) {
         }
       });
 
-      // 3. Resumo do Mês
-      const clientesQ = await db.query(`
-        SELECT COUNT(*) AS total
-        FROM clientes
-        WHERE status = 'ativo'
-      `)
-      const novosClientesQ = await db.query(`
+      // ── Grupo 2: métricas, pipeline, alertas, ocupação, ranking (independentes) ──
+      const [
+        clientesQ,
+        novosClientesQ,
+        livesMesQ,
+        mediaViewersQ,
+        pipelineQ,
+        taxaConversaoQ,
+        alertasOpsQ,
+        ocupacaoQ,
+        rankingResult,
+      ] = await Promise.all([
+        db.query(`SELECT COUNT(*) AS total FROM clientes WHERE status = 'ativo'`),
+        db.query(`
         SELECT COUNT(*) AS total FROM clientes
         WHERE date_trunc('month', criado_em AT TIME ZONE 'America/Sao_Paulo')
               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
           AND status = 'ativo'
-      `)
-      const livesMesQ = await db.query(`
+      `),
+        db.query(`
         SELECT COUNT(id) AS lives_mes, COALESCE(SUM(fat_gerado), 0) AS gmv_lives_mes
         FROM lives
         WHERE status = 'encerrada'
           AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-      `)
-
-      const mediaViewersQ = await db.query(`
+      `),
+        db.query(`
         SELECT COALESCE(AVG(viewer_count), 0) AS media
         FROM live_snapshots
         WHERE date_trunc('month', captured_at) = date_trunc('month', NOW())
-      `)
-
-      // 4. Pipeline CRM (leads não ganhos e não perdidos)
-      const pipelineQ = await db.query(`
+      `),
+        db.query(`
         SELECT COUNT(*) AS pipeline_aberto, COALESCE(SUM(valor_oportunidade), 0) AS valor_pipeline
         FROM leads
         WHERE franqueadora_id = $1
           AND crm_etapa NOT IN ('ganho','perdido')
           AND status != 'expirado'
-      `, [tenant_id])
-
-      // 5. Taxa de conversão — ganhos / (ganhos + perdidos) de todos os leads fechados
-      const taxaConversaoQ = await db.query(`
+      `, [tenant_id]),
+        db.query(`
         SELECT
           COUNT(*) FILTER (WHERE crm_etapa = 'ganho') AS ganhos,
           COUNT(*) FILTER (WHERE crm_etapa IN ('ganho','perdido')) AS total_fechados
         FROM leads
         WHERE franqueadora_id = $1
-      `, [tenant_id])
-
-      const ganhos = Number(taxaConversaoQ.rows[0].ganhos)
-      const totalFechados = Number(taxaConversaoQ.rows[0].total_fechados)
-      const taxaConversao = totalFechados > 0
-        ? parseFloat(((ganhos / totalFechados) * 100).toFixed(1))
-        : 0
-
-      // 6. Alertas operacionais completos
-      const alertasOpsQ = await db.query(`
+      `, [tenant_id]),
+        db.query(`
         SELECT
           (SELECT COUNT(*) FROM clientes WHERE status = 'inadimplente') AS inadimplentes,
           (SELECT COUNT(*) FROM contratos WHERE status IN ('rascunho','em_analise')) AS contratos_aguardando_assinatura,
@@ -173,16 +161,32 @@ export async function homeRoutes(app) {
            WHERE status = 'vencido'
               OR (status = 'pendente' AND vencimento < NOW())) AS boletos_vencidos,
           (SELECT COUNT(*) FROM leads WHERE pego_por IS NULL AND status = 'disponivel') AS leads_disponiveis
-      `, [tenant_id])
-      const alertas = alertasOpsQ.rows[0]
-
-      // 7. Ocupação de cabines hoje
-      const ocupacaoQ = await db.query(`
+      `, [tenant_id]),
+        db.query(`
         SELECT
           COUNT(*) FILTER (WHERE status = 'ao_vivo') AS ao_vivo,
           COUNT(*) FILTER (WHERE ativo IS NOT FALSE) AS operacionais
         FROM cabines
-      `)
+      `),
+        db.query(`
+        SELECT cl.nome, COALESCE(SUM(l.fat_gerado), 0) AS gmv, COUNT(l.id) AS lives
+        FROM lives l
+        JOIN clientes cl ON cl.id = l.cliente_id
+        WHERE l.status = 'encerrada'
+          AND date_trunc('day', l.iniciado_em) = date_trunc('day', NOW())
+        GROUP BY cl.id, cl.nome
+        ORDER BY gmv DESC
+        LIMIT 5
+      `),
+      ])
+
+      const ganhos = Number(taxaConversaoQ.rows[0].ganhos)
+      const totalFechados = Number(taxaConversaoQ.rows[0].total_fechados)
+      const taxaConversao = totalFechados > 0
+        ? parseFloat(((ganhos / totalFechados) * 100).toFixed(1))
+        : 0
+
+      const alertas = alertasOpsQ.rows[0]
       const ocupacao = {
         ao_vivo: Number(ocupacaoQ.rows[0].ao_vivo),
         operacionais: Number(ocupacaoQ.rows[0].operacionais)
@@ -215,18 +219,7 @@ export async function homeRoutes(app) {
         // live_requests pode não existir em ambientes sem a migration 025
       }
 
-      // 9. Ranking do Dia
-      const rankingResult = await db.query(`
-        SELECT cl.nome, COALESCE(SUM(l.fat_gerado), 0) AS gmv, COUNT(l.id) AS lives
-        FROM lives l
-        JOIN clientes cl ON cl.id = l.cliente_id
-        WHERE l.status = 'encerrada'
-          AND date_trunc('day', l.iniciado_em) = date_trunc('day', NOW())
-        GROUP BY cl.id, cl.nome
-        ORDER BY gmv DESC
-        LIMIT 5
-      `)
-
+      // 9. Ranking do Dia (já paralelizado no Grupo 2)
       const rankingDia = rankingResult.rows.map(r => ({
         nome: r.nome,
         gmv: parseFloat(Number(r.gmv).toFixed(2)),
@@ -276,11 +269,10 @@ export async function homeRoutes(app) {
         // Ranking do dia
         ranking_dia: rankingDia
       }
-    } catch (error) {
-      app.log.error({ err: error }, 'ERRO NA ROTA /v1/home/dashboard')
-      throw error
-    } finally {
-      db.release()
-    }
+      } catch (error) {
+        app.log.error({ err: error }, 'ERRO NA ROTA /v1/home/dashboard')
+        throw error
+      }
+    })
   })
 }

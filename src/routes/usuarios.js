@@ -11,6 +11,7 @@ const convidarSchema = z.object({
   ]),
   cliente_id: z.string().uuid().optional(),
   apresentadora_id: z.string().uuid().optional(),
+  senha_temporaria: z.string().min(6, 'Senha temporária deve ter no mínimo 6 caracteres').optional(),
 }).refine(d => d.papel !== 'cliente_parceiro' || !!d.cliente_id, {
   message: 'cliente_id é obrigatório para papel cliente_parceiro',
 })
@@ -64,7 +65,7 @@ export async function usuariosRoutes(app) {
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0].message })
     }
-    const { nome, email, papel, cliente_id, apresentadora_id } = parsed.data
+    const { nome, email, papel, cliente_id, apresentadora_id, senha_temporaria } = parsed.data
     const tenantId = request.user.tenant_id
 
     const existing = await app.db.query('SELECT id FROM users WHERE email = $1', [email])
@@ -72,7 +73,7 @@ export async function usuariosRoutes(app) {
       return reply.code(409).send({ error: 'E-mail já cadastrado' })
     }
 
-    const senhaTemp = crypto.randomBytes(8).toString('hex')
+    const senhaTemp = senha_temporaria ?? crypto.randomBytes(8).toString('hex')
     const senhaHash = await bcrypt.hash(senhaTemp, 12)
 
     const db = await app.dbTenant(tenantId)

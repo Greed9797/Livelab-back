@@ -34,10 +34,10 @@ export async function liveApresentadoresRoutes(app) {
 
       // Insert — ON CONFLICT DO NOTHING to ignore duplicates
       await db.query(
-        `INSERT INTO live_apresentadores (live_id, apresentador_id)
-         VALUES ($1, $2)
+        `INSERT INTO live_apresentadores (tenant_id, live_id, apresentador_id)
+         VALUES ($1, $2, $3)
          ON CONFLICT (live_id, apresentador_id) DO NOTHING`,
-        [liveId, apresentador_id]
+        [request.user.tenant_id, liveId, apresentador_id]
       )
 
       return reply.code(201).send({ ok: true })

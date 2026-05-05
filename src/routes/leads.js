@@ -58,34 +58,40 @@ export async function leadsRoutes(app) {
       where += ` AND crm_etapa = $${params.length}`
     }
 
-    const result = await app.db.query(
-      `${SELECT_CRM} ${where} ORDER BY criado_em DESC`,
-      params
-    )
-    return result.rows
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `${SELECT_CRM} ${where} ORDER BY criado_em DESC`,
+        params
+      )
+      return result.rows
+    })
   })
 
   // GET /v1/leads/meus — leads próprios não encerrados
   app.get('/v1/leads/meus', { preHandler: access }, async (request) => {
     const { tenant_id } = request.user
-    const result = await app.db.query(
-      `${SELECT_CRM}
-       WHERE pego_por = $1 AND crm_etapa NOT IN ('ganho','perdido')
-       ORDER BY atualizado_em DESC NULLS LAST, pego_em DESC`,
-      [tenant_id]
-    )
-    return result.rows
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `${SELECT_CRM}
+         WHERE pego_por = $1 AND crm_etapa NOT IN ('ganho','perdido')
+         ORDER BY atualizado_em DESC NULLS LAST, pego_em DESC`,
+        [tenant_id]
+      )
+      return result.rows
+    })
   })
 
   // GET /v1/leads/:id — detalhe do lead
   app.get('/v1/leads/:id', { preHandler: access }, async (request, reply) => {
     const { tenant_id } = request.user
-    const result = await app.db.query(
-      `${SELECT_CRM} WHERE id = $1 AND franqueadora_id = $2`,
-      [request.params.id, tenant_id]
-    )
-    if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
-    return result.rows[0]
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `${SELECT_CRM} WHERE id = $1 AND franqueadora_id = $2`,
+        [request.params.id, tenant_id]
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+      return result.rows[0]
+    })
   })
 
   // PATCH /v1/leads/:id — atualiza campos CRM
@@ -101,25 +107,29 @@ export async function leadsRoutes(app) {
     const setClauses = fields.map((f, i) => `${f} = $${i + 3}`).join(', ')
     const values = [request.params.id, tenant_id, ...fields.map((f) => updates[f])]
 
-    const result = await app.db.query(
-      `UPDATE leads SET ${setClauses}, atualizado_em = NOW()
-       WHERE id = $1 AND franqueadora_id = $2
-       RETURNING id, crm_etapa, valor_oportunidade, responsavel_nome, origem, motivo_perda`,
-      values
-    )
-    if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
-    return result.rows[0]
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `UPDATE leads SET ${setClauses}, atualizado_em = NOW()
+         WHERE id = $1 AND franqueadora_id = $2
+         RETURNING id, crm_etapa, valor_oportunidade, responsavel_nome, origem, motivo_perda`,
+        values
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+      return result.rows[0]
+    })
   })
 
   // DELETE /v1/leads/:id — remove lead (CRM)
   app.delete('/v1/leads/:id', { preHandler: access }, async (request, reply) => {
     const { tenant_id } = request.user
-    const result = await app.db.query(
-      `DELETE FROM leads WHERE id = $1 AND franqueadora_id = $2 RETURNING id`,
-      [request.params.id, tenant_id]
-    )
-    if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
-    return reply.code(204).send()
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `DELETE FROM leads WHERE id = $1 AND franqueadora_id = $2 RETURNING id`,
+        [request.params.id, tenant_id]
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+      return reply.code(204).send()
+    })
   })
 
   // POST /v1/leads/:id/contato — adiciona entrada no histórico de contatos
@@ -130,16 +140,18 @@ export async function leadsRoutes(app) {
     const { tenant_id } = request.user
     const entrada = { ...parsed.data, data: new Date().toISOString() }
 
-    const result = await app.db.query(
-      `UPDATE leads
-       SET historico_contatos = historico_contatos || $3::jsonb,
-           atualizado_em = NOW()
-       WHERE id = $1 AND franqueadora_id = $2
-       RETURNING id, historico_contatos`,
-      [request.params.id, tenant_id, JSON.stringify(entrada)]
-    )
-    if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
-    return result.rows[0]
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `UPDATE leads
+         SET historico_contatos = historico_contatos || $3::jsonb,
+             atualizado_em = NOW()
+         WHERE id = $1 AND franqueadora_id = $2
+         RETURNING id, historico_contatos`,
+        [request.params.id, tenant_id, JSON.stringify(entrada)]
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+      return result.rows[0]
+    })
   })
 
   // POST /v1/leads/:id/tarefa — adiciona tarefa ao lead
@@ -150,16 +162,18 @@ export async function leadsRoutes(app) {
     const { tenant_id } = request.user
     const tarefa = { ...parsed.data, id: crypto.randomUUID(), criado_em: new Date().toISOString() }
 
-    const result = await app.db.query(
-      `UPDATE leads
-       SET tarefas = tarefas || $3::jsonb,
-           atualizado_em = NOW()
-       WHERE id = $1 AND franqueadora_id = $2
-       RETURNING id, tarefas`,
-      [request.params.id, tenant_id, JSON.stringify(tarefa)]
-    )
-    if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
-    return result.rows[0]
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `UPDATE leads
+         SET tarefas = tarefas || $3::jsonb,
+             atualizado_em = NOW()
+         WHERE id = $1 AND franqueadora_id = $2
+         RETURNING id, tarefas`,
+        [request.params.id, tenant_id, JSON.stringify(tarefa)]
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+      return result.rows[0]
+    })
   })
 
   // POST /v1/leads/:id/ganhar — converte lead em cliente + contrato ativo
@@ -169,6 +183,7 @@ export async function leadsRoutes(app) {
 
     const client = await app.db.pool.connect()
     try {
+      await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenant_id])
       await client.query('BEGIN')
 
       const leadQ = await client.query(
@@ -245,17 +260,19 @@ export async function leadsRoutes(app) {
       }
     }
     const placeholders = values.map((_, i) => `$${i + 1}`).join(', ')
-    const result = await app.db.query(
-      `INSERT INTO leads (${fields.join(', ')}, criado_em, atualizado_em)
-       VALUES (${placeholders}, NOW(), NOW())
-       RETURNING id, nome, nicho, cidade, estado, fat_estimado, status, pego_por, pego_em,
-                 crm_etapa, valor_oportunidade, responsavel_nome, origem,
-                 historico_contatos, observacoes_internas, tarefas, motivo_perda,
-                 convertido_cliente_id, ganho_em, criado_em, atualizado_em,
-                 (NOW() - criado_em) < interval '24 hours' AS is_novo`,
-      values
-    )
-    return reply.code(201).send(result.rows[0])
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `INSERT INTO leads (${fields.join(', ')}, criado_em, atualizado_em)
+         VALUES (${placeholders}, NOW(), NOW())
+         RETURNING id, nome, nicho, cidade, estado, fat_estimado, status, pego_por, pego_em,
+                   crm_etapa, valor_oportunidade, responsavel_nome, origem,
+                   historico_contatos, observacoes_internas, tarefas, motivo_perda,
+                   convertido_cliente_id, ganho_em, criado_em, atualizado_em,
+                   (NOW() - criado_em) < interval '24 hours' AS is_novo`,
+        values
+      )
+      return reply.code(201).send(result.rows[0])
+    })
   })
 
   // POST /v1/leads/:id/pegar — pega lead disponível (fluxo legado)
@@ -263,6 +280,7 @@ export async function leadsRoutes(app) {
     const { tenant_id } = request.user
     const client = await app.db.pool.connect()
     try {
+      await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenant_id])
       await client.query('BEGIN')
       const q = await client.query(
         `SELECT id, status FROM leads WHERE id = $1 AND franqueadora_id = $2 FOR UPDATE`,

@@ -101,7 +101,7 @@ describe('POST /v1/lives/manual', () => {
     })
 
     expect(junctionCalls).toHaveLength(1)
-    expect(junctionCalls[0].args[1]).toBe(ap2)
+    expect(junctionCalls[0].args[2]).toBe(ap2)
   })
 
   it('returns 400 when hora_fim <= hora_inicio', async () => {

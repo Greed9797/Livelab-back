@@ -162,6 +162,8 @@ describe('Route regressions: SQL and RBAC', () => {
       }
     })
     app.decorate('db', { query: queryMock, pool: { connect: vi.fn() } })
+    app.decorate('dbTenant', async () => ({ query: queryMock, release: vi.fn() }))
+    app.decorate('withTenant', async (_tid, fn) => fn({ query: queryMock }))
 
     await app.register(leadsRoutes)
 

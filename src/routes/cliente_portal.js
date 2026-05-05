@@ -151,12 +151,12 @@ export async function clientePortalRoutes(app) {
       if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
 
       const res = await db.query(
-        `INSERT INTO cliente_metas (cliente_id, ano, mes, meta_gmv)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO cliente_metas (tenant_id, cliente_id, ano, mes, meta_gmv)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (cliente_id, ano, mes)
          DO UPDATE SET meta_gmv = EXCLUDED.meta_gmv, atualizado_em = NOW()
          RETURNING ano, mes, meta_gmv`,
-        [clienteId, ano, mes, parseFloat(meta_gmv)]
+        [request.user.tenant_id, clienteId, ano, mes, parseFloat(meta_gmv)]
       )
 
       const row = res.rows[0]

@@ -948,9 +948,9 @@ export async function cabinesRoutes(app) {
 
         if (d.apresentador2_id) {
           await db.query(
-            `INSERT INTO live_apresentadores (live_id, apresentador_id)
-             VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-            [liveId, d.apresentador2_id]
+            `INSERT INTO live_apresentadores (tenant_id, live_id, apresentador_id)
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+            [tenant_id, liveId, d.apresentador2_id]
           )
         }
 
@@ -1035,8 +1035,8 @@ export async function cabinesRoutes(app) {
           await db.query(`DELETE FROM live_apresentadores WHERE live_id = $1`, [request.params.id])
           if (d.apresentador2_id) {
             await db.query(
-              `INSERT INTO live_apresentadores (live_id, apresentador_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
-              [request.params.id, d.apresentador2_id]
+              `INSERT INTO live_apresentadores (tenant_id, live_id, apresentador_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+              [tenant_id, request.params.id, d.apresentador2_id]
             )
           }
         }

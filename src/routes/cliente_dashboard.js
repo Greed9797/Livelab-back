@@ -1,3 +1,5 @@
+import { getClienteId } from '../lib/cliente_resolver.js'
+
 const DASHBOARD_TZ = 'America/Sao_Paulo'
 
 function toNumber(value) {
@@ -112,28 +114,14 @@ function buildBenchmark({ niche, meuGmv, mediaGmv, amostra, percentil, minimumSa
   }
 }
 
+// Resolve cliente_parceiro do user logado SEMPRE via FK clientes.user_id.
+// Nunca usar fallback por email — dois clientes mesmo email/tenant => vazamento.
 async function getClienteVinculado(db, tenantId, userId) {
-  const userQ = await db.query(
-    `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
-    [userId, tenantId]
+  const r = await db.query(
+    `SELECT id, nicho, nome FROM clientes WHERE user_id = $1 LIMIT 1`,
+    [userId],
   )
-  const email = userQ.rows[0]?.email
-
-  if (!email) {
-    return null
-  }
-
-  const clienteQ = await db.query(
-    `SELECT id, nicho, nome
-     FROM clientes
-     WHERE tenant_id = $1
-       AND email = $2
-       AND status = 'ativo'
-     LIMIT 1`,
-    [tenantId, email]
-  )
-
-  return clienteQ.rows[0] ?? null
+  return r.rows[0] ?? null
 }
 
 async function getContratoAtivo(db, tenantId, clienteId) {
@@ -739,17 +727,8 @@ export async function clienteDashboardRoutes(app) {
     const db = await app.dbTenant(tenant_id)
 
     try {
-      const userQ = await db.query(
-        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
-        [user_id, tenant_id]
-      )
-      const email = userQ.rows[0]?.email
-
-      const clienteQ = await db.query(
-        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
-        [tenant_id, email]
-      )
-      const cliente_id = clienteQ.rows[0]?.id
+      // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
+      const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return { resumo: { total_produtos: 0, total_qty: 0, total_faturamento: 0 }, produtos: [] }
 
       const mes = Number(request.query.mes) || (new Date().getMonth() + 1)
@@ -802,17 +781,8 @@ export async function clienteDashboardRoutes(app) {
     const db = await app.dbTenant(tenant_id)
 
     try {
-      const userQ = await db.query(
-        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
-        [user_id, tenant_id]
-      )
-      const email = userQ.rows[0]?.email
-
-      const clienteQ = await db.query(
-        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
-        [tenant_id, email]
-      )
-      const cliente_id = clienteQ.rows[0]?.id
+      // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
+      const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return []
 
       const cabinesQ = await db.query(`
@@ -873,17 +843,8 @@ export async function clienteDashboardRoutes(app) {
     const db = await app.dbTenant(tenant_id)
 
     try {
-      const userQ = await db.query(
-        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
-        [user_id, tenant_id]
-      )
-      const email = userQ.rows[0]?.email
-
-      const clienteQ = await db.query(
-        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
-        [tenant_id, email]
-      )
-      const cliente_id = clienteQ.rows[0]?.id
+      // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
+      const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
 
       // Valida que a cabine pertence ao cliente via contrato ativo
@@ -1006,17 +967,8 @@ export async function clienteDashboardRoutes(app) {
     const db = await app.dbTenant(tenant_id)
 
     try {
-      const userQ = await db.query(
-        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
-        [user_id, tenant_id]
-      )
-      const email = userQ.rows[0]?.email
-
-      const clienteQ = await db.query(
-        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
-        [tenant_id, email]
-      )
-      const cliente_id = clienteQ.rows[0]?.id
+      // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
+      const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
 
       const q = await db.query(`
@@ -1070,17 +1022,8 @@ export async function clienteDashboardRoutes(app) {
 
     const db = await app.dbTenant(tenant_id)
     try {
-      const userQ = await db.query(
-        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
-        [user_id, tenant_id]
-      )
-      const email = userQ.rows[0]?.email
-
-      const clienteQ = await db.query(
-        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
-        [tenant_id, email]
-      )
-      const cliente_id = clienteQ.rows[0]?.id
+      // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
+      const cliente_id = await getClienteId(db, user_id)
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
 
       // Valida que a cabine pertence ao cliente via contrato ativo

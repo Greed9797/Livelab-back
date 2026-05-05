@@ -79,6 +79,24 @@ export async function usuariosRoutes(app) {
     try {
       await db.query('BEGIN')
 
+      // Pré-validação: cliente_parceiro precisa de cliente DISPONÍVEL (sem user_id já vinculado)
+      // antes de criar o user — evita orphan onde INSERT users sucede mas UPDATE falha,
+      // deixando cliente alheio acessível pelo novo user via fallback de email.
+      if (papel === 'cliente_parceiro') {
+        const check = await db.query(
+          `SELECT user_id FROM clientes WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+          [cliente_id, tenantId],
+        )
+        if (check.rowCount === 0) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Cliente não encontrado no tenant' })
+        }
+        if (check.rows[0].user_id) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'Cliente já vinculado a outro usuário.' })
+        }
+      }
+
       const { rows } = await db.query(
         `INSERT INTO users (tenant_id, nome, email, senha_hash, papel, ativo, criado_por)
          VALUES ($1, $2, $3, $4, $5, true, $6)
@@ -89,12 +107,12 @@ export async function usuariosRoutes(app) {
 
       if (papel === 'cliente_parceiro') {
         const updated = await db.query(
-          `UPDATE clientes SET user_id = $1 WHERE id = $2 AND tenant_id = $3`,
+          `UPDATE clientes SET user_id = $1 WHERE id = $2 AND tenant_id = $3 AND user_id IS NULL`,
           [newUser.id, cliente_id, tenantId]
         )
         if (updated.rowCount === 0) {
           await db.query('ROLLBACK')
-          return reply.code(404).send({ error: 'Cliente não encontrado no tenant' })
+          return reply.code(409).send({ error: 'Cliente foi vinculado por outra requisição. Tente novamente.' })
         }
       }
 

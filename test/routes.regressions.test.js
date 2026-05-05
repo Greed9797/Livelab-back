@@ -467,7 +467,7 @@ describe('Route regressions: SQL and RBAC', () => {
     const app = Fastify()
     const clienteId = '33333333-3333-4333-8333-333333333333'
     const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ email: 'parceiro@teste.com' }] })
+      // Resolução por user_id direto — não há mais SELECT email FROM users.
       .mockResolvedValueOnce({ rows: [{ id: clienteId, nicho: 'Moda Feminina', nome: 'Parceiro Alpha' }] })
       .mockResolvedValueOnce({ rows: [{ id: 'ctr-1', comissao_pct: '15.00', valor_fixo: '2400.00', horas_contratadas: '12.00', pacote_valor: null, horas_incluidas: null }] })
       .mockResolvedValueOnce({
@@ -598,15 +598,15 @@ describe('Route regressions: SQL and RBAC', () => {
       ],
     })
 
-    const livesSql = queryMock.mock.calls[3][0]
+    const livesSql = queryMock.mock.calls[2][0]
     expect(livesSql).toContain('final_peak_viewers')
     expect(livesSql).toContain("make_timestamptz($3::int, $4::int")
 
-    const rankingSql = queryMock.mock.calls[7][0]
+    const rankingSql = queryMock.mock.calls[6][0]
     expect(rankingSql).toContain('l.tenant_id = $1')
     expect(rankingSql).toContain('l.iniciado_em >= p.inicio')
 
-    const benchmarkSql = queryMock.mock.calls[8][0]
+    const benchmarkSql = queryMock.mock.calls[7][0]
     expect(benchmarkSql).toContain('WITH base_90_dias AS')
     expect(benchmarkSql).toContain('PERCENT_RANK() OVER')
     expect(releaseMock).toHaveBeenCalledTimes(1)
@@ -617,8 +617,7 @@ describe('Route regressions: SQL and RBAC', () => {
   it('cliente dashboard returns empty payload when no active cliente is linked', async () => {
     const app = Fastify()
     const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ email: 'sem-cliente@teste.com' }] })
-      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] }) // SELECT clientes WHERE user_id = $1 → vazio
     const releaseMock = vi.fn()
 
     app.decorate('requirePapel', (papeis) => async (request, reply) => {
@@ -640,7 +639,7 @@ describe('Route regressions: SQL and RBAC', () => {
       melhores_horarios_venda: [],
       lives: [],
     })
-    expect(queryMock).toHaveBeenCalledTimes(2)
+    expect(queryMock).toHaveBeenCalledTimes(1)
     expect(releaseMock).toHaveBeenCalledTimes(1)
 
     await app.close()
@@ -651,7 +650,6 @@ describe('Route regressions: SQL and RBAC', () => {
       const app = Fastify()
       const clienteId = '33333333-3333-4333-8333-333333333333'
       const queryMock = vi.fn()
-        .mockResolvedValueOnce({ rows: [{ email: 'parceiro@teste.com' }] })
         .mockResolvedValueOnce({ rows: [{ id: clienteId, nicho: 'Moda Feminina', nome: 'Parceiro Alpha' }] })
         .mockResolvedValueOnce({ rows: [{ id: 'ctr-1', comissao_pct: '10.00', valor_fixo: '1000.00', horas_contratadas: '10.00', pacote_valor: null, horas_incluidas: null }] })
         .mockResolvedValueOnce({
@@ -713,7 +711,7 @@ describe('Route regressions: SQL and RBAC', () => {
           },
         ],
       })
-      expect(queryMock.mock.calls[3][0]).toContain("make_timestamptz($3::int, $4::int")
+      expect(queryMock.mock.calls[2][0]).toContain("make_timestamptz($3::int, $4::int")
       expect(releaseMock).toHaveBeenCalledTimes(1)
 
       await app.close()

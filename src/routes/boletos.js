@@ -138,10 +138,24 @@ export async function boletosRoutes(app) {
     if (!id || !status) return reply.code(400).send({ error: 'Payload inválido' })
 
     if (status === 'paid') {
+      // Lookup tenant_id da referência primeiro pra defesa em profundidade.
+      const lookup = await app.db.query(
+        `SELECT id, tenant_id FROM boletos WHERE referencia_externa = $1 LIMIT 2`,
+        [id]
+      )
+      if (lookup.rows.length === 0) {
+        app.log.warn({ ref: id }, '[webhook pagamento] referência inexistente')
+        return reply.code(404).send({ error: 'Boleto não encontrado' })
+      }
+      if (lookup.rows.length > 1) {
+        app.log.warn({ ref: id, count: lookup.rows.length }, '[webhook pagamento] referência colide entre tenants — REJEITANDO')
+        return reply.code(409).send({ error: 'Referência ambígua entre tenants' })
+      }
+      const { id: boletoId, tenant_id: boletoTenant } = lookup.rows[0]
       await app.db.query(
         `UPDATE boletos SET status = 'pago', pago_em = NOW()
-         WHERE referencia_externa = $1 AND status != 'pago'`,
-        [id]
+         WHERE id = $1 AND tenant_id = $2 AND status != 'pago'`,
+        [boletoId, boletoTenant]
       )
     }
     return { received: true }
@@ -184,12 +198,12 @@ export async function boletosRoutes(app) {
         [tenantId, eventType, JSON.stringify(payload), boletoId]
       )
 
-      if (eventType === 'PAYMENT_RECEIVED' && boletoId && payment?.id) {  // Fix E: guard payment.id
+      if (eventType === 'PAYMENT_RECEIVED' && boletoId && payment?.id && tenantId) {
         await app.db.query(
           `UPDATE boletos
-           SET status = 'pago', pago_em = NOW(), asaas_id = $2
-           WHERE id = $1 AND status != 'pago'`,
-          [boletoId, payment.id]
+           SET status = 'pago', pago_em = NOW(), asaas_id = $3
+           WHERE id = $1 AND tenant_id = $2 AND status != 'pago'`,
+          [boletoId, tenantId, payment.id]
         )
       }
     } catch (err) {

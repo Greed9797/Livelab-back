@@ -152,12 +152,15 @@ export async function clientesRoutes(app) {
   })
 
   // GET /v1/clientes/:id
-  app.get('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
+  app.get('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueador_master', 'franqueado', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
+      // Defesa em profundidade: além do RLS via dbTenant, filtra explícito
+      // por tenant_id pra evitar leak se RLS for desabilitado por engano.
       const result = await db.query(
-        `SELECT * FROM clientes WHERE id = $1`, [request.params.id]
+        `SELECT * FROM clientes WHERE id = $1 AND tenant_id = $2`,
+        [request.params.id, tenant_id],
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       return result.rows[0]

@@ -1,16 +1,17 @@
 // src/services/oauth-state.js
 // CSRF signed state pra OAuth flows (TikTok Live + TikTok Shop).
 // Formato: `tenantId:nonce:timestamp:hmacSig16`
-// Assinado com HMAC-SHA256 usando JWT_SECRET.
+// Assinado com HMAC-SHA256 usando OAUTH_STATE_SECRET (S-13: secret dedicado,
+// fallback pra JWT_SECRET pra compat com deploys antigos).
 
 import crypto from 'node:crypto'
 
 const DEFAULT_MAX_AGE_MS = 10 * 60_000 // 10 minutos
 
 function _secret() {
-  const s = process.env.JWT_SECRET
+  const s = process.env.OAUTH_STATE_SECRET ?? process.env.JWT_SECRET
   if (!s || s.length < 32) {
-    throw new Error('JWT_SECRET não configurado ou muito curto (mínimo 32 chars)')
+    throw new Error('OAUTH_STATE_SECRET (ou fallback JWT_SECRET) não configurado ou muito curto (mínimo 32 chars)')
   }
   return s
 }

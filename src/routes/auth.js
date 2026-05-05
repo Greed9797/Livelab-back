@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
 import { loginSchema, refreshSchema } from '../schemas/auth.schema.js'
+import { SECURITY } from '../config/security.js'
 
 export async function authRoutes(app) {
   const isProd = process.env.NODE_ENV === 'production'
@@ -132,8 +133,8 @@ export async function authRoutes(app) {
     if (typeof senha_atual !== 'string' || senha_atual.length < 1) {
       return reply.code(400).send({ error: 'senha_atual é obrigatória' })
     }
-    if (typeof nova_senha !== 'string' || nova_senha.length < 6) {
-      return reply.code(400).send({ error: 'nova_senha deve ter ao menos 6 caracteres' })
+    if (typeof nova_senha !== 'string' || !SECURITY.PASSWORD_REGEX.test(nova_senha)) {
+      return reply.code(400).send({ error: SECURITY.PASSWORD_HINT })
     }
 
     const userResult = await app.db.query(
@@ -146,7 +147,7 @@ export async function authRoutes(app) {
     const senhaOk = await bcrypt.compare(senha_atual, user.senha_hash)
     if (!senhaOk) return reply.code(401).send({ error: 'Senha atual incorreta' })
 
-    const novoHash = await bcrypt.hash(nova_senha, 10)
+    const novoHash = await bcrypt.hash(nova_senha, SECURITY.BCRYPT_ROUNDS)
     await app.db.query(
       `UPDATE users SET senha_hash = $1, atualizado_em = NOW() WHERE id = $2`,
       [novoHash, user.id]

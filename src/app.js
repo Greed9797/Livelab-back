@@ -33,8 +33,24 @@ import { tenantsRoutes } from './routes/tenants.js'
 import { webhookBioCrmRoutes } from './routes/webhook_bio_crm.js'
 
 export async function buildApp(opts = {}) {
+  // S-08: secrets obrigatórios em produção. Falha cedo (boot-time) em vez de
+  // descobrir mid-request que o webhook está aceitando payload sem assinatura.
+  if (process.env.NODE_ENV === 'production') {
+    const required = {
+      JWT_SECRET: process.env.JWT_SECRET,
+      DATABASE_URL: process.env.DATABASE_URL,
+    }
+    const missing = Object.entries(required).filter(([, v]) => !v).map(([k]) => k)
+    if (missing.length > 0) {
+      throw new Error(`[boot] env vars obrigatórias em produção ausentes: ${missing.join(', ')}`)
+    }
+  }
+
   const app = Fastify({
     logger: process.env.NODE_ENV !== 'test',
+    // S-09: confia no header X-Forwarded-For do primeiro proxy (Railway/Render).
+    // Sem isso, rate-limit aplicaria global pelo IP do edge.
+    trustProxy: process.env.NODE_ENV === 'production' ? 1 : false,
     ...opts,
   })
 
@@ -59,13 +75,18 @@ export async function buildApp(opts = {}) {
 
   await app.register(cors, {
     origin: (origin, cb) => {
-      // Sem Origin = server-to-server (webhooks) → sempre permitir
-      if (!origin) return cb(null, true)
-      // Dev → permitir tudo
-      if (!corsAllowedOrigins) return cb(null, true)
+      // Sem header Origin = server-to-server (webhooks, health) → permitir
+      if (origin === undefined) return cb(null, true)
+      // S-06: rejeita origin "null" (iframe sandbox, file://, redirects opacos)
+      if (origin === 'null') return cb(new Error('Not allowed by CORS'))
+      // Dev sem allowlist → só localhost/127.0.0.1, nunca tudo
+      if (!corsAllowedOrigins) {
+        const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+        return cb(isLocal ? null : new Error('Not allowed by CORS'), isLocal)
+      }
       // TikTok portals → sempre permitir (webhooks e OAuth callback)
       if (TIKTOK_ORIGINS.some(o => origin.startsWith(o))) return cb(null, true)
-      // App Firebase → permitir
+      // App Firebase / domínios produção → permitir se na allowlist
       if (corsAllowedOrigins.includes(origin)) return cb(null, true)
       cb(new Error('Not allowed by CORS'))
     },
@@ -73,12 +94,21 @@ export async function buildApp(opts = {}) {
     allowedHeaders: ['Authorization', 'Content-Type', 'Accept', 'tiktok-signature'],
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   })
-  // Security headers (CSP disabled — TikTok callback returns text/html)
-  await app.register(helmet, { contentSecurityPolicy: false })
-  // Global rate limiting (100 req/min default; auth routes override with stricter limits)
+  // S-12: CSP habilitado globalmente; TikTok callback sobrescreve no handler.
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'none'"],
+        objectSrc: ["'none'"],
+      },
+    },
+  })
+  // Global rate limiting — usa request.ip (já correto graças ao trustProxy)
   await app.register(rateLimit, {
     max: 100,
     timeWindow: '1 minute',
+    keyGenerator: (request) => request.ip,
     errorResponseBuilder: () => ({ error: 'Muitas requisições. Tente novamente em breve.' }),
   })
   await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024 } })
@@ -126,7 +156,15 @@ export async function buildApp(opts = {}) {
   await app.register(tenantsRoutes)
   await app.register(webhookBioCrmRoutes)
 
-  app.get('/health', () => ({ ok: true }))
+  // S-11: opcional — se HEALTH_CHECK_TOKEN setado, exige header pra responder.
+  // 404 (não 401) pra não confirmar existência do endpoint a scanners.
+  app.get('/health', async (request, reply) => {
+    const token = process.env.HEALTH_CHECK_TOKEN
+    if (token && request.headers['x-health-token'] !== token) {
+      return reply.code(404).send()
+    }
+    return { ok: true }
+  })
 
   app.setErrorHandler((error, request, reply) => {
     const status = error.statusCode ?? 500

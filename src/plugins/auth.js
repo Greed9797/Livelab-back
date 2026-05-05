@@ -31,19 +31,17 @@ async function authPlugin(app) {
   app.decorate('requirePapel', (requiredPapeis) => async (request, reply) => {
     const papeis = Array.isArray(requiredPapeis) ? requiredPapeis : [requiredPapeis]
 
-    if (!request.user) {
-      try {
-        await request.jwtVerify()
-      } catch {
-        return reply.code(401).send({ error: 'Não autenticado' })
-      }
+    // S-04: SEMPRE valida JWT — nunca confia em request.user pré-existente
+    // (evita bypass se outro plugin popular request.user antes).
+    try {
+      await request.jwtVerify()
+    } catch {
+      return reply.code(401).send({ error: 'Não autenticado' })
     }
 
     if (!papeis.includes(request.user.papel)) {
       return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
     }
-
-    return
   })
 }
 

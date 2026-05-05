@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
 import { z } from 'zod'
+import { SECURITY } from '../config/security.js'
 
 const criarFranquiaSchema = z.object({
   nome: z.string().min(2),
@@ -70,7 +71,7 @@ export async function tenantsRoutes(app) {
     }
 
     const senhaTemp = franqueado.senha_temporaria ?? crypto.randomBytes(8).toString('hex')
-    const senhaHash = await bcrypt.hash(senhaTemp, 12)
+    const senhaHash = await bcrypt.hash(senhaTemp, SECURITY.BCRYPT_ROUNDS)
 
     const client = await app.db.pool.connect()
     try {
@@ -94,6 +95,9 @@ export async function tenantsRoutes(app) {
 
       await client.query('COMMIT')
 
+      // S-10: resposta contém senha — proibir cache
+      reply.header('Cache-Control', 'no-store')
+      reply.header('Pragma', 'no-cache')
       return reply.code(201).send({ tenant, owner, senha_temporaria: senhaTemp })
     } catch (e) {
       await client.query('ROLLBACK')

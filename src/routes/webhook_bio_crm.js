@@ -143,6 +143,12 @@ function buildLeadRow(payload, franqueadoraId) {
 }
 
 export async function webhookBioCrmRoutes(app) {
+  // S-08: secret obrigatório em produção. Falha boot pra evitar webhook
+  // aceitar payload sem assinatura por config esquecida.
+  if (process.env.NODE_ENV === 'production' && !process.env.BIO_CRM_WEBHOOK_SECRET) {
+    throw new Error('[boot] BIO_CRM_WEBHOOK_SECRET é obrigatório em produção')
+  }
+
   // Rota pública (sem authenticate). Segurança via HMAC.
   app.post('/v1/webhooks/bio-crm', async (request, reply) => {
     const secret = process.env.BIO_CRM_WEBHOOK_SECRET

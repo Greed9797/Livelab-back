@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
 import { z } from 'zod'
+import { SECURITY } from '../config/security.js'
 
 const convidarSchema = z.object({
   nome: z.string().min(2),
@@ -65,17 +66,23 @@ export async function usuariosRoutes(app) {
     const { nome, email, papel, cliente_id, apresentadora_id, senha_temporaria } = parsed.data
     const tenantId = request.user.tenant_id
 
-    const existing = await app.db.query('SELECT id FROM users WHERE email = $1', [email])
-    if (existing.rows.length > 0) {
-      return reply.code(409).send({ error: 'E-mail já cadastrado' })
-    }
-
     const senhaTemp = senha_temporaria ?? crypto.randomBytes(8).toString('hex')
-    const senhaHash = await bcrypt.hash(senhaTemp, 12)
+    const senhaHash = await bcrypt.hash(senhaTemp, SECURITY.BCRYPT_ROUNDS)
 
     return app.withTenant(tenantId, async (db) => {
       try {
         await db.query('BEGIN')
+
+        // S-02: checagem de email apenas dentro do tenant (UNIQUE composto).
+        // Antes vazava enumeração cross-tenant via 409.
+        const existing = await db.query(
+          'SELECT id FROM users WHERE LOWER(email) = LOWER($1) AND tenant_id = $2',
+          [email, tenantId],
+        )
+        if (existing.rows.length > 0) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'E-mail já cadastrado neste tenant' })
+        }
 
         // Pré-validação: cliente_parceiro precisa de cliente DISPONÍVEL (sem user_id já vinculado)
         // antes de criar o user — evita orphan onde INSERT users sucede mas UPDATE falha,
@@ -122,6 +129,9 @@ export async function usuariosRoutes(app) {
         }
 
         await db.query('COMMIT')
+        // S-10: resposta contém senha — proibir cache em proxies/CDN
+        reply.header('Cache-Control', 'no-store')
+        reply.header('Pragma', 'no-cache')
         return reply.code(201).send({ ...newUser, senha_temporaria: senhaTemp })
       } catch (e) {
         await db.query('ROLLBACK')
@@ -143,6 +153,17 @@ export async function usuariosRoutes(app) {
     const fields = parsed.data
     if (Object.keys(fields).length === 0) {
       return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
+    }
+
+    // S-01: bloquear escalada de papel via PATCH.
+    // - franqueado/franqueador_master nunca atribuíveis (criados via /v1/tenants).
+    // - 'gerente' apenas franqueador_master pode atribuir.
+    const PAPEIS_PROIBIDOS = new Set(['franqueado', 'franqueador_master'])
+    if (fields.papel && PAPEIS_PROIBIDOS.has(fields.papel)) {
+      return reply.code(403).send({ error: 'Este papel não pode ser atribuído manualmente' })
+    }
+    if (fields.papel === 'gerente' && request.user.papel !== 'franqueador_master') {
+      return reply.code(403).send({ error: 'Somente franqueador_master pode atribuir papel gerente' })
     }
 
     const updates = []
@@ -195,6 +216,9 @@ export async function usuariosRoutes(app) {
         return reply.code(404).send({ error: 'Usuário não encontrado' })
       }
       await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+      // S-10: resposta contém senha — proibir cache em proxies/CDN
+      reply.header('Cache-Control', 'no-store')
+      reply.header('Pragma', 'no-cache')
       return { senha_temporaria: novaSenha }
     })
   })

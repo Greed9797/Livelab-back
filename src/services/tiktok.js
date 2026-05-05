@@ -1,3 +1,5 @@
+import { encryptToken, decryptToken } from './token-crypto.js'
+
 // Logger leve para serviço sem acesso ao app.log do Fastify.
 // Em produção, NODE_ENV=production suprime DEBUG mas mantém WARN/ERROR.
 const log = {
@@ -90,6 +92,8 @@ export class TikTokService {
    * Renova token de acesso se expirado (OAuth 2.0 TikTok)
    */
   static async refreshToken(db, tenantId, currentRefreshToken) {
+    // S-07: refresh token vem cifrado do banco — decifra antes de enviar pro TikTok
+    currentRefreshToken = decryptToken(currentRefreshToken)
     const clientKey    = process.env.TIKTOK_CLIENT_KEY
     const clientSecret = process.env.TIKTOK_CLIENT_SECRET
     if (!clientKey || !clientSecret) {
@@ -113,7 +117,7 @@ export class TikTokService {
       const expiresAt = new Date(Date.now() + data.expires_in * 1000)
       await db.query(
         `UPDATE tenants SET tiktok_access_token=$1, tiktok_refresh_token=$2, tiktok_token_expires_at=$3 WHERE id=$4`,
-        [data.access_token, data.refresh_token, expiresAt, tenantId]
+        [encryptToken(data.access_token), encryptToken(data.refresh_token), expiresAt, tenantId]
       )
       log.debug(`Token renovado para tenant ${tenantId}`)
       return true
@@ -154,6 +158,10 @@ export class TikTokService {
 
       for (const tenant of tenants) {
         try {
+          // S-07: tokens são lidos cifrados — decifra antes de chamar API TikTok
+          tenant.tiktok_access_token = decryptToken(tenant.tiktok_access_token);
+          tenant.tiktok_refresh_token = decryptToken(tenant.tiktok_refresh_token);
+
           // 1. Busca dados da live na API do TikTok
           let liveData = await this.getLiveData(tenant.id, tenant.tiktok_access_token);
 
@@ -167,7 +175,7 @@ export class TikTokService {
                 `SELECT tiktok_access_token FROM tenants WHERE id = $1`,
                 [tenant.id]
               );
-              const newToken = fresh.rows[0]?.tiktok_access_token;
+              const newToken = decryptToken(fresh.rows[0]?.tiktok_access_token);
               if (newToken) {
                 liveData = await this.getLiveData(tenant.id, newToken);
                 if (!liveData) continue;

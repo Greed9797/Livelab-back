@@ -7,6 +7,7 @@ import crypto from 'node:crypto'
 import * as connectorManager from '../services/tiktok-connector-manager.js'
 import { getEmitter } from '../services/tiktok-connector-manager.js'
 import { createSignedState, verifySignedState } from '../services/oauth-state.js'
+import { encryptToken } from '../services/token-crypto.js'
 
 export async function tiktokRoutes(app) {
   const tiktokUrlVerification = {
@@ -75,6 +76,12 @@ export async function tiktokRoutes(app) {
    * Recebe o 'code' do TikTok após o login do usuário e troca por Access Token
    */
   app.get('/v1/tiktok/callback', async (request, reply) => {
+    // S-12: CSP global bloqueia scripts; HTML do callback usa style inline.
+    // Override permite style mas mantém scriptSrc 'none'.
+    reply.header(
+      'Content-Security-Policy',
+      "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+    )
     if (!oauthEnabled) {
       return reply.code(503).send({
         error: 'Integração TikTok OAuth temporariamente indisponível (aguardando aprovação dos escopos pela TikTok).',
@@ -141,7 +148,7 @@ export async function tiktokRoutes(app) {
           tiktok_token_expires_at = $3,
           tiktok_user_id          = $4
         WHERE id = $5
-      `, [data.access_token, data.refresh_token, expiresAt, data.open_id, tenantId])
+      `, [encryptToken(data.access_token), encryptToken(data.refresh_token), expiresAt, data.open_id, tenantId])
 
       app.log.info(`[TikTok OAuth] Token salvo para tenant ${tenantId} (open_id: ${data.open_id})`)
 

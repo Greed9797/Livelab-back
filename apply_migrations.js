@@ -42,6 +42,7 @@ const MIGRATIONS_LIST = [
   '053_rls_hardening.sql',
   '054_tenant_contact_history_rls.sql',
   '055_leads_dados_extras.sql',
+  '056_users_email_unique_per_tenant.sql',
 ]
 
 async function ensureMigrationsTable(client) {

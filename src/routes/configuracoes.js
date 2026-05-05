@@ -7,6 +7,9 @@ const configSchema = z.object({
   nome:                z.string().min(1).optional(),
   telefone_contato:    z.string().optional().nullable(),
   email_contato:       z.string().email().optional().nullable(),
+  gateway_api_key:     z.string().optional().nullable(),
+  gateway_wallet_id:   z.string().optional().nullable(),
+  // Aliases legados pra compat (campos antigos do Asaas mapeiam pro novo)
   asaas_api_key:       z.string().optional().nullable(),
   asaas_wallet_id:     z.string().optional().nullable(),
   tiktok_access_token: z.string().optional().nullable(),
@@ -73,7 +76,7 @@ export async function configuracoesRoutes(app) {
       const { rows } = await db.query(`
         SELECT id, nome, logo_url,
                telefone_contato, email_contato,
-               asaas_api_key, asaas_wallet_id,
+               gateway_api_key, gateway_wallet_id,
                tiktok_access_token, tiktok_shop_id,
                meta_diaria_gmv
         FROM tenants WHERE id = $1
@@ -94,18 +97,23 @@ export async function configuracoesRoutes(app) {
       `, [tenant_id])
 
       return {
-        id:                   conf.id,
-        nome:                 conf.nome,
-        logo_url:             conf.logo_url,
-        telefone_contato:     conf.telefone_contato,
-        email_contato:        conf.email_contato,
-        asaas_api_key_hidden: hideKey(conf.asaas_api_key),
-        has_asaas:            !!conf.asaas_api_key,
-        asaas_wallet_id:      conf.asaas_wallet_id,
-        has_tiktok:           !!conf.tiktok_access_token,
-        tiktok_shop_id:       conf.tiktok_shop_id,
-        meta_diaria_gmv:      conf.meta_diaria_gmv ? Number(conf.meta_diaria_gmv) : 10000,
-        contact_history:      histRows.rows,
+        id:                     conf.id,
+        nome:                   conf.nome,
+        logo_url:               conf.logo_url,
+        telefone_contato:       conf.telefone_contato,
+        email_contato:          conf.email_contato,
+        gateway_api_key_hidden: hideKey(conf.gateway_api_key),
+        has_gateway:            !!conf.gateway_api_key,
+        gateway_wallet_id:      conf.gateway_wallet_id,
+        gateway_provider:       'appmax',
+        // Aliases legados (frontend antigo ainda referencia)
+        asaas_api_key_hidden:   hideKey(conf.gateway_api_key),
+        has_asaas:              !!conf.gateway_api_key,
+        asaas_wallet_id:        conf.gateway_wallet_id,
+        has_tiktok:             !!conf.tiktok_access_token,
+        tiktok_shop_id:         conf.tiktok_shop_id,
+        meta_diaria_gmv:        conf.meta_diaria_gmv ? Number(conf.meta_diaria_gmv) : 10000,
+        contact_history:        histRows.rows,
       }
     })
   })
@@ -130,8 +138,11 @@ export async function configuracoesRoutes(app) {
 
         if (data.nome !== undefined)            { updates.push(`nome = $${paramIdx++}`);            values.push(data.nome) }
         if (data.logo_url !== undefined)        { updates.push(`logo_url = $${paramIdx++}`);        values.push(data.logo_url) }
-        if (data.asaas_api_key !== undefined)   { updates.push(`asaas_api_key = $${paramIdx++}`);   values.push(data.asaas_api_key) }
-        if (data.asaas_wallet_id !== undefined) { updates.push(`asaas_wallet_id = $${paramIdx++}`); values.push(data.asaas_wallet_id) }
+        // Aceita tanto campo novo (gateway_*) quanto legado (asaas_*) — alias semântico.
+        const apiKey = data.gateway_api_key ?? data.asaas_api_key
+        const walletId = data.gateway_wallet_id ?? data.asaas_wallet_id
+        if (apiKey !== undefined)   { updates.push(`gateway_api_key = $${paramIdx++}`);   values.push(apiKey) }
+        if (walletId !== undefined) { updates.push(`gateway_wallet_id = $${paramIdx++}`); values.push(walletId) }
         if (data.tiktok_access_token !== undefined) { updates.push(`tiktok_access_token = $${paramIdx++}`); values.push(data.tiktok_access_token) }
         if (data.tiktok_shop_id !== undefined)  { updates.push(`tiktok_shop_id = $${paramIdx++}`);  values.push(data.tiktok_shop_id) }
         if (data.meta_diaria_gmv !== undefined) { updates.push(`meta_diaria_gmv = $${paramIdx++}`); values.push(data.meta_diaria_gmv) }

@@ -31,6 +31,7 @@ import { clientePortalRoutes } from './routes/cliente_portal.js'
 import onboardingRoutes from './routes/onboarding.js'
 import { tenantsRoutes } from './routes/tenants.js'
 import { webhookBioCrmRoutes } from './routes/webhook_bio_crm.js'
+import { appmaxRoutes } from './routes/appmax.js'
 
 export async function buildApp(opts = {}) {
   // S-08: secrets obrigatórios em produção. Falha cedo (boot-time) em vez de
@@ -155,6 +156,7 @@ export async function buildApp(opts = {}) {
   await app.register(onboardingRoutes)
   await app.register(tenantsRoutes)
   await app.register(webhookBioCrmRoutes)
+  await app.register(appmaxRoutes)
 
   // S-11: opcional — se HEALTH_CHECK_TOKEN setado, exige header pra responder.
   // 404 (não 401) pra não confirmar existência do endpoint a scanners.

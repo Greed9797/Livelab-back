@@ -1,5 +1,4 @@
 import crypto from 'node:crypto'
-import { validarWebhookToken } from '../services/asaas.js'
 
 export async function boletosRoutes(app) {
   const boletoAccess = [
@@ -30,7 +29,7 @@ export async function boletosRoutes(app) {
 
       // Busca um boleto criado nos ultimos 3 dias e nao notificado
       const q = `
-        SELECT id, valor, vencimento, asaas_url, asaas_pix_copia_cola
+        SELECT id, valor, vencimento, gateway_url, gateway_pix_copia_cola
         FROM boletos 
         WHERE tenant_id = $1 
           AND status = 'pendente' 
@@ -67,7 +66,8 @@ export async function boletosRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT id, tipo, valor, vencimento, status, pago_em, referencia_externa, competencia,
-                asaas_id, asaas_url, asaas_pix_copia_cola, gerado_automaticamente, asaas_error
+                gateway_id, gateway_url, gateway_pix_copia_cola, gateway_provider,
+                gerado_automaticamente, gateway_error
          FROM boletos ORDER BY vencimento DESC`
       )
       return result.rows.map(b => ({ ...b, valor: Number(b.valor ?? 0) }))
@@ -144,55 +144,9 @@ export async function boletosRoutes(app) {
     return { received: true }
   })
 
-  // POST /v1/webhooks/asaas — seguro por token no header
-  app.post('/v1/webhooks/asaas', async (request, reply) => {
-    const receivedToken = request.headers['asaas-access-token']
-
-    try {
-      validarWebhookToken(receivedToken)
-    } catch {
-      return reply.code(401).send({ error: 'Unauthorized' })
-    }
-
-    const payload = request.body ?? {}
-    const eventType = payload.event ?? 'UNKNOWN'   // Fix D: default if absent
-    const payment = payload.payment
-
-    let boletoId = null
-    let tenantId = null
-
-    if (payment?.externalReference) {
-      const { rows } = await app.db.query(
-        `SELECT id, tenant_id FROM boletos WHERE id = $1`,
-        [payment.externalReference]
-      )
-      if (rows.length > 0) {
-        boletoId = rows[0].id
-        tenantId = rows[0].tenant_id
-      } else {
-        app.log.warn({ externalReference: payment.externalReference }, 'webhook asaas: externalReference não encontrado em boletos')
-      }
-    }
-
-    try {
-      await app.db.query(
-        `INSERT INTO webhook_eventos (tenant_id, source, event_type, payload_raw, boleto_id)
-         VALUES ($1, 'asaas', $2, $3::jsonb, $4)`,
-        [tenantId, eventType, JSON.stringify(payload), boletoId]
-      )
-
-      if (eventType === 'PAYMENT_RECEIVED' && boletoId && payment?.id && tenantId) {
-        await app.db.query(
-          `UPDATE boletos
-           SET status = 'pago', pago_em = NOW(), asaas_id = $3
-           WHERE id = $1 AND tenant_id = $2 AND status != 'pago'`,
-          [boletoId, tenantId, payment.id]
-        )
-      }
-    } catch (err) {
-      app.log.error({ err }, 'webhook asaas: erro ao processar evento no banco')
-    }
-
-    return reply.code(200).send({ received: true })
+  // POST /v1/webhooks/asaas — DEPRECATED. Asaas substituído por Appmax.
+  // Mantido pra responder 410 Gone caso webhook antigo ainda dispare.
+  app.post('/v1/webhooks/asaas', async (_, reply) => {
+    return reply.code(410).send({ error: 'Webhook Asaas removido. Use /v1/webhooks/appmax.' })
   })
 }

@@ -1,7 +1,7 @@
 import pg from 'pg'
 import 'dotenv/config'
 import cron from 'node-cron'
-import { buscarOuCriarCustomer, gerarIdempotencyKey, criarCobranca } from '../services/asaas.js'
+import { buscarOuCriarCustomer, gerarIdempotencyKey, criarCobranca } from '../services/appmax.js'
 
 // Para evitar problemas com timezone ao consultar as lives do banco
 // No Node, usaremos a data atual no timezone de SP
@@ -17,8 +17,8 @@ async function processTenantBilling(tenantId, day, spDate) {
   const db = await dbPool.connect()
   try {
     // 1. Obter tenant config
-    const tenantQ = await db.query(`SELECT asaas_api_key FROM tenants WHERE id = $1`, [tenantId])
-    if (!tenantQ.rows[0]?.asaas_api_key) return // Tenant sem Asaas configurado, ignora
+    const tenantQ = await db.query(`SELECT gateway_api_key FROM tenants WHERE id = $1`, [tenantId])
+    if (!tenantQ.rows[0]?.gateway_api_key) return // Tenant sem gateway de pagamento configurado
 
     await db.query('BEGIN')
 
@@ -123,27 +123,23 @@ async function processTenantBilling(tenantId, day, spDate) {
 
       // Comunicação com Asaas
       try {
-        const clienteQ = await db.query(`SELECT nome, cpf, cnpj, email, celular, asaas_customer_id FROM clientes WHERE id = $1`, [clienteId])
+        const clienteQ = await db.query(`SELECT nome, cpf, cnpj, email, celular, gateway_customer_id FROM clientes WHERE id = $1`, [clienteId])
         const cliente = clienteQ.rows[0]
         if (!cliente) continue
 
-        let asaasCustomerId = cliente.asaas_customer_id
-        if (!asaasCustomerId) {
-          // A criação precisa da chave da API, como a função de Asaas.js usa o process.env.ASAAS_API_KEY por default, 
-          // precisamos garantir que os métodos em asaas.js aceitem token customizado. 
-          // Como não queremos quebrar o asaas.js já existente, vamos assumir que ele funciona com a env global,
-          // ou adaptamos depois.
-          asaasCustomerId = await buscarOuCriarCustomer({
+        let gatewayCustomerId = cliente.gateway_customer_id
+        if (!gatewayCustomerId) {
+          gatewayCustomerId = await buscarOuCriarCustomer({
             nome: cliente.nome,
             cpfCnpj: cliente.cpf || cliente.cnpj,
             email: cliente.email,
             celular: cliente.celular,
           })
-          await db.query(`UPDATE clientes SET asaas_customer_id = $1 WHERE id = $2`, [asaasCustomerId, clienteId])
+          await db.query(`UPDATE clientes SET gateway_customer_id = $1 WHERE id = $2`, [gatewayCustomerId, clienteId])
         }
 
         const payment = await criarCobranca({
-          asaasCustomerId,
+          asaasCustomerId: gatewayCustomerId, // signature legada — primeiro arg é customer id no gateway
           valor: valorTotal,
           vencimento: vencimentoStr,
           descricao: `${tituloFatura} - LiveShop`,
@@ -153,14 +149,14 @@ async function processTenantBilling(tenantId, day, spDate) {
         })
 
         await db.query(
-          `UPDATE boletos SET asaas_id = $1, asaas_url = $2, asaas_pix_copia_cola = $3 WHERE id = $4`,
+          `UPDATE boletos SET gateway_id = $1, gateway_url = $2, gateway_pix_copia_cola = $3, gateway_provider = 'appmax' WHERE id = $4`,
           [payment.id, payment.invoiceUrl, payment.pixCopiaECola ?? null, boletoId]
         )
 
       } catch (err) {
-        // Se a API Asaas falhar, registramos o erro no boleto, mas comitamos o banco.
-        console.error(`Falha no Asaas para boleto ${boletoId}:`, err.message)
-        await db.query(`UPDATE boletos SET asaas_error = $1 WHERE id = $2`, [err.message, boletoId])
+        // Se a API do gateway falhar, registramos o erro no boleto, mas comitamos o banco.
+        console.error(`Falha no gateway de pagamento para boleto ${boletoId}:`, err.message)
+        await db.query(`UPDATE boletos SET gateway_error = $1 WHERE id = $2`, [err.message, boletoId])
       }
     }
 

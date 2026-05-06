@@ -17,7 +17,7 @@ export async function tiktokRoutes(app) {
   const TIKTOK_CLIENT_KEY    = process.env.TIKTOK_CLIENT_KEY;
   const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
   const TIKTOK_REDIRECT_URI  = process.env.TIKTOK_REDIRECT_URI;
-  const requireWebhookSignature = process.env.TIKTOK_WEBHOOK_REQUIRE_SIGNATURE === 'true'
+  const requireWebhookSignature = process.env.TIKTOK_WEBHOOK_REQUIRE_SIGNATURE !== 'false'
   const webhookSignatureToleranceSeconds = Number(
     process.env.TIKTOK_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS ?? 300
   )
@@ -62,7 +62,7 @@ export async function tiktokRoutes(app) {
     const state = createSignedState({ tenantId: request.user.tenant_id, nonce });
     // Escopos aprovados no app sandbox TikTok (Live Studio).
     // live.info.read / live.commerce.read exigem aprovação Live Shop API (programa restrito) — adicionar quando aprovado.
-    const scope = 'user.info.profile,user.info.stats,video.list';
+    const scope = 'user.info.basic';
     const responseType = 'code';
 
     // URL oficial de autorização do TikTok V2

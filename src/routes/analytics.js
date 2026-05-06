@@ -150,7 +150,7 @@ export async function analyticsRoutes(app) {
     const params = cliente_id ? [refDate, cliente_id] : [refDate]
 
     return app.withTenant(tenant_id, async (db) => {
-      const [faturamentoQ, vendasQ, horasQ, rankingQ] = await Promise.all([
+      const [faturamentoQ, vendasQ, horasQ, rankingQ, peakHoursQ, heatmapQ, audienciaQ] = await Promise.all([
         // Query A — Faturamento Mensal (últimos 12 meses)
         db.query(`
           SELECT
@@ -209,12 +209,53 @@ export async function analyticsRoutes(app) {
           ORDER BY gmv_total DESC
           LIMIT 10
         `, params),
+
+        // Query E — Horários de pico (GMV por hora do dia, mês selecionado)
+        db.query(`
+          SELECT
+            EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS hora,
+            COALESCE(SUM(l.fat_gerado), 0) AS gmv
+          FROM lives l
+          WHERE l.status = 'encerrada'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${clienteFilter}
+          GROUP BY 1 ORDER BY 1
+        `, params),
+
+        // Query F — Heatmap conversão (dia da semana × bloco de 3h)
+        db.query(`
+          SELECT
+            EXTRACT(ISODOW FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS dow,
+            (FLOOR(EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') / 3) * 3)::int AS bloco_hora,
+            COALESCE(SUM(l.fat_gerado), 0) AS gmv,
+            COUNT(*) AS lives
+          FROM lives l
+          WHERE l.status = 'encerrada'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${clienteFilter}
+          GROUP BY 1, 2 ORDER BY 1, 2
+        `, params),
+
+        // Query G — Audiência média (viewers médios das lives encerradas no mês)
+        db.query(`
+          SELECT COALESCE(AVG(NULLIF(l.viewer_count, 0)), 0) AS audiencia_media
+          FROM lives l
+          WHERE l.status = 'encerrada'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${clienteFilter}
+        `, params),
       ])
 
       const faturamentoRows = faturamentoQ.rows
       const vendasRows = vendasQ.rows
       const horasRows = horasQ.rows
       const rankingRows = rankingQ.rows
+      const peakHoursRows = peakHoursQ.rows
+      const heatmapRows = heatmapQ.rows
+      const audienciaMedia = parseFloat(Number(audienciaQ.rows[0]?.audiencia_media ?? 0).toFixed(0))
 
       // Derivar KPIs do mês selecionado
       const mesAlvo = mesAno || new Date().toISOString().slice(0, 7)
@@ -223,16 +264,36 @@ export async function analyticsRoutes(app) {
 
       const faturamentoTotal = parseFloat(Number(fatMesAtual?.gmv ?? 0).toFixed(2))
       const totalVendas = Number(vendasMesAtual?.total_vendas ?? 0)
-      // Proteção contra divisão por zero: retorna 0 quando totalVendas é 0
       const ticketMedio = totalVendas > 0
         ? parseFloat((faturamentoTotal / totalVendas).toFixed(2))
         : 0
+
+      // Calcular deltas (mês anterior)
+      const dt = new Date(refDate)
+      dt.setMonth(dt.getMonth() - 1)
+      const mesAnterior = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`
+      const fatMesAnt = faturamentoRows.find(r => r.mes === mesAnterior)
+      const vendasMesAnt = vendasRows.find(r => r.mes === mesAnterior)
+      const fatAnt = Number(fatMesAnt?.gmv ?? 0)
+      const vendasAnt = Number(vendasMesAnt?.total_vendas ?? 0)
+      const ticketAnt = vendasAnt > 0 ? fatAnt / vendasAnt : 0
+
+      const pct = (cur, prev) => prev > 0 ? Math.round(((cur - prev) / prev) * 100) : 0
+
+      // Total horas no ar (mês selecionado)
+      const totalHoras = horasRows.reduce((acc, r) => acc + Number(r.horas), 0)
 
       return {
         kpis: {
           faturamento_total: faturamentoTotal,
           total_vendas: totalVendas,
           ticket_medio: ticketMedio,
+          audiencia_media: audienciaMedia,
+          delta_faturamento: pct(faturamentoTotal, fatAnt),
+          delta_vendas: pct(totalVendas, vendasAnt),
+          delta_ticket: pct(ticketMedio, ticketAnt),
+          delta_audiencia: 0,
+          total_horas_no_ar: parseFloat(totalHoras.toFixed(1)),
         },
         faturamento_mensal: faturamentoRows.map(r => ({
           mes: r.mes,
@@ -251,6 +312,16 @@ export async function analyticsRoutes(app) {
           apresentador_nome: r.apresentador_nome,
           total_lives: Number(r.total_lives),
           gmv_total: parseFloat(Number(r.gmv_total).toFixed(2)),
+        })),
+        peak_hours: peakHoursRows.map(r => ({
+          hora: Number(r.hora),
+          gmv: parseFloat(Number(r.gmv).toFixed(2)),
+        })),
+        heatmap_conversao: heatmapRows.map(r => ({
+          dow: Number(r.dow),
+          bloco_hora: Number(r.bloco_hora),
+          gmv: parseFloat(Number(r.gmv).toFixed(2)),
+          lives: Number(r.lives),
         })),
       }
     })

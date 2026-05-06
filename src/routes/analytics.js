@@ -137,47 +137,84 @@ export async function analyticsRoutes(app) {
         type: 'object',
         properties: {
           cliente_id: { type: 'string', format: 'uuid' },
+          from: { type: 'string', format: 'date' },
+          to: { type: 'string', format: 'date' },
           mesAno: { type: 'string', pattern: '^\\d{4}-\\d{2}$' },
         },
       },
     },
   }, async (request) => {
     const { tenant_id } = request.user
-    const { cliente_id, mesAno } = request.query
-    const refDate = mesAno ? `${mesAno}-01` : new Date().toISOString().slice(0, 8) + '01'
+    const { cliente_id, from, to, mesAno } = request.query
 
-    const clienteFilter = cliente_id ? 'AND l.cliente_id = $2' : ''
-    const params = cliente_id ? [refDate, cliente_id] : [refDate]
+    // Resolver range — prioridade: from+to > mesAno > default (últimos 30 dias)
+    let fromDate, toDate
+    if (from && to) {
+      fromDate = from
+      toDate = to
+    } else if (mesAno) {
+      fromDate = `${mesAno}-01`
+      const [y, m] = mesAno.split('-').map(Number)
+      toDate = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10)
+    } else {
+      const now = new Date()
+      toDate = now.toISOString().slice(0, 10)
+      const past = new Date(now)
+      past.setDate(past.getDate() - 29)
+      fromDate = past.toISOString().slice(0, 10)
+    }
+
+    // Janela anterior de mesmo tamanho (para deltas)
+    const dayMs = 86400000
+    const days = Math.floor((new Date(toDate) - new Date(fromDate)) / dayMs) + 1
+    const prevToD = new Date(fromDate); prevToD.setDate(prevToD.getDate() - 1)
+    const prevFromD = new Date(prevToD); prevFromD.setDate(prevFromD.getDate() - days + 1)
+    const prevFrom = prevFromD.toISOString().slice(0, 10)
+    const prevTo = prevToD.toISOString().slice(0, 10)
+
+    const clienteFilter = cliente_id ? 'AND l.cliente_id = $3' : ''
+    const params = cliente_id ? [fromDate, toDate, cliente_id] : [fromDate, toDate]
+    const prevParams = cliente_id ? [prevFrom, prevTo, cliente_id] : [prevFrom, prevTo]
 
     return app.withTenant(tenant_id, async (db) => {
-      const [faturamentoQ, vendasQ, horasQ, rankingQ, peakHoursQ, heatmapQ, audienciaQ] = await Promise.all([
-        // Query A — Faturamento Mensal (últimos 12 meses)
+      // Filtro de range explícito (do parâmetro)
+      const rangeFilter = `
+        AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= $1::date
+        AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  ($2::date + interval '1 day')
+      `
+
+      const [
+        faturamentoQ, vendasQ, horasQ, rankingQ,
+        peakHoursQ, heatmapQ, audienciaQ,
+        kpisCurQ, kpisPrevQ,
+      ] = await Promise.all([
+        // Query A — Faturamento Mensal (12 meses ancorados em $2 = toDate)
         db.query(`
           SELECT
             to_char(date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS mes,
             COALESCE(SUM(l.fat_gerado), 0) AS gmv
           FROM lives l
           WHERE l.status = 'encerrada'
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date) - interval '11 months'
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $2::date) - interval '11 months'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $2::date) + interval '1 month'
             ${clienteFilter}
           GROUP BY 1 ORDER BY 1
         `, params),
 
-        // Query B — Vendas Mensal (últimos 12 meses)
+        // Query B — Vendas Mensal (12 meses ancorados em $2 = toDate)
         db.query(`
           SELECT
             to_char(date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS mes,
             COUNT(*) AS total_vendas
           FROM lives l
           WHERE l.status = 'encerrada'
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date) - interval '11 months'
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $2::date) - interval '11 months'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $2::date) + interval '1 month'
             ${clienteFilter}
           GROUP BY 1 ORDER BY 1
         `, params),
 
-        // Query C — Horas de Live por Dia (últimos 30 dias do período)
+        // Query C — Horas de Live por Dia (range completo)
         db.query(`
           SELECT
             (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
@@ -186,13 +223,12 @@ export async function analyticsRoutes(app) {
             ), 0) AS horas
           FROM lives l
           WHERE l.status IN ('encerrada', 'em_andamento')
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date) + interval '1 month' - interval '30 days'
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${rangeFilter}
             ${clienteFilter}
           GROUP BY 1 ORDER BY 1
         `, params),
 
-        // Query D — Ranking Top 10 Apresentadores (mês selecionado)
+        // Query D — Ranking Top 10 Apresentadores (range)
         db.query(`
           SELECT
             l.apresentador_id,
@@ -202,28 +238,26 @@ export async function analyticsRoutes(app) {
           FROM lives l
           JOIN users u ON u.id = l.apresentador_id
           WHERE l.status = 'encerrada'
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${rangeFilter}
             ${clienteFilter}
           GROUP BY l.apresentador_id, u.nome
           ORDER BY gmv_total DESC
           LIMIT 10
         `, params),
 
-        // Query E — Horários de pico (GMV por hora do dia, mês selecionado)
+        // Query E — Horários de pico (GMV por hora do dia, range)
         db.query(`
           SELECT
             EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS hora,
             COALESCE(SUM(l.fat_gerado), 0) AS gmv
           FROM lives l
           WHERE l.status = 'encerrada'
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${rangeFilter}
             ${clienteFilter}
           GROUP BY 1 ORDER BY 1
         `, params),
 
-        // Query F — Heatmap conversão (dia da semana × bloco de 3h)
+        // Query F — Heatmap conversão (dia da semana × bloco de 3h, range)
         db.query(`
           SELECT
             EXTRACT(ISODOW FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS dow,
@@ -232,13 +266,12 @@ export async function analyticsRoutes(app) {
             COUNT(*) AS lives
           FROM lives l
           WHERE l.status = 'encerrada'
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${rangeFilter}
             ${clienteFilter}
           GROUP BY 1, 2 ORDER BY 1, 2
         `, params),
 
-        // Query G — Audiência média via live_snapshots (mais robusto)
+        // Query G — Audiência média via live_snapshots (range)
         db.query(`
           SELECT COALESCE(AVG(s.peak_viewers), 0) AS audiencia_media
           FROM (
@@ -246,12 +279,33 @@ export async function analyticsRoutes(app) {
             FROM live_snapshots ls
             JOIN lives l ON l.id = ls.live_id
             WHERE l.status = 'encerrada'
-              AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
-              AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+              ${rangeFilter}
               ${clienteFilter}
             GROUP BY ls.live_id
           ) s
         `, params),
+
+        // Query H — KPIs no range atual
+        db.query(`
+          SELECT
+            COALESCE(SUM(l.fat_gerado), 0) AS faturamento_total,
+            COUNT(*) AS total_vendas
+          FROM lives l
+          WHERE l.status = 'encerrada'
+            ${rangeFilter}
+            ${clienteFilter}
+        `, params),
+
+        // Query I — KPIs no range anterior (para deltas)
+        db.query(`
+          SELECT
+            COALESCE(SUM(l.fat_gerado), 0) AS faturamento_total,
+            COUNT(*) AS total_vendas
+          FROM lives l
+          WHERE l.status = 'encerrada'
+            ${rangeFilter}
+            ${clienteFilter}
+        `, prevParams),
       ])
 
       const faturamentoRows = faturamentoQ.rows
@@ -262,30 +316,23 @@ export async function analyticsRoutes(app) {
       const heatmapRows = heatmapQ.rows
       const audienciaMedia = parseFloat(Number(audienciaQ.rows[0]?.audiencia_media ?? 0).toFixed(0))
 
-      // Derivar KPIs do mês selecionado
-      const mesAlvo = mesAno || new Date().toISOString().slice(0, 7)
-      const fatMesAtual = faturamentoRows.find(r => r.mes === mesAlvo)
-      const vendasMesAtual = vendasRows.find(r => r.mes === mesAlvo)
-
-      const faturamentoTotal = parseFloat(Number(fatMesAtual?.gmv ?? 0).toFixed(2))
-      const totalVendas = Number(vendasMesAtual?.total_vendas ?? 0)
+      // KPIs do range atual
+      const cur = kpisCurQ.rows[0] || {}
+      const faturamentoTotal = parseFloat(Number(cur.faturamento_total ?? 0).toFixed(2))
+      const totalVendas = Number(cur.total_vendas ?? 0)
       const ticketMedio = totalVendas > 0
         ? parseFloat((faturamentoTotal / totalVendas).toFixed(2))
         : 0
 
-      // Calcular deltas (mês anterior)
-      const dt = new Date(refDate)
-      dt.setMonth(dt.getMonth() - 1)
-      const mesAnterior = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`
-      const fatMesAnt = faturamentoRows.find(r => r.mes === mesAnterior)
-      const vendasMesAnt = vendasRows.find(r => r.mes === mesAnterior)
-      const fatAnt = Number(fatMesAnt?.gmv ?? 0)
-      const vendasAnt = Number(vendasMesAnt?.total_vendas ?? 0)
+      // KPIs janela anterior
+      const prev = kpisPrevQ.rows[0] || {}
+      const fatAnt = Number(prev.faturamento_total ?? 0)
+      const vendasAnt = Number(prev.total_vendas ?? 0)
       const ticketAnt = vendasAnt > 0 ? fatAnt / vendasAnt : 0
 
-      const pct = (cur, prev) => prev > 0 ? Math.round(((cur - prev) / prev) * 100) : 0
+      const pct = (curV, prevV) => prevV > 0 ? Math.round(((curV - prevV) / prevV) * 100) : 0
 
-      // Total horas no ar (mês selecionado)
+      // Total horas no ar (range)
       const totalHoras = horasRows.reduce((acc, r) => acc + Number(r.horas), 0)
 
       return {

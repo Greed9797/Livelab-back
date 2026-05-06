@@ -9,94 +9,146 @@ const custoSchema = z.object({
 
 const toNum = (v) => Number(v ?? 0)
 
+/**
+ * Resolve [inicio, fim] como datas YYYY-MM-DD a partir dos query params.
+ * Aceita: inicio=YYYY-MM, fim=YYYY-MM (range), ou mes+ano (single month),
+ * ou nada (fallback: mês corrente).
+ *
+ * Retorna: { startDate, endDate } onde startDate é o primeiro dia do mês `inicio`
+ * e endDate é o último dia do mês `fim` (inclusive).
+ */
+function resolveRange({ inicio, fim, mes, ano }) {
+  // Range explícito (frontend manda 'inicio' e 'fim' em YYYY-MM)
+  if (inicio && fim && /^\d{4}-\d{2}$/.test(inicio) && /^\d{4}-\d{2}$/.test(fim)) {
+    const startDate = `${inicio}-01`
+    const [fy, fm] = fim.split('-').map(Number)
+    const endDate = new Date(Date.UTC(fy, fm, 0)).toISOString().slice(0, 10) // último dia do mês fim
+    return { startDate, endDate }
+  }
+  // Mês único via mes+ano
+  if (mes && ano) {
+    const m = String(mes).padStart(2, '0')
+    const startDate = `${ano}-${m}-01`
+    const endDate = new Date(Date.UTC(Number(ano), Number(mes), 0)).toISOString().slice(0, 10)
+    return { startDate, endDate }
+  }
+  // Fallback: mês atual
+  const now = new Date()
+  const y = now.getUTCFullYear()
+  const m = now.getUTCMonth() + 1
+  const startDate = `${y}-${String(m).padStart(2, '0')}-01`
+  const endDate = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10)
+  return { startDate, endDate }
+}
+
 export async function financeiroRoutes(app) {
-  // GET /v1/financeiro/resumo?mes=&ano=
+  // GET /v1/financeiro/resumo?mes=&ano=  OR  ?inicio=YYYY-MM&fim=YYYY-MM
   app.get('/v1/financeiro/resumo', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const { mes, ano } = request.query
-    const periodo = mes && ano
-      ? `${ano}-${String(mes).padStart(2, '0')}-01`
-      : new Date().toISOString().slice(0, 7) + '-01'
+    const { startDate, endDate } = resolveRange(request.query)
 
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(`
-        WITH contratos_mes AS (
+        WITH contratos_periodo AS (
           SELECT
-            COALESCE(SUM(c.valor_fixo), 0)                          AS fat_bruto_fixo,
+            -- Fixo proporcional ao número de meses no range
+            COALESCE(SUM(c.valor_fixo), 0) *
+              GREATEST(1, (DATE_PART('year', $2::date) - DATE_PART('year', $1::date)) * 12
+                          + DATE_PART('month', $2::date) - DATE_PART('month', $1::date) + 1)
+              AS fat_bruto_fixo,
             COALESCE(SUM(l.fat_gerado * c.comissao_pct / 100.0), 0) AS fat_bruto_comissao
           FROM contratos c
           LEFT JOIN lives l ON l.cliente_id = c.cliente_id
-            AND date_trunc('month', l.encerrado_em) = date_trunc('month', $1::date)
+            AND l.encerrado_em >= $1::date
+            AND l.encerrado_em <  ($2::date + interval '1 day')
           WHERE c.status = 'ativo'
         ),
-        custos_mes AS (
+        custos_periodo AS (
           SELECT COALESCE(SUM(valor), 0) AS total_custos
           FROM custos
-          WHERE date_trunc('month', competencia) = date_trunc('month', $1::date)
+          WHERE competencia >= $1::date
+            AND competencia <  ($2::date + interval '1 day')
         )
         SELECT
           cm.fat_bruto_fixo,
           cm.fat_bruto_comissao,
           cu.total_custos
-        FROM contratos_mes cm
-        CROSS JOIN custos_mes cu
-      `, [periodo])
+        FROM contratos_periodo cm
+        CROSS JOIN custos_periodo cu
+      `, [startDate, endDate])
 
       const r = result.rows[0]
       const fat_bruto  = toNum(r.fat_bruto_fixo) + toNum(r.fat_bruto_comissao)
       const fat_liquido = Math.max(0, fat_bruto - toNum(r.total_custos))
-      return { fat_bruto, fat_liquido, total_custos: toNum(r.total_custos), periodo }
+      return {
+        fat_bruto,
+        fat_liquido,
+        total_custos: toNum(r.total_custos),
+        periodo: startDate,
+        inicio: startDate,
+        fim: endDate,
+      }
     })
   })
 
-  // GET /v1/financeiro/faturamento?periodo=YYYY-MM
+  // GET /v1/financeiro/faturamento?periodo=YYYY-MM  OR  ?inicio=YYYY-MM&fim=YYYY-MM
   app.get('/v1/financeiro/faturamento', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const periodo = (request.query.periodo ?? new Date().toISOString().slice(0, 7)) + '-01'
+    // Aceita 'periodo' legado (YYYY-MM) como atalho
+    const q = { ...request.query }
+    if (!q.inicio && !q.fim && q.periodo && /^\d{4}-\d{2}$/.test(q.periodo)) {
+      q.inicio = q.periodo
+      q.fim = q.periodo
+    }
+    const { startDate, endDate } = resolveRange(q)
 
     return app.withTenant(tenant_id, async (db) => {
       const porCliente = await db.query(`
         SELECT cl.nome, cl.nicho, COALESCE(SUM(l.fat_gerado), 0) AS total
         FROM clientes cl
         LEFT JOIN lives l ON l.cliente_id = cl.id
-          AND date_trunc('month', l.encerrado_em) = date_trunc('month', $1::date)
+          AND l.encerrado_em >= $1::date
+          AND l.encerrado_em <  ($2::date + interval '1 day')
         WHERE cl.status = 'ativo'
         GROUP BY cl.id, cl.nome, cl.nicho
         ORDER BY total DESC
-      `, [periodo])
+      `, [startDate, endDate])
 
       return {
-        periodo,
+        periodo: startDate,
+        inicio: startDate,
+        fim: endDate,
         por_cliente: porCliente.rows.map(r => ({ ...r, total: toNum(r.total) })),
       }
     })
   })
 
-  // GET /v1/financeiro/fluxo-caixa?mes=&ano=
+  // GET /v1/financeiro/fluxo-caixa?mes=&ano=  OR  ?inicio=YYYY-MM&fim=YYYY-MM
   app.get('/v1/financeiro/fluxo-caixa', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const { mes, ano } = request.query
-    const periodo = mes && ano
-      ? `${ano}-${String(mes).padStart(2, '0')}-01`
-      : new Date().toISOString().slice(0, 7) + '-01'
+    const { startDate, endDate } = resolveRange(request.query)
 
     return app.withTenant(tenant_id, async (db) => {
       const entradas = await db.query(`
         SELECT date_trunc('day', encerrado_em) AS dia, SUM(fat_gerado) AS valor
         FROM lives
-        WHERE date_trunc('month', encerrado_em) = date_trunc('month', $1::date)
+        WHERE encerrado_em >= $1::date
+          AND encerrado_em <  ($2::date + interval '1 day')
         GROUP BY 1 ORDER BY 1
-      `, [periodo])
+      `, [startDate, endDate])
 
       const saidas = await db.query(`
         SELECT competencia AS dia, SUM(valor) AS valor
         FROM custos
-        WHERE date_trunc('month', competencia) = date_trunc('month', $1::date)
+        WHERE competencia >= $1::date
+          AND competencia <  ($2::date + interval '1 day')
         GROUP BY 1 ORDER BY 1
-      `, [periodo])
+      `, [startDate, endDate])
 
       return {
-        periodo,
+        periodo: startDate,
+        inicio: startDate,
+        fim: endDate,
         entradas: entradas.rows.map(r => ({ ...r, valor: toNum(r.valor) })),
         saidas:   saidas.rows.map(r => ({ ...r, valor: toNum(r.valor) })),
       }
@@ -122,17 +174,25 @@ export async function financeiroRoutes(app) {
     })
   })
 
-  // GET /v1/financeiro/custos
+  // GET /v1/financeiro/custos?mes=YYYY-MM  OR  ?inicio=YYYY-MM&fim=YYYY-MM
   app.get('/v1/financeiro/custos', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
-    const mes = request.query.mes ?? new Date().toISOString().slice(0, 7)
+    const q = { ...request.query }
+    // Atalho: legado mandava 'mes=YYYY-MM' (string). Converte para inicio/fim iguais.
+    if (q.mes && !q.inicio && !q.fim && /^\d{4}-\d{2}$/.test(String(q.mes))) {
+      q.inicio = String(q.mes)
+      q.fim = String(q.mes)
+    }
+    const { startDate, endDate } = resolveRange(q)
+
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT id, descricao, valor, tipo, competencia
          FROM custos
-         WHERE date_trunc('month', competencia) = date_trunc('month', ($1 || '-01')::date)
+         WHERE competencia >= $1::date
+           AND competencia <  ($2::date + interval '1 day')
          ORDER BY competencia DESC`,
-        [mes]
+        [startDate, endDate]
       )
       return result.rows.map(r => ({ ...r, valor: toNum(r.valor) }))
     })

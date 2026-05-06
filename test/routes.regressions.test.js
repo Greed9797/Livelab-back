@@ -76,9 +76,9 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(queryMock).toHaveBeenCalledTimes(1)
 
     const sql = queryMock.mock.calls[0][0]
-    expect(sql).toContain('WITH contratos_mes')
-    expect(sql).toContain('custos_mes')
-    expect(sql).toContain('CROSS JOIN custos_mes')
+    expect(sql).toContain('WITH contratos_periodo')
+    expect(sql).toContain('custos_periodo')
+    expect(sql).toContain('CROSS JOIN custos_periodo')
     expect(sql).not.toContain('COALESCE(cu.total_custos, 0)')
     expect(releaseMock).toHaveBeenCalledTimes(1)
 

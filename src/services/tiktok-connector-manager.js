@@ -1,6 +1,5 @@
 // src/services/tiktok-connector-manager.js
 import EventEmitter from 'node:events'
-import { WebcastPushConnection } from 'tiktok-live-connector'
 
 // ── Singleton state ───────────────────────────────────────────────────────────
 let _db = null
@@ -13,6 +12,21 @@ const MAX_CONNECTORS = Number(process.env.TIKTOK_MAX_CONNECTORS ?? 20)
 const FLUSH_INTERVAL_MS = 10_000  // Real-time: 6 inserts/min por live
 const CIRCUIT_BREAKER_THRESHOLD = Number(process.env.TIKTOK_CB_THRESHOLD ?? 5)
 const CIRCUIT_BREAKER_WINDOW_MS = Number(process.env.TIKTOK_CB_WINDOW_MS ?? 5 * 60_000)
+
+let WebcastPushConnectionImpl = null
+
+async function getWebcastPushConnection() {
+  if (WebcastPushConnectionImpl) return WebcastPushConnectionImpl
+
+  // TikTok Live ainda aguarda aprovação; mantém o pacote fora do boot path e
+  // permite remover a dependência vulnerável enquanto a integração está inativa.
+  const mod = await import('tiktok-live-connector')
+  WebcastPushConnectionImpl = mod.WebcastPushConnection ?? mod.default?.WebcastPushConnection
+  if (!WebcastPushConnectionImpl) {
+    throw new Error('tiktok-live-connector indisponível')
+  }
+  return WebcastPushConnectionImpl
+}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -160,6 +174,7 @@ async function startConnector(liveId, tenantId, username) {
     circuitOpen: false,
   }
 
+  const WebcastPushConnection = await getWebcastPushConnection()
   const connection = new WebcastPushConnection(username)
 
   // ── Event handlers ────────────────────────────────────────────────────────

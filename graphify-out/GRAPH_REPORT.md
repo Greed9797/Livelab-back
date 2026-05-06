@@ -1,12 +1,12 @@
-# Graph Report - /Users/vitormiguelgoedertdaluz/liveshop_saas_api-backend-  (2026-04-18)
+# Graph Report - /Users/vitormiguelgoedertdaluz/liveshop_saas_api-backend-  (2026-05-06)
 
 ## Corpus Check
-- 0 files · ~0 words
+- 66 files · ~85,986 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 165 nodes · 139 edges · 55 communities detected
-- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 4 edges (avg confidence: 0.8)
+- 263 nodes · 282 edges · 67 communities detected
+- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 10 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -65,127 +65,139 @@
 - [[_COMMUNITY_Community 52|Community 52]]
 - [[_COMMUNITY_Community 53|Community 53]]
 - [[_COMMUNITY_Community 54|Community 54]]
+- [[_COMMUNITY_Community 55|Community 55]]
+- [[_COMMUNITY_Community 56|Community 56]]
+- [[_COMMUNITY_Community 57|Community 57]]
+- [[_COMMUNITY_Community 58|Community 58]]
+- [[_COMMUNITY_Community 59|Community 59]]
+- [[_COMMUNITY_Community 60|Community 60]]
+- [[_COMMUNITY_Community 61|Community 61]]
+- [[_COMMUNITY_Community 62|Community 62]]
+- [[_COMMUNITY_Community 63|Community 63]]
+- [[_COMMUNITY_Community 64|Community 64]]
+- [[_COMMUNITY_Community 65|Community 65]]
+- [[_COMMUNITY_Community 66|Community 66]]
 
 ## God Nodes (most connected - your core abstractions)
-1. `TikTok Integration Spec` - 7 edges
-2. `TikTok Connector Manager` - 6 edges
-3. `login()` - 4 edges
-4. `processTenantBilling()` - 4 edges
-5. `syncLives()` - 4 edges
-6. `_sign()` - 4 edges
-7. `criarCobranca()` - 4 edges
-8. `TikTokService` - 4 edges
-9. `executarAcaoAuditoria()` - 3 edges
-10. `has()` - 3 edges
+1. `ok()` - 9 edges
+2. `buildDashboardPayload()` - 7 edges
+3. `_request()` - 7 edges
+4. `TikTok Integration Spec` - 7 edges
+5. `TikTok Connector Manager` - 6 edges
+6. `fail()` - 5 edges
+7. `main()` - 5 edges
+8. `login()` - 5 edges
+9. `toNumber()` - 5 edges
+10. `has()` - 5 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `TikTok Connector Manager` --references--> `live_snapshots table`  [EXTRACTED]
-  docs/specs/2026-04-12-tiktok-integration.md → migrations/029_lives_tiktok_fields.txt
+- `live_snapshots table` --references--> `TikTok Connector Manager`  [EXTRACTED]
+  migrations/029_lives_tiktok_fields.txt → docs/specs/2026-04-12-tiktok-integration.md
 - `TikTok Connector Manager` --populates--> `tiktok_room_id column`  [EXTRACTED]
   docs/specs/2026-04-12-tiktok-integration.md → migrations/029_lives_tiktok_fields.txt
 - `TikTok Connector Manager` --populates--> `final_peak_viewers column`  [EXTRACTED]
   docs/specs/2026-04-12-tiktok-integration.md → migrations/029_lives_tiktok_fields.txt
-- `criarCobranca()` --calls--> `has()`  [INFERRED]
-  /Users/vitormiguelgoedertdaluz/liveshop_saas_api-backend-/src/services/asaas.js → /Users/vitormiguelgoedertdaluz/liveshop_saas_api-backend-/src/services/tiktok-connector-manager.js
-- `live_requests table` --shares_data_with--> `LiveShop SaaS Backend`  [EXTRACTED]
-  migrations/025_create_live_requests.txt → STATUS.md
+- `getMasterToken()` --calls--> `ok()`  [INFERRED]
+  /Users/vitormiguelgoedertdaluz/liveshop_saas_api-backend-/e2e/tests/analytics-dashboard.spec.js → /Users/vitormiguelgoedertdaluz/liveshop_saas_api-backend-/scripts/audit-rls.js
+- `getClienteToken()` --calls--> `ok()`  [INFERRED]
+  /Users/vitormiguelgoedertdaluz/liveshop_saas_api-backend-/e2e/tests/analytics-dashboard.spec.js → /Users/vitormiguelgoedertdaluz/liveshop_saas_api-backend-/scripts/audit-rls.js
 
 ## Communities
 
 ### Community 0 - "Community 0"
 Cohesion: 0.14
-Nodes (18): Asaas Service, Billing Engine, Circuit Breaker, final_peak_viewers column, Franqueado Analytics route, live_requests table, live_snapshots table, lives table (+10 more)
+Nodes (16): buildAlerts(), buildDashboardPayload(), buildExecutiveSummary(), buildHistoryMaps(), calculateGrowth(), calculateRate(), fetchCrmSnapshot(), formatCurrency() (+8 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.29
-Nodes (5): buscarOuCriarCustomer(), criarCobranca(), gerarIdempotencyKey(), _request(), processTenantBilling()
+Cohesion: 0.2
+Nodes (10): getClienteToken(), getMasterToken(), checkNotNull(), checkOrphans(), checkRls(), checkRouteBypass(), fail(), main() (+2 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.29
-Nodes (5): _flushToDb(), has(), startConnector(), stopConnector(), syncLives()
+Cohesion: 0.16
+Nodes (10): normalizeStatus(), _flushToDb(), getWebcastPushConnection(), has(), startConnector(), stopConnector(), syncLives(), buildLeadRow() (+2 more)
 
 ### Community 3 - "Community 3"
+Cohesion: 0.2
+Nodes (13): _apiKey(), _appId(), buscarOuCriarCustomer(), chargeBoleto(), chargeCard(), chargePix(), createOrder(), criarCobranca() (+5 more)
+
+### Community 4 - "Community 4"
+Cohesion: 0.14
+Nodes (18): Asaas Service, Billing Engine, Circuit Breaker, final_peak_viewers column, Franqueado Analytics route, live_requests table, live_snapshots table, lives table (+10 more)
+
+### Community 5 - "Community 5"
+Cohesion: 0.22
+Nodes (6): buildBenchmark(), calcularCustoHora(), fetchClienteLives(), round2(), toInt(), toNumber()
+
+### Community 6 - "Community 6"
 Cohesion: 0.29
 Nodes (2): countSemanticsNodes(), waitForScreenWithNodes()
 
-### Community 4 - "Community 4"
+### Community 7 - "Community 7"
 Cohesion: 0.43
 Nodes (5): executarAcaoAuditoria(), getClientIp(), insertContratoEvento(), normalizeClientIp(), updateClienteStatusFromContrato()
 
-### Community 5 - "Community 5"
+### Community 8 - "Community 8"
 Cohesion: 0.33
 Nodes (0): 
 
-### Community 6 - "Community 6"
-Cohesion: 0.7
-Nodes (4): login(), loginCliente(), loginFranqueado(), loginMaster()
-
-### Community 7 - "Community 7"
-Cohesion: 0.5
-Nodes (2): cabineRoleAccess(), cabinesRoutes()
-
-### Community 8 - "Community 8"
-Cohesion: 0.7
-Nodes (4): createSignedState(), _secret(), _sign(), verifySignedState()
-
 ### Community 9 - "Community 9"
-Cohesion: 0.5
+Cohesion: 0.53
 Nodes (1): TikTokService
 
 ### Community 10 - "Community 10"
-Cohesion: 0.5
-Nodes (0): 
+Cohesion: 0.7
+Nodes (4): applyMigration(), ensureMigrationsTable(), getAppliedMigrations(), runMigrations()
 
 ### Community 11 - "Community 11"
+Cohesion: 0.7
+Nodes (4): login(), loginCliente(), loginFranqueado(), loginMaster()
+
+### Community 12 - "Community 12"
+Cohesion: 0.5
+Nodes (2): cabineRoleAccess(), cabinesRoutes()
+
+### Community 13 - "Community 13"
+Cohesion: 0.6
+Nodes (3): _fetchViaCep(), _geocode(), resolveCepToGeo()
+
+### Community 14 - "Community 14"
+Cohesion: 0.7
+Nodes (4): createSignedState(), _secret(), _sign(), verifySignedState()
+
+### Community 15 - "Community 15"
 Cohesion: 0.67
 Nodes (2): enableA11y(), loginViaAPI()
 
-### Community 12 - "Community 12"
+### Community 16 - "Community 16"
 Cohesion: 0.83
 Nodes (4): cliente_parceiro role, Live Shop Flutter UI, Minhas Cabines sidebar button, solicitacao-booking E2E test
 
-### Community 13 - "Community 13"
-Cohesion: 1.0
-Nodes (2): main(), runMigration()
-
-### Community 14 - "Community 14"
+### Community 17 - "Community 17"
 Cohesion: 0.67
 Nodes (0): 
 
-### Community 15 - "Community 15"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 16 - "Community 16"
-Cohesion: 1.0
-Nodes (0): 
-
-### Community 17 - "Community 17"
-Cohesion: 1.0
-Nodes (0): 
-
 ### Community 18 - "Community 18"
-Cohesion: 1.0
+Cohesion: 0.67
 Nodes (0): 
 
 ### Community 19 - "Community 19"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (2): getClienteId(), getClienteVinculado()
 
 ### Community 20 - "Community 20"
-Cohesion: 1.0
+Cohesion: 0.67
 Nodes (0): 
 
 ### Community 21 - "Community 21"
-Cohesion: 1.0
+Cohesion: 0.67
 Nodes (0): 
 
 ### Community 22 - "Community 22"
-Cohesion: 1.0
+Cohesion: 0.67
 Nodes (0): 
 
 ### Community 23 - "Community 23"
-Cohesion: 1.0
+Cohesion: 0.67
 Nodes (0): 
 
 ### Community 24 - "Community 24"
@@ -262,7 +274,7 @@ Nodes (0):
 
 ### Community 42 - "Community 42"
 Cohesion: 1.0
-Nodes (2): leads RLS policy, Migration 024
+Nodes (0): 
 
 ### Community 43 - "Community 43"
 Cohesion: 1.0
@@ -302,96 +314,166 @@ Nodes (0):
 
 ### Community 52 - "Community 52"
 Cohesion: 1.0
-Nodes (0): 
+Nodes (2): leads RLS policy, Migration 024
 
 ### Community 53 - "Community 53"
 Cohesion: 1.0
-Nodes (1): Login Screen
+Nodes (0): 
 
 ### Community 54 - "Community 54"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 55 - "Community 55"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 56 - "Community 56"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 57 - "Community 57"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 58 - "Community 58"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 59 - "Community 59"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 60 - "Community 60"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 61 - "Community 61"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 62 - "Community 62"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 63 - "Community 63"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 64 - "Community 64"
+Cohesion: 1.0
+Nodes (0): 
+
+### Community 65 - "Community 65"
+Cohesion: 1.0
+Nodes (1): Login Screen
+
+### Community 66 - "Community 66"
 Cohesion: 1.0
 Nodes (1): Migration 026
 
 ## Knowledge Gaps
 - **11 isolated node(s):** `LiveShop REST API (Fastify 5)`, `live_snapshots table`, `leads RLS policy`, `Migration 029`, `tiktok_room_id column` (+6 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 15`** (2 nodes): `createTestUsers()`, `seed_users.js`
+- **Thin community `Community 24`** (2 nodes): `createTestUsers()`, `seed_users.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 16`** (2 nodes): `createUser()`, `create_user.js`
+- **Thin community `Community 25`** (2 nodes): `createUser()`, `create_user.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 17`** (2 nodes): `createDemoData()`, `seed_demo_data.js`
+- **Thin community `Community 26`** (2 nodes): `createDemoData()`, `seed_demo_data.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 18`** (2 nodes): `buildTiktokApp()`, `routes.regressions.test.js`
+- **Thin community `Community 27`** (2 nodes): `buildApp()`, `lives_manual.test.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 19`** (2 nodes): `makeDb()`, `tiktok-connector-manager.test.js`
+- **Thin community `Community 28`** (2 nodes): `makeDb()`, `tiktok-connector-manager.test.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 20`** (2 nodes): `buildApp()`, `app.js`
+- **Thin community `Community 29`** (2 nodes): `main()`, `backfill_user_id_clientes.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 21`** (2 nodes): `dbPlugin()`, `db.js`
+- **Thin community `Community 30`** (2 nodes): `buildApp()`, `app.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 22`** (2 nodes): `authPlugin()`, `auth.js`
+- **Thin community `Community 31`** (2 nodes): `dbPlugin()`, `db.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 23`** (2 nodes): `cleanupOrphanContracts()`, `cleanup_orphan_contracts.js`
+- **Thin community `Community 32`** (2 nodes): `authPlugin()`, `auth.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 24`** (2 nodes): `configuracoesRoutes()`, `configuracoes.js`
+- **Thin community `Community 33`** (2 nodes): `cleanupOrphanContracts()`, `cleanup_orphan_contracts.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 25`** (2 nodes): `excelenciaRoutes()`, `excelencia.js`
+- **Thin community `Community 34`** (2 nodes): `configuracoesRoutes()`, `configuracoes.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 26`** (2 nodes): `recomendacoesRoutes()`, `recomendacoes.js`
+- **Thin community `Community 35`** (2 nodes): `excelenciaRoutes()`, `excelencia.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 27`** (2 nodes): `pacotesRoutes()`, `pacotes.js`
+- **Thin community `Community 36`** (2 nodes): `onboardingRoutes()`, `onboarding.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 28`** (2 nodes): `franqueadoRoutes()`, `franqueado.js`
+- **Thin community `Community 37`** (2 nodes): `recomendacoesRoutes()`, `recomendacoes.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 29`** (2 nodes): `cepRoutes()`, `cep.js`
+- **Thin community `Community 38`** (2 nodes): `pacotesRoutes()`, `pacotes.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 30`** (2 nodes): `boletosRoutes()`, `boletos.js`
+- **Thin community `Community 39`** (2 nodes): `boletosRoutes()`, `boletos.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 31`** (2 nodes): `authRoutes()`, `auth.js`
+- **Thin community `Community 40`** (2 nodes): `authRoutes()`, `auth.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 32`** (2 nodes): `usuarios.js`, `usuariosRoutes()`
+- **Thin community `Community 41`** (2 nodes): `clientePortalRoutes()`, `cliente_portal.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 33`** (2 nodes): `homeRoutes()`, `home.js`
+- **Thin community `Community 42`** (2 nodes): `usuarios.js`, `usuariosRoutes()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 34`** (2 nodes): `solicitacoesRoutes()`, `solicitacoes.js`
+- **Thin community `Community 43`** (2 nodes): `apresentadorasRoutes()`, `apresentadoras.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 35`** (2 nodes): `manuaisRoutes()`, `manuais.js`
+- **Thin community `Community 44`** (2 nodes): `homeRoutes()`, `home.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 36`** (2 nodes): `analyticsRoutes()`, `analytics.js`
+- **Thin community `Community 45`** (2 nodes): `solicitacoesRoutes()`, `solicitacoes.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 37`** (2 nodes): `leadsRoutes()`, `leads.js`
+- **Thin community `Community 46`** (2 nodes): `tenantsRoutes()`, `tenants.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 38`** (2 nodes): `clienteDashboardRoutes()`, `cliente_dashboard.js`
+- **Thin community `Community 47`** (2 nodes): `manuaisRoutes()`, `manuais.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 39`** (2 nodes): `contratosRoutes()`, `contratos.js`
+- **Thin community `Community 48`** (2 nodes): `analyticsRoutes()`, `analytics.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 40`** (2 nodes): `tiktokRoutes()`, `tiktok.js`
+- **Thin community `Community 49`** (2 nodes): `leadsRoutes()`, `leads.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 41`** (2 nodes): `clientesRoutes()`, `clientes.js`
+- **Thin community `Community 50`** (2 nodes): `liveApresentadoresRoutes()`, `live_apresentadores.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 42`** (2 nodes): `leads RLS policy`, `Migration 024`
+- **Thin community `Community 51`** (2 nodes): `clientesRoutes()`, `clientes.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 43`** (1 nodes): `test-asaas.js`
+- **Thin community `Community 52`** (2 nodes): `leads RLS policy`, `Migration 024`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 44`** (1 nodes): `oauth-state.test.js`
+- **Thin community `Community 53`** (1 nodes): `vitest.config.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 45`** (1 nodes): `playwright.config.js`
+- **Thin community `Community 54`** (1 nodes): `test-asaas.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 46`** (1 nodes): `dashboard.spec.js`
+- **Thin community `Community 55`** (1 nodes): `oauth-state.test.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 47`** (1 nodes): `role-access.spec.js`
+- **Thin community `Community 56`** (1 nodes): `playwright.config.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 48`** (1 nodes): `cabines.spec.js`
+- **Thin community `Community 57`** (1 nodes): `dashboard.spec.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 49`** (1 nodes): `auth.spec.js`
+- **Thin community `Community 58`** (1 nodes): `role-access.spec.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 50`** (1 nodes): `financeiro.spec.js`
+- **Thin community `Community 59`** (1 nodes): `cabines.spec.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 51`** (1 nodes): `server.js`
+- **Thin community `Community 60`** (1 nodes): `auth.spec.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 52`** (1 nodes): `auth.schema.js`
+- **Thin community `Community 61`** (1 nodes): `financeiro.spec.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 53`** (1 nodes): `Login Screen`
+- **Thin community `Community 62`** (1 nodes): `server.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 54`** (1 nodes): `Migration 026`
+- **Thin community `Community 63`** (1 nodes): `security.js`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 64`** (1 nodes): `auth.schema.js`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 65`** (1 nodes): `Login Screen`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 66`** (1 nodes): `Migration 026`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+
+## Suggested Questions
+_Questions this graph is uniquely positioned to answer:_
+
+- **Why does `normalizeStatus()` connect `Community 2` to `Community 0`?**
+  _High betweenness centrality (0.012) - this node is a cross-community bridge._
+- **Why does `ok()` connect `Community 1` to `Community 11`?**
+  _High betweenness centrality (0.005) - this node is a cross-community bridge._
+- **Are the 4 inferred relationships involving `ok()` (e.g. with `getMasterToken()` and `getClienteToken()`) actually correct?**
+  _`ok()` has 4 INFERRED edges - model-reasoned connections that need verification._
+- **What connects `LiveShop REST API (Fastify 5)`, `live_snapshots table`, `leads RLS policy` to the rest of the system?**
+  _11 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Should `Community 0` be split into smaller, more focused modules?**
+  _Cohesion score 0.14 - nodes in this community are weakly interconnected._
+- **Should `Community 4` be split into smaller, more focused modules?**
+  _Cohesion score 0.14 - nodes in this community are weakly interconnected._

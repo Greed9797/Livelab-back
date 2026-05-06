@@ -3,12 +3,22 @@
 //   confirmar que o app está instalado; precisa retornar 200 + app_id matching).
 // - POST /v1/webhooks/appmax           — recebe eventos de pagamento.
 
-import { validateWebhook } from '../services/appmax.js'
+import { validateWebhook, validarWebhookToken } from '../services/appmax.js'
+
+function appmaxWebhookToken(request) {
+  return request.headers['x-appmax-signature']
+    ?? request.headers['appmax-signature']
+    ?? request.headers['x-appmax-token']
+    ?? request.headers['x-webhook-token']
+}
 
 export async function appmaxRoutes(app) {
   // S-08-style: Appmax obrigatório em produção exige APPMAX_APP_ID
   if (process.env.NODE_ENV === 'production' && !process.env.APPMAX_APP_ID) {
     app.log.warn('[appmax] APPMAX_APP_ID ausente em produção — webhooks responderão 503')
+  }
+  if (process.env.NODE_ENV === 'production' && process.env.APPMAX_APP_ID && !process.env.APPMAX_WEBHOOK_SECRET) {
+    app.log.warn('[appmax] APPMAX_WEBHOOK_SECRET ausente em produção — webhooks responderão 503')
   }
 
   // GET/POST /v1/webhooks/appmax/validate — Appmax bate aqui na instalação.
@@ -26,12 +36,10 @@ export async function appmaxRoutes(app) {
   app.post('/v1/webhooks/appmax/validate', async (request, reply) => {
     const appId = process.env.APPMAX_APP_ID
     if (!appId) return reply.code(503).send({ error: 'APPMAX_APP_ID não configurado' })
-    const payload = request.body ?? {}
-    app.log.info({ payload }, '[appmax] validate hit')
+    app.log.info('[appmax] validate hit')
     return reply.send({
       ok: true,
       app_id: appId,
-      received: payload,
     })
   })
 
@@ -40,11 +48,23 @@ export async function appmaxRoutes(app) {
     if (!process.env.APPMAX_APP_ID) {
       return reply.code(503).send({ error: 'Appmax não configurado' })
     }
+    if (process.env.NODE_ENV === 'production' && !process.env.APPMAX_WEBHOOK_SECRET) {
+      return reply.code(503).send({ error: 'APPMAX_WEBHOOK_SECRET não configurado' })
+    }
 
     const payload = request.body ?? {}
     if (!validateWebhook(payload)) {
-      app.log.warn({ payload }, '[appmax webhook] app_id inválido — rejeitando')
+      app.log.warn('[appmax webhook] app_id inválido — rejeitando')
       return reply.code(401).send({ error: 'app_id inválido' })
+    }
+
+    try {
+      // Defesa em profundidade: quando APPMAX_WEBHOOK_SECRET estiver configurado,
+      // o webhook público precisa provar posse do token sem depender só do app_id no payload.
+      validarWebhookToken(appmaxWebhookToken(request))
+    } catch {
+      app.log.warn('[appmax webhook] token inválido — rejeitando')
+      return reply.code(401).send({ error: 'Token de webhook Appmax inválido' })
     }
 
     const event = payload.event ?? payload.type ?? 'unknown'
@@ -106,6 +126,7 @@ export async function appmaxRoutes(app) {
       }
     } catch (err) {
       app.log.error({ err }, '[appmax webhook] erro processando evento')
+      return reply.code(500).send({ error: 'Erro ao processar webhook Appmax' })
     }
 
     return reply.code(200).send({ received: true })

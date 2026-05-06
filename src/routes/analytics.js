@@ -202,6 +202,7 @@ export async function analyticsRoutes(app) {
             COALESCE(SUM(l.fat_gerado), 0) AS gmv
           FROM lives l
           WHERE l.status = 'encerrada'
+            AND $1::date IS NOT NULL
             AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $2::date) - interval '11 months'
             AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $2::date) + interval '1 month'
             ${clienteFilter}
@@ -215,6 +216,7 @@ export async function analyticsRoutes(app) {
             COUNT(*) AS total_vendas
           FROM lives l
           WHERE l.status = 'encerrada'
+            AND $1::date IS NOT NULL
             AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $2::date) - interval '11 months'
             AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $2::date) + interval '1 month'
             ${clienteFilter}

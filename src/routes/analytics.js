@@ -136,16 +136,22 @@ export async function analyticsRoutes(app) {
       querystring: {
         type: 'object',
         properties: {
-          cliente_id: { type: 'string', format: 'uuid' },
-          from: { type: 'string', format: 'date' },
-          to: { type: 'string', format: 'date' },
-          mesAno: { type: 'string', pattern: '^\\d{4}-\\d{2}$' },
+          cliente_id: { type: 'string' },
+          from: { type: 'string' },
+          to: { type: 'string' },
+          mesAno: { type: 'string' },
         },
       },
     },
-  }, async (request) => {
+  }, async (request, reply) => {
     const { tenant_id } = request.user
     const { cliente_id, from, to, mesAno } = request.query
+
+    // Basic date format validation (YYYY-MM-DD)
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/
+    if ((from && !dateRe.test(from)) || (to && !dateRe.test(to))) {
+      return reply.code(400).send({ error: 'from/to must be YYYY-MM-DD' })
+    }
 
     // Resolver range — prioridade: from+to > mesAno > default (últimos 30 dias)
     let fromDate, toDate
@@ -176,7 +182,8 @@ export async function analyticsRoutes(app) {
     const params = cliente_id ? [fromDate, toDate, cliente_id] : [fromDate, toDate]
     const prevParams = cliente_id ? [prevFrom, prevTo, cliente_id] : [prevFrom, prevTo]
 
-    return app.withTenant(tenant_id, async (db) => {
+    try {
+    return await app.withTenant(tenant_id, async (db) => {
       // Filtro de range explícito (do parâmetro)
       const rangeFilter = `
         AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= $1::date
@@ -377,5 +384,9 @@ export async function analyticsRoutes(app) {
         })),
       }
     })
+    } catch (err) {
+      request.log.error({ err }, 'analytics/dashboard error')
+      return reply.code(500).send({ error: err.message })
+    }
   })
 }

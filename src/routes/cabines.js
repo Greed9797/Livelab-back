@@ -238,6 +238,18 @@ export async function cabinesRoutes(app) {
         return reply.code(409).send({ error: 'Libere a cabine antes de deletá-la' })
       }
 
+      // Check FK refs: lives and solicitacoes
+      const [livesRef, solRef] = await Promise.all([
+        db.query(`SELECT id FROM lives WHERE cabine_id = $1 LIMIT 1`, [request.params.id]),
+        db.query(`SELECT id FROM solicitacoes WHERE cabine_id = $1 LIMIT 1`, [request.params.id]),
+      ])
+      if (livesRef.rowCount > 0) {
+        return reply.code(409).send({ error: 'Cabine possui histórico de lives. Não pode ser deletada.' })
+      }
+      if (solRef.rowCount > 0) {
+        return reply.code(409).send({ error: 'Cabine possui solicitações vinculadas. Remova-as primeiro.' })
+      }
+
       await db.query(`DELETE FROM cabines WHERE id = $1`, [request.params.id])
       return { ok: true }
     })

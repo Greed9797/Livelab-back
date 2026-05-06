@@ -238,14 +238,19 @@ export async function analyticsRoutes(app) {
           GROUP BY 1, 2 ORDER BY 1, 2
         `, params),
 
-        // Query G — Audiência média (peak viewers médios das lives encerradas no mês)
+        // Query G — Audiência média via live_snapshots (mais robusto)
         db.query(`
-          SELECT COALESCE(AVG(NULLIF(l.final_peak_viewers, 0)), 0) AS audiencia_media
-          FROM lives l
-          WHERE l.status = 'encerrada'
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
-            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
-            ${clienteFilter}
+          SELECT COALESCE(AVG(s.peak_viewers), 0) AS audiencia_media
+          FROM (
+            SELECT MAX(ls.viewer_count) AS peak_viewers
+            FROM live_snapshots ls
+            JOIN lives l ON l.id = ls.live_id
+            WHERE l.status = 'encerrada'
+              AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
+              AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+              ${clienteFilter}
+            GROUP BY ls.live_id
+          ) s
         `, params),
       ])
 

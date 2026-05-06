@@ -238,9 +238,9 @@ export async function analyticsRoutes(app) {
           GROUP BY 1, 2 ORDER BY 1, 2
         `, params),
 
-        // Query G — Audiência média (viewers médios das lives encerradas no mês)
+        // Query G — Audiência média (peak viewers médios das lives encerradas no mês)
         db.query(`
-          SELECT COALESCE(AVG(NULLIF(l.viewer_count, 0)), 0) AS audiencia_media
+          SELECT COALESCE(AVG(NULLIF(l.final_peak_viewers, 0)), 0) AS audiencia_media
           FROM lives l
           WHERE l.status = 'encerrada'
             AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)

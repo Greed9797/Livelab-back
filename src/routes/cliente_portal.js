@@ -207,7 +207,11 @@ export async function clientePortalRoutes(app) {
     return app.withTenant(tenantId, async (db) => {
       // All active cabines for this tenant
       const cabinesRes = await db.query(
-        'SELECT id, numero FROM cabines WHERE ativo IS NOT FALSE ORDER BY numero'
+        `SELECT id, numero FROM cabines
+         WHERE tenant_id = $1::uuid
+           AND ativo IS NOT FALSE
+         ORDER BY numero`,
+        [tenantId]
       )
 
       // All live_requests in date range (exclude recusada)
@@ -216,11 +220,12 @@ export async function clientePortalRoutes(app) {
                 lr.status, lr.cliente_id,
                 (lr.cliente_id = $1) AS is_mine
          FROM live_requests lr
-         WHERE lr.data_solicitada >= $2
+         WHERE lr.tenant_id = $4::uuid
+           AND lr.data_solicitada >= $2
            AND lr.data_solicitada <= $3
            AND lr.status != 'recusada'
          ORDER BY lr.data_solicitada, lr.hora_inicio`,
-        [clienteId, data_inicio, data_fim]
+        [clienteId, data_inicio, data_fim, tenantId]
       )
 
       const slots = slotsRes.rows.map((r) => {

@@ -9,12 +9,15 @@ export async function excelenciaRoutes(app) {
           COUNT(*) FILTER (WHERE status = 'cancelado') AS cancelados,
           COUNT(*) FILTER (WHERE status IN ('ativo', 'cancelado')) AS total_fechados
         FROM contratos
+        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
       `)
 
       const fatSeries = await db.query(`
         SELECT date_trunc('month', encerrado_em) AS mes,
                SUM(fat_gerado) AS total
         FROM lives
+        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND encerrado_em IS NOT NULL
         GROUP BY 1 ORDER BY 1 DESC LIMIT 2
       `)
 

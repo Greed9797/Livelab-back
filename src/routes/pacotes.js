@@ -22,7 +22,10 @@ export async function pacotesRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT ${COLS} FROM pacotes ORDER BY ativo DESC, valor_fixo ASC`
+        `SELECT ${COLS} FROM pacotes
+         WHERE tenant_id = $1::uuid
+         ORDER BY ativo DESC, valor_fixo ASC`,
+        [tenant_id]
       )
       return result.rows
     })
@@ -56,13 +59,13 @@ export async function pacotesRoutes(app) {
     const fields = Object.keys(updates)
     if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
-    const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(', ')
-    const values = [request.params.id, ...fields.map((f) => updates[f])]
+    const setClauses = fields.map((f, i) => `${f} = $${i + 3}`).join(', ')
+    const values = [request.params.id, tenant_id, ...fields.map((f) => updates[f])]
 
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE pacotes SET ${setClauses}
-         WHERE id = $1
+         WHERE id = $1 AND tenant_id = $2::uuid
          RETURNING ${COLS}`,
         values
       )
@@ -76,8 +79,10 @@ export async function pacotesRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `UPDATE pacotes SET ativo = false WHERE id = $1 RETURNING id`,
-        [request.params.id]
+        `UPDATE pacotes SET ativo = false
+         WHERE id = $1 AND tenant_id = $2::uuid
+         RETURNING id`,
+        [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Pacote não encontrado' })
       return reply.code(204).send()

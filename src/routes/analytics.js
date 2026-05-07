@@ -236,13 +236,14 @@ export async function analyticsRoutes(app) {
         `, params),
 
         // Query C — Horas de Live por Dia (range completo)
-        // Conta apenas lives encerradas — lives travadas em 'em_andamento'
-        // inflam a soma quando comparadas com NOW() há semanas/meses.
+        // Cap 24h por live — lives reais não passam de algumas horas.
+        // Lives com encerrado_em registrado dias depois (bug DB / cron sujo)
+        // inflavam a soma; LEAST garante valor real-mundo.
         db.query(`
           SELECT
             (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
             COALESCE(SUM(
-              EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0
+              LEAST(EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0, 24.0)
             ), 0) AS horas
           FROM lives l
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid

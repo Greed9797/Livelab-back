@@ -54,11 +54,12 @@ export async function homeRoutes(app) {
             ORDER BY captured_at DESC LIMIT 1
         ) ls ON true
         LEFT JOIN LATERAL (
-            SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (encerrado_em - iniciado_em)) / 3600.0), 0) AS horas_realizadas_hoje
+            SELECT COALESCE(SUM(LEAST(EXTRACT(EPOCH FROM (encerrado_em - iniciado_em)) / 3600.0, 24.0)), 0) AS horas_realizadas_hoje
             FROM lives
             WHERE cabine_id = c.id
               AND tenant_id = c.tenant_id
               AND status = 'encerrada'
+              AND encerrado_em IS NOT NULL
               AND date_trunc('day', iniciado_em) = date_trunc('day', NOW())
         ) enc ON true
         WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid

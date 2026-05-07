@@ -116,6 +116,9 @@ export async function cabinesRoutes(app) {
   app.get('/v1/cabines', { preHandler: cabineRoleAccess(app) }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      // Defesa em profundidade: tenant_id explícito além de RLS — role
+      // postgres do Supabase tem BYPASSRLS, queries sem WHERE tenant_id
+      // retornariam dados de todos os tenants.
       const result = await db.query(
         `SELECT c.id, c.numero, c.status, c.live_atual_id, c.contrato_id,
                 ct.tiktok_username,
@@ -131,19 +134,22 @@ export async function cabinesRoutes(app) {
                 COALESCE(ls.gifts_diamonds, 0) AS gifts_diamonds,
                 COALESCE(ls.total_orders, 0) AS total_orders
          FROM cabines c
-         LEFT JOIN contratos ct ON ct.id = c.contrato_id
-         LEFT JOIN lives l ON l.id = c.live_atual_id
-         LEFT JOIN users u ON u.id = l.apresentador_id
-         LEFT JOIN clientes cl ON cl.id = COALESCE(l.cliente_id, ct.cliente_id)
+         LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = c.tenant_id
+         LEFT JOIN lives l ON l.id = c.live_atual_id AND l.tenant_id = c.tenant_id
+         LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = c.tenant_id
+         LEFT JOIN clientes cl ON cl.id = COALESCE(l.cliente_id, ct.cliente_id) AND cl.tenant_id = c.tenant_id
          LEFT JOIN LATERAL (
            SELECT viewer_count, gmv, likes_count, comments_count,
                   shares_count, gifts_diamonds, total_orders
            FROM live_snapshots
            WHERE live_id = c.live_atual_id
+             AND tenant_id = c.tenant_id
            ORDER BY captured_at DESC
            LIMIT 1
          ) ls ON true
-         ORDER BY c.numero`
+         WHERE c.tenant_id = $1::uuid
+         ORDER BY c.numero`,
+        [tenant_id]
       )
 
       return result.rows.map(c => ({

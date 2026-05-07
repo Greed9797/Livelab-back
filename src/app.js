@@ -1,4 +1,5 @@
 import Fastify from 'fastify'
+import * as Sentry from '@sentry/node'
 import { timingSafeEqual } from 'crypto'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
@@ -177,6 +178,15 @@ export async function buildApp(opts = {}) {
     const status = error.statusCode ?? 500
     if (status >= 500) {
       request.log.error({ err: error }, 'Unhandled error')
+      // Reportar 5xx para Sentry com tags úteis (sem PII — beforeSend filtra)
+      if (process.env.SENTRY_DSN) {
+        Sentry.withScope((scope) => {
+          scope.setTag('route', request.routeOptions?.url ?? request.url)
+          scope.setTag('method', request.method)
+          scope.setUser(request.user ? { id: request.user.sub, papel: request.user.papel } : undefined)
+          Sentry.captureException(error)
+        })
+      }
       return reply.code(500).send({ error: 'Erro interno do servidor' })
     }
     return reply.code(status).send({ error: error.message })

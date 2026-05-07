@@ -1,7 +1,39 @@
 // src/server.js
 import 'dotenv/config'
+import * as Sentry from '@sentry/node'
 import cron from 'node-cron'
 import { buildApp } from './app.js'
+
+// Sentry init — antes de buildApp para capturar erros de boot.
+// PII redaction via beforeSend: nunca enviar senhas, tokens, body completo.
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV ?? 'development',
+    release: process.env.SENTRY_RELEASE ?? 'liveshop_saas_api@dev',
+    tracesSampleRate: 0.1,
+    beforeSend(event) {
+      // Redact PII em request body, headers e extra context
+      const scrub = (obj) => {
+        if (!obj || typeof obj !== 'object') return obj
+        const SENSITIVE = /^(senha|password|token|authorization|x-.*-token|secret|api.?key|credit.?card|cvv|cpf|cnpj)$/i
+        for (const k of Object.keys(obj)) {
+          if (SENSITIVE.test(k)) obj[k] = '[redacted]'
+          else if (typeof obj[k] === 'object') scrub(obj[k])
+        }
+        return obj
+      }
+      if (event.request) {
+        scrub(event.request.headers)
+        scrub(event.request.cookies)
+        scrub(event.request.data)
+      }
+      scrub(event.extra)
+      scrub(event.contexts)
+      return event
+    },
+  })
+}
 import { TikTokService } from './services/tiktok.js'
 import { cleanupOrphanContracts } from './jobs/cleanup_orphan_contracts.js'
 import * as connectorManager from './services/tiktok-connector-manager.js'

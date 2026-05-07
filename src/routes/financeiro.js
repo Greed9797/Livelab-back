@@ -51,10 +51,15 @@ export async function financeiroRoutes(app) {
       const result = await db.query(`
         WITH contratos_periodo AS (
           SELECT
-            -- Fixo proporcional ao número de meses no range
+            -- Fixo proporcional ao número de meses no range.
+            -- Mês único (mai-mai) deve dar 1, range mai-jul deve dar 3.
+            -- Fórmula: meses_diff + (1 se dia_fim >= dia_início, senão 0).
             COALESCE(SUM(c.valor_fixo), 0) *
-              GREATEST(1, (DATE_PART('year', $2::date) - DATE_PART('year', $1::date)) * 12
-                          + DATE_PART('month', $2::date) - DATE_PART('month', $1::date) + 1)
+              GREATEST(1::numeric,
+                (DATE_PART('year', $2::date) - DATE_PART('year', $1::date)) * 12
+                + DATE_PART('month', $2::date) - DATE_PART('month', $1::date)
+                + CASE WHEN DATE_PART('day', $2::date) >= DATE_PART('day', $1::date) THEN 1 ELSE 0 END
+              )::numeric
               AS fat_bruto_fixo,
             COALESCE(SUM(l.fat_gerado * c.comissao_pct / 100.0), 0) AS fat_bruto_comissao
           FROM contratos c

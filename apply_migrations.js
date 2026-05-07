@@ -44,6 +44,8 @@ const MIGRATIONS_LIST = [
   '055_leads_dados_extras.sql',
   '056_users_email_unique_per_tenant.sql',
   '057_rename_asaas_to_gateway.sql',
+  '058_webhook_replay_log.sql',
+  '059_cabines_unique_numero.sql',
 ]
 
 async function ensureMigrationsTable(client) {

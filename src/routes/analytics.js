@@ -224,14 +224,17 @@ export async function analyticsRoutes(app) {
         `, params),
 
         // Query C — Horas de Live por Dia (range completo)
+        // Conta apenas lives encerradas — lives travadas em 'em_andamento'
+        // inflam a soma quando comparadas com NOW() há semanas/meses.
         db.query(`
           SELECT
             (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
             COALESCE(SUM(
-              EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 3600.0
+              EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0
             ), 0) AS horas
           FROM lives l
-          WHERE l.status IN ('encerrada', 'em_andamento')
+          WHERE l.status = 'encerrada'
+            AND l.encerrado_em IS NOT NULL
             ${rangeFilter}
             ${clienteFilter}
           GROUP BY 1 ORDER BY 1

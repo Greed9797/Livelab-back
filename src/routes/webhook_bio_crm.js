@@ -149,45 +149,68 @@ export async function webhookBioCrmRoutes(app) {
     throw new Error('[boot] BIO_CRM_WEBHOOK_SECRET é obrigatório em produção')
   }
 
-  // Rota pública (sem authenticate). Segurança via HMAC.
-  app.post('/v1/webhooks/bio-crm', async (request, reply) => {
+  // Rota pública (sem authenticate). Segurança via HMAC + replay protection.
+  // Rate limit individual: 30/min é folga vs uso real (sender envia ~1/min).
+  app.post('/v1/webhooks/bio-crm', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
     const secret = process.env.BIO_CRM_WEBHOOK_SECRET
     const franqueadoraId = process.env.BIO_WEBHOOK_DEFAULT_FRANQUEADORA_ID
+    const replayProtect = process.env.WEBHOOK_REPLAY_PROTECTION === 'true'
 
-    if (!secret) {
-      app.log.error('[bio-crm webhook] BIO_CRM_WEBHOOK_SECRET ausente — rejeitando')
-      return reply.code(503).send({ error: 'Webhook não configurado.' })
-    }
-    if (!franqueadoraId) {
-      app.log.error('[bio-crm webhook] BIO_WEBHOOK_DEFAULT_FRANQUEADORA_ID ausente — rejeitando')
-      return reply.code(503).send({ error: 'Tenant destino não configurado.' })
+    // Resposta genérica em todas as falhas pré-DB para não permitir enumeration.
+    const reject = (status, reason) => {
+      app.log.warn({ reason }, '[bio-crm webhook] rejected')
+      return reply.code(status).send({ error: 'Webhook rejected.' })
     }
 
-    // rawBody quando disponível (via contentTypeParser global) — fallback determinístico
+    if (!secret || !franqueadoraId) {
+      app.log.error('[bio-crm webhook] config ausente — rejeitando')
+      return reply.code(503).send({ error: 'Webhook indisponível.' })
+    }
+
     const rawBody = typeof request.rawBody === 'string'
       ? request.rawBody
       : JSON.stringify(request.body ?? {})
 
     const sig = verifySignature(rawBody, request.headers['x-livelab-signature'], secret)
-    if (!sig.ok) {
-      app.log.warn({ reason: sig.reason }, '[bio-crm webhook] assinatura inválida')
-      return reply.code(401).send({ error: 'Assinatura inválida.' })
+    if (!sig.ok) return reject(401, sig.reason)
+
+    // Replay protection (timestamp + nonce). Ativado via env quando sender pronto.
+    if (replayProtect) {
+      const tsHeader = request.headers['x-livelab-timestamp']
+      const nonce = request.headers['x-livelab-nonce']
+      const ts = Number(tsHeader)
+      if (!Number.isFinite(ts) || !nonce || typeof nonce !== 'string' || nonce.length < 8) {
+        return reject(401, 'missing_timestamp_or_nonce')
+      }
+      const skewMs = Math.abs(Date.now() - ts * 1000)
+      if (skewMs > 5 * 60 * 1000) return reject(401, 'timestamp_skew')
+
+      try {
+        const inserted = await app.db.query(
+          `INSERT INTO webhook_replay_log (source, nonce)
+           VALUES ($1, $2)
+           ON CONFLICT DO NOTHING
+           RETURNING nonce`,
+          ['bio-crm', String(nonce).slice(0, 200)],
+        )
+        if (inserted.rowCount === 0) return reject(409, 'replay_detected')
+      } catch (err) {
+        app.log.error({ err }, '[bio-crm webhook] replay log insert failed')
+        return reject(503, 'replay_log_unavailable')
+      }
     }
 
     const payload = request.body
-    if (!payload || typeof payload !== 'object') {
-      return reply.code(400).send({ error: 'Payload inválido.' })
-    }
+    if (!payload || typeof payload !== 'object') return reject(400, 'invalid_payload')
     if (payload.event && payload.event !== 'bio.form.submitted') {
-      return reply.code(400).send({ error: `Evento não suportado: ${payload.event}` })
+      return reject(400, 'unsupported_event')
     }
 
     const row = buildLeadRow(payload, franqueadoraId)
 
     try {
-      // Usa withTenant pra setar app.tenant_id na conexão — necessário pra
-      // passar pela policy RLS leads_tenant (WITH CHECK herda do USING quando
-      // omitido, então INSERT exige franqueadora_id = current_setting(...)).
       const lead = await app.withTenant(franqueadoraId, async (db) => {
         const result = await db.query(
           `INSERT INTO leads (
@@ -211,7 +234,7 @@ export async function webhookBioCrmRoutes(app) {
       return reply.code(201).send({ ok: true, lead_id: lead.id })
     } catch (err) {
       app.log.error({ err }, '[bio-crm webhook] erro ao inserir lead')
-      return reply.code(500).send({ error: 'Erro ao gravar lead.' })
+      return reply.code(500).send({ error: 'Erro interno.' })
     }
   })
 }

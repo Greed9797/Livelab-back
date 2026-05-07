@@ -1,4 +1,5 @@
 import Fastify from 'fastify'
+import { timingSafeEqual } from 'crypto'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import helmet from '@fastify/helmet'
@@ -162,8 +163,12 @@ export async function buildApp(opts = {}) {
   // 404 (não 401) pra não confirmar existência do endpoint a scanners.
   app.get('/health', async (request, reply) => {
     const token = process.env.HEALTH_CHECK_TOKEN
-    if (token && request.headers['x-health-token'] !== token) {
-      return reply.code(404).send()
+    if (token) {
+      const provided = request.headers['x-health-token'] ?? ''
+      const a = Buffer.from(String(provided))
+      const b = Buffer.from(token)
+      const ok = a.length === b.length && timingSafeEqual(a, b)
+      if (!ok) return reply.code(404).send()
     }
     return { ok: true }
   })

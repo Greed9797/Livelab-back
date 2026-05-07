@@ -17,7 +17,11 @@ export async function tiktokRoutes(app) {
   const TIKTOK_CLIENT_KEY    = process.env.TIKTOK_CLIENT_KEY;
   const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
   const TIKTOK_REDIRECT_URI  = process.env.TIKTOK_REDIRECT_URI;
-  const requireWebhookSignature = process.env.TIKTOK_WEBHOOK_REQUIRE_SIGNATURE !== 'false'
+  // Em produção a signature é sempre obrigatória; toggle só vale fora de prod
+  // (staging/dev) para facilitar debug local.
+  const requireWebhookSignature = process.env.NODE_ENV === 'production'
+    ? true
+    : (process.env.TIKTOK_WEBHOOK_REQUIRE_SIGNATURE !== 'false')
   const webhookSignatureToleranceSeconds = Number(
     process.env.TIKTOK_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS ?? 300
   )
@@ -150,7 +154,8 @@ export async function tiktokRoutes(app) {
         WHERE id = $5
       `, [encryptToken(data.access_token), encryptToken(data.refresh_token), expiresAt, data.open_id, tenantId])
 
-      app.log.info(`[TikTok OAuth] Token salvo para tenant ${tenantId} (open_id: ${data.open_id})`)
+      const openIdMasked = String(data.open_id ?? '').slice(0, 4) + '***'
+      app.log.info(`[TikTok OAuth] Token salvo para tenant ${tenantId} (open_id: ${openIdMasked})`)
 
       const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:4200'
       return reply.type('text/html').send(_successPage(frontendUrl))

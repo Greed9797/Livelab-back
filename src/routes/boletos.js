@@ -101,7 +101,10 @@ export async function boletosRoutes(app) {
   })
 
   // POST /v1/webhooks/pagamento (Pagar.me webhook)
-  app.post('/v1/webhooks/pagamento', async (request, reply) => {
+  // Rate limit individual: webhooks legítimos chegam < 5/min; 30 é folga
+  app.post('/v1/webhooks/pagamento', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
     // Validar token secreto enviado no header pelo Pagar.me
     const receivedToken = request.headers['x-webhook-token']
     const expectedToken = process.env.PAGAMENTO_WEBHOOK_TOKEN ?? ''
@@ -121,7 +124,8 @@ export async function boletosRoutes(app) {
     if (!id || !status) return reply.code(400).send({ error: 'Payload inválido' })
 
     if (status === 'paid') {
-      // Lookup tenant_id da referência primeiro pra defesa em profundidade.
+      // Lookup precisa cross-tenant pra detectar colisão de referência externa
+      // (PK do gateway pode bater entre tenants). Defesa em profundidade.
       const lookup = await app.db.query(
         `SELECT id, tenant_id FROM boletos WHERE referencia_externa = $1 LIMIT 2`,
         [id]
@@ -135,11 +139,15 @@ export async function boletosRoutes(app) {
         return reply.code(409).send({ error: 'Referência ambígua entre tenants' })
       }
       const { id: boletoId, tenant_id: boletoTenant } = lookup.rows[0]
-      await app.db.query(
-        `UPDATE boletos SET status = 'pago', pago_em = NOW()
-         WHERE id = $1 AND tenant_id = $2 AND status != 'pago'`,
-        [boletoId, boletoTenant]
-      )
+      // UPDATE via dbTenant para ativar RLS (defesa em profundidade extra
+      // sobre o filtro explícito tenant_id = $2).
+      await app.withTenant(boletoTenant, async (db) => {
+        await db.query(
+          `UPDATE boletos SET status = 'pago', pago_em = NOW()
+           WHERE id = $1 AND tenant_id = $2 AND status != 'pago'`,
+          [boletoId, boletoTenant]
+        )
+      })
     }
     return { received: true }
   })

@@ -33,7 +33,9 @@ export async function appmaxRoutes(app) {
     })
   })
 
-  app.post('/v1/webhooks/appmax/validate', async (request, reply) => {
+  app.post('/v1/webhooks/appmax/validate', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
     const appId = process.env.APPMAX_APP_ID
     if (!appId) return reply.code(503).send({ error: 'APPMAX_APP_ID não configurado' })
     app.log.info('[appmax] validate hit')
@@ -44,7 +46,9 @@ export async function appmaxRoutes(app) {
   })
 
   // POST /v1/webhooks/appmax — recebe eventos de pagamento
-  app.post('/v1/webhooks/appmax', async (request, reply) => {
+  app.post('/v1/webhooks/appmax', {
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+  }, async (request, reply) => {
     if (!process.env.APPMAX_APP_ID) {
       return reply.code(503).send({ error: 'Appmax não configurado' })
     }

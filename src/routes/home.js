@@ -6,20 +6,26 @@ export async function homeRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       try {
-      // ── Grupo 1: queries financeiras + cabines (independentes entre si) ──
+      // ── Grupo 1: queries financeiras + cabines ──
+      // Defesa em profundidade: tenant_id explícito em cada query
+      // (role Postgres atual tem BYPASSRLS — RLS sozinha não filtra).
       const [fixoQ, varQ, custosQ, cabinesQ] = await Promise.all([
-        db.query(`SELECT COALESCE(SUM(valor_fixo), 0) AS valor FROM contratos WHERE status = 'ativo'`),
+        db.query(`SELECT COALESCE(SUM(valor_fixo), 0) AS valor FROM contratos
+                  WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+                    AND status = 'ativo'`),
         db.query(`
         SELECT COALESCE(SUM(l.fat_gerado * (COALESCE(c.comissao_pct, 0) / 100.0)), 0) AS valor
         FROM lives l
-        JOIN contratos c ON c.cliente_id = l.cliente_id AND c.status = 'ativo'
-        WHERE l.status = 'encerrada'
+        JOIN contratos c ON c.cliente_id = l.cliente_id AND c.status = 'ativo' AND c.tenant_id = l.tenant_id
+        WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND l.status = 'encerrada'
           AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
       `),
         db.query(`
         SELECT COALESCE(SUM(valor), 0) AS valor
         FROM custos
-        WHERE date_trunc('month', competencia) = date_trunc('month', NOW())
+        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND date_trunc('month', competencia) = date_trunc('month', NOW())
       `),
         db.query(`
         SELECT
@@ -36,24 +42,27 @@ export async function homeRoutes(app) {
              JOIN users u2 ON u2.id = la.apresentador_id
              WHERE la.live_id = c.live_atual_id) AS apresentadores_extra
         FROM cabines c
-        LEFT JOIN lives l ON l.id = c.live_atual_id
-        LEFT JOIN clientes cl ON cl.id = l.cliente_id
+        LEFT JOIN lives l ON l.id = c.live_atual_id AND l.tenant_id = c.tenant_id
+        LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = c.tenant_id
         LEFT JOIN users u ON u.id = l.apresentador_id
-        LEFT JOIN contratos ct ON ct.id = c.contrato_id
+        LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = c.tenant_id
         LEFT JOIN LATERAL (
             SELECT viewer_count, gmv
             FROM live_snapshots
             WHERE live_id = c.live_atual_id
+              AND tenant_id = c.tenant_id
             ORDER BY captured_at DESC LIMIT 1
         ) ls ON true
         LEFT JOIN LATERAL (
             SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (encerrado_em - iniciado_em)) / 3600.0), 0) AS horas_realizadas_hoje
             FROM lives
             WHERE cabine_id = c.id
+              AND tenant_id = c.tenant_id
               AND status = 'encerrada'
               AND date_trunc('day', iniciado_em) = date_trunc('day', NOW())
         ) enc ON true
-        WHERE c.ativo IS NOT FALSE
+        WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND c.ativo IS NOT FALSE
         ORDER BY c.numero
       `),
       ])
@@ -98,24 +107,29 @@ export async function homeRoutes(app) {
         ocupacaoQ,
         rankingResult,
       ] = await Promise.all([
-        db.query(`SELECT COUNT(*) AS total FROM clientes WHERE status = 'ativo'`),
+        db.query(`SELECT COUNT(*) AS total FROM clientes
+                  WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+                    AND status = 'ativo'`),
         db.query(`
         SELECT COUNT(*) AS total FROM clientes
-        WHERE date_trunc('month', criado_em AT TIME ZONE 'America/Sao_Paulo')
+        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND date_trunc('month', criado_em AT TIME ZONE 'America/Sao_Paulo')
               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
           AND status = 'ativo'
       `),
         db.query(`
         SELECT COUNT(id) AS lives_mes, COALESCE(SUM(fat_gerado), 0) AS gmv_lives_mes
         FROM lives
-        WHERE status = 'encerrada'
+        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND status = 'encerrada'
           AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
       `),
         db.query(`
         SELECT COALESCE(AVG(viewer_count), 0) AS media
         FROM live_snapshots
-        WHERE date_trunc('month', captured_at) = date_trunc('month', NOW())
+        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND date_trunc('month', captured_at) = date_trunc('month', NOW())
       `),
         db.query(`
         SELECT COUNT(*) AS pipeline_aberto, COALESCE(SUM(valor_oportunidade), 0) AS valor_pipeline
@@ -133,10 +147,15 @@ export async function homeRoutes(app) {
       `, [tenant_id]),
         db.query(`
         SELECT
-          (SELECT COUNT(*) FROM clientes WHERE status = 'inadimplente') AS inadimplentes,
-          (SELECT COUNT(*) FROM contratos WHERE status IN ('rascunho','em_analise')) AS contratos_aguardando_assinatura,
+          (SELECT COUNT(*) FROM clientes
+           WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+             AND status = 'inadimplente') AS inadimplentes,
+          (SELECT COUNT(*) FROM contratos
+           WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+             AND status IN ('rascunho','em_analise')) AS contratos_aguardando_assinatura,
           (SELECT COUNT(*) FROM live_requests
-           WHERE data_solicitada >= DATE_TRUNC('week', CURRENT_DATE)
+           WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+             AND data_solicitada >= DATE_TRUNC('week', CURRENT_DATE)
              AND data_solicitada < DATE_TRUNC('week', CURRENT_DATE) + INTERVAL '7 days'
              AND status IN ('aprovada','pendente')) AS agendamentos_semana,
           (SELECT COUNT(*) FROM leads

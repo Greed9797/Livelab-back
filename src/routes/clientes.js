@@ -68,7 +68,8 @@ export async function clientesRoutes(app) {
       const { rows } = await db.query(
         `SELECT id, cep, cidade, estado
          FROM clientes
-         WHERE (lat IS NULL OR lng IS NULL)
+         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+           AND (lat IS NULL OR lng IS NULL)
            AND (cep IS NOT NULL OR (cidade IS NOT NULL AND estado IS NOT NULL))
          LIMIT 50`
       )
@@ -87,7 +88,8 @@ export async function clientesRoutes(app) {
         }
         if (geo.lat != null && geo.lng != null) {
           await db.query(
-            `UPDATE clientes SET lat = $1, lng = $2 WHERE id = $3`,
+            `UPDATE clientes SET lat = $1, lng = $2
+             WHERE id = $3 AND tenant_id = current_setting('app.tenant_id', true)::uuid`,
             [geo.lat, geo.lng, cli.id]
           )
           results.updated++
@@ -110,7 +112,8 @@ export async function clientesRoutes(app) {
            COUNT(l.id)::int                          AS total_lives,
            COALESCE(SUM(l.comissao_calculada), 0)   AS comissao_paga
          FROM lives l
-         WHERE l.status = 'encerrada'`
+         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+           AND l.status = 'encerrada'`
       )
       return result.rows[0]
     })

@@ -14,11 +14,14 @@ export async function analyticsRoutes(app) {
         heatmapHorariosQ,
         eficienciaCabinesQ,
       ] = await Promise.all([
+        // Defesa em profundidade: filtros tenant_id explícitos via current_setting.
+        // Role Postgres do Supabase tem BYPASSRLS, então RLS sozinha não basta.
         db.query(`
         WITH lives_ao_vivo AS (
           SELECT c.live_atual_id AS live_id
           FROM cabines c
-          WHERE c.status = 'ao_vivo'
+          WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND c.status = 'ao_vivo'
             AND c.live_atual_id IS NOT NULL
         ), snapshots_recentes AS (
           SELECT DISTINCT ON (ls.live_id)
@@ -27,6 +30,7 @@ export async function analyticsRoutes(app) {
                  ls.gmv
           FROM live_snapshots ls
           JOIN lives_ao_vivo laov ON laov.live_id = ls.live_id
+          WHERE ls.tenant_id = current_setting('app.tenant_id', true)::uuid
           ORDER BY ls.live_id, ls.captured_at DESC
         )
         SELECT
@@ -35,7 +39,8 @@ export async function analyticsRoutes(app) {
           (
             SELECT COUNT(*)
             FROM lives l
-            WHERE l.status = 'encerrada'
+            WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND l.status = 'encerrada'
               AND date_trunc('day', l.iniciado_em) = date_trunc('day', NOW())
           ) AS total_lives_hoje
         FROM snapshots_recentes sr
@@ -48,7 +53,8 @@ export async function analyticsRoutes(app) {
           COALESCE(SUM(l.fat_gerado), 0) AS gmv_total
         FROM lives l
         JOIN users u ON u.id = l.apresentador_id
-        WHERE l.status = 'encerrada'
+        WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND l.status = 'encerrada'
         GROUP BY u.id, u.nome
         ORDER BY gmv_total DESC, total_lives DESC, apresentador_nome ASC
         LIMIT 5
@@ -60,8 +66,9 @@ export async function analyticsRoutes(app) {
           COALESCE(SUM(l.fat_gerado), 0) AS gmv_total,
           MAX(l.iniciado_em) AS ultima_live
         FROM lives l
-        JOIN clientes c ON c.id = l.cliente_id
-        WHERE l.status = 'encerrada'
+        JOIN clientes c ON c.id = l.cliente_id AND c.tenant_id = l.tenant_id
+        WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND l.status = 'encerrada'
         GROUP BY c.id, c.nome
         ORDER BY gmv_total DESC, ultima_live DESC NULLS LAST, cliente_nome ASC
         LIMIT 5
@@ -72,7 +79,8 @@ export async function analyticsRoutes(app) {
           COUNT(*) AS total_lives,
           COALESCE(SUM(l.fat_gerado), 0) AS gmv_total
         FROM lives l
-        WHERE l.status = 'encerrada'
+        WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND l.status = 'encerrada'
         GROUP BY 1
         ORDER BY 1 ASC
       `),
@@ -85,7 +93,9 @@ export async function analyticsRoutes(app) {
         FROM cabines c
         LEFT JOIN lives l
           ON l.cabine_id = c.id
+         AND l.tenant_id = c.tenant_id
          AND l.status = 'encerrada'
+        WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
         GROUP BY c.id, c.numero
         ORDER BY gmv_acumulado DESC, total_lives DESC, c.numero ASC
         LIMIT 5
@@ -201,7 +211,8 @@ export async function analyticsRoutes(app) {
             to_char(date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS mes,
             COALESCE(SUM(l.fat_gerado), 0) AS gmv
           FROM lives l
-          WHERE l.status = 'encerrada'
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
             AND $1::date IS NOT NULL
             AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $2::date) - interval '11 months'
             AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $2::date) + interval '1 month'
@@ -215,7 +226,8 @@ export async function analyticsRoutes(app) {
             to_char(date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS mes,
             COUNT(*) AS total_vendas
           FROM lives l
-          WHERE l.status = 'encerrada'
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
             AND $1::date IS NOT NULL
             AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $2::date) - interval '11 months'
             AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $2::date) + interval '1 month'
@@ -233,7 +245,8 @@ export async function analyticsRoutes(app) {
               EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0
             ), 0) AS horas
           FROM lives l
-          WHERE l.status = 'encerrada'
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
             AND l.encerrado_em IS NOT NULL
             ${rangeFilter}
             ${clienteFilter}
@@ -249,7 +262,8 @@ export async function analyticsRoutes(app) {
             COALESCE(SUM(l.fat_gerado), 0) AS gmv_total
           FROM lives l
           JOIN users u ON u.id = l.apresentador_id
-          WHERE l.status = 'encerrada'
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
             ${rangeFilter}
             ${clienteFilter}
           GROUP BY l.apresentador_id, u.nome
@@ -263,7 +277,8 @@ export async function analyticsRoutes(app) {
             EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS hora,
             COALESCE(SUM(l.fat_gerado), 0) AS gmv
           FROM lives l
-          WHERE l.status = 'encerrada'
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
             ${rangeFilter}
             ${clienteFilter}
           GROUP BY 1 ORDER BY 1
@@ -277,7 +292,8 @@ export async function analyticsRoutes(app) {
             COALESCE(SUM(l.fat_gerado), 0) AS gmv,
             COUNT(*) AS lives
           FROM lives l
-          WHERE l.status = 'encerrada'
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
             ${rangeFilter}
             ${clienteFilter}
           GROUP BY 1, 2 ORDER BY 1, 2
@@ -290,7 +306,8 @@ export async function analyticsRoutes(app) {
             SELECT MAX(ls.viewer_count) AS peak_viewers
             FROM live_snapshots ls
             JOIN lives l ON l.id = ls.live_id
-            WHERE l.status = 'encerrada'
+            WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
               ${rangeFilter}
               ${clienteFilter}
             GROUP BY ls.live_id
@@ -303,7 +320,8 @@ export async function analyticsRoutes(app) {
             COALESCE(SUM(l.fat_gerado), 0) AS faturamento_total,
             COUNT(*) AS total_vendas
           FROM lives l
-          WHERE l.status = 'encerrada'
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
             ${rangeFilter}
             ${clienteFilter}
         `, params),
@@ -314,7 +332,8 @@ export async function analyticsRoutes(app) {
             COALESCE(SUM(l.fat_gerado), 0) AS faturamento_total,
             COUNT(*) AS total_vendas
           FROM lives l
-          WHERE l.status = 'encerrada'
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
             ${rangeFilter}
             ${clienteFilter}
         `, prevParams),

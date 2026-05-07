@@ -31,7 +31,10 @@ export async function apresentadorasRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT ${COLS} FROM apresentadoras a ORDER BY a.ativo DESC, a.nome ASC`
+        `SELECT ${COLS} FROM apresentadoras a
+         WHERE a.tenant_id = $1::uuid
+         ORDER BY a.ativo DESC, a.nome ASC`,
+        [tenant_id]
       )
       return result.rows
     })
@@ -42,8 +45,8 @@ export async function apresentadorasRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT ${COLS} FROM apresentadoras WHERE id = $1`,
-        [request.params.id]
+        `SELECT ${COLS} FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+        [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
       return result.rows[0]
@@ -80,12 +83,14 @@ export async function apresentadorasRoutes(app) {
     const fields = Object.keys(updates)
     if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
-    const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(', ')
-    const values = [request.params.id, ...fields.map((f) => updates[f])]
+    const setClauses = fields.map((f, i) => `${f} = $${i + 3}`).join(', ')
+    const values = [request.params.id, tenant_id, ...fields.map((f) => updates[f])]
 
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `UPDATE apresentadoras SET ${setClauses} WHERE id = $1 RETURNING ${COLS}`,
+        `UPDATE apresentadoras SET ${setClauses}
+         WHERE id = $1 AND tenant_id = $2::uuid
+         RETURNING ${COLS}`,
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
@@ -98,8 +103,10 @@ export async function apresentadorasRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `UPDATE apresentadoras SET ativo = false WHERE id = $1 RETURNING id`,
-        [request.params.id]
+        `UPDATE apresentadoras SET ativo = false
+         WHERE id = $1 AND tenant_id = $2::uuid
+         RETURNING id`,
+        [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
       return reply.code(204).send()

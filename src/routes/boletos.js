@@ -68,7 +68,10 @@ export async function boletosRoutes(app) {
         `SELECT id, tipo, valor, vencimento, status, pago_em, referencia_externa, competencia,
                 gateway_id, gateway_url, gateway_pix_copia_cola, gateway_provider,
                 gerado_automaticamente, gateway_error
-         FROM boletos ORDER BY vencimento DESC`
+         FROM boletos
+         WHERE tenant_id = $1::uuid
+         ORDER BY vencimento DESC`,
+        [tenant_id]
       )
       return result.rows.map(b => ({ ...b, valor: Number(b.valor ?? 0) }))
     })
@@ -79,7 +82,8 @@ export async function boletosRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT * FROM boletos WHERE id = $1`, [request.params.id]
+        `SELECT * FROM boletos WHERE id = $1 AND tenant_id = $2::uuid`,
+        [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Boleto não encontrado' })
       return { ...result.rows[0], url_boleto: `https://sandbox.pagar.me/boletos/${result.rows[0].referencia_externa ?? result.rows[0].id}` }
@@ -92,8 +96,9 @@ export async function boletosRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE boletos SET status = 'pago', pago_em = NOW()
-         WHERE id = $1 AND status != 'pago' RETURNING id, status, pago_em`,
-        [request.params.id]
+         WHERE id = $1 AND tenant_id = $2::uuid AND status != 'pago'
+         RETURNING id, status, pago_em`,
+        [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Boleto não encontrado ou já pago' })
       return result.rows[0]

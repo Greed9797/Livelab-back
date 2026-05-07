@@ -26,7 +26,10 @@ export async function recomendacoesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT id, nome_indicado, recomendante, status, lat, lng, convertido_em, criado_em
-         FROM recomendacoes ORDER BY criado_em DESC`
+         FROM recomendacoes
+         WHERE tenant_id = $1::uuid
+         ORDER BY criado_em DESC`,
+        [tenant_id]
       )
       return result.rows
     })

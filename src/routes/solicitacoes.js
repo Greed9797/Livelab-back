@@ -42,8 +42,8 @@ export async function solicitacoesRoutes(app) {
           cli.nome   AS cliente_nome,
           u.nome     AS solicitante_nome
         FROM live_requests lr
-        JOIN cabines  cab ON cab.id = lr.cabine_id
-        JOIN clientes cli ON cli.id = lr.cliente_id
+        JOIN cabines  cab ON cab.id = lr.cabine_id AND cab.tenant_id = lr.tenant_id
+        JOIN clientes cli ON cli.id = lr.cliente_id AND cli.tenant_id = lr.tenant_id
         JOIN users    u   ON u.id   = lr.solicitante_id
         WHERE lr.tenant_id = $1
           ${whereStatus}

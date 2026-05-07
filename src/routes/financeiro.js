@@ -111,10 +111,11 @@ export async function financeiroRoutes(app) {
       const porCliente = await db.query(`
         SELECT cl.nome, cl.nicho, COALESCE(SUM(l.fat_gerado), 0) AS total
         FROM clientes cl
-        LEFT JOIN lives l ON l.cliente_id = cl.id
+        LEFT JOIN lives l ON l.cliente_id = cl.id AND l.tenant_id = cl.tenant_id
           AND l.encerrado_em >= $1::date
           AND l.encerrado_em <  ($2::date + interval '1 day')
-        WHERE cl.status = 'ativo'
+        WHERE cl.tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND cl.status = 'ativo'
         GROUP BY cl.id, cl.nome, cl.nicho
         ORDER BY total DESC
       `, [startDate, endDate])
@@ -137,7 +138,8 @@ export async function financeiroRoutes(app) {
       const entradas = await db.query(`
         SELECT date_trunc('day', encerrado_em) AS dia, SUM(fat_gerado) AS valor
         FROM lives
-        WHERE encerrado_em >= $1::date
+        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND encerrado_em >= $1::date
           AND encerrado_em <  ($2::date + interval '1 day')
         GROUP BY 1 ORDER BY 1
       `, [startDate, endDate])
@@ -145,7 +147,8 @@ export async function financeiroRoutes(app) {
       const saidas = await db.query(`
         SELECT competencia AS dia, SUM(valor) AS valor
         FROM custos
-        WHERE competencia >= $1::date
+        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND competencia >= $1::date
           AND competencia <  ($2::date + interval '1 day')
         GROUP BY 1 ORDER BY 1
       `, [startDate, endDate])
@@ -194,7 +197,8 @@ export async function financeiroRoutes(app) {
       const result = await db.query(
         `SELECT id, descricao, valor, tipo, competencia
          FROM custos
-         WHERE competencia >= $1::date
+         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+           AND competencia >= $1::date
            AND competencia <  ($2::date + interval '1 day')
          ORDER BY competencia DESC`,
         [startDate, endDate]
@@ -208,7 +212,8 @@ export async function financeiroRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `DELETE FROM custos WHERE id = $1 RETURNING id`, [request.params.id]
+        `DELETE FROM custos WHERE id = $1 AND tenant_id = $2::uuid RETURNING id`,
+        [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Custo não encontrado' })
       return { ok: true }

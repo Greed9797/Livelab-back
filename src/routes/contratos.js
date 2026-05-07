@@ -81,7 +81,8 @@ export async function contratosRoutes(app) {
                cl.nome AS cliente_nome, cl.cnpj AS cliente_cnpj,
                cl.nicho AS cliente_nicho
         FROM contratos c
-        JOIN clientes cl ON cl.id = c.cliente_id
+        JOIN clientes cl ON cl.id = c.cliente_id AND cl.tenant_id = c.tenant_id
+        WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
         ORDER BY c.criado_em DESC
       `)
       return result.rows
@@ -100,8 +101,9 @@ export async function contratosRoutes(app) {
                cl.score AS cliente_score, cl.email AS cliente_email,
                cl.celular AS cliente_celular
         FROM contratos c
-        JOIN clientes cl ON cl.id = c.cliente_id
+        JOIN clientes cl ON cl.id = c.cliente_id AND cl.tenant_id = c.tenant_id
         WHERE c.id = $1
+          AND c.tenant_id = current_setting('app.tenant_id', true)::uuid
       `, [request.params.id])
       if (!result.rows[0]) return reply.code(404).send({ error: 'Contrato não encontrado' })
       return result.rows[0]
@@ -140,9 +142,12 @@ export async function contratosRoutes(app) {
       if (sets.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
       vals.push(request.params.id)
+      vals.push(tenant_id)
       const result = await db.query(
         `UPDATE contratos SET ${sets.join(', ')}
-         WHERE id = $${idx} AND status = 'rascunho'
+         WHERE id = $${idx}
+           AND tenant_id = $${idx + 1}::uuid
+           AND status = 'rascunho'
          RETURNING id, status, pacote_id, valor_fixo, comissao_pct,
                    horas_contratadas, horas_consumidas,
                    (horas_contratadas - horas_consumidas) AS horas_restantes`,
@@ -160,9 +165,11 @@ export async function contratosRoutes(app) {
       const result = await db.query(
         `UPDATE contratos
          SET status = 'em_analise', assinado_em = NOW()
-         WHERE id = $1 AND status = 'rascunho'
+         WHERE id = $1
+           AND tenant_id = $2::uuid
+           AND status = 'rascunho'
          RETURNING id, status, assinado_em`,
-        [request.params.id]
+        [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou já assinado' })
       return result.rows[0]
@@ -188,9 +195,11 @@ export async function contratosRoutes(app) {
       const q = await db.query(
         `SELECT c.id, c.status, c.cliente_id,
                 cl.fat_anual, cl.cnpj, cl.score as cliente_score, cl.nicho
-         FROM contratos c JOIN clientes cl ON cl.id = c.cliente_id
-         WHERE c.id = $1 AND c.status = 'rascunho'`,
-        [request.params.id]
+         FROM contratos c JOIN clientes cl ON cl.id = c.cliente_id AND cl.tenant_id = c.tenant_id
+         WHERE c.id = $1
+           AND c.tenant_id = $2::uuid
+           AND c.status = 'rascunho'`,
+        [request.params.id, tenant_id]
       )
       const contrato = q.rows[0]
       if (!contrato) {
@@ -215,14 +224,14 @@ export async function contratosRoutes(app) {
                accepted_terms_at = NOW(),
                assinado_em = NOW(),
                ativado_em = $4
-           WHERE id = $5`,
-          [novoStatus, signatureUrl, clientIp, aprovado ? new Date() : null, request.params.id]
+           WHERE id = $5 AND tenant_id = $6::uuid`,
+          [novoStatus, signatureUrl, clientIp, aprovado ? new Date() : null, request.params.id, tenant_id]
         )
 
         if (aprovado) {
           await db.query(
-            `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
-            [contrato.cliente_id]
+            `UPDATE clientes SET status = 'ativo' WHERE id = $1 AND tenant_id = $2::uuid`,
+            [contrato.cliente_id, tenant_id]
           )
         }
         await db.query('COMMIT')
@@ -242,9 +251,11 @@ export async function contratosRoutes(app) {
       // Busca contrato + cliente
       const q = await db.query(
         `SELECT c.*, cl.fat_anual, cl.cnpj, cl.score as cliente_score, cl.nicho
-         FROM contratos c JOIN clientes cl ON cl.id = c.cliente_id
-         WHERE c.id = $1 AND c.status = 'em_analise'`,
-        [request.params.id]
+         FROM contratos c JOIN clientes cl ON cl.id = c.cliente_id AND cl.tenant_id = c.tenant_id
+         WHERE c.id = $1
+           AND c.tenant_id = $2::uuid
+           AND c.status = 'em_analise'`,
+        [request.params.id, tenant_id]
       )
       const contrato = q.rows[0]
       if (!contrato) return reply.code(400).send({ error: 'Contrato não em análise' })
@@ -253,11 +264,13 @@ export async function contratosRoutes(app) {
       const novoStatus = aprovado ? 'ativo' : 'cancelado'
 
       await db.query(
-        `UPDATE contratos SET status = $1, ativado_em = $2, cancelado_em = $3 WHERE id = $4`,
+        `UPDATE contratos SET status = $1, ativado_em = $2, cancelado_em = $3
+         WHERE id = $4 AND tenant_id = $5::uuid`,
         [novoStatus,
          aprovado ? new Date() : null,
          aprovado ? null : new Date(),
-         request.params.id]
+         request.params.id,
+         tenant_id]
       )
 
       return { aprovado, score, risco, status: novoStatus }
@@ -298,9 +311,11 @@ export async function contratosRoutes(app) {
         const result = await db.query(
           `UPDATE contratos SET de_risco = true, is_risco_franqueado = true,
                   status = 'ativo', ativado_em = NOW(), risco_assumido_em = NOW()
-           WHERE id = $1 AND status IN ('em_analise', 'cancelado')
+           WHERE id = $1
+             AND tenant_id = $2::uuid
+             AND status IN ('em_analise', 'cancelado')
            RETURNING id, cliente_id, status, de_risco`,
-          [request.params.id]
+          [request.params.id, tenant_id]
         )
         if (!result.rows[0]) {
           await db.query('ROLLBACK')
@@ -308,8 +323,8 @@ export async function contratosRoutes(app) {
         }
 
         await db.query(
-          `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
-          [result.rows[0].cliente_id]
+          `UPDATE clientes SET status = 'ativo' WHERE id = $1 AND tenant_id = $2::uuid`,
+          [result.rows[0].cliente_id, tenant_id]
         )
         await db.query('COMMIT')
       } catch (txErr) {

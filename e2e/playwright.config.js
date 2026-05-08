@@ -11,20 +11,22 @@ export default defineConfig({
   },
   webServer: [
     {
-      // Backend API server
+      // Backend API server (este repo)
       command: 'node src/server.js',
-      cwd: '/Users/vitormiguelgoedertdaluz/liveshop_saas_api-backend-',
+      cwd: '..', // path relativo a e2e/
       port: 3001,
       reuseExistingServer: true,
-      timeout: 15000,
+      timeout: 30000,
     },
     {
-      // Flutter web static build
+      // Flutter web build — clone Playground (ativo).
+      // Pré-requisito: rodar `flutter build web --release` antes do `npm run e2e`.
+      // Override via env: E2E_FRONTEND_DIR.
       command: 'npx serve build/web -l 8080 -s',
-      cwd: '/Users/vitormiguelgoedertdaluz/-liveshop_saas-frontend-',
+      cwd: process.env.E2E_FRONTEND_DIR ?? '/Users/vitormiguelgoedertdaluz/Documents/Playground/-liveshop_saas-frontend-',
       port: 8080,
       reuseExistingServer: true,
-      timeout: 10000,
+      timeout: 15000,
     },
   ],
   projects: [

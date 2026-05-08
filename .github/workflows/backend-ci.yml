@@ -31,12 +31,20 @@ jobs:
             node --check "$f" || exit 1
           done
 
-      - name: Run tests
-        run: npx vitest run
+      - name: Run tests + coverage threshold
+        run: npx vitest run --coverage
         env:
           DATABASE_URL: postgresql://test:test@localhost:5432/test
           JWT_SECRET: test-secret-with-at-least-32-chars-required
           NODE_ENV: test
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage/
+          retention-days: 14
 
       - name: Audit (high severity)
         run: npm audit --omit=dev --audit-level=high || echo "Audit warnings"

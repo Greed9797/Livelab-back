@@ -18,31 +18,39 @@
 
 /**
  * Enable Flutter accessibility tree on the current page.
- * Must be called before any flt-semantics interaction.
+ * Polling até semantics tree estar populada com pelo menos 1 botão.
+ * Substitui waitForTimeout fixo (que falhava em swiftshader heavy).
  */
 async function enableA11y(page) {
+  // 1. Click placeholder (idempotente — múltiplos clicks ok)
   await page.evaluate(() => {
     const placeholder = document.querySelector('flt-semantics-placeholder');
     if (placeholder) {
       placeholder.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     }
   });
-  // Wait for semantics tree to build
-  await page.waitForTimeout(1500);
+
+  // 2. Polling: aguardar pelo menos 1 flt-semantics button aparecer (max 10s)
+  await page.waitForFunction(
+    () => {
+      const nodes = document.querySelectorAll('flt-semantics[role="button"]');
+      return nodes.length > 0;
+    },
+    { timeout: 10000, polling: 200 },
+  ).catch(() => {
+    // Re-click placeholder e tentar de novo (semantics pode ter sido limpo)
+    return page.evaluate(() => {
+      const ph = document.querySelector('flt-semantics-placeholder');
+      if (ph) ph.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+  });
 }
 
 /**
- * Log in by filling the visible Flutter login form.
- * Works regardless of FlutterSecureStorage encryption because it drives the real UI.
- *
- * Precondition: page must already be on the app URL (login screen visible).
+ * Acha botão ENTRAR no semantics tree. Retorna posição ou null.
  */
-export async function loginViaAPI(page, email, senha) {
-  // 1. Enable accessibility so we can interact with flt-semantics nodes
-  await enableA11y(page);
-
-  // 2. Locate ENTRAR button as a positional anchor
-  const formPos = await page.evaluate(() => {
+async function findEntrarButton(page) {
+  return page.evaluate(() => {
     const nodes = Array.from(document.querySelectorAll('flt-semantics'));
     const entrar = nodes.find(
       n => n.getAttribute('role') === 'button' && n.textContent?.trim() === 'ENTRAR'
@@ -55,37 +63,83 @@ export async function loginViaAPI(page, email, senha) {
     const ey = parseFloat(m[2]);
     const ew = parseFloat(entrar.style.width) || 338;
     const eh = parseFloat(entrar.style.height) || 32;
-    const cx = ex + ew / 2; // horizontal center of form
+    const cx = ex + ew / 2;
 
-    // Email field is ~136px above ENTRAR top; password ~72px above ENTRAR top
     return {
       emailX: cx,
-      emailY: ey - 112,       // center of email input
+      emailY: ey - 112,
       passwordX: cx,
-      passwordY: ey - 48,     // center of password input
+      passwordY: ey - 48,
       entrarX: cx,
-      entrarY: ey + eh / 2,   // center of ENTRAR button
+      entrarY: ey + eh / 2,
     };
   });
+}
 
-  if (!formPos) {
-    throw new Error(`loginViaAPI: login form (ENTRAR button) not found for ${email}`);
+/**
+ * Login via UI — drive form real do Flutter Web.
+ * Tem retry interno (3×) caso semantics tree ainda não esteja pronto.
+ */
+export async function loginViaAPI(page, email, senha) {
+  let formPos = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await enableA11y(page);
+
+    // Polling explícito até ENTRAR aparecer (max 8s por tentativa)
+    try {
+      await page.waitForFunction(
+        () => {
+          const nodes = Array.from(document.querySelectorAll('flt-semantics'));
+          return nodes.some(
+            n => n.getAttribute('role') === 'button' && n.textContent?.trim() === 'ENTRAR',
+          );
+        },
+        { timeout: 8000, polling: 250 },
+      );
+    } catch (_) {
+      // Timeout — retry
+    }
+
+    formPos = await findEntrarButton(page);
+    if (formPos) break;
+
+    // Não achou — re-disparar placeholder e tentar de novo
+    await page.waitForTimeout(500);
   }
 
-  // 3. Click email field and type
+  if (!formPos) {
+    // Última chance: dump DOM pra debug
+    const debug = await page.evaluate(() => {
+      return {
+        url: location.href,
+        flt_semantics_count: document.querySelectorAll('flt-semantics').length,
+        flt_buttons: Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
+          .map(n => n.textContent?.trim())
+          .filter(Boolean)
+          .slice(0, 10),
+        has_placeholder: !!document.querySelector('flt-semantics-placeholder'),
+      };
+    });
+    throw new Error(
+      `loginViaAPI: ENTRAR não achado para ${email} após 3 tentativas. ` +
+      `DOM debug: ${JSON.stringify(debug)}`,
+    );
+  }
+
+  // 3. Click email + type
   await page.mouse.click(formPos.emailX, formPos.emailY);
   await page.waitForTimeout(500);
   await page.keyboard.type(email, { delay: 20 });
 
-  // 4. Tab to password field and type
+  // 4. Tab + senha
   await page.keyboard.press('Tab');
   await page.waitForTimeout(300);
   await page.keyboard.type(senha, { delay: 20 });
 
-  // 5. Submit form
+  // 5. Submit
   await page.mouse.click(formPos.entrarX, formPos.entrarY);
 
-  // 6. Wait for the dashboard to load (networkidle = API calls settled)
+  // 6. Aguarda dashboard carregar
   await page.waitForLoadState('networkidle', { timeout: 20000 });
   await page.waitForTimeout(4000);
 }

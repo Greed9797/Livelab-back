@@ -140,7 +140,7 @@ export async function analyticsRoutes(app) {
   app.get('/v1/analytics/dashboard', {
     preHandler: [
       app.authenticate,
-      app.requirePapel(['franqueado', 'gerente']),
+      app.requirePapel(['franqueado', 'gerente', 'franqueador_master']),
     ],
     schema: {
       querystring: {

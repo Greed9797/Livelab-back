@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import { z } from 'zod'
-import { stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
+import { has as managerHas, stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
 
 const cabineRoleAccess = (app) => [
   app.authenticate,

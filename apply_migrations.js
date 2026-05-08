@@ -47,6 +47,7 @@ const MIGRATIONS_LIST = [
   '058_webhook_replay_log.sql',
   '059_cabines_unique_numero.sql',
   '060_rls_with_check.sql',
+  '061_audit_log.sql',
 ]
 
 async function ensureMigrationsTable(client) {

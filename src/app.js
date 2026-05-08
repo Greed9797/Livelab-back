@@ -7,6 +7,7 @@ import helmet from '@fastify/helmet'
 import multipart from '@fastify/multipart'
 import { dbPlugin } from './plugins/db.js'
 import { authPlugin } from './plugins/auth.js'
+import { auditLogPlugin } from './plugins/audit_log.js'
 import { authRoutes } from './routes/auth.js'
 import { homeRoutes } from './routes/home.js'
 import { analyticsRoutes } from './routes/analytics.js'
@@ -131,6 +132,7 @@ export async function buildApp(opts = {}) {
 
   await app.register(dbPlugin)
   await app.register(authPlugin)
+  await app.register(auditLogPlugin)
 
   await app.register(authRoutes)
   await app.register(homeRoutes)

@@ -156,14 +156,15 @@ async function fetchUnitSummaries(app, masterTenantId, periodInfo, status = 'tod
           tenant_id,
           COUNT(*) FILTER (WHERE status = 'ativo') AS active_clients
         FROM clientes
+        WHERE criado_em < $4::date
         GROUP BY tenant_id
       ),
       contratos_resumo AS (
         SELECT
           tenant_id,
-          COUNT(*) FILTER (WHERE status = 'ativo') AS active_contracts,
-          COUNT(*) FILTER (WHERE status IN ('rascunho', 'enviado', 'em_analise')) AS pending_contracts,
-          COALESCE(AVG(comissao_pct) FILTER (WHERE status = 'ativo'), 0) AS avg_contract_pct,
+          COUNT(*) FILTER (WHERE status = 'ativo' AND criado_em < $4::date) AS active_contracts,
+          COUNT(*) FILTER (WHERE status IN ('rascunho', 'enviado', 'em_analise') AND criado_em < $4::date) AS pending_contracts,
+          COALESCE(AVG(comissao_pct) FILTER (WHERE status = 'ativo' AND criado_em < $4::date), 0) AS avg_contract_pct,
           COALESCE(SUM(valor_fixo) FILTER (
             WHERE COALESCE(ativado_em, assinado_em, criado_em) < $4::date
               AND (cancelado_em IS NULL OR cancelado_em >= $2::date)
@@ -253,6 +254,7 @@ async function fetchUnitSummaries(app, masterTenantId, periodInfo, status = 'tod
       LEFT JOIN lives_previous lp ON lp.tenant_id = t.id
       LEFT JOIN boletos_current bc ON bc.tenant_id = t.id
       WHERE t.id <> $1
+        AND t.criado_em < $4::date
       ORDER BY (COALESCE(cr.fixed_current, 0) + COALESCE(lc.commission_current, 0)) DESC, t.nome ASC
     `,
     [
@@ -571,7 +573,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo) {
   }
 }
 
-async function fetchStalledContracts(app, masterTenantId) {
+async function fetchStalledContracts(app, masterTenantId, periodInfo) {
   const result = await app.db.query(
     `
       SELECT
@@ -586,11 +588,12 @@ async function fetchStalledContracts(app, masterTenantId) {
       LEFT JOIN clientes cl ON cl.id = c.cliente_id
       WHERE c.tenant_id <> $1
         AND c.status IN ('rascunho', 'enviado', 'em_analise')
-        AND COALESCE(c.assinado_em, c.criado_em) < NOW() - interval '7 days'
+        AND c.criado_em < $2::date
+        AND COALESCE(c.assinado_em, c.criado_em) < $2::date - interval '7 days'
       ORDER BY reference_date ASC
       LIMIT 5
     `,
-    [masterTenantId]
+    [masterTenantId, periodInfo.currentEnd]
   )
 
   return result.rows.map((row) => ({
@@ -603,7 +606,13 @@ async function fetchStalledContracts(app, masterTenantId) {
   }))
 }
 
-async function fetchCrmSnapshot(app, masterTenantId) {
+async function fetchCrmSnapshot(app, masterTenantId, periodInfo = null) {
+  const params = [masterTenantId]
+  let dateFilter = ''
+  if (periodInfo?.currentEnd) {
+    params.push(periodInfo.currentEnd)
+    dateFilter = 'AND criado_em < $2::date'
+  }
   const result = await app.db.query(
     `
       SELECT
@@ -614,8 +623,9 @@ async function fetchCrmSnapshot(app, masterTenantId) {
         COUNT(*) FILTER (WHERE status = 'expirado') AS expired_leads
       FROM leads
       WHERE franqueadora_id = $1
+        ${dateFilter}
     `,
-    [masterTenantId]
+    params
   )
 
   const row = result.rows[0] ?? {}
@@ -898,8 +908,8 @@ export async function franqueadoRoutes(app) {
       const periodInfo = parsePeriod(request.query?.periodo)
       const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo)
       const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo)
-      const crmSnapshot = await fetchCrmSnapshot(app, request.user.tenant_id)
-      const stalledContracts = await fetchStalledContracts(app, request.user.tenant_id)
+      const crmSnapshot = await fetchCrmSnapshot(app, request.user.tenant_id, periodInfo)
+      const stalledContracts = await fetchStalledContracts(app, request.user.tenant_id, periodInfo)
 
       return reply.send(
         buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stalledContracts)

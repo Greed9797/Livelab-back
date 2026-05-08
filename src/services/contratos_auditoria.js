@@ -1,18 +1,5 @@
 import bcrypt from 'bcrypt'
 
-function normalizeClientIp(ip) {
-  if (!ip) return 'unknown'
-  return ip === '::1' ? '127.0.0.1' : ip
-}
-
-export function getClientIp(request) {
-  const forwarded = request.headers['x-forwarded-for']
-  if (typeof forwarded === 'string' && forwarded.length > 0) {
-    return normalizeClientIp(forwarded.split(',')[0].trim())
-  }
-  return normalizeClientIp(request.socket?.remoteAddress)
-}
-
 export async function insertContratoEvento(db, data) {
   const {
     tenantId,

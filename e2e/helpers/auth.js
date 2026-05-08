@@ -119,4 +119,9 @@ export const E2E_USERS = {
     senha: 'admin123',
     role: 'franqueador_master',
   },
+  apresentador: {
+    email: 'apresentador@liveshop.com',
+    senha: 'teste123',
+    role: 'apresentador',
+  },
 };

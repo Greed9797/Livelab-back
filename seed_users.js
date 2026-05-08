@@ -38,6 +38,13 @@ async function createTestUsers() {
       ON CONFLICT (email) DO NOTHING
     `, [franqueadoId, senhaAdmin])
 
+    // 5. Usuário Apresentadora E2E (acesso restrito a /cabines + /manuais)
+    await pool.query(`
+      INSERT INTO users (tenant_id, nome, email, senha_hash, papel)
+      VALUES ($1, 'Apresentadora E2E', 'apresentador@liveshop.com', $2, 'apresentador')
+      ON CONFLICT (email) DO NOTHING
+    `, [franqueadoId, senhaHash])
+
     console.log('--- CREDENCIAIS CRIADAS PARA TESTE ---')
     console.log('1. Franqueado (Dashboard Principal, Cabines):')
     console.log('   E-mail: franqueado@liveshop.com')
@@ -49,8 +56,12 @@ async function createTestUsers() {
 
     console.log('3. Franqueador Master (Painel Master, Auditoria):')
     console.log('   E-mail: admin@liveshop.com')
-    console.log('   Senha:  admin123')
-    
+    console.log('   Senha:  admin123\n')
+
+    console.log('4. Apresentadora (acesso restrito /cabines + /manuais):')
+    console.log('   E-mail: apresentador@liveshop.com')
+    console.log('   Senha:  teste123')
+
   } catch (err) {
     console.error('Erro ao criar usuários:', err)
   } finally {

@@ -48,6 +48,7 @@ const MIGRATIONS_LIST = [
   '059_cabines_unique_numero.sql',
   '060_rls_with_check.sql',
   '061_audit_log.sql',
+  '062_tenants_plano_cidade.sql',
 ]
 
 async function ensureMigrationsTable(client) {

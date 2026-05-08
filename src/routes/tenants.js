@@ -20,21 +20,37 @@ const atualizarTenantSchema = z.object({
   cnpj: z.string().optional(),
   telefone_contato: z.string().optional(),
   email_contato: z.string().email().optional(),
+  cidade: z.string().optional(),
+  uf: z.string().length(2).optional(),
+  plano: z.enum(['Standard', 'Plus', 'Premium', 'Master', 'Trial']).optional(),
 })
 
 export async function tenantsRoutes(app) {
   const masterOnly = [app.authenticate, app.requirePapel(['franqueador_master'])]
 
-  // GET /v1/tenants — lista todas as franquias
+  // GET /v1/tenants — lista todas as franquias com métricas do mês corrente
   app.get('/v1/tenants', { preHandler: masterOnly }, async (request, reply) => {
     const result = await app.db.query(`
+      WITH lives_mes AS (
+        SELECT tenant_id,
+               COUNT(*)::int                       AS lives_mes,
+               COALESCE(SUM(fat_gerado), 0)::float AS gmv_mes
+        FROM lives
+        WHERE iniciado_em >= date_trunc('month', NOW())
+          AND iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
+        GROUP BY tenant_id
+      )
       SELECT t.id, t.nome, t.ativo, t.criado_em,
              t.cnpj, t.telefone_contato, t.email_contato,
-             u.id   AS owner_id,
-             u.nome AS owner_nome,
-             u.email AS owner_email
+             t.cidade, t.uf, t.plano,
+             u.id    AS owner_id,
+             u.nome  AS owner_nome,
+             u.email AS owner_email,
+             COALESCE(lm.lives_mes, 0) AS lives_mes,
+             COALESCE(lm.gmv_mes, 0)   AS gmv_mes
       FROM tenants t
       LEFT JOIN users u ON u.tenant_id = t.id AND u.papel = 'franqueado'
+      LEFT JOIN lives_mes lm ON lm.tenant_id = t.id
       ORDER BY t.criado_em DESC
     `)
     return result.rows
@@ -43,13 +59,27 @@ export async function tenantsRoutes(app) {
   // GET /v1/tenants/:id — detalhe
   app.get('/v1/tenants/:id', { preHandler: masterOnly }, async (request, reply) => {
     const result = await app.db.query(`
+      WITH lives_mes AS (
+        SELECT tenant_id,
+               COUNT(*)::int                       AS lives_mes,
+               COALESCE(SUM(fat_gerado), 0)::float AS gmv_mes
+        FROM lives
+        WHERE tenant_id = $1
+          AND iniciado_em >= date_trunc('month', NOW())
+          AND iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
+        GROUP BY tenant_id
+      )
       SELECT t.id, t.nome, t.ativo, t.criado_em,
              t.cnpj, t.telefone_contato, t.email_contato,
-             u.id   AS owner_id,
-             u.nome AS owner_nome,
-             u.email AS owner_email
+             t.cidade, t.uf, t.plano,
+             u.id    AS owner_id,
+             u.nome  AS owner_nome,
+             u.email AS owner_email,
+             COALESCE(lm.lives_mes, 0) AS lives_mes,
+             COALESCE(lm.gmv_mes, 0)   AS gmv_mes
       FROM tenants t
       LEFT JOIN users u ON u.tenant_id = t.id AND u.papel = 'franqueado'
+      LEFT JOIN lives_mes lm ON lm.tenant_id = t.id
       WHERE t.id = $1
     `, [request.params.id])
     if (result.rows.length === 0) return reply.code(404).send({ error: 'Franquia não encontrada' })

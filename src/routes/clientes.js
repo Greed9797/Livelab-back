@@ -123,6 +123,8 @@ export async function clientesRoutes(app) {
   app.get('/v1/clientes', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      // Defesa em profundidade: WHERE cl.tenant_id explícito porque role
+      // postgres do Supabase tem rolbypassrls=true (ADR 0003).
       const result = await db.query(
         `SELECT cl.id, cl.nome, cl.celular, cl.email, cl.status, cl.lat, cl.lng,
                 cl.fat_anual, cl.nicho, cl.score, cl.cep, cl.cidade, cl.estado,
@@ -133,12 +135,14 @@ export async function clientesRoutes(app) {
          LEFT JOIN LATERAL (
            SELECT horas_contratadas, horas_consumidas
            FROM contratos
-           WHERE cliente_id = cl.id AND status = 'ativo'
+           WHERE cliente_id = cl.id AND tenant_id = $1::uuid AND status = 'ativo'
            ORDER BY ativado_em DESC NULLS LAST
            LIMIT 1
          ) c ON true
-         WHERE cl.status IN ('ativo', 'inadimplente', 'cancelado')
-         ORDER BY cl.criado_em DESC`
+         WHERE cl.tenant_id = $1::uuid
+           AND cl.status IN ('ativo', 'inadimplente', 'cancelado')
+         ORDER BY cl.criado_em DESC`,
+        [tenant_id]
       )
       return result.rows
     })

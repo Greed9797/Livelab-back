@@ -1071,7 +1071,14 @@ export async function cabinesRoutes(app) {
   // GET /v1/lives
   app.get('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request) => {
     const { tenant_id } = request.user
+    const statusFilter = request.query?.status // 'em_andamento' | 'encerrada' | undefined
     return app.withTenant(tenant_id, async (db) => {
+      const params = [tenant_id]
+      let where = 'WHERE l.tenant_id = $1::uuid'
+      if (statusFilter && ['em_andamento', 'encerrada', 'faturada'].includes(statusFilter)) {
+        params.push(statusFilter)
+        where += ` AND l.status = $${params.length}`
+      }
       const result = await db.query(
         `SELECT l.*, c.numero AS cabine_numero, c.contrato_id, cl.nome AS cliente_nome,
                 u.nome AS apresentador_nome
@@ -1079,7 +1086,9 @@ export async function cabinesRoutes(app) {
          JOIN cabines c ON c.id = l.cabine_id
          JOIN clientes cl ON cl.id = l.cliente_id
          JOIN users u ON u.id = l.apresentador_id
-         ORDER BY l.iniciado_em DESC LIMIT 100`
+         ${where}
+         ORDER BY l.iniciado_em DESC LIMIT 100`,
+        params
       )
       return result.rows
     })

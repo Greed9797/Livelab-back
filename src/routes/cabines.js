@@ -1,10 +1,16 @@
 import crypto from 'node:crypto'
 import { z } from 'zod'
 import { has as managerHas, stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
+import { READ_CABINES, WRITE_CABINES, READ_LIVES, WRITE_LIVES } from '../config/role_groups.js'
 
 const cabineRoleAccess = (app) => [
   app.authenticate,
-  app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'apresentador']),
+  app.requirePapel(READ_CABINES),
+]
+
+const cabineWriteAccess = (app) => [
+  app.authenticate,
+  app.requirePapel(WRITE_CABINES),
 ]
 
 const reservarCabineSchema = z.object({
@@ -202,7 +208,7 @@ export async function cabinesRoutes(app) {
 
   // POST /v1/cabines — create a new cabine for the authenticated tenant
   app.post('/v1/cabines', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])],
+    preHandler: [app.authenticate, app.requirePapel(WRITE_CABINES)],
   }, async (request, reply) => {
     const parsed = criarCabineSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
@@ -226,7 +232,7 @@ export async function cabinesRoutes(app) {
 
   // DELETE /v1/cabines/:id — delete a cabine (only if not in use)
   app.delete('/v1/cabines/:id', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])],
+    preHandler: [app.authenticate, app.requirePapel(WRITE_CABINES)],
   }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
@@ -658,7 +664,7 @@ export async function cabinesRoutes(app) {
   // Gerente/Franqueado envia uma mensagem/dica para o closer da cabine.
   // A mensagem é emitida via EventEmitter para o canal SSE do apresentador.
   app.post('/v1/cabines/:id/closer-notification', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])],
+    preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)],
   }, async (request, reply) => {
     const { message, type = 'custom' } = request.body ?? {}
     if (!message || typeof message !== 'string' || message.trim().length === 0) {
@@ -712,7 +718,7 @@ export async function cabinesRoutes(app) {
   // ── GET /v1/cabines/:id/closer-notifications/stream ──────────────────────
   // SSE para o apresentador receber mensagens do gerente em tempo real.
   app.get('/v1/cabines/:id/closer-notifications/stream', {
-    preHandler: [app.authenticate, app.requirePapel(['apresentador', 'franqueado', 'franqueador_master', 'gerente'])],
+    preHandler: [app.authenticate, app.requirePapel(READ_LIVES)],
   }, async (request, reply) => {
     const cabineId = request.params.id
 
@@ -925,9 +931,11 @@ export async function cabinesRoutes(app) {
   })
 
   // POST /v1/lives/manual — cria live já encerrada (entrada manual pelo gestor)
+  // Restrito a admin/gerente/produtor_live: apresentador NÃO pode criar
+  // entradas retroativas (atribuição de comissão é responsabilidade do gestor).
   const gestorRoleAccess = [
     app.authenticate,
-    app.requirePapel(['franqueador_master', 'franqueado', 'gerente']),
+    app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'produtor_live']),
   ]
   app.post('/v1/lives/manual', { preHandler: gestorRoleAccess }, async (request, reply) => {
     const parsed = liveManualSchema.safeParse(request.body)

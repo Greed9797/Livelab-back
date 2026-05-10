@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { READ_CONFIGURACOES, WRITE_CONFIGURACOES } from '../config/role_groups.js'
 
 const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
 
@@ -21,7 +22,7 @@ const configSchema = z.object({
 export async function configuracoesRoutes(app) {
   // POST /v1/configuracoes/logo — upload de imagem para Supabase Storage
   app.post('/v1/configuracoes/logo', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente'])],
+    preHandler: [app.authenticate, app.requirePapel(WRITE_CONFIGURACOES)],
   }, async (request, reply) => {
     const supabaseUrl = process.env.SUPABASE_URL
     const supabaseKey = process.env.SUPABASE_SERVICE_KEY
@@ -69,7 +70,7 @@ export async function configuracoesRoutes(app) {
 
   // GET /v1/configuracoes
   app.get('/v1/configuracoes', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
+    preHandler: app.requirePapel(READ_CONFIGURACOES),
   }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
@@ -120,9 +121,10 @@ export async function configuracoesRoutes(app) {
 
   // PATCH /v1/configuracoes
   app.patch('/v1/configuracoes', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente'])],
+    preHandler: [app.authenticate, app.requirePapel(WRITE_CONFIGURACOES)],
   }, async (request, reply) => {
     const parsed = configSchema.safeParse(request.body)
+
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub: user_id } = request.user
@@ -198,7 +200,7 @@ export async function configuracoesRoutes(app) {
 
   // GET /v1/configuracoes/contact-history
   app.get('/v1/configuracoes/contact-history', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado'])],
+    preHandler: [app.authenticate, app.requirePapel(READ_CONFIGURACOES)],
   }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {

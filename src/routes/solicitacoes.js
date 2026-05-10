@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { READ_SOLICITACOES, WRITE_SOLICITACOES } from '../config/role_groups.js'
 
 const agendamentoSchema = z.object({
   cabine_id:        z.string().uuid(),
@@ -14,7 +15,7 @@ export async function solicitacoesRoutes(app) {
   // GET /v1/solicitacoes — lista solicitações (franqueador/franqueador_master)
   // Query param: ?status=pendente (default) | aprovada | recusada | all
   app.get('/v1/solicitacoes', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
+    preHandler: app.requirePapel(READ_SOLICITACOES),
   }, async (request) => {
     const { tenant_id } = request.user
     const statusFilter = request.query.status ?? 'pendente'
@@ -70,7 +71,7 @@ export async function solicitacoesRoutes(app) {
 
   // PATCH /v1/solicitacoes/:id/aprovar — aprovar solicitação com check de overlap
   app.patch('/v1/solicitacoes/:id/aprovar', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
+    preHandler: app.requirePapel(WRITE_SOLICITACOES),
   }, async (request, reply) => {
     const { tenant_id, sub: user_id } = request.user
     const { id } = request.params
@@ -147,7 +148,7 @@ export async function solicitacoesRoutes(app) {
 
   // PATCH /v1/solicitacoes/:id/recusar — recusar solicitação
   app.patch('/v1/solicitacoes/:id/recusar', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
+    preHandler: app.requirePapel(WRITE_SOLICITACOES),
   }, async (request, reply) => {
     const { tenant_id, sub: user_id } = request.user
     const { id } = request.params
@@ -182,7 +183,7 @@ export async function solicitacoesRoutes(app) {
 
   // POST /v1/solicitacoes — franqueado cria agendamento diretamente (já aprovado)
   app.post('/v1/solicitacoes', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])],
+    preHandler: [app.authenticate, app.requirePapel(WRITE_SOLICITACOES)],
   }, async (request, reply) => {
     const parsed = agendamentoSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })

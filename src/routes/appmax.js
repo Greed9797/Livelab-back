@@ -5,6 +5,7 @@
 
 import crypto from 'node:crypto'
 import { validateWebhook, validarWebhookToken } from '../services/appmax.js'
+import { notify } from '../services/mailer.js'
 
 // Extrai um identificador único do payload pra prevenir replay.
 // Tenta usar IDs nativos do Appmax; fallback pra hash SHA256 do payload completo.
@@ -156,12 +157,36 @@ export async function appmaxRoutes(app) {
           // sobre o filtro explícito tenant_id = $2). Necessário quando a role
           // do app for NOBYPASSRLS (P0 hardening).
           await app.withTenant(boletoTenant, async (db) => {
-            await db.query(
+            const updated = await db.query(
               `UPDATE boletos
                SET status = 'pago', pago_em = NOW(), gateway_id = COALESCE(gateway_id, $3)
-               WHERE id = $1 AND tenant_id = $2 AND status != 'pago'`,
+               WHERE id = $1 AND tenant_id = $2 AND status != 'pago'
+               RETURNING id, valor, vencimento, pago_em, cliente_id`,
               [boletoId, boletoTenant, gatewayId ?? null],
             )
+            if (updated.rows[0]) {
+              const boleto = updated.rows[0]
+              // Busca e-mail do cliente (fire-and-forget)
+              db.query(
+                `SELECT cl.nome, cl.email FROM clientes cl WHERE cl.id = $1`,
+                [boleto.cliente_id]
+              ).then(({ rows }) => {
+                const cliente = rows[0]
+                if (cliente?.email) {
+                  notify({
+                    app, tenantId: boletoTenant, to: cliente.email,
+                    template: 'boleto_pago', refId: boletoId,
+                    dedupe: true,
+                    vars: {
+                      cliente_nome: cliente.nome,
+                      valor: boleto.valor,
+                      vencimento: boleto.vencimento,
+                      pago_em: boleto.pago_em,
+                    },
+                  }).catch(err => app.log.error({ err }, 'mailer boleto_pago failed'))
+                }
+              }).catch(err => app.log.error({ err }, 'mailer boleto_pago: lookup cliente failed'))
+            }
           })
           app.log.info({ boletoId, gatewayId, event }, '[appmax webhook] boleto marcado como pago')
         } else if (lookup.rows.length > 1) {

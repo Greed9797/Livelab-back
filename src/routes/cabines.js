@@ -227,6 +227,7 @@ export async function cabinesRoutes(app) {
          RETURNING id, numero, nome, tamanho, descricao, status`,
         [tenant_id, nome, tamanho ?? null, descricao ?? null]
       )
+      app.audit?.log?.(request, { action: 'cabines.create', entity_type: 'cabine', entity_id: result.rows[0].id, metadata: { nome, tamanho: tamanho ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(result.rows[0])
     })
   })
@@ -266,6 +267,7 @@ export async function cabinesRoutes(app) {
       }
 
       await db.query(`DELETE FROM cabines WHERE id = $1`, [request.params.id])
+      app.audit?.log?.(request, { action: 'cabines.delete', entity_type: 'cabine', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { ok: true }
     })
   })

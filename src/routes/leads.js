@@ -311,8 +311,8 @@ export async function leadsRoutes(app) {
       await client.query(
         `UPDATE leads SET status = 'pego', pego_por = $1,
           pego_em = NOW(), expira_em = NOW() + interval '24 hours', atualizado_em = NOW()
-         WHERE id = $2`,
-        [tenant_id, request.params.id]
+         WHERE id = $2 AND franqueadora_id = $3`,
+        [tenant_id, request.params.id, tenant_id]
       )
       await client.query('COMMIT')
       return { ok: true }

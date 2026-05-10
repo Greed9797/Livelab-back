@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { READ_CONTRATOS, WRITE_CONTRATOS } from '../config/role_groups.js'
 import { notify } from '../services/mailer.js'
+import { executarAcaoAuditoria } from '../services/contratos_auditoria.js'
 
 // Regex sincronizado com clientes_tiktok_username_format / contratos_tiktok_username_format (migration 075).
 const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
@@ -34,6 +35,25 @@ export async function contratosRoutes(app) {
 
     const { tenant_id, sub } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      // Bloqueia novo contrato se cliente foi reprovado nos últimos 30 dias
+      const reprovadoQ = await db.query(
+        `SELECT EXTRACT(DAY FROM (NOW() - reviewed_at))::int AS dias_passados
+         FROM contratos
+         WHERE cliente_id = $1
+           AND tenant_id = current_setting('app.tenant_id', true)::uuid
+           AND status = 'reprovado'
+           AND reviewed_at > NOW() - INTERVAL '30 days'
+         ORDER BY reviewed_at DESC
+         LIMIT 1`,
+        [cliente_id]
+      )
+      if (reprovadoQ.rows[0]) {
+        const diasRestantes = 30 - Number(reprovadoQ.rows[0].dias_passados)
+        return reply.code(409).send({
+          error: `Cliente foi reprovado nos últimos 30 dias. Aguarde ${diasRestantes} dia(s) ou revise o contrato anterior.`,
+        })
+      }
+
       let valor_fixo = 0
       let comissao_pct = 0
 
@@ -66,6 +86,25 @@ export async function contratosRoutes(app) {
     let { tiktok_username } = parsed.data
 
     return app.withTenant(tenant_id, async (db) => {
+      // Bloqueia novo contrato se cliente foi reprovado nos últimos 30 dias
+      const reprovadoQ = await db.query(
+        `SELECT EXTRACT(DAY FROM (NOW() - reviewed_at))::int AS dias_passados
+         FROM contratos
+         WHERE cliente_id = $1
+           AND tenant_id = current_setting('app.tenant_id', true)::uuid
+           AND status = 'reprovado'
+           AND reviewed_at > NOW() - INTERVAL '30 days'
+         ORDER BY reviewed_at DESC
+         LIMIT 1`,
+        [cliente_id]
+      )
+      if (reprovadoQ.rows[0]) {
+        const diasRestantes = 30 - Number(reprovadoQ.rows[0].dias_passados)
+        return reply.code(409).send({
+          error: `Cliente foi reprovado nos últimos 30 dias. Aguarde ${diasRestantes} dia(s) ou revise o contrato anterior.`,
+        })
+      }
+
       let horasContratadas = 0
       if (pacote_id) {
         const pacoteQ = await db.query(
@@ -103,6 +142,7 @@ export async function contratosRoutes(app) {
                    tiktok_username`,
         [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null, horasContratadas, tiktok_username]
       )
+      app.audit?.log?.(request, { action: 'contratos.create', entity_type: 'contrato', entity_id: result.rows[0].id, metadata: { cliente_id } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(result.rows[0])
     })
   })
@@ -210,6 +250,7 @@ export async function contratosRoutes(app) {
         [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou já assinado' })
+      app.audit?.log?.(request, { action: 'contratos.sign', entity_type: 'contrato', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })
@@ -358,6 +399,7 @@ export async function contratosRoutes(app) {
         }
       })()
 
+      app.audit?.log?.(request, { action: 'contratos.analyze', entity_type: 'contrato', entity_id: request.params.id, metadata: { aprovado, score, risco, status: novoStatus } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { aprovado, score, risco, status: novoStatus }
     })
   })
@@ -451,6 +493,7 @@ export async function contratosRoutes(app) {
         [request.params.id]
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou não pode ser cancelado neste estado' })
+      app.audit?.log?.(request, { action: 'contratos.cancel', entity_type: 'contrato', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })
@@ -480,32 +523,18 @@ export async function contratosRoutes(app) {
   app.patch('/v1/contratos/:id/aprovar', {
     preHandler: app.requirePapel(['franqueador_master']),
   }, async (request, reply) => {
-    const { tenant_id } = request.user
+    const { tenant_id, sub, papel } = request.user
+    const ip = request.ip ?? request.headers['x-forwarded-for'] ?? null
     return app.withTenant(tenant_id, async (db) => {
-      await db.query('BEGIN')
       try {
-        const q = await db.query(
-          `UPDATE contratos
-           SET status = 'ativo', ativado_em = NOW()
-           WHERE id = $1 AND status = 'em_analise'
-           RETURNING id, cliente_id`,
-          [request.params.id]
-        )
-        if (!q.rows[0]) {
-          await db.query('ROLLBACK')
-          return reply.code(400).send({ error: 'Contrato não está em análise' })
-        }
-
-        await db.query(
-          `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
-          [q.rows[0].cliente_id]
-        )
-        await db.query('COMMIT')
-      } catch (txErr) {
-        await db.query('ROLLBACK')
-        throw txErr
+        const result = await executarAcaoAuditoria({
+          db, contratoId: request.params.id, tenantId: tenant_id,
+          actorUserId: sub, actorPapel: papel, ip, acao: 'aprovar',
+        })
+        return result
+      } catch (err) {
+        return reply.code(err.statusCode ?? 500).send({ error: err.message })
       }
-      return { ok: true, status: 'ativo' }
     })
   })
 
@@ -513,18 +542,19 @@ export async function contratosRoutes(app) {
   app.patch('/v1/contratos/:id/arquivar', {
     preHandler: app.requirePapel(['franqueador_master']),
   }, async (request, reply) => {
-    const { tenant_id } = request.user
+    const { tenant_id, sub, papel } = request.user
     const motivo = (request.body ?? {}).motivo ?? null
+    const ip = request.ip ?? request.headers['x-forwarded-for'] ?? null
     return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `UPDATE contratos
-         SET status = 'arquivado', arquivado_em = NOW(), arquivado_motivo = $2
-         WHERE id = $1 AND status IN ('em_analise','rascunho')
-         RETURNING id, status`,
-        [request.params.id, motivo]
-      )
-      if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não pode ser arquivado' })
-      return result.rows[0]
+      try {
+        const result = await executarAcaoAuditoria({
+          db, contratoId: request.params.id, tenantId: tenant_id,
+          actorUserId: sub, actorPapel: papel, ip, acao: 'arquivar', motivo,
+        })
+        return result
+      } catch (err) {
+        return reply.code(err.statusCode ?? 500).send({ error: err.message })
+      }
     })
   })
 
@@ -536,15 +566,18 @@ export async function contratosRoutes(app) {
     if (!motivo || motivo.length < 8) {
       return reply.code(400).send({ error: 'Motivo deve ter pelo menos 8 caracteres' })
     }
-    const { tenant_id } = request.user
+    const { tenant_id, sub, papel } = request.user
+    const ip = request.ip ?? request.headers['x-forwarded-for'] ?? null
     return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `UPDATE contratos SET pendencia_motivo = $2, reviewed_at = NOW()
-         WHERE id = $1 AND status = 'em_analise' RETURNING id, status`,
-        [request.params.id, motivo]
-      )
-      if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não está em análise' })
-      return result.rows[0]
+      try {
+        const result = await executarAcaoAuditoria({
+          db, contratoId: request.params.id, tenantId: tenant_id,
+          actorUserId: sub, actorPapel: papel, ip, acao: 'pendencia', motivo,
+        })
+        return result
+      } catch (err) {
+        return reply.code(err.statusCode ?? 500).send({ error: err.message })
+      }
     })
   })
 
@@ -556,17 +589,18 @@ export async function contratosRoutes(app) {
     if (!motivo || motivo.trim().length < 8) {
       return reply.code(400).send({ error: 'Motivo deve ter pelo menos 8 caracteres' })
     }
-    const { tenant_id } = request.user
+    const { tenant_id, sub, papel } = request.user
+    const ip = request.ip ?? request.headers['x-forwarded-for'] ?? null
     return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `UPDATE contratos SET status = 'reprovado', reprovacao_motivo = $2,
-         reviewed_at = NOW(),
-         prazo_decisao_ate = NOW() + INTERVAL '5 days'
-         WHERE id = $1 AND status = 'em_analise' RETURNING id, status`,
-        [request.params.id, motivo]
-      )
-      if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não está em análise' })
-      return result.rows[0]
+      try {
+        const result = await executarAcaoAuditoria({
+          db, contratoId: request.params.id, tenantId: tenant_id,
+          actorUserId: sub, actorPapel: papel, ip, acao: 'reprovar', motivo,
+        })
+        return result
+      } catch (err) {
+        return reply.code(err.statusCode ?? 500).send({ error: err.message })
+      }
     })
   })
 
@@ -574,35 +608,20 @@ export async function contratosRoutes(app) {
   app.patch('/v1/contratos/:id/sinalizar-risco', {
     preHandler: app.requirePapel(['franqueador_master']),
   }, async (request, reply) => {
-    const { tenant_id } = request.user
+    const { tenant_id, sub, papel } = request.user
+    const ip = request.ip ?? request.headers['x-forwarded-for'] ?? null
+    const confirmacao = (request.body ?? {}).confirmacao ?? 'CONCORDO'
     return app.withTenant(tenant_id, async (db) => {
-      await db.query('BEGIN')
       try {
-        const q = await db.query(
-          `UPDATE contratos
-           SET status = 'ativo',
-               is_risco_franqueado = true,
-               risco_assumido_em = NOW(),
-               ativado_em = NOW()
-           WHERE id = $1 AND status = 'em_analise'
-           RETURNING id, cliente_id`,
-          [request.params.id]
-        )
-        if (!q.rows[0]) {
-          await db.query('ROLLBACK')
-          return reply.code(400).send({ error: 'Contrato não está em análise' })
-        }
-
-        await db.query(
-          `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
-          [q.rows[0].cliente_id]
-        )
-        await db.query('COMMIT')
-      } catch (txErr) {
-        await db.query('ROLLBACK')
-        throw txErr
+        const result = await executarAcaoAuditoria({
+          db, contratoId: request.params.id, tenantId: tenant_id,
+          actorUserId: sub, actorPapel: papel, ip,
+          acao: 'assumir_risco', confirmacao,
+        })
+        return { ...result, is_risco_franqueado: true }
+      } catch (err) {
+        return reply.code(err.statusCode ?? 500).send({ error: err.message })
       }
-      return { ok: true, status: 'ativo', is_risco_franqueado: true }
     })
   })
 }

@@ -118,8 +118,8 @@ function buildBenchmark({ niche, meuGmv, mediaGmv, amostra, percentil, minimumSa
 // Nunca usar fallback por email — dois clientes mesmo email/tenant => vazamento.
 async function getClienteVinculado(db, tenantId, userId) {
   const r = await db.query(
-    `SELECT id, nicho, nome FROM clientes WHERE user_id = $1 LIMIT 1`,
-    [userId],
+    `SELECT id, nicho, nome FROM clientes WHERE user_id = $1 AND tenant_id = $2::uuid LIMIT 1`,
+    [userId, tenantId],
   )
   return r.rows[0] ?? null
 }

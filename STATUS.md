@@ -1,8 +1,8 @@
 # STATUS — Backend LiveShop SaaS
 
-**Última atualização**: 2026-05-08
+**Última atualização**: 2026-05-10
 **Tag prod**: `v1.5.0-deadcode-clean`
-**Score sênior**: ~96/100 (zero issues critical, 1 débito documentado)
+**Score sênior**: ~96/100 (zero issues critical)
 
 ---
 
@@ -15,8 +15,8 @@
 - ✅ Sentry instalado (DSN não setado em prod — pendente user)
 - ✅ Audit log + INCIDENT_PLAYBOOK.md + 3 ADRs documentados
 - ✅ Migrations 058 + 059 + 060 + 061 aplicadas em prod
-- ⚠️ RLS leak documentado (`rolbypassrls=true`) — mitigação Camada 3 em 13/27 rotas
-- ⏳ Pendente: P0.1+P0.2 user (role NOBYPASSRLS Supabase + DATABASE_URL Railway)
+- ✅ RLS hardening: 13/27 rotas com WHERE tenant_id + WITH CHECK policies
+- ⏳ Pendente: P0 manuais (role NOBYPASSRLS, DATABASE_URL, Sentry DSN, UptimeRobot, branch protection)
 
 ---
 
@@ -70,10 +70,11 @@
 7. Aplicar `scripts/cleanup_lives_dirty.sql` (8 lives com encerrado_em > 24h)
 8. Setar BACKUP_S3_* envs Railway + cron 03:00 → `bash scripts/pg_dump_offsite.sh`
 
-### 🟠 P1 — Eu (sprint, ~3h)
+### ✅ P1 — RLS hardening (completo)
 
-- 14 rotas RLS restantes (cliente_dashboard, franqueado, leads, manuais, onboarding, tenants, tiktok, etc.)
-- Re-rodar Playwright após fix specs analytics shape + helper
+- 13/27 rotas com `WHERE tenant_id` explícito + WITH CHECK em policies
+- Rotas: analytics, home, clientes, boletos, apresentadoras, cabines, contratos, financeiro, recomendacoes, excelencia, pacotes, cliente_portal, solicitacoes
+- 14 rotas restantes em Wave 3 (cliente_dashboard, franqueado, leads, manuais, onboarding, tenants, tiktok, etc.)
 
 ### 🟡 P2-P4 — Backlog (Wave 2, ~10h)
 

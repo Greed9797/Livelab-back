@@ -191,6 +191,8 @@ export async function usuariosRoutes(app) {
             app.log?.warn?.({ err }, '[usuarios] falha ao enviar email convite_usuario')
           })
 
+          app.audit?.log?.(request, { action: 'usuarios.invite', entity_type: 'user', entity_id: newUser.id, metadata: { email, papel } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
           reply.header('Cache-Control', 'no-store')
           reply.header('Pragma', 'no-cache')
           return reply.code(201).send({
@@ -202,6 +204,8 @@ export async function usuariosRoutes(app) {
 
         // Fallback legado — sem mailer ou senha forçada pelo caller.
         // S-10: resposta contém senha — proibir cache em proxies/CDN.
+        app.audit?.log?.(request, { action: 'usuarios.invite', entity_type: 'user', entity_id: newUser.id, metadata: { email, papel, invite_flow: false } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
         reply.header('Cache-Control', 'no-store')
         reply.header('Pragma', 'no-cache')
         return reply.code(201).send({
@@ -261,6 +265,13 @@ export async function usuariosRoutes(app) {
         await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
       }
 
+      // Captura papel atual antes do UPDATE (para audit de role_change)
+      let oldPapel = null
+      if (fields.papel !== undefined) {
+        const oldUser = await db.query(`SELECT papel FROM users WHERE id = $1`, [request.params.id])
+        oldPapel = oldUser.rows[0]?.papel ?? null
+      }
+
       values.push(request.params.id, request.user.tenant_id)
       const result = await db.query(
         `UPDATE users SET ${updates.join(', ')}
@@ -271,6 +282,11 @@ export async function usuariosRoutes(app) {
       if (result.rows.length === 0) {
         return reply.code(404).send({ error: 'Usuário não encontrado' })
       }
+
+      if (fields.papel !== undefined && oldPapel !== null) {
+        app.audit?.log?.(request, { action: 'usuarios.role_change', entity_type: 'user', entity_id: request.params.id, metadata: { old_papel: oldPapel, new_papel: fields.papel } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      }
+
       return result.rows[0]
     })
   })
@@ -326,7 +342,52 @@ export async function usuariosRoutes(app) {
         `UPDATE refresh_tokens SET revogado = true WHERE user_id = $1`,
         [request.params.id]
       )
+      app.audit?.log?.(request, { action: 'usuarios.force_logout', entity_type: 'user', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { ok: true, token_version: result.rows[0].token_version }
+    })
+  })
+
+  // POST /v1/usuarios/:id/reenviar-convite
+  // Reenviar convite para usuário que ainda não aceitou (primeiro_acesso = false)
+  app.post('/v1/usuarios/:id/reenviar-convite', { preHandler: rbac }, async (request, reply) => {
+    return app.withTenant(request.user.tenant_id, async (db) => {
+      // Validar que usuário existe e ainda não aceitou convite
+      const user = await db.query(
+        `SELECT id, nome, email, primeiro_acesso FROM users
+         WHERE id = $1 AND tenant_id = $2`,
+        [request.params.id, request.user.tenant_id]
+      )
+      if (user.rows.length === 0) {
+        return reply.code(404).send({ error: 'Usuário não encontrado' })
+      }
+      const userData = user.rows[0]
+      if (userData.primeiro_acesso === true) {
+        return reply.code(400).send({ error: 'Usuário já aceitou convite ou não pode receber novo convite' })
+      }
+
+      // Gerar novo invite_token e atualizar expiração
+      const inviteRawToken = crypto.randomBytes(32).toString('hex')
+      const inviteTokenHash = crypto.createHash('sha256').update(inviteRawToken).digest('hex')
+      const inviteExpiraEm = new Date(Date.now() + 72 * 60 * 60 * 1000)
+
+      const result = await db.query(
+        `UPDATE users SET invite_token_hash = $1, invite_expira_em = $2, atualizado_em = NOW()
+         WHERE id = $3 AND tenant_id = $4
+         RETURNING id, nome, email`,
+        [inviteTokenHash, inviteExpiraEm, request.params.id, request.user.tenant_id]
+      )
+
+      // Disparar email de convite (fire-and-forget)
+      const inviteUrl = `${_frontendUrl()}/aceitar-convite?token=${encodeURIComponent(inviteRawToken)}`
+      notify('convite_usuario', {
+        usuario_nome: result.rows[0].nome,
+        usuario_email: result.rows[0].email,
+        invite_url: inviteUrl,
+        expira_em: inviteExpiraEm.toLocaleString('pt-BR'),
+      }).catch(err => app.log.error({ err }, 'Failed to send invite email'))
+
+      app.audit?.log?.(request, { action: 'usuarios.invite_resend', entity_type: 'user', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      return { ok: true, invite_enviado: true }
     })
   })
 
@@ -348,6 +409,7 @@ export async function usuariosRoutes(app) {
       if (result.rows.length === 0) {
         return reply.code(404).send({ error: 'Usuário não encontrado' })
       }
+      app.audit?.log?.(request, { action: 'usuarios.delete', entity_type: 'user', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(204).send()
     })
   })

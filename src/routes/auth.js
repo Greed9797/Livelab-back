@@ -34,10 +34,16 @@ export async function authRoutes(app) {
     )
 
     const user = result.rows[0]
-    if (!user) return reply.code(401).send({ error: 'Credenciais inválidas' })
+    if (!user) {
+      app.audit?.log?.(request, { action: 'auth.login_failed', metadata: { email, reason: 'user_not_found' } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      return reply.code(401).send({ error: 'Credenciais inválidas' })
+    }
 
     const senhaOk = await bcrypt.compare(senha, user.senha_hash)
-    if (!senhaOk) return reply.code(401).send({ error: 'Credenciais inválidas' })
+    if (!senhaOk) {
+      app.audit?.log?.(request, { action: 'auth.login_failed', metadata: { email, reason: 'wrong_password' } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      return reply.code(401).send({ error: 'Credenciais inválidas' })
+    }
 
     const payload = {
       sub: user.id,
@@ -63,6 +69,8 @@ export async function authRoutes(app) {
        VALUES ($1, $2, $3)`,
       [user.id, refreshHash, expiresAt]
     )
+
+    app.audit?.log?.(request, { action: 'auth.login_success', entity_type: 'user', entity_id: user.id, metadata: { papel: user.papel } })?.catch(err => app.log.error({ err }, 'audit log failed'))
 
     return {
       access_token: accessToken,
@@ -142,6 +150,7 @@ export async function authRoutes(app) {
       `UPDATE refresh_tokens SET revogado = true WHERE user_id = $1`,
       [request.user.sub]
     )
+    app.audit?.log?.(request, { action: 'auth.logout', entity_type: 'user', entity_id: request.user.sub })?.catch(err => app.log.error({ err }, 'audit log failed'))
     return { ok: true }
   })
 
@@ -282,6 +291,8 @@ export async function authRoutes(app) {
           app.log?.warn?.({ err }, '[auth] falha ao enviar email recuperacao_senha')
         })
 
+        app.audit?.log?.(request, { action: 'auth.password_reset_request', entity_type: 'user', entity_id: user.id, metadata: { email: user.email } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
         return reply.code(200).send(genericResponse)
       } catch (err) {
         app.log?.error?.({ err }, '[auth] erro em /esqueci-senha')
@@ -355,6 +366,8 @@ export async function authRoutes(app) {
         `UPDATE refresh_tokens SET revogado = true WHERE user_id = $1`,
         [userId]
       )
+
+      app.audit?.log?.(request, { action: 'auth.password_reset_complete', entity_type: 'user', entity_id: userId })?.catch(err => app.log.error({ err }, 'audit log failed'))
 
       return { ok: true }
     }
@@ -443,6 +456,8 @@ export async function authRoutes(app) {
          VALUES ($1, $2, $3)`,
         [user.id, refreshHash, expiresAt]
       )
+
+      app.audit?.log?.(request, { action: 'auth.invite_accepted', entity_type: 'user', entity_id: user.id, metadata: { papel: user.papel } })?.catch(err => app.log.error({ err }, 'audit log failed'))
 
       return {
         access_token: accessToken,

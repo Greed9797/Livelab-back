@@ -265,6 +265,23 @@ const _templates = {
     `),
   }),
 
+  boleto_pago: (vars) => ({
+    subject: `Pagamento confirmado — ${_money(vars.valor)} recebido`,
+    html: _wrap('Pagamento confirmado', `
+      <p>Olá <b>${vars.cliente_nome ?? 'Cliente'}</b>,</p>
+      <p>Confirmamos o recebimento do seu pagamento. Veja os detalhes:</p>
+      <table style="width:100%;border-collapse:collapse;margin:16px 0;">
+        <tr><td style="padding:8px;border-bottom:1px solid #eee;"><b>Valor pago</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;color:#10b981;font-weight:600;">${_money(vars.valor)}</td></tr>
+        <tr><td style="padding:8px;border-bottom:1px solid #eee;"><b>Vencimento</b></td>
+            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${_fmtDate(vars.vencimento)}</td></tr>
+        <tr><td style="padding:8px;"><b>Data do pagamento</b></td>
+            <td style="padding:8px;text-align:right;">${_fmtDate(vars.pago_em)}</td></tr>
+      </table>
+      <p>Obrigado pelo pagamento. Seus serviços continuam ativos.</p>
+    `),
+  }),
+
   recuperacao_senha: (vars) => ({
     subject: 'Redefinir sua senha — LiveShop',
     html: _wrap('Redefinir sua senha', `

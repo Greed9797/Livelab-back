@@ -179,6 +179,7 @@ export async function financeiroRoutes(app) {
         [tenant_id, descricao, valor, tipo, competencia]
       )
       const row = result.rows[0]
+      app.audit?.log?.(request, { action: 'financeiro.custo_create', entity_type: 'custo', entity_id: row.id, metadata: { descricao, tipo, valor } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send({ ...row, valor: toNum(row.valor) })
     })
   })
@@ -217,6 +218,7 @@ export async function financeiroRoutes(app) {
         [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Custo não encontrado' })
+      app.audit?.log?.(request, { action: 'financeiro.custo_delete', entity_type: 'custo', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { ok: true }
     })
   })

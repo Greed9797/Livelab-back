@@ -128,6 +128,7 @@ export async function tenantsRoutes(app) {
       // S-10: resposta contém senha — proibir cache
       reply.header('Cache-Control', 'no-store')
       reply.header('Pragma', 'no-cache')
+      app.audit?.log?.(request, { action: 'tenants.create', entity_type: 'tenant', entity_id: tenant.id, metadata: { nome, email_contato: email_contato ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send({ tenant, owner, senha_temporaria: senhaTemp })
     } catch (e) {
       await client.query('ROLLBACK')
@@ -163,6 +164,7 @@ export async function tenantsRoutes(app) {
       values
     )
     if (result.rows.length === 0) return reply.code(404).send({ error: 'Franquia não encontrada' })
+    app.audit?.log?.(request, { action: 'tenants.update', entity_type: 'tenant', entity_id: request.params.id, metadata: fields })?.catch(err => app.log.error({ err }, 'audit log failed'))
     return result.rows[0]
   })
 

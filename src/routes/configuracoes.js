@@ -10,7 +10,7 @@ const configSchema = z.object({
   email_contato:       z.string().email().optional().nullable(),
   gateway_api_key:     z.string().optional().nullable(),
   gateway_wallet_id:   z.string().optional().nullable(),
-  // Aliases legados pra compat (campos antigos do Asaas mapeiam pro novo)
+  // LEGACY ASAAS — manter pra compat 6 meses. Clients antigos podem usar asaas_* fields (mapeiam pra gateway_*)
   asaas_api_key:       z.string().optional().nullable(),
   asaas_wallet_id:     z.string().optional().nullable(),
   tiktok_access_token: z.string().optional().nullable(),
@@ -115,7 +115,7 @@ export async function configuracoesRoutes(app) {
         has_gateway:            !!conf.gateway_api_key,
         gateway_wallet_id:      conf.gateway_wallet_id,
         gateway_provider:       'appmax',
-        // Aliases legados (frontend antigo ainda referencia)
+        // LEGACY ASAAS — manter pra compat 6 meses (frontend antigo ainda referencia)
         asaas_api_key_hidden:   hideKey(conf.gateway_api_key),
         has_asaas:              !!conf.gateway_api_key,
         asaas_wallet_id:        conf.gateway_wallet_id,
@@ -153,7 +153,7 @@ export async function configuracoesRoutes(app) {
 
         if (data.nome !== undefined)            { updates.push(`nome = $${paramIdx++}`);            values.push(data.nome) }
         if (data.logo_url !== undefined)        { updates.push(`logo_url = $${paramIdx++}`);        values.push(data.logo_url) }
-        // Aceita tanto campo novo (gateway_*) quanto legado (asaas_*) — alias semântico.
+        // LEGACY ASAAS — aceita tanto campo novo (gateway_*) quanto legado (asaas_*) — alias semântico. Remover em 2026-11.
         const apiKey = data.gateway_api_key ?? data.asaas_api_key
         const walletId = data.gateway_wallet_id ?? data.asaas_wallet_id
         if (apiKey !== undefined)   { updates.push(`gateway_api_key = $${paramIdx++}`);   values.push(apiKey) }

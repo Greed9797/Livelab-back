@@ -108,7 +108,7 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
                 l.status, l.cabine_id
            FROM lives l
            LEFT JOIN live_apresentadores la ON la.live_id = l.id
-          WHERE l.status IN ('em_andamento')
+          WHERE l.status IN ('em_andamento', 'agendada')
             AND (l.apresentador_id = $1 OR la.apresentador_id = $1)
             AND l.iniciado_em <= ($3::date + interval '1 day')
             AND COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
@@ -248,7 +248,11 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
       if (!apr) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
 
       // dia_semana: 0=domingo .. 6=sabado (PG: EXTRACT(DOW))
-      const dowR = await db.query(`SELECT EXTRACT(DOW FROM $1::date)::int AS dow`, [data])
+      // B6.3 — usar timezone BR para evitar bug de virada de dia em UTC
+      const dowR = await db.query(
+        `SELECT EXTRACT(DOW FROM ($1::date AT TIME ZONE 'America/Sao_Paulo'))::int AS dow`,
+        [data]
+      )
       const dow = dowR.rows[0].dow
 
       // 1) Está dentro de algum slot da grade?
@@ -292,17 +296,33 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
       }
 
       // 3) Há live ativa/agendada que conflita?
-      // Considera lives encerradas com encerrado_em null como "em aberto" — usa interval 4h default.
+      // B6.1 — inclui lives 'em_andamento' E 'agendada' (status no DB) + lives aprovadas
+      //         via live_requests (status='aprovada') para detectar conflitos futuros.
+      // Considera lives sem encerrado_em como "em aberto" — usa interval 4h default.
       if (apr.user_id) {
         const liveR = await db.query(
           `SELECT DISTINCT l.id, l.status, l.iniciado_em, l.encerrado_em
              FROM lives l
              LEFT JOIN live_apresentadores la ON la.live_id = l.id
-            WHERE l.status = 'em_andamento'
+            WHERE l.status IN ('em_andamento', 'agendada')
               AND (l.apresentador_id = $1 OR la.apresentador_id = $1)
               AND tstzrange(
                     l.iniciado_em,
                     COALESCE(l.encerrado_em, l.iniciado_em + interval '4 hours'),
+                    '[)'
+                  ) &&
+                  tstzrange(($2::date + $3::time)::timestamptz,
+                            ($2::date + $4::time)::timestamptz, '[)')
+           UNION
+           SELECT DISTINCT lr.id, 'live_request_aprovada' AS status,
+                  (lr.data_solicitada + lr.hora_inicio)::timestamptz AS iniciado_em,
+                  (lr.data_solicitada + lr.hora_fim)::timestamptz    AS encerrado_em
+             FROM live_requests lr
+            WHERE lr.status = 'aprovada'
+              AND lr.apresentadora_id = $1
+              AND tstzrange(
+                    (lr.data_solicitada + lr.hora_inicio)::timestamptz,
+                    (lr.data_solicitada + lr.hora_fim)::timestamptz,
                     '[)'
                   ) &&
                   tstzrange(($2::date + $3::time)::timestamptz,

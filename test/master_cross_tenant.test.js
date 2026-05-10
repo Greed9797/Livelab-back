@@ -178,3 +178,110 @@ describe('GET /v1/master/alertas', () => {
     await app.close()
   })
 })
+
+// ─── /v1/master/crm — agregação cross-tenant real (W3-C) ──────────────────
+describe('GET /v1/master/crm', () => {
+  it('200 com is_placeholder=false e pipeline real (8 stages)', async () => {
+    let call = 0
+    const queryMock = vi.fn(async () => {
+      call++
+      // 1: summary legado
+      if (call === 1) {
+        return {
+          rows: [
+            {
+              total_leads: 12,
+              estimated_value: '15000.00',
+              lead_pool: 4,
+              engaged_leads: 6,
+              expired_leads: 2,
+            },
+          ],
+        }
+      }
+      // 2: stage agg
+      if (call === 2) {
+        return {
+          rows: [
+            { stage: 'lead_novo', count: 5, value: '5000' },
+            { stage: 'ganho', count: 2, value: '8000' },
+          ],
+        }
+      }
+      // 3: per-tenant top
+      if (call === 3) {
+        return {
+          rows: [
+            {
+              stage: 'lead_novo',
+              tenant_id: OTHER_TENANT,
+              tenant_nome: 'Unidade A',
+              count: 3,
+              value: '3000',
+            },
+          ],
+        }
+      }
+      // 4: totals
+      if (call === 4) {
+        return {
+          rows: [
+            {
+              leads_total: 12,
+              valor_total: '15000',
+              leads_ultimos_7d: 4,
+              ganhos_30d: 2,
+              leads_30d: 10,
+            },
+          ],
+        }
+      }
+      // 5: motivo_perda top
+      if (call === 5) return { rows: [{ motivo_perda: 'concorrente', qtd: 3 }] }
+      // 6+: fetchUnitSummaries (units) — vazio para simplificar
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryImpl: queryMock })
+    await app.register(franqueadoRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/master/crm?periodo=2026-05' })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.is_placeholder).toBe(false)
+    expect(body.pipeline).toHaveLength(8)
+    const leadNovo = body.pipeline.find((p) => p.stage_id === 'lead_novo')
+    expect(leadNovo.count).toBe(5)
+    expect(leadNovo.value).toBe(5000)
+    expect(leadNovo.por_tenant).toHaveLength(1)
+    expect(leadNovo.por_tenant[0].tenant_nome).toBe('Unidade A')
+    // Stages sem dados ainda aparecem com count=0
+    const perdido = body.pipeline.find((p) => p.stage_id === 'perdido')
+    expect(perdido.count).toBe(0)
+    expect(body.totals.leads_total).toBe(12)
+    expect(body.totals.taxa_ganhos_30d).toBe(20)
+    expect(body.totals.motivo_perda_top).toBe('concorrente')
+    await app.close()
+  })
+
+  it('gerente_regional restringe agregação ao allowedTenantIds', async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+    const { app } = buildApp({
+      papel: 'gerente_regional',
+      isMaster: false,
+      allowedTenantIds: ['t1', 't2'],
+      queryImpl: queryMock,
+    })
+    await app.register(franqueadoRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/master/crm' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().is_placeholder).toBe(false)
+    // Pelo menos uma query deve ter recebido o array allowedTenantIds.
+    const calls = queryMock.mock.calls.filter((c) =>
+      c[1]?.some(
+        (p) => Array.isArray(p) && p.includes('t1') && p.includes('t2')
+      )
+    )
+    expect(calls.length).toBeGreaterThan(0)
+    await app.close()
+  })
+})

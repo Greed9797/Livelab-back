@@ -2,11 +2,26 @@ import { z } from 'zod'
 import { READ_CONTRATOS, WRITE_CONTRATOS } from '../config/role_groups.js'
 import { notify } from '../services/mailer.js'
 
+// Regex sincronizado com clientes_tiktok_username_format / contratos_tiktok_username_format (migration 075).
+const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
+
+const tiktokUsernameField = z
+  .string()
+  .trim()
+  .transform((v) => v.replace(/^@/, ''))
+  .refine((v) => v === '' || TIKTOK_USERNAME_RE.test(v), {
+    message: 'tiktok_username inválido (2-24 chars: letras/números/_/.)',
+  })
+  .transform((v) => (v === '' ? null : v))
+  .nullable()
+  .optional()
+
 const createSchema = z.object({
-  cliente_id:   z.string().uuid(),
-  valor_fixo:   z.number().min(0),
-  comissao_pct: z.number().min(0).max(100),
-  pacote_id:    z.string().uuid().optional(),
+  cliente_id:      z.string().uuid(),
+  valor_fixo:      z.number().min(0),
+  comissao_pct:    z.number().min(0).max(100),
+  pacote_id:       z.string().uuid().optional(),
+  tiktok_username: tiktokUsernameField,
 })
 
 export async function contratosRoutes(app) {
@@ -48,6 +63,7 @@ export async function contratosRoutes(app) {
 
     const { tenant_id, sub } = request.user
     const { cliente_id, valor_fixo, comissao_pct, pacote_id } = parsed.data
+    let { tiktok_username } = parsed.data
 
     return app.withTenant(tenant_id, async (db) => {
       let horasContratadas = 0
@@ -60,12 +76,32 @@ export async function contratosRoutes(app) {
         horasContratadas = Number(pacoteQ.rows[0].horas_incluidas)
       }
 
+      // Auto-preenche tiktok_username com o do cliente quando não veio no body.
+      // Se cliente também não tem, retorna 400 — TikTok @ é obrigatório pra integração.
+      if (tiktok_username == null) {
+        const clienteQ = await db.query(
+          `SELECT tiktok_username FROM clientes WHERE id = $1`,
+          [cliente_id]
+        )
+        if (!clienteQ.rows[0]) {
+          return reply.code(400).send({ error: 'Cliente não encontrado' })
+        }
+        tiktok_username = clienteQ.rows[0].tiktok_username ?? null
+        if (!tiktok_username) {
+          return reply.code(400).send({
+            error: 'TikTok @ obrigatório — preencha no contrato ou no cadastro do cliente',
+          })
+        }
+      }
+
       const result = await db.query(
-        `INSERT INTO contratos (tenant_id, cliente_id, user_id, valor_fixo, comissao_pct, pacote_id, horas_contratadas)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO contratos
+            (tenant_id, cliente_id, user_id, valor_fixo, comissao_pct, pacote_id, horas_contratadas, tiktok_username)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING id, status, criado_em, pacote_id, horas_contratadas, horas_consumidas,
-                   (horas_contratadas - horas_consumidas) AS horas_restantes`,
-        [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null, horasContratadas]
+                   (horas_contratadas - horas_consumidas) AS horas_restantes,
+                   tiktok_username`,
+        [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null, horasContratadas, tiktok_username]
       )
       return reply.code(201).send(result.rows[0])
     })

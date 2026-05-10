@@ -13,12 +13,22 @@ function getSPDate() {
 // Cria um pool com a pool principal
 let dbPool = null
 
+// Advisory lock key — número arbitrário único pro billing engine.
+// Usado pra prevenir múltiplas instâncias Railway rodando billing simultaneamente.
+const BILLING_ADVISORY_LOCK_KEY = 7421900119911234n
+
 async function processTenantBilling(tenantId, day, spDate) {
   const db = await dbPool.connect()
   try {
-    // 1. Obter tenant config
+    // 1. Obter tenant config (query system-level, sem RLS — tabela tenants
+    // não tem tenant_id como filtro RLS; busca por id direto).
     const tenantQ = await db.query(`SELECT gateway_api_key FROM tenants WHERE id = $1`, [tenantId])
     if (!tenantQ.rows[0]?.gateway_api_key) return // Tenant sem gateway de pagamento configurado
+
+    // Ativa RLS para o tenant atual nesta connection. Necessário quando a role
+    // do app for NOBYPASSRLS — todas as queries seguintes (lives, contratos,
+    // boletos, clientes) ficam confinadas ao tenant_id correto via policy.
+    await db.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
 
     await db.query('BEGIN')
 
@@ -182,7 +192,23 @@ export async function startBillingEngine(db) {
       return
     }
     _billingRunning = true
+
+    // Advisory lock cross-instance: previne 2+ workers Railway rodando billing
+    // simultaneamente. pg_try_advisory_lock retorna false se outra conexão já
+    // segurou o lock — nesse caso pula essa rodada.
+    const lockClient = await dbPool.connect()
+    let lockAcquired = false
     try {
+      const lockRes = await lockClient.query(
+        'SELECT pg_try_advisory_lock($1::bigint) AS acquired',
+        [BILLING_ADVISORY_LOCK_KEY.toString()],
+      )
+      lockAcquired = lockRes.rows[0]?.acquired === true
+      if (!lockAcquired) {
+        console.log('[Billing Engine] Outra instância já está rodando (advisory lock). Pulando.')
+        return
+      }
+
       console.log('[Billing Engine] Iniciando rotina de faturamento...')
       const spDate = getSPDate()
       const day = spDate.getDate()
@@ -193,7 +219,7 @@ export async function startBillingEngine(db) {
         return
       }
 
-      // Pega todos os tenants
+      // Pega todos os tenants (query cross-tenant — não precisa de RLS).
       const res = await dbPool.query('SELECT id FROM tenants')
       for (const row of res.rows) {
         await processTenantBilling(row.id, day, spDate)
@@ -202,6 +228,17 @@ export async function startBillingEngine(db) {
     } catch (err) {
       console.error('[Billing Engine] Erro geral na rotina:', err)
     } finally {
+      if (lockAcquired) {
+        try {
+          await lockClient.query(
+            'SELECT pg_advisory_unlock($1::bigint)',
+            [BILLING_ADVISORY_LOCK_KEY.toString()],
+          )
+        } catch (err) {
+          console.error('[Billing Engine] Falha ao liberar advisory lock:', err)
+        }
+      }
+      lockClient.release()
       _billingRunning = false
     }
   }, {

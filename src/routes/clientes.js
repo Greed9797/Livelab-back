@@ -2,24 +2,55 @@ import { z } from 'zod'
 import { resolveCepToGeo } from './cep.js'
 import { READ_CLIENTES, WRITE_CLIENTES } from '../config/role_groups.js'
 
+// Regex sincronizado com clientes_tiktok_username_format (migration 075).
+const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
+
+const tiktokUsernameField = z
+  .string()
+  .trim()
+  .transform((v) => v.replace(/^@/, ''))
+  .refine((v) => v === '' || TIKTOK_USERNAME_RE.test(v), {
+    message: 'tiktok_username inválido (2-24 chars: letras/números/_/.)',
+  })
+  .transform((v) => (v === '' ? null : v))
+  .nullable()
+  .optional()
+
 const createSchema = z.object({
-  nome:         z.string().min(1),
-  celular:      z.string().min(1),
-  cpf:          z.string().optional(),
-  cnpj:         z.string().optional(),
-  razao_social: z.string().optional(),
-  email:        z.string().optional(),
-  fat_anual:    z.number().default(0),
-  nicho:        z.string().optional(),
-  site:         z.string().optional(),
-  vende_tiktok: z.boolean().default(false),
-  lat:          z.number().optional(),
-  lng:          z.number().optional(),
-  cep:          z.string().optional(),
-  cidade:       z.string().optional(),
-  estado:       z.string().optional(),
-  siga:         z.string().optional(),
+  nome:            z.string().min(1),
+  celular:         z.string().min(1),
+  cpf:             z.string().optional(),
+  cnpj:            z.string().optional(),
+  razao_social:    z.string().optional(),
+  email:           z.string().optional(),
+  fat_anual:       z.number().default(0),
+  nicho:           z.string().optional(),
+  site:            z.string().optional(),
+  vende_tiktok:    z.boolean().default(false),
+  lat:             z.number().optional(),
+  lng:             z.number().optional(),
+  cep:             z.string().optional(),
+  cidade:          z.string().optional(),
+  estado:          z.string().optional(),
+  siga:            z.string().optional(),
+  tiktok_username: tiktokUsernameField,
 })
+
+const patchSchema = z.object({
+  nome:             z.string().optional(),
+  celular:          z.string().optional(),
+  email:            z.string().optional(),
+  fat_anual:        z.number().optional(),
+  nicho:            z.string().optional(),
+  site:             z.string().optional(),
+  vende_tiktok:     z.boolean().optional(),
+  lat:              z.number().optional(),
+  lng:              z.number().optional(),
+  status:           z.string().optional(),
+  meta_diaria_gmv:  z.number().optional(),
+  onboarding_step:  z.number().int().optional(),
+  tiktok_username:  tiktokUsernameField,
+}).passthrough()
 
 export async function clientesRoutes(app) {
   // POST /v1/clientes
@@ -46,14 +77,15 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `INSERT INTO clientes (tenant_id, nome, celular, cpf, cnpj, razao_social, email,
-          fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+          fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga, tiktok_username)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
          RETURNING *`,
         [tenant_id, d.nome, d.celular, d.cpf ?? null, d.cnpj ?? null,
          d.razao_social ?? null, d.email ?? null, d.fat_anual,
          d.nicho ?? null, d.site ?? null, d.vende_tiktok,
          lat, lng,
-         d.cep ?? null, cidade, estado, d.siga ?? null]
+         d.cep ?? null, cidade, estado, d.siga ?? null,
+         d.tiktok_username ?? null]
       )
       return reply.code(201).send(result.rows[0])
     })
@@ -129,7 +161,7 @@ export async function clientesRoutes(app) {
       const result = await db.query(
         `SELECT cl.id, cl.nome, cl.celular, cl.email, cl.status, cl.lat, cl.lng,
                 cl.fat_anual, cl.nicho, cl.score, cl.cep, cl.cidade, cl.estado,
-                cl.siga, cl.criado_em, cl.meta_diaria_gmv, cl.logo_url,
+                cl.siga, cl.criado_em, cl.meta_diaria_gmv, cl.logo_url, cl.tiktok_username,
                 c.horas_contratadas, c.horas_consumidas,
                 (c.horas_contratadas - c.horas_consumidas) AS horas_restantes
          FROM clientes cl
@@ -218,8 +250,15 @@ export async function clientesRoutes(app) {
   // PATCH /v1/clientes/:id
   app.patch('/v1/clientes/:id', { preHandler: app.requirePapel(WRITE_CLIENTES) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status','meta_diaria_gmv','onboarding_step']
-    const body = { ...request.body }
+    const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status','meta_diaria_gmv','onboarding_step','tiktok_username']
+
+    // Valida via Zod (especialmente o regex de tiktok_username); demais campos
+    // continuam permissivos via passthrough pra preservar compat.
+    const parsed = patchSchema.safeParse(request.body ?? {})
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.issues[0].message })
+    }
+    const body = { ...parsed.data }
 
     // Onboarding automático: se status === 'ganho', promove para onboarding + step 1
     if (body.status === 'ganho') {
@@ -241,7 +280,7 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE clientes SET ${set}, atualizado_em = NOW()
-         WHERE id = $${keys.length + 1} RETURNING id, nome, status, onboarding_step`,
+         WHERE id = $${keys.length + 1} RETURNING id, nome, status, onboarding_step, tiktok_username`,
         [...vals, request.params.id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })

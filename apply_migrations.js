@@ -66,6 +66,7 @@ const MIGRATIONS_LIST = [
   '072_users_token_version.sql',
   '073_users_atualizado_em.sql',
   '074_boletos_cliente_contrato.sql',
+  '075_tiktok_cliente_username.sql',
 ]
 
 async function ensureMigrationsTable(client) {

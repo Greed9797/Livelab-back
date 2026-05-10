@@ -9,6 +9,19 @@ const MASTER_PIPELINE_STAGES = [
   'Fechado perdido',
 ]
 
+// Map crm_etapa enum (DB) → label PT-BR exibida no funil.
+// Ordem é a ordem canônica do pipeline.
+const CRM_STAGE_DEFS = [
+  { id: 'lead_novo', label: 'Lead captado' },
+  { id: 'contato_iniciado', label: 'Qualificação' },
+  { id: 'reuniao_agendada', label: 'Reunião agendada' },
+  { id: 'proposta_enviada', label: 'Negociação' },
+  { id: 'em_negociacao', label: 'Contrato enviado' },
+  { id: 'aguardando_assinatura', label: 'Contrato pendente' },
+  { id: 'ganho', label: 'Fechado ganho' },
+  { id: 'perdido', label: 'Fechado perdido' },
+]
+
 const MONTH_LABELS = [
   'Jan',
   'Fev',
@@ -618,14 +631,46 @@ async function fetchStalledContracts(app, masterTenantId, periodInfo, allowedTen
   }))
 }
 
-async function fetchCrmSnapshot(app, masterTenantId, periodInfo = null) {
-  const params = [masterTenantId]
+async function fetchCrmSnapshot(
+  app,
+  masterTenantId,
+  periodInfo = null,
+  options = {}
+) {
+  const { isMaster = false, allowedTenantIds = null } = options
+  // Master agrega cross-tenant. Não-master limita por franqueadora_id == tenant.
+  // allowedTenantIds (gerente_regional) restringe master a um subset.
+  // baseParams = filtros de tenant (sem date). dateParams adiciona corte temporal opcional.
+  const baseParams = []
+  const baseConditions = []
+
+  if (isMaster) {
+    if (Array.isArray(allowedTenantIds) && allowedTenantIds.length > 0) {
+      baseParams.push(allowedTenantIds)
+      baseConditions.push(`franqueadora_id = ANY($${baseParams.length}::uuid[])`)
+    }
+    // sem allowedTenantIds → vê todos os tenants
+  } else {
+    baseParams.push(masterTenantId)
+    baseConditions.push(`franqueadora_id = $${baseParams.length}`)
+  }
+
+  const baseWhere =
+    baseConditions.length > 0 ? `WHERE ${baseConditions.join(' AND ')}` : ''
+
+  // Params/where com filtro de data — usado em summary + stage agg (pipeline histórico).
+  const params = [...baseParams]
   let dateFilter = ''
   if (periodInfo?.currentEnd) {
     params.push(periodInfo.currentEnd)
-    dateFilter = 'AND criado_em < $2::date'
+    dateFilter = `AND criado_em < $${params.length}::date`
   }
-  const result = await app.db.query(
+  const baseWhereWithDate = baseConditions.length > 0
+    ? `WHERE ${baseConditions.join(' AND ')} ${dateFilter}`.trim()
+    : (dateFilter ? `WHERE 1=1 ${dateFilter}` : '')
+
+  // 1. Resumo legado (mantém retrocompatibilidade da UI antiga).
+  const summaryResult = await app.db.query(
     `
       SELECT
         COUNT(*) AS total_leads,
@@ -634,28 +679,158 @@ async function fetchCrmSnapshot(app, masterTenantId, periodInfo = null) {
         COUNT(*) FILTER (WHERE status = 'pego') AS engaged_leads,
         COUNT(*) FILTER (WHERE status = 'expirado') AS expired_leads
       FROM leads
-      WHERE franqueadora_id = $1
-        ${dateFilter}
+      ${baseWhereWithDate}
     `,
     params
   )
+  const summaryRow = summaryResult.rows[0] ?? {}
 
-  const row = result.rows[0] ?? {}
+  // 2. Agregação por etapa (exclui status 'expirado' — pipeline ativo).
+  // Usa apenas baseParams (sem corte de data — pipeline reflete estado atual).
+  const stageWhere = baseConditions.length > 0
+    ? `WHERE ${baseConditions.join(' AND ')} AND status <> 'expirado'`
+    : `WHERE status <> 'expirado'`
+  const stageResult = await app.db.query(
+    `
+      SELECT
+        crm_etapa AS stage,
+        COUNT(*)::int AS count,
+        COALESCE(SUM(valor_oportunidade), 0)::numeric AS value
+      FROM leads
+      ${stageWhere}
+      GROUP BY crm_etapa
+    `,
+    baseParams
+  )
+
+  const stageMap = new Map(
+    stageResult.rows.map((row) => [
+      row.stage,
+      { count: toInt(row.count), value: toMoney(row.value) },
+    ])
+  )
+
+  // 3. Top 5 unidades por etapa (apenas master cross-tenant).
+  let perTenantByStage = new Map()
+  if (isMaster) {
+    // Aliased conditions: baseConditions usam 'franqueadora_id' direto;
+    // aqui precisamos qualificar pra l.franqueadora_id (JOIN com tenants).
+    const aliasedConditions = baseConditions.map((c) =>
+      c.replace(/\bfranqueadora_id\b/g, 'l.franqueadora_id')
+    )
+    const perTenantWhere =
+      aliasedConditions.length > 0
+        ? `WHERE ${aliasedConditions.join(' AND ')} AND l.status <> 'expirado'`
+        : `WHERE l.status <> 'expirado'`
+
+    const perTenantResult = await app.db.query(
+      `
+        SELECT
+          l.crm_etapa AS stage,
+          t.id AS tenant_id,
+          t.nome AS tenant_nome,
+          COUNT(*)::int AS count,
+          COALESCE(SUM(l.valor_oportunidade), 0)::numeric AS value
+        FROM leads l
+        JOIN tenants t ON t.id = l.franqueadora_id
+        ${perTenantWhere}
+        GROUP BY l.crm_etapa, t.id, t.nome
+        HAVING COUNT(*) > 0
+        ORDER BY l.crm_etapa, count DESC
+      `,
+      baseParams
+    )
+    for (const row of perTenantResult.rows) {
+      const list = perTenantByStage.get(row.stage) ?? []
+      if (list.length < 5) {
+        list.push({
+          tenant_id: row.tenant_id,
+          tenant_nome: row.tenant_nome,
+          count: toInt(row.count),
+          value: toMoney(row.value),
+        })
+      }
+      perTenantByStage.set(row.stage, list)
+    }
+  }
+
+  // 4. Pipeline final — todos os 8 stages, mesmo se count=0.
+  const pipeline = CRM_STAGE_DEFS.map((def) => {
+    const agg = stageMap.get(def.id) ?? { count: 0, value: 0 }
+    return {
+      stage: def.label, // mantém label PT-BR consumido pela UI antiga
+      stage_id: def.id, // expõe o enum para drill-down e tooltip
+      label: def.label,
+      count: agg.count,
+      value: agg.value,
+      por_tenant: isMaster ? perTenantByStage.get(def.id) ?? [] : [],
+    }
+  })
+
+  // 5. Totals agregados (cross-tenant ou per-tenant conforme isMaster).
+  const totalsResult = await app.db.query(
+    `
+      SELECT
+        COUNT(*) FILTER (WHERE status <> 'expirado')::int AS leads_total,
+        COALESCE(
+          SUM(valor_oportunidade) FILTER (WHERE status <> 'expirado'),
+          0
+        )::numeric AS valor_total,
+        COUNT(*) FILTER (WHERE criado_em >= NOW() - INTERVAL '7 days')::int AS leads_ultimos_7d,
+        COUNT(*) FILTER (
+          WHERE crm_etapa = 'ganho'
+            AND ganho_em IS NOT NULL
+            AND ganho_em >= NOW() - INTERVAL '30 days'
+        )::int AS ganhos_30d,
+        COUNT(*) FILTER (WHERE criado_em >= NOW() - INTERVAL '30 days')::int AS leads_30d
+      FROM leads
+      ${baseWhere}
+    `,
+    baseParams
+  )
+  const totalsRow = totalsResult.rows[0] ?? {}
+  const leads30d = toInt(totalsRow.leads_30d)
+  const ganhos30d = toInt(totalsRow.ganhos_30d)
+
+  // 6. Motivo de perda mais frequente (top 1).
+  const motivoWhere = baseConditions.length > 0
+    ? `WHERE ${baseConditions.join(' AND ')} AND crm_etapa = 'perdido'`
+    : `WHERE crm_etapa = 'perdido'`
+  const motivoResult = await app.db.query(
+    `
+      SELECT motivo_perda, COUNT(*)::int AS qtd
+      FROM leads
+      ${motivoWhere}
+        AND motivo_perda IS NOT NULL
+        AND length(trim(motivo_perda)) > 0
+      GROUP BY motivo_perda
+      ORDER BY qtd DESC
+      LIMIT 1
+    `,
+    baseParams
+  )
+  const motivoTop = motivoResult.rows[0]?.motivo_perda ?? null
 
   return {
-    is_placeholder: true,
+    is_placeholder: false,
     summary: {
-      total_leads: toInt(row.total_leads),
-      estimated_value: toMoney(row.estimated_value),
-      lead_pool: toInt(row.lead_pool),
-      engaged_leads: toInt(row.engaged_leads),
-      expired_leads: toInt(row.expired_leads),
+      total_leads: toInt(summaryRow.total_leads),
+      estimated_value: toMoney(summaryRow.estimated_value),
+      lead_pool: toInt(summaryRow.lead_pool),
+      engaged_leads: toInt(summaryRow.engaged_leads),
+      expired_leads: toInt(summaryRow.expired_leads),
     },
-    pipeline: MASTER_PIPELINE_STAGES.map((stage) => ({
-      stage,
-      count: 0,
-      value: 0,
-    })),
+    pipeline,
+    totals: {
+      leads_total: toInt(totalsRow.leads_total),
+      valor_total: toMoney(totalsRow.valor_total),
+      leads_ultimos_7d: toInt(totalsRow.leads_ultimos_7d),
+      taxa_ganhos_30d:
+        leads30d > 0 ? Number(((ganhos30d / leads30d) * 100).toFixed(2)) : 0,
+      ganhos_30d: ganhos30d,
+      leads_30d: leads30d,
+      motivo_perda_top: motivoTop,
+    },
     recommended_fields: [
       'Nome do lead',
       'Tipo do lead',
@@ -667,8 +842,9 @@ async function fetchCrmSnapshot(app, masterTenantId, periodInfo = null) {
       'Data de follow-up',
       'Observações',
     ],
-    message:
-      'Placeholder preparado para a evolução do CRM global da franqueadora. O backend já responde sem erro e o funil pode ser conectado depois ao modelo real de expansão.',
+    message: isMaster
+      ? 'CRM master agregado cross-tenant. Drill-down disponível por unidade em cada etapa.'
+      : 'CRM da unidade — pipeline real conectado ao banco de leads.',
   }
 }
 
@@ -1027,7 +1203,12 @@ export async function franqueadoRoutes(app) {
       const allowed = request.allowedTenantIds
       const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo, 'todos', allowed)
       const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo, allowed)
-      const crmSnapshot = await fetchCrmSnapshot(app, request.user.tenant_id, periodInfo)
+      const crmSnapshot = await fetchCrmSnapshot(
+        app,
+        request.user.tenant_id,
+        periodInfo,
+        { isMaster: true, allowedTenantIds: allowed }
+      )
       const stalledContracts = await fetchStalledContracts(app, request.user.tenant_id, periodInfo, allowed)
       const totals = await fetchMasterTotals(app, request.user.tenant_id, periodInfo, allowed)
 
@@ -1526,7 +1707,15 @@ export async function franqueadoRoutes(app) {
   app.get('/v1/master/crm', masterAccess, async (request, reply) => {
     try {
       const allowed = request.allowedTenantIds
-      const crmSnapshot = await fetchCrmSnapshot(app, request.user.tenant_id)
+      // gerente_regional: isMaster=false na semantica de visão (só seus tenants),
+      // mas o snapshot precisa agregar cross-tenant pelo allowedTenantIds.
+      // Tratamos ambos como cross-tenant aqui — diferença é o filtro de array.
+      const crmSnapshot = await fetchCrmSnapshot(
+        app,
+        request.user.tenant_id,
+        null,
+        { isMaster: true, allowedTenantIds: allowed }
+      )
       const units = await fetchUnitSummaries(
         app,
         request.user.tenant_id,
@@ -1558,10 +1747,18 @@ export async function franqueadoRoutes(app) {
   }
   app.get('/v1/crm/summary', commercialAccess, async (request, reply) => {
     try {
-      const crmSnapshot = await fetchCrmSnapshot(app, request.user.tenant_id)
+      const isMasterPapel =
+        request.user.papel === 'franqueador_master' ||
+        request.user.papel === 'admin_master'
+      const crmSnapshot = await fetchCrmSnapshot(
+        app,
+        request.user.tenant_id,
+        null,
+        { isMaster: isMasterPapel, allowedTenantIds: null }
+      )
       let pendingContracts = crmSnapshot.summary?.contratos_pendentes ?? 0
       // Master agrega contratos pendentes via unidades; demais usam o já calculado.
-      if (request.user.papel === 'franqueador_master' || request.user.papel === 'admin_master') {
+      if (isMasterPapel) {
         const units = await fetchUnitSummaries(app, request.user.tenant_id, parsePeriod(request.query?.periodo))
         pendingContracts = units.reduce((sum, unit) => sum + unit.pending_contracts, 0)
       }

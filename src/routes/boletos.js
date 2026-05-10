@@ -129,6 +129,36 @@ export async function boletosRoutes(app) {
     const { id, status } = request.body ?? {}
     if (!id || !status) return reply.code(400).send({ error: 'Payload inválido' })
 
+    // Replay protection (opt-in via env). Identifica evento por id + status pra
+    // permitir transições legítimas (pendente→pago não é replay) mas bloquear
+    // duplicação exata de payload.
+    if (process.env.WEBHOOK_REPLAY_PROTECTION === 'true') {
+      const body = request.body ?? {}
+      const nonceBase =
+        body.event_id ??
+        body.notification_id ??
+        `${id}:${status}:${body.occurred_at ?? body.event_date ?? ''}`
+      const nonce = nonceBase.length > 200
+        ? crypto.createHash('sha256').update(nonceBase).digest('hex')
+        : String(nonceBase).slice(0, 200)
+      try {
+        const inserted = await app.db.query(
+          `INSERT INTO webhook_replay_log (source, nonce)
+           VALUES ($1, $2)
+           ON CONFLICT DO NOTHING
+           RETURNING nonce`,
+          ['pagarme', nonce],
+        )
+        if (inserted.rowCount === 0) {
+          request.log.warn({ nonce }, '[webhook pagamento] replay bloqueado')
+          return reply.code(200).send({ received: true, replay: true })
+        }
+      } catch (err) {
+        app.log.error({ err }, '[webhook pagamento] replay log insert failed')
+        return reply.code(503).send({ error: 'replay_log_unavailable' })
+      }
+    }
+
     if (status === 'paid') {
       // Lookup precisa cross-tenant pra detectar colisão de referência externa
       // (PK do gateway pode bater entre tenants). Defesa em profundidade.

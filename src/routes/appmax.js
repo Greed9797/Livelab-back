@@ -3,7 +3,23 @@
 //   confirmar que o app está instalado; precisa retornar 200 + app_id matching).
 // - POST /v1/webhooks/appmax           — recebe eventos de pagamento.
 
+import crypto from 'node:crypto'
 import { validateWebhook, validarWebhookToken } from '../services/appmax.js'
+
+// Extrai um identificador único do payload pra prevenir replay.
+// Tenta usar IDs nativos do Appmax; fallback pra hash SHA256 do payload completo.
+function appmaxEventNonce(payload) {
+  const data = payload?.data ?? {}
+  const id =
+    payload?.id ??
+    payload?.event_id ??
+    payload?.notification_id ??
+    data.id ??
+    data.payment_id ??
+    data.order_id
+  if (id) return String(id).slice(0, 200)
+  return 'sha256:' + crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
+}
 
 function appmaxWebhookToken(request) {
   return request.headers['x-appmax-signature']
@@ -71,6 +87,28 @@ export async function appmaxRoutes(app) {
       return reply.code(401).send({ error: 'Token de webhook Appmax inválido' })
     }
 
+    // Replay protection (opt-in via env). Idempotência via tabela webhook_replay_log
+    // com PK (source, nonce). Ataque de replay retorna 200 + replay:true sem reprocessar.
+    if (process.env.WEBHOOK_REPLAY_PROTECTION === 'true') {
+      const nonce = appmaxEventNonce(payload)
+      try {
+        const inserted = await app.db.query(
+          `INSERT INTO webhook_replay_log (source, nonce)
+           VALUES ($1, $2)
+           ON CONFLICT DO NOTHING
+           RETURNING nonce`,
+          ['appmax', nonce],
+        )
+        if (inserted.rowCount === 0) {
+          request.log.warn({ nonce }, '[appmax webhook] replay bloqueado')
+          return reply.code(200).send({ received: true, replay: true })
+        }
+      } catch (err) {
+        app.log.error({ err }, '[appmax webhook] replay log insert failed')
+        return reply.code(503).send({ error: 'replay_log_unavailable' })
+      }
+    }
+
     const event = payload.event ?? payload.type ?? 'unknown'
     const data = payload.data ?? {}
 
@@ -114,12 +152,17 @@ export async function appmaxRoutes(app) {
 
         if (lookup.rows.length === 1) {
           const { id: boletoId, tenant_id: boletoTenant } = lookup.rows[0]
-          await app.db.query(
-            `UPDATE boletos
-             SET status = 'pago', pago_em = NOW(), gateway_id = COALESCE(gateway_id, $3)
-             WHERE id = $1 AND tenant_id = $2 AND status != 'pago'`,
-            [boletoId, boletoTenant, gatewayId ?? null],
-          )
+          // UPDATE via withTenant para ativar RLS (defesa em profundidade extra
+          // sobre o filtro explícito tenant_id = $2). Necessário quando a role
+          // do app for NOBYPASSRLS (P0 hardening).
+          await app.withTenant(boletoTenant, async (db) => {
+            await db.query(
+              `UPDATE boletos
+               SET status = 'pago', pago_em = NOW(), gateway_id = COALESCE(gateway_id, $3)
+               WHERE id = $1 AND tenant_id = $2 AND status != 'pago'`,
+              [boletoId, boletoTenant, gatewayId ?? null],
+            )
+          })
           app.log.info({ boletoId, gatewayId, event }, '[appmax webhook] boleto marcado como pago')
         } else if (lookup.rows.length > 1) {
           app.log.warn({ candidates }, '[appmax webhook] referência ambígua entre tenants — REJEITANDO')

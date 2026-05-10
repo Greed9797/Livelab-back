@@ -100,7 +100,7 @@ export async function clientePortalRoutes(app) {
     return app.withTenant(request.user.tenant_id, async (db) => {
       const r = await db.query(
         `SELECT id, nome, email, celular, cnpj, razao_social,
-                site, logo_url, status, fat_anual, nicho, cidade, estado
+                site, logo_url, status, fat_anual, nicho, cidade, estado, tiktok_username
          FROM clientes WHERE user_id = $1 LIMIT 1`,
         [request.user.sub]
       )
@@ -108,6 +108,43 @@ export async function clientePortalRoutes(app) {
         return reply.code(404).send({ error: 'Cliente não encontrado para este usuário.' })
       }
       return r.rows[0]
+    })
+  })
+
+  // POST /v1/cliente/perfil/tiktok — atualiza @TikTok do PRÓPRIO cliente_parceiro
+  // Importante: filtra por user_id (sub do JWT) — cliente só edita o próprio.
+  app.post('/v1/cliente/perfil/tiktok', {
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+  }, async (request, reply) => {
+    const raw = request.body?.tiktok_username
+    if (raw !== null && typeof raw !== 'string') {
+      return reply.code(400).send({ error: 'tiktok_username deve ser string ou null' })
+    }
+    const username = raw == null
+      ? null
+      : (raw.trim().replace(/^@/, '') || null)
+
+    // Mesmo regex da migration 075 (clientes_tiktok_username_format).
+    if (username !== null && !/^[a-zA-Z0-9_.]{2,24}$/.test(username)) {
+      return reply.code(400).send({
+        error: 'tiktok_username inválido (2-24 chars: letras/números/_/.)',
+      })
+    }
+
+    return app.withTenant(request.user.tenant_id, async (db) => {
+      const upd = await db.query(
+        `UPDATE clientes
+         SET tiktok_username = $1, atualizado_em = NOW()
+         WHERE user_id = $2 AND tenant_id = $3::uuid
+         RETURNING id, tiktok_username`,
+        [username, request.user.sub, request.user.tenant_id]
+      )
+      if (!upd.rows[0]) {
+        return reply.code(404).send({
+          error: 'Conta de cliente não vinculada — peça pro admin associar seu usuário a um cliente.',
+        })
+      }
+      return reply.send(upd.rows[0])
     })
   })
 

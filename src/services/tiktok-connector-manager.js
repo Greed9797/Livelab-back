@@ -51,13 +51,17 @@ export function has(liveId) {
 export async function syncLives() {
   if (!_db) return
 
+  // W3-A: fallback do @ — usa o do contrato; se ausente, cai pro do cliente.
+  // Lives sem @ em nenhum dos dois são puladas (não erro — apenas não viram connector).
   const { rows: activeLives } = await _db.query(`
-    SELECT l.id, l.tenant_id, ct.tiktok_username
+    SELECT l.id, l.tenant_id,
+           COALESCE(ct.tiktok_username, cl.tiktok_username) AS tiktok_username
     FROM lives l
     JOIN cabines c ON c.live_atual_id = l.id
-    JOIN contratos ct ON ct.id = c.contrato_id
+    LEFT JOIN contratos ct ON ct.id = c.contrato_id
+    LEFT JOIN clientes cl ON cl.id = COALESCE(ct.cliente_id, l.cliente_id)
     WHERE l.status = 'em_andamento'
-      AND ct.tiktok_username IS NOT NULL
+      AND COALESCE(ct.tiktok_username, cl.tiktok_username) IS NOT NULL
   `)
 
   const activeIds = new Set(activeLives.map(r => r.id))

@@ -305,6 +305,68 @@ export async function tiktokRoutes(app) {
     return reply.send({ ok: true })
   })
 
+  // ── GET /v1/lives/:liveId/tiktok-status — snapshot do connector ───────────
+  // Combina state da DB (lives.tiktok_connector_status, último snapshot)
+  // com presença em memória (connectorManager.has) pra resolver o status
+  // efetivo (connected/connecting/disconnected/error). W3-A.
+  app.get('/v1/lives/:liveId/tiktok-status', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente', 'apresentador', 'apresentadora', 'produtor_live'])],
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { liveId } = request.params
+
+    const liveQ = await app.db.query(
+      `SELECT l.id, l.status, l.tiktok_connector_status,
+              COALESCE(ct.tiktok_username, cl.tiktok_username) AS tiktok_username
+       FROM lives l
+       LEFT JOIN cabines cb ON cb.live_atual_id = l.id
+       LEFT JOIN contratos ct ON ct.id = cb.contrato_id
+       LEFT JOIN clientes cl ON cl.id = COALESCE(ct.cliente_id, l.cliente_id)
+       WHERE l.id = $1 AND l.tenant_id = $2::uuid`,
+      [liveId, tenant_id]
+    )
+    if (liveQ.rows.length === 0) {
+      return reply.code(404).send({ error: 'Live não encontrada' })
+    }
+    const live = liveQ.rows[0]
+
+    const snapQ = await app.db.query(
+      `SELECT viewer_count, captured_at
+       FROM live_snapshots
+       WHERE live_id = $1 AND tenant_id = $2::uuid
+       ORDER BY captured_at DESC
+       LIMIT 1`,
+      [liveId, tenant_id]
+    )
+    const snap = snapQ.rows[0] ?? null
+
+    const inMemory = connectorManager.has(liveId)
+    let status
+    let error = null
+    if (live.status !== 'em_andamento') {
+      status = 'disconnected'
+    } else if (!live.tiktok_username) {
+      status = 'error'
+      error = 'TikTok @ ausente em contrato e cliente'
+    } else if (live.tiktok_connector_status === 'degraded' || live.tiktok_connector_status === 'offline') {
+      status = 'error'
+      error = `connector ${live.tiktok_connector_status}`
+    } else if (inMemory) {
+      status = 'connected'
+    } else {
+      // Live ao vivo + @ ok mas sem connector: cron vai reconciliar em até 60s.
+      status = 'connecting'
+    }
+
+    return reply.send({
+      status,
+      tiktok_username: live.tiktok_username ?? null,
+      viewer_count: snap ? Number(snap.viewer_count) : 0,
+      last_sync_at: snap?.captured_at ?? null,
+      error,
+    })
+  })
+
   // ── GET /v1/lives/:liveId/events — SSE por-evento (chat/gift/share) ───────
   // Canal separado do /stream (snapshots agregados 30s). Emite eventos
   // individuais no momento em que acontecem na live — consumidor renderiza

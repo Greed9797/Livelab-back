@@ -62,6 +62,7 @@ const MIGRATIONS_LIST = [
   '066_tenant_notif_settings.sql',
   '069_apresentadoras_disponibilidade.sql',
   '070_user_tenant_access.sql',
+  '071_password_reset_invite.sql',
 ]
 
 async function ensureMigrationsTable(client) {

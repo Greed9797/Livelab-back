@@ -2,6 +2,20 @@ import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
 import { z } from 'zod'
 import { SECURITY } from '../config/security.js'
+import { notify } from '../services/mailer.js'
+
+const PAPEL_LABELS = {
+  gerente: 'Gerente',
+  gerente_comercial: 'Gerente Comercial',
+  financeiro: 'Financeiro',
+  operacional: 'Operacional',
+  apresentador: 'Apresentador',
+  apresentadora: 'Apresentadora',
+  cliente_parceiro: 'Cliente Parceiro',
+}
+
+const _frontendUrl = () =>
+  (process.env.FRONTEND_URL ?? 'https://livelab-3601f.web.app').replace(/\/+$/, '')
 
 const convidarSchema = z.object({
   nome: z.string().min(2),
@@ -66,8 +80,27 @@ export async function usuariosRoutes(app) {
     const { nome, email, papel, cliente_id, apresentadora_id, senha_temporaria } = parsed.data
     const tenantId = request.user.tenant_id
 
-    const senhaTemp = senha_temporaria ?? crypto.randomBytes(8).toString('hex')
-    const senhaHash = await bcrypt.hash(senhaTemp, SECURITY.BCRYPT_ROUNDS)
+    // F4: convite via email. Senha inicial é placeholder aleatório (NÃO usável
+    // pra login) — usuário define a real ao aceitar o convite via /aceitar-convite.
+    // Fallback: se mailer não está configurado (sem RESEND_API_KEY) ou se o caller
+    // forçou senha_temporaria, mantemos comportamento legado pra não quebrar dev.
+    const mailerEnabled = !!process.env.RESEND_API_KEY
+    const useInviteFlow = mailerEnabled && !senha_temporaria
+
+    const senhaInicial = senha_temporaria
+      ?? crypto.randomBytes(32).toString('hex') // só pra ter algo no campo NOT NULL
+    const senhaHash = await bcrypt.hash(senhaInicial, SECURITY.BCRYPT_ROUNDS)
+
+    // Token de convite (72h). Hash gravado, plaintext só vai por email.
+    const inviteRawToken = useInviteFlow
+      ? crypto.randomBytes(32).toString('hex')
+      : null
+    const inviteTokenHash = inviteRawToken
+      ? crypto.createHash('sha256').update(inviteRawToken).digest('hex')
+      : null
+    const inviteExpiraEm = useInviteFlow
+      ? new Date(Date.now() + 72 * 60 * 60 * 1000)
+      : null
 
     return app.withTenant(tenantId, async (db) => {
       try {
@@ -103,10 +136,16 @@ export async function usuariosRoutes(app) {
         }
 
         const { rows } = await db.query(
-          `INSERT INTO users (tenant_id, nome, email, senha_hash, papel, ativo, criado_por)
-           VALUES ($1, $2, $3, $4, $5, true, $6)
+          `INSERT INTO users (
+              tenant_id, nome, email, senha_hash, papel, ativo, criado_por,
+              invite_token_hash, invite_expira_em, primeiro_acesso
+            )
+           VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, false)
            RETURNING id, nome, email, papel, ativo, criado_em`,
-          [tenantId, nome, email, senhaHash, papel, request.user.sub]
+          [
+            tenantId, nome, email, senhaHash, papel, request.user.sub,
+            inviteTokenHash, inviteExpiraEm,
+          ]
         )
         const newUser = rows[0]
 
@@ -129,10 +168,50 @@ export async function usuariosRoutes(app) {
         }
 
         await db.query('COMMIT')
-        // S-10: resposta contém senha — proibir cache em proxies/CDN
+
+        // F4: dispara email de convite (fire-and-forget — não bloqueia resposta).
+        if (useInviteFlow) {
+          // Pega nome do tenant pra personalizar email.
+          const tenantRow = await db.query(`SELECT nome FROM tenants WHERE id = $1`, [tenantId])
+          const tenantNome = tenantRow.rows[0]?.nome ?? 'LiveShop'
+
+          const link = `${_frontendUrl()}/aceitar-convite?token=${inviteRawToken}`
+          notify({
+            app,
+            tenantId,
+            to: email,
+            template: 'convite_usuario',
+            vars: {
+              nome,
+              papel_label: PAPEL_LABELS[papel] ?? papel,
+              link,
+              tenant_nome: tenantNome,
+            },
+          }).catch((err) => {
+            app.log?.warn?.({ err }, '[usuarios] falha ao enviar email convite_usuario')
+          })
+
+          reply.header('Cache-Control', 'no-store')
+          reply.header('Pragma', 'no-cache')
+          return reply.code(201).send({
+            ...newUser,
+            invite_enviado: true,
+            invite_expira_em: inviteExpiraEm,
+          })
+        }
+
+        // Fallback legado — sem mailer ou senha forçada pelo caller.
+        // S-10: resposta contém senha — proibir cache em proxies/CDN.
         reply.header('Cache-Control', 'no-store')
         reply.header('Pragma', 'no-cache')
-        return reply.code(201).send({ ...newUser, senha_temporaria: senhaTemp })
+        return reply.code(201).send({
+          ...newUser,
+          senha_temporaria: senhaInicial,
+          invite_enviado: false,
+          warning: mailerEnabled
+            ? 'Senha definida pelo administrador (sem fluxo de convite).'
+            : 'Mailer não configurado — usando senha temporária. Configure RESEND_API_KEY para o fluxo de convite por email.',
+        })
       } catch (e) {
         await db.query('ROLLBACK')
         throw e

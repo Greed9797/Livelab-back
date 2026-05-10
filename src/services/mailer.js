@@ -265,6 +265,51 @@ const _templates = {
     `),
   }),
 
+  recuperacao_senha: (vars) => ({
+    subject: 'Redefinir sua senha — LiveShop',
+    html: _wrap('Redefinir sua senha', `
+      <p>Olá ${vars.nome ? `<b>${vars.nome}</b>` : ''},</p>
+      <p>Recebemos uma solicitação para redefinir a senha da sua conta no LiveShop.
+         Se foi você, clique no botão abaixo para criar uma nova senha:</p>
+      <p style="text-align:center;margin:24px 0;">
+        <a href="${vars.link}" style="${_btnStyle}">Redefinir senha</a>
+      </p>
+      <p style="font-size:12.5px;color:#555;">
+        Este link expira em <b>1 hora</b> e só pode ser usado uma vez.
+      </p>
+      <p style="font-size:12.5px;color:#555;">
+        Se você não solicitou essa redefinição, ignore este e-mail —
+        sua senha continua a mesma.
+      </p>
+      <p style="font-size:11px;color:#888;word-break:break-all;margin-top:18px;">
+        Caso o botão não funcione, copie e cole no navegador:<br>
+        ${vars.link}
+      </p>
+    `),
+  }),
+
+  convite_usuario: (vars) => ({
+    subject: `Você foi convidado para ${vars.tenant_nome ?? 'LiveShop'}`,
+    html: _wrap('Bem-vindo ao LiveShop', `
+      <p>Olá <b>${vars.nome ?? ''}</b>,</p>
+      <p>Você foi convidado para acessar a plataforma
+         <b>${vars.tenant_nome ?? 'LiveShop'}</b> com o papel
+         <b>${vars.papel_label ?? '—'}</b>.</p>
+      <p>Para começar, defina sua senha de acesso clicando no botão abaixo:</p>
+      <p style="text-align:center;margin:24px 0;">
+        <a href="${vars.link}" style="${_btnStyle}">Definir minha senha</a>
+      </p>
+      <p style="font-size:12.5px;color:#555;">
+        Este convite expira em <b>72 horas</b>.
+        Se expirar, peça um novo ao administrador da sua unidade.
+      </p>
+      <p style="font-size:11px;color:#888;word-break:break-all;margin-top:18px;">
+        Caso o botão não funcione, copie e cole no navegador:<br>
+        ${vars.link}
+      </p>
+    `),
+  }),
+
   lead_novo_inbound: (vars) => ({
     subject: `Novo lead recebido — ${vars.nome ?? ''}`,
     html: _wrap('Novo lead inbound', `

@@ -56,6 +56,7 @@ const MIGRATIONS_LIST = [
   '060_rls_with_check.sql',
   '061_audit_log.sql',
   '062_tenants_plano_cidade.sql',
+  '063_knowledge_base_expansion.sql',
 ]
 
 async function ensureMigrationsTable(client) {

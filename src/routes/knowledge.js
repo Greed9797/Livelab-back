@@ -198,16 +198,19 @@ export async function knowledgeRoutes(app) {
     return rows
   })
 
-  app.get('/v1/knowledge/articles/:slug', { onRequest: allReaders }, async (req, reply) => {
+  app.get('/v1/knowledge/articles/:slugOrId', { onRequest: allReaders }, async (req, reply) => {
     const isMaster = req.user.papel === 'franqueador_master'
+    const param = req.params.slugOrId
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(param)
+    const where = isUuid ? 'm.id = $1' : 'm.slug = $1'
     const r = await app.db.query(
       `SELECT
          m.*,
          c.name AS category_name, c.slug AS category_slug
        FROM manuais m
        LEFT JOIN knowledge_categories c ON c.id = m.category_id
-       WHERE m.slug = $1 ${isMaster ? '' : `AND m.status = 'published'`}`,
-      [req.params.slug],
+       WHERE ${where} ${isMaster ? '' : `AND m.status = 'published'`}`,
+      [param],
     )
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Artigo não encontrado' })
     return r.rows[0]

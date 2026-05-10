@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 
 const custoSchema = z.object({
   descricao:   z.string().min(1),
@@ -43,7 +44,7 @@ function resolveRange({ inicio, fim, mes, ano }) {
 
 export async function financeiroRoutes(app) {
   // GET /v1/financeiro/resumo?mes=&ano=  OR  ?inicio=YYYY-MM&fim=YYYY-MM
-  app.get('/v1/financeiro/resumo', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
+  app.get('/v1/financeiro/resumo', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
     const { tenant_id } = request.user
     const { startDate, endDate } = resolveRange(request.query)
 
@@ -97,7 +98,7 @@ export async function financeiroRoutes(app) {
   })
 
   // GET /v1/financeiro/faturamento?periodo=YYYY-MM  OR  ?inicio=YYYY-MM&fim=YYYY-MM
-  app.get('/v1/financeiro/faturamento', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
+  app.get('/v1/financeiro/faturamento', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
     const { tenant_id } = request.user
     // Aceita 'periodo' legado (YYYY-MM) como atalho
     const q = { ...request.query }
@@ -130,7 +131,7 @@ export async function financeiroRoutes(app) {
   })
 
   // GET /v1/financeiro/fluxo-caixa?mes=&ano=  OR  ?inicio=YYYY-MM&fim=YYYY-MM
-  app.get('/v1/financeiro/fluxo-caixa', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
+  app.get('/v1/financeiro/fluxo-caixa', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
     const { tenant_id } = request.user
     const { startDate, endDate } = resolveRange(request.query)
 
@@ -164,7 +165,7 @@ export async function financeiroRoutes(app) {
   })
 
   // POST /v1/financeiro/custos
-  app.post('/v1/financeiro/custos', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
+  app.post('/v1/financeiro/custos', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
     const parsed = custoSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -183,7 +184,7 @@ export async function financeiroRoutes(app) {
   })
 
   // GET /v1/financeiro/custos?mes=YYYY-MM  OR  ?inicio=YYYY-MM&fim=YYYY-MM
-  app.get('/v1/financeiro/custos', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
+  app.get('/v1/financeiro/custos', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
     const { tenant_id } = request.user
     const q = { ...request.query }
     // Atalho: legado mandava 'mes=YYYY-MM' (string). Converte para inicio/fim iguais.
@@ -208,7 +209,7 @@ export async function financeiroRoutes(app) {
   })
 
   // DELETE /v1/financeiro/custos/:id
-  app.delete('/v1/financeiro/custos/:id', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
+  app.delete('/v1/financeiro/custos/:id', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(

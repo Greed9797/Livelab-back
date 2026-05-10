@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { resolveCepToGeo } from './cep.js'
+import { READ_CLIENTES, WRITE_CLIENTES } from '../config/role_groups.js'
 
 const createSchema = z.object({
   nome:         z.string().min(1),
@@ -22,7 +23,7 @@ const createSchema = z.object({
 
 export async function clientesRoutes(app) {
   // POST /v1/clientes
-  app.post('/v1/clientes', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
+  app.post('/v1/clientes', { preHandler: app.requirePapel(WRITE_CLIENTES) }, async (request, reply) => {
     const parsed = createSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -61,7 +62,7 @@ export async function clientesRoutes(app) {
   // POST /v1/clientes/geocode-pending — preenche lat/lng de clientes existentes
   // (utilizado uma vez para popular clientes cadastrados antes do auto-geocoding)
   app.post('/v1/clientes/geocode-pending', {
-    preHandler: app.requirePapel(['franqueado', 'gerente']),
+    preHandler: app.requirePapel(WRITE_CLIENTES),
   }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
@@ -102,7 +103,7 @@ export async function clientesRoutes(app) {
   })
 
   // GET /v1/clientes/metricas — métricas agregadas: LTV, faturamento, lives, comissão
-  app.get('/v1/clientes/metricas', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
+  app.get('/v1/clientes/metricas', { preHandler: app.requirePapel(READ_CLIENTES) }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
@@ -120,7 +121,7 @@ export async function clientesRoutes(app) {
   })
 
   // GET /v1/clientes
-  app.get('/v1/clientes', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
+  app.get('/v1/clientes', { preHandler: app.requirePapel(READ_CLIENTES) }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       // Defesa em profundidade: WHERE cl.tenant_id explícito porque role
@@ -149,7 +150,7 @@ export async function clientesRoutes(app) {
   })
 
   // GET /v1/clientes/:id
-  app.get('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueador_master', 'franqueado', 'gerente']) }, async (request, reply) => {
+  app.get('/v1/clientes/:id', { preHandler: app.requirePapel(READ_CLIENTES) }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       // Defesa em profundidade: além do RLS via dbTenant, filtra explícito
@@ -215,7 +216,7 @@ export async function clientesRoutes(app) {
   })
 
   // PATCH /v1/clientes/:id
-  app.patch('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
+  app.patch('/v1/clientes/:id', { preHandler: app.requirePapel(WRITE_CLIENTES) }, async (request, reply) => {
     const { tenant_id } = request.user
     const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status','meta_diaria_gmv','onboarding_step']
     const body = { ...request.body }

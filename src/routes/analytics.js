@@ -1,8 +1,10 @@
+import { READ_ANALYTICS } from '../config/role_groups.js'
+
 export async function analyticsRoutes(app) {
   app.get('/v1/analytics/franqueado/resumo', {
     preHandler: [
       app.authenticate,
-      app.requirePapel(['franqueado', 'gerente']),
+      app.requirePapel(READ_ANALYTICS),
     ],
   }, async (request) => {
     const { tenant_id } = request.user
@@ -140,7 +142,7 @@ export async function analyticsRoutes(app) {
   app.get('/v1/analytics/dashboard', {
     preHandler: [
       app.authenticate,
-      app.requirePapel(['franqueado', 'gerente', 'franqueador_master']),
+      app.requirePapel(READ_ANALYTICS),
     ],
     schema: {
       querystring: {

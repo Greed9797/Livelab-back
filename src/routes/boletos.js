@@ -1,9 +1,10 @@
 import crypto from 'node:crypto'
+import { READ_BOLETOS, WRITE_BOLETOS } from '../config/role_groups.js'
 
 export async function boletosRoutes(app) {
   const boletoAccess = [
     app.authenticate,
-    app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'cliente_parceiro']),
+    app.requirePapel(READ_BOLETOS),
   ]
   
   // GET /v1/boletos/alertas
@@ -91,7 +92,7 @@ export async function boletosRoutes(app) {
   })
 
   // PATCH /v1/boletos/:id/pagar (dev manual)
-  app.patch('/v1/boletos/:id/pagar', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
+  app.patch('/v1/boletos/:id/pagar', { preHandler: app.requirePapel(WRITE_BOLETOS) }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(

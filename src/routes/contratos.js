@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { READ_CONTRATOS, WRITE_CONTRATOS } from '../config/role_groups.js'
 
 const createSchema = z.object({
   cliente_id:   z.string().uuid(),
@@ -9,7 +10,7 @@ const createSchema = z.object({
 
 export async function contratosRoutes(app) {
   // POST /v1/contratos/quick — cria contrato rascunho com defaults (sem valor_fixo obrigatório)
-  app.post('/v1/contratos/quick', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.post('/v1/contratos/quick', { preHandler: app.requirePapel(WRITE_CONTRATOS) }, async (request, reply) => {
     const { cliente_id, pacote_id } = request.body ?? {}
     if (!cliente_id || typeof cliente_id !== 'string') {
       return reply.code(400).send({ error: 'cliente_id é obrigatório' })
@@ -40,7 +41,7 @@ export async function contratosRoutes(app) {
   })
 
   // POST /v1/contratos
-  app.post('/v1/contratos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.post('/v1/contratos', { preHandler: app.requirePapel(WRITE_CONTRATOS) }, async (request, reply) => {
     const parsed = createSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -70,7 +71,7 @@ export async function contratosRoutes(app) {
   })
 
   // GET /v1/contratos — lista todos os contratos do tenant
-  app.get('/v1/contratos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request) => {
+  app.get('/v1/contratos', { preHandler: app.requirePapel(READ_CONTRATOS) }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(`
@@ -90,7 +91,7 @@ export async function contratosRoutes(app) {
   })
 
   // GET /v1/contratos/:id — detalhe de um contrato
-  app.get('/v1/contratos/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.get('/v1/contratos/:id', { preHandler: app.requirePapel(READ_CONTRATOS) }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(`
@@ -111,7 +112,7 @@ export async function contratosRoutes(app) {
   })
 
   // PATCH /v1/contratos/:id — edita pacote/valores de um contrato em rascunho
-  app.patch('/v1/contratos/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.patch('/v1/contratos/:id', { preHandler: app.requirePapel(WRITE_CONTRATOS) }, async (request, reply) => {
     const { tenant_id } = request.user
     const { pacote_id, valor_fixo, comissao_pct } = request.body ?? {}
 
@@ -159,7 +160,7 @@ export async function contratosRoutes(app) {
   })
 
   // POST /v1/contratos/:id/assinar → em_analise
-  app.post('/v1/contratos/:id/assinar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.post('/v1/contratos/:id/assinar', { preHandler: app.requirePapel(WRITE_CONTRATOS) }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
@@ -177,7 +178,7 @@ export async function contratosRoutes(app) {
   })
 
   // POST /v1/contratos/:id/assinar-digital
-  app.post('/v1/contratos/:id/assinar-digital', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.post('/v1/contratos/:id/assinar-digital', { preHandler: app.requirePapel(WRITE_CONTRATOS) }, async (request, reply) => {
     const { tenant_id } = request.user
     const { signatureImageBase64, acceptedTerms } = request.body ?? {}
 
@@ -245,7 +246,7 @@ export async function contratosRoutes(app) {
   })
 
   // POST /v1/contratos/:id/analisar → score automático → ativo ou cancelado
-  app.post('/v1/contratos/:id/analisar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.post('/v1/contratos/:id/analisar', { preHandler: app.requirePapel(WRITE_CONTRATOS) }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       // Busca contrato + cliente
@@ -279,7 +280,7 @@ export async function contratosRoutes(app) {
 
   // PATCH /v1/contratos/:id/assumir-risco → ativo forçado
   app.patch('/v1/contratos/:id/assumir-risco', {
-    preHandler: app.requirePapel(['franqueador_master', 'franqueado', 'gerente']),
+    preHandler: app.requirePapel(WRITE_CONTRATOS),
   }, async (request, reply) => {
     const { confirmacao, senha } = request.body ?? {}
     if (!confirmacao || confirmacao.toUpperCase() !== 'CONCORDO') {
@@ -337,7 +338,7 @@ export async function contratosRoutes(app) {
 
   // PATCH /v1/contratos/:id/tiktok-username — define o @username do apresentador TikTok
   app.patch('/v1/contratos/:id/tiktok-username', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
+    preHandler: app.requirePapel(WRITE_CONTRATOS),
   }, async (request, reply) => {
     const { tiktok_username } = request.body ?? {}
     const username = typeof tiktok_username === 'string'
@@ -357,7 +358,7 @@ export async function contratosRoutes(app) {
   })
 
   // PATCH /v1/contratos/:id/cancelar
-  app.patch('/v1/contratos/:id/cancelar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.patch('/v1/contratos/:id/cancelar', { preHandler: app.requirePapel(WRITE_CONTRATOS) }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
@@ -371,7 +372,7 @@ export async function contratosRoutes(app) {
   })
 
   // GET /v1/analise-credito
-  app.get('/v1/analise-credito', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request) => {
+  app.get('/v1/analise-credito', { preHandler: app.requirePapel(READ_CONTRATOS) }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(

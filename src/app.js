@@ -23,6 +23,7 @@ import { recomendacoesRoutes } from './routes/recomendacoes.js'
 import { franqueadoRoutes } from './routes/franqueado.js'
 import { manuaisRoutes } from './routes/manuais.js'
 import { knowledgeRoutes } from './routes/knowledge.js'
+import { clienteNotasRoutes } from './routes/cliente_notas.js'
 import { tiktokRoutes } from './routes/tiktok.js'
 import { cepRoutes } from './routes/cep.js'
 import { configuracoesRoutes } from './routes/configuracoes.js'
@@ -150,6 +151,7 @@ export async function buildApp(opts = {}) {
   await app.register(franqueadoRoutes)
   await app.register(manuaisRoutes)
   await app.register(knowledgeRoutes)
+  await app.register(clienteNotasRoutes)
   await app.register(tiktokRoutes)
   await app.register(cepRoutes)
   await app.register(configuracoesRoutes)

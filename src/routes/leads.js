@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { READ_LEADS, WRITE_LEADS } from '../config/role_groups.js'
 
 const CRM_ETAPAS = ['lead_novo','contato_iniciado','reuniao_agendada','proposta_enviada','em_negociacao','aguardando_assinatura','ganho','perdido']
 
@@ -51,10 +52,11 @@ const SELECT_CRM = `
   FROM leads`
 
 export async function leadsRoutes(app) {
-  const access = [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente'])]
+  const readAccess = [app.authenticate, app.requirePapel(READ_LEADS)]
+  const writeAccess = [app.authenticate, app.requirePapel(WRITE_LEADS)]
 
   // GET /v1/leads — lista leads do tenant com campos CRM
-  app.get('/v1/leads', { preHandler: access }, async (request) => {
+  app.get('/v1/leads', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
     const { etapa } = request.query
 
@@ -76,7 +78,7 @@ export async function leadsRoutes(app) {
   })
 
   // GET /v1/leads/meus — leads próprios não encerrados
-  app.get('/v1/leads/meus', { preHandler: access }, async (request) => {
+  app.get('/v1/leads/meus', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
@@ -90,7 +92,7 @@ export async function leadsRoutes(app) {
   })
 
   // GET /v1/leads/:id — detalhe do lead
-  app.get('/v1/leads/:id', { preHandler: access }, async (request, reply) => {
+  app.get('/v1/leads/:id', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
@@ -103,7 +105,7 @@ export async function leadsRoutes(app) {
   })
 
   // PATCH /v1/leads/:id — atualiza campos CRM
-  app.patch('/v1/leads/:id', { preHandler: access }, async (request, reply) => {
+  app.patch('/v1/leads/:id', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = crmUpdateSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -136,7 +138,7 @@ export async function leadsRoutes(app) {
   })
 
   // DELETE /v1/leads/:id — remove lead (CRM)
-  app.delete('/v1/leads/:id', { preHandler: access }, async (request, reply) => {
+  app.delete('/v1/leads/:id', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
@@ -149,7 +151,7 @@ export async function leadsRoutes(app) {
   })
 
   // POST /v1/leads/:id/contato — adiciona entrada no histórico de contatos
-  app.post('/v1/leads/:id/contato', { preHandler: access }, async (request, reply) => {
+  app.post('/v1/leads/:id/contato', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = contatoSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -171,7 +173,7 @@ export async function leadsRoutes(app) {
   })
 
   // POST /v1/leads/:id/tarefa — adiciona tarefa ao lead
-  app.post('/v1/leads/:id/tarefa', { preHandler: access }, async (request, reply) => {
+  app.post('/v1/leads/:id/tarefa', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = tarefaSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -193,7 +195,7 @@ export async function leadsRoutes(app) {
   })
 
   // POST /v1/leads/:id/ganhar — converte lead em cliente + contrato ativo
-  app.post('/v1/leads/:id/ganhar', { preHandler: access }, async (request, reply) => {
+  app.post('/v1/leads/:id/ganhar', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     const { pacote_id } = request.body ?? {}
 
@@ -260,7 +262,7 @@ export async function leadsRoutes(app) {
   })
 
   // POST /v1/leads — cria lead manualmente (CRM)
-  app.post('/v1/leads', { preHandler: access }, async (request, reply) => {
+  app.post('/v1/leads', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = createLeadSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -292,7 +294,7 @@ export async function leadsRoutes(app) {
   })
 
   // POST /v1/leads/:id/pegar — pega lead disponível (fluxo legado)
-  app.post('/v1/leads/:id/pegar', { preHandler: access }, async (request, reply) => {
+  app.post('/v1/leads/:id/pegar', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     const client = await app.db.pool.connect()
     try {

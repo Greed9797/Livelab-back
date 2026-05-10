@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { READ_APRESENTADORAS, WRITE_APRESENTADORAS } from '../config/role_groups.js'
 
 const createSchema = z.object({
   nome:            z.string().min(1),
@@ -24,10 +25,11 @@ const updateSchema = createSchema.partial().extend({
 const COLS = `id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
 
 export async function apresentadorasRoutes(app) {
-  const access = [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'operacional'])]
+  const readAccess = [app.authenticate, app.requirePapel(READ_APRESENTADORAS)]
+  const writeAccess = [app.authenticate, app.requirePapel(WRITE_APRESENTADORAS)]
 
   // GET /v1/apresentadoras
-  app.get('/v1/apresentadoras', { preHandler: access }, async (request) => {
+  app.get('/v1/apresentadoras', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
@@ -41,7 +43,7 @@ export async function apresentadorasRoutes(app) {
   })
 
   // GET /v1/apresentadoras/:id
-  app.get('/v1/apresentadoras/:id', { preHandler: access }, async (request, reply) => {
+  app.get('/v1/apresentadoras/:id', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
@@ -54,7 +56,7 @@ export async function apresentadorasRoutes(app) {
   })
 
   // POST /v1/apresentadoras
-  app.post('/v1/apresentadoras', { preHandler: access }, async (request, reply) => {
+  app.post('/v1/apresentadoras', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = createSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -74,7 +76,7 @@ export async function apresentadorasRoutes(app) {
   })
 
   // PATCH /v1/apresentadoras/:id
-  app.patch('/v1/apresentadoras/:id', { preHandler: access }, async (request, reply) => {
+  app.patch('/v1/apresentadoras/:id', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = updateSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -99,7 +101,7 @@ export async function apresentadorasRoutes(app) {
   })
 
   // DELETE /v1/apresentadoras/:id — desativa (soft delete)
-  app.delete('/v1/apresentadoras/:id', { preHandler: access }, async (request, reply) => {
+  app.delete('/v1/apresentadoras/:id', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(

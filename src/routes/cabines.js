@@ -16,7 +16,9 @@ const iniciarLiveSchema = z.object({
 })
 
 const encerrarSchema = z.object({
-  fat_gerado: z.number().min(0),
+  fat_gerado:  z.number().min(0),
+  qtd_pedidos: z.number().int().min(0).optional(),
+  resumo:      z.string().max(2000).optional(),
 })
 
 const liveManualSchema = z.object({
@@ -1145,9 +1147,17 @@ export async function cabinesRoutes(app) {
         await db.query(
           `UPDATE lives
            SET status = 'encerrada', encerrado_em = NOW(),
-               fat_gerado = $1, comissao_calculada = $2
-           WHERE id = $3`,
-          [parsed.data.fat_gerado, comissao, request.params.id]
+               fat_gerado = $1, comissao_calculada = $2,
+               final_orders_count = COALESCE($3, final_orders_count),
+               resumo = COALESCE($4, resumo)
+           WHERE id = $5`,
+          [
+            parsed.data.fat_gerado,
+            comissao,
+            parsed.data.qtd_pedidos ?? null,
+            parsed.data.resumo ?? null,
+            request.params.id,
+          ]
         )
 
         // Deduct live duration from contrato's horas_consumidas

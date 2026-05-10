@@ -8,6 +8,7 @@
 //     submitted_at, source_path, data: {...}, metadata: {...} }
 
 import crypto from 'node:crypto'
+import { notify } from '../services/mailer.js'
 
 const ALLOWED_PERSONAS = new Set(['cliente', 'franqueado', 'apresentador'])
 const PERSONA_CRM_TYPE = {
@@ -231,6 +232,45 @@ export async function webhookBioCrmRoutes(app) {
         return result.rows[0]
       })
       app.log.info({ leadId: lead.id, origem: lead.origem }, '[bio-crm webhook] lead criado')
+
+      // F1: notificação por e-mail — fire-and-forget.
+      ;(async () => {
+        try {
+          // franqueadoraId aqui é tenant_id do destino. Busca e-mail de contato + flags.
+          const tQ = await app.db.query(
+            `SELECT email_contato, notif_email_ativo, notif_lead_novo
+             FROM tenants WHERE id = $1`,
+            [franqueadoraId],
+          )
+          const tenant = tQ.rows[0]
+          if (!tenant?.email_contato) return
+
+          await notify({
+            app,
+            tenantId: franqueadoraId,
+            to: tenant.email_contato,
+            template: 'lead_novo_inbound',
+            refId: lead.id,
+            settings: {
+              notif_email_ativo: tenant.notif_email_ativo,
+              notif_lead_novo: tenant.notif_lead_novo,
+            },
+            settingsKey: 'notif_lead_novo',
+            dedupe: true,
+            vars: {
+              nome: row.nome,
+              cidade: row.cidade,
+              estado: row.estado,
+              email: row.contato_email,
+              whatsapp: row.contato_whatsapp,
+              origem: row.origem,
+            },
+          })
+        } catch (err) {
+          app.log.error({ err, leadId: lead.id }, 'mailer: falha ao notificar lead inbound')
+        }
+      })()
+
       return reply.code(201).send({ ok: true, lead_id: lead.id })
     } catch (err) {
       app.log.error({ err }, '[bio-crm webhook] erro ao inserir lead')

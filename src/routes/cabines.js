@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { z } from 'zod'
 import { has as managerHas, stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
 import { READ_CABINES, WRITE_CABINES, READ_LIVES, WRITE_LIVES } from '../config/role_groups.js'
+import { notify } from '../services/mailer.js'
 
 const cabineRoleAccess = (app) => [
   app.authenticate,
@@ -1219,6 +1220,49 @@ export async function cabinesRoutes(app) {
             app.log.error({ err, liveId: live.id }, 'tiktokManager: falha ao parar connector no encerramento')
           )
         }
+
+        // F1: notificação por e-mail — fire-and-forget, jamais bloqueia o response.
+        // Lê tenant fora da conexão RLS (app.db.query, sem set_config tenant).
+        ;(async () => {
+          try {
+            const tQ = await app.db.query(
+              `SELECT email_contato, notif_email_ativo, notif_live_meta
+               FROM tenants WHERE id = $1`,
+              [tenant_id],
+            )
+            const tenant = tQ.rows[0]
+            if (!tenant?.email_contato) return
+
+            const duracaoMs = live.iniciado_em
+              ? Date.now() - new Date(live.iniciado_em).getTime()
+              : 0
+            const hh = String(Math.floor(duracaoMs / 3600000)).padStart(2, '0')
+            const mm = String(Math.floor((duracaoMs % 3600000) / 60000)).padStart(2, '0')
+            const ss = String(Math.floor((duracaoMs % 60000) / 1000)).padStart(2, '0')
+
+            await notify({
+              app,
+              tenantId: tenant_id,
+              to: tenant.email_contato,
+              template: 'live_encerrada',
+              refId: live.id,
+              settings: {
+                notif_email_ativo: tenant.notif_email_ativo,
+                notif_live_meta: tenant.notif_live_meta,
+              },
+              settingsKey: 'notif_live_meta',
+              dedupe: true,
+              vars: {
+                gmv: parsed.data.fat_gerado,
+                qtd_pedidos: parsed.data.qtd_pedidos,
+                viewers: parsed.data.viewers ?? '—',
+                duracao: `${hh}:${mm}:${ss}`,
+              },
+            })
+          } catch (err) {
+            app.log.error({ err, liveId: live.id }, 'mailer: falha ao notificar live_encerrada')
+          }
+        })()
 
         return { ok: true, fat_gerado: parsed.data.fat_gerado, comissao_calculada: comissao }
       } catch (error) {

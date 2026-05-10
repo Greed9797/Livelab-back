@@ -79,7 +79,9 @@ describe('POST /v1/webhooks/bio-crm', () => {
     expect(res.statusCode).toBe(201)
     expect(res.json()).toMatchObject({ ok: true, lead_id: 'lead-uuid' })
 
-    expect(queryMock).toHaveBeenCalledTimes(1)
+    // F1: hook fire-and-forget de notify pode disparar SELECT extra no mesmo mock.
+    // O INSERT do lead (call principal) é sempre o primeiro.
+    expect(queryMock.mock.calls.length).toBeGreaterThanOrEqual(1)
     const params = queryMock.mock.calls[0][1]
     // params: [franqueadora, nome, nicho, cidade, estado, fat, status, etapa, responsavel, origem, email, whatsapp, observacoes, payload]
     expect(params[0]).toBe(FRANQUEADORA)

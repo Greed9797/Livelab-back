@@ -151,6 +151,36 @@ export async function knowledgeRoutes(app) {
     return reply.code(204).send()
   })
 
+  // Reordena categorias atualizando sort_order conforme ordem do array recebido (1-indexed).
+  // Body: { ids: ['uuid1', 'uuid2', 'uuid3'] }
+  app.post('/v1/knowledge/categories/reorder', { onRequest: masterOnly }, async (req, reply) => {
+    const reorderSchema = z.object({
+      ids: z.array(z.string().uuid()).min(1).max(500),
+    })
+    const parsed = reorderSchema.safeParse(req.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.issues[0].message })
+    }
+    const { ids } = parsed.data
+    const client = await app.db.pool.connect()
+    try {
+      await client.query('BEGIN')
+      for (let i = 0; i < ids.length; i++) {
+        await client.query(
+          `UPDATE knowledge_categories SET sort_order = $1, updated_at = NOW() WHERE id = $2`,
+          [i + 1, ids[i]],
+        )
+      }
+      await client.query('COMMIT')
+    } catch (e) {
+      await client.query('ROLLBACK')
+      throw e
+    } finally {
+      client.release()
+    }
+    return reply.code(204).send()
+  })
+
   // ─── ARTIGOS ────────────────────────────────────────────────────────────
 
   // Lista com filtros opcionais. Não-master só vê published.

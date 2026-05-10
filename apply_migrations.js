@@ -58,6 +58,10 @@ const MIGRATIONS_LIST = [
   '062_tenants_plano_cidade.sql',
   '063_knowledge_base_expansion.sql',
   '064_papel_expansao_cliente_notas.sql',
+  '065_notification_log.sql',
+  '066_tenant_notif_settings.sql',
+  '069_apresentadoras_disponibilidade.sql',
+  '070_user_tenant_access.sql',
 ]
 
 async function ensureMigrationsTable(client) {

@@ -1,3 +1,5 @@
+import { notify } from '../services/mailer.js'
+
 export async function cleanupOrphanContracts(app) {
   const expirationDays = Number(process.env.CONTRACT_EXPIRATION_DAYS ?? 5)
 
@@ -46,6 +48,44 @@ export async function cleanupOrphanContracts(app) {
   const total = result.rowCount ?? 0
   if (total > 0) {
     app.log.info({ total, expirationDays }, 'Contratos órfãos cancelados automaticamente')
+
+    // F1: notifica franqueado de cada contrato cancelado (fire-and-forget).
+    ;(async () => {
+      try {
+        const ids = result.rows.map(r => r.contrato_id)
+        if (ids.length === 0) return
+        const { rows } = await app.db.query(
+          `SELECT c.id AS contrato_id, c.tenant_id, cl.nome AS cliente_nome, cl.email AS cliente_email,
+                  t.email_contato AS tenant_email, t.notif_email_ativo, t.notif_contrato
+           FROM contratos c
+           JOIN clientes cl ON cl.id = c.cliente_id
+           JOIN tenants t ON t.id = c.tenant_id
+           WHERE c.id = ANY($1::uuid[])`,
+          [ids],
+        )
+        for (const r of rows) {
+          const settings = {
+            notif_email_ativo: r.notif_email_ativo,
+            notif_contrato: r.notif_contrato,
+          }
+          const vars = {
+            cliente_nome: r.cliente_nome,
+            score: '—',
+            risco: '—',
+            motivo: 'Prazo expirado sem decisão do franqueado.',
+          }
+          if (r.tenant_email) {
+            await notify({
+              app, tenantId: r.tenant_id, to: r.tenant_email,
+              template: 'contrato_reprovado', refId: r.contrato_id,
+              settings, settingsKey: 'notif_contrato', dedupe: true, vars,
+            })
+          }
+        }
+      } catch (err) {
+        app.log.error({ err }, 'mailer: falha ao notificar contratos cancelados automaticamente')
+      }
+    })()
   }
 
   return total

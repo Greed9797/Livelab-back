@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_CONTRATOS, WRITE_CONTRATOS } from '../config/role_groups.js'
+import { notify } from '../services/mailer.js'
 
 const createSchema = z.object({
   cliente_id:   z.string().uuid(),
@@ -273,6 +274,53 @@ export async function contratosRoutes(app) {
          request.params.id,
          tenant_id]
       )
+
+      // F1: notificação por e-mail — fire-and-forget.
+      ;(async () => {
+        try {
+          const tQ = await app.db.query(
+            `SELECT email_contato, notif_email_ativo, notif_contrato
+             FROM tenants WHERE id = $1`,
+            [tenant_id],
+          )
+          const tenant = tQ.rows[0]
+
+          // Cliente
+          const clQ = await app.db.query(
+            `SELECT nome, email FROM clientes WHERE id = $1`,
+            [contrato.cliente_id],
+          )
+          const cliente = clQ.rows[0]
+
+          const settings = {
+            notif_email_ativo: tenant?.notif_email_ativo,
+            notif_contrato: tenant?.notif_contrato,
+          }
+          const template = aprovado ? 'contrato_aprovado' : 'contrato_reprovado'
+          const vars = { cliente_nome: cliente?.nome ?? '—', score, risco }
+
+          // Notifica cliente (se tem e-mail)
+          if (cliente?.email) {
+            await notify({
+              app, tenantId: tenant_id, to: cliente.email,
+              template, refId: request.params.id,
+              settings, settingsKey: 'notif_contrato',
+              dedupe: true, vars,
+            })
+          }
+          // Notifica responsável (e-mail de contato do tenant)
+          if (tenant?.email_contato && tenant.email_contato !== cliente?.email) {
+            await notify({
+              app, tenantId: tenant_id, to: tenant.email_contato,
+              template, refId: request.params.id,
+              settings, settingsKey: 'notif_contrato',
+              vars,
+            })
+          }
+        } catch (err) {
+          app.log.error({ err, contratoId: request.params.id }, 'mailer: falha ao notificar contrato analisado')
+        }
+      })()
 
       return { aprovado, score, risco, status: novoStatus }
     })

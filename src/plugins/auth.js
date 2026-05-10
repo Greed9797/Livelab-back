@@ -43,6 +43,52 @@ async function authPlugin(app) {
       return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
     }
   })
+
+  // preHandler para rotas /v1/master/* compartilhadas entre franqueador_master
+  // e gerente_regional. Injeta:
+  //   request.isMaster: boolean       (true = franqueador_master)
+  //   request.allowedTenantIds: string[]  (lista pra filtro SQL; vazia se
+  //                                        gerente_regional sem acesso)
+  //
+  // Decisão: SEMPRE consulta o banco a cada request — nunca confia em claims
+  // do JWT. Assim, revogar acesso tem efeito imediato (sem esperar exp do
+  // token de 15min). Se virar gargalo, cachear em Redis com invalidação por
+  // tenant_id, mas hoje 1 SELECT por request /v1/master/* é negligenciável.
+  app.decorate('requireTenantAccess', async (request, reply) => {
+    // jwtVerify já é assumido (rota usa também app.authenticate ou
+    // requirePapel antes) — mas chamamos defensivamente.
+    if (!request.user) {
+      try {
+        await request.jwtVerify()
+      } catch {
+        return reply.code(401).send({ error: 'Não autenticado' })
+      }
+    }
+
+    const papel = request.user.papel
+    if (papel === 'franqueador_master') {
+      request.isMaster = true
+      request.allowedTenantIds = null // null = sem restrição = vê tudo
+      return
+    }
+
+    if (papel === 'gerente_regional') {
+      try {
+        const { rows } = await app.db.query(
+          `SELECT tenant_id FROM user_tenant_access WHERE user_id = $1`,
+          [request.user.sub ?? request.user.id]
+        )
+        request.isMaster = false
+        request.allowedTenantIds = rows.map((r) => r.tenant_id)
+        return
+      } catch (err) {
+        request.log.error({ err }, 'requireTenantAccess: falha consulta user_tenant_access')
+        return reply.code(500).send({ error: 'Falha verificando permissões' })
+      }
+    }
+
+    return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
+  })
 }
 
 export default fp(authPlugin, { name: 'auth', dependencies: ['db'] })

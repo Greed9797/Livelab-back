@@ -39,6 +39,7 @@ import { cleanupOrphanContracts } from './jobs/cleanup_orphan_contracts.js'
 import * as connectorManager from './services/tiktok-connector-manager.js'
 import { startBillingEngine } from './jobs/billing_engine.js'
 import { startClienteMetricasSnapshotCron } from './jobs/cliente_metricas_snapshot.js'
+import { notifyBoletosVencidos } from './jobs/notify_boletos_vencidos.js'
 import { runMigrations } from '../apply_migrations.js'
 
 // Auto-create Supabase Storage bucket if not exists
@@ -119,3 +120,12 @@ cron.schedule('0 1 * * *', async () => {
     app.log.error({ error }, 'Falha ao atualizar boletos vencidos')
   }
 })
+
+// F1: 02:30 SP — notifica clientes sobre boletos vencidos (1x por boleto, dedupe via notification_log)
+cron.schedule('30 2 * * *', async () => {
+  try {
+    await notifyBoletosVencidos(app)
+  } catch (error) {
+    app.log.error({ error }, 'Falha ao notificar boletos vencidos')
+  }
+}, { timezone: 'America/Sao_Paulo' })

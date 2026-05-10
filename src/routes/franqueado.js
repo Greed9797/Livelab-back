@@ -148,7 +148,13 @@ function buildExecutiveSummary(cards, alertCount) {
   return `Tenho ${pluralize(cards.unidades_ativas, 'unidade', 'unidades')}, ${pluralize(cards.clientes_ativos, 'cliente', 'clientes')}, ${formatCurrency(cards.faturamento_bruto_rede)} faturados na rede, minha receita líquida é ${formatCurrency(cards.receita_liquida_franqueadora)}, há ${pluralize(cards.contratos_pendentes, 'contrato pendente', 'contratos pendentes')} e ${pluralize(alertCount, 'alerta crítico', 'alertas críticos')}.`
 }
 
-async function fetchUnitSummaries(app, masterTenantId, periodInfo, status = 'todos') {
+async function fetchUnitSummaries(
+  app,
+  masterTenantId,
+  periodInfo,
+  status = 'todos',
+  allowedTenantIds = null
+) {
   const result = await app.db.query(
     `
       WITH clientes_ativos AS (
@@ -255,6 +261,7 @@ async function fetchUnitSummaries(app, masterTenantId, periodInfo, status = 'tod
       LEFT JOIN boletos_current bc ON bc.tenant_id = t.id
       WHERE t.id <> $1
         AND t.criado_em < $4::date
+        AND ($6::uuid[] IS NULL OR t.id = ANY($6::uuid[]))
       ORDER BY (COALESCE(cr.fixed_current, 0) + COALESCE(lc.commission_current, 0)) DESC, t.nome ASC
     `,
     [
@@ -263,6 +270,7 @@ async function fetchUnitSummaries(app, masterTenantId, periodInfo, status = 'tod
       periodInfo.previousStart,
       periodInfo.currentEnd,
       periodInfo.previousEnd,
+      allowedTenantIds,
     ]
   )
 
@@ -312,7 +320,7 @@ async function fetchUnitSummaries(app, masterTenantId, periodInfo, status = 'tod
   return mapped.filter((unit) => unit.status === status)
 }
 
-async function fetchHistoryRows(app, masterTenantId, periodInfo) {
+async function fetchHistoryRows(app, masterTenantId, periodInfo, allowedTenantIds = null) {
   const result = await app.db.query(
     `
       WITH months AS (
@@ -330,6 +338,7 @@ async function fetchHistoryRows(app, masterTenantId, periodInfo) {
         FROM tenants t
         CROSS JOIN months m
         WHERE t.id <> $1
+          AND ($4::uuid[] IS NULL OR t.id = ANY($4::uuid[]))
       ),
       fixed_revenue AS (
         SELECT
@@ -395,7 +404,7 @@ async function fetchHistoryRows(app, masterTenantId, periodInfo) {
        AND br.month_start = tm.month_start
       ORDER BY tm.month_start ASC, tm.tenant_name ASC
     `,
-    [masterTenantId, periodInfo.historyStart, periodInfo.historyEnd]
+    [masterTenantId, periodInfo.historyStart, periodInfo.historyEnd, allowedTenantIds]
   )
 
   return result.rows.map((row) => ({
@@ -408,7 +417,7 @@ async function fetchHistoryRows(app, masterTenantId, periodInfo) {
   }))
 }
 
-async function fetchUnitClients(app, masterTenantId, periodInfo) {
+async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantIds = null) {
   const mapRows = (rows) =>
     rows.map((row) => {
       const monthlyFee = toMoney(row.monthly_fee)
@@ -502,9 +511,10 @@ async function fetchUnitClients(app, masterTenantId, periodInfo) {
           ON cb.tenant_id = cl.tenant_id
          AND cb.cliente_id = cl.id
         WHERE cl.tenant_id <> $1
+          AND ($4::uuid[] IS NULL OR cl.tenant_id = ANY($4::uuid[]))
         ORDER BY cl.tenant_id, (COALESCE(ct.valor_fixo, 0) + COALESCE(lv.live_revenue, 0)) DESC, cl.nome ASC
       `,
-      [masterTenantId, periodInfo.currentStart, periodInfo.currentEnd]
+      [masterTenantId, periodInfo.currentStart, periodInfo.currentEnd, allowedTenantIds]
     )
 
     return mapRows(result.rows)
@@ -564,16 +574,17 @@ async function fetchUnitClients(app, masterTenantId, periodInfo) {
           ON lv.tenant_id = cl.tenant_id
          AND lv.cliente_id = cl.id
         WHERE cl.tenant_id <> $1
+          AND ($4::uuid[] IS NULL OR cl.tenant_id = ANY($4::uuid[]))
         ORDER BY cl.tenant_id, (COALESCE(ct.valor_fixo, 0) + COALESCE(lv.live_revenue, 0)) DESC, cl.nome ASC
       `,
-      [masterTenantId, periodInfo.currentStart, periodInfo.currentEnd]
+      [masterTenantId, periodInfo.currentStart, periodInfo.currentEnd, allowedTenantIds]
     )
 
     return mapRows(fallback.rows)
   }
 }
 
-async function fetchStalledContracts(app, masterTenantId, periodInfo) {
+async function fetchStalledContracts(app, masterTenantId, periodInfo, allowedTenantIds = null) {
   const result = await app.db.query(
     `
       SELECT
@@ -587,13 +598,14 @@ async function fetchStalledContracts(app, masterTenantId, periodInfo) {
       JOIN tenants t ON t.id = c.tenant_id
       LEFT JOIN clientes cl ON cl.id = c.cliente_id
       WHERE c.tenant_id <> $1
+        AND ($3::uuid[] IS NULL OR c.tenant_id = ANY($3::uuid[]))
         AND c.status IN ('rascunho', 'enviado', 'em_analise')
         AND c.criado_em < $2::date
         AND COALESCE(c.assinado_em, c.criado_em) < $2::date - interval '7 days'
       ORDER BY reference_date ASC
       LIMIT 5
     `,
-    [masterTenantId, periodInfo.currentEnd]
+    [masterTenantId, periodInfo.currentEnd, allowedTenantIds]
   )
 
   return result.rows.map((row) => ({
@@ -764,7 +776,81 @@ function buildAlerts(units, stalledContracts) {
   return alerts.slice(0, 8)
 }
 
-function buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stalledContracts) {
+function findTopBottomUnit(units) {
+  const ranked = [...units]
+    .filter((unit) => unit.gross_revenue > 0)
+    .sort((a, b) => b.gross_revenue - a.gross_revenue)
+  if (ranked.length === 0) {
+    return { top: null, bottom: null }
+  }
+  const top = ranked[0]
+  const bottom = ranked[ranked.length - 1]
+  return {
+    top: top
+      ? { tenant_id: top.id, nome: top.name, gmv: top.gross_revenue }
+      : null,
+    bottom: bottom && bottom !== top
+      ? { tenant_id: bottom.id, nome: bottom.name, gmv: bottom.gross_revenue }
+      : null,
+  }
+}
+
+function buildUnidadesEmRisco(units) {
+  return units
+    .filter((unit) => unit.growth_pct <= -30 && unit.previous_gross_revenue > 0)
+    .slice(0, 5)
+    .map((unit) => ({
+      tenant_id: unit.id,
+      nome: unit.name,
+      gmv: unit.gross_revenue,
+      queda_pct: Math.abs(Number(unit.growth_pct.toFixed(1))),
+    }))
+}
+
+async function fetchMasterTotals(app, masterTenantId, periodInfo, allowedTenantIds = null) {
+  const result = await app.db.query(
+    `
+      WITH lives_periodo AS (
+        SELECT tenant_id, COUNT(*)::int AS total_lives,
+               COALESCE(SUM(fat_gerado), 0) AS gmv_total
+        FROM lives
+        WHERE tenant_id <> $1
+          AND ($5::uuid[] IS NULL OR tenant_id = ANY($5::uuid[]))
+          AND COALESCE(encerrado_em, iniciado_em) >= $2::date
+          AND COALESCE(encerrado_em, iniciado_em) < $3::date
+        GROUP BY tenant_id
+      ),
+      lives_anterior AS (
+        SELECT COALESCE(SUM(fat_gerado), 0) AS gmv_total
+        FROM lives
+        WHERE tenant_id <> $1
+          AND ($5::uuid[] IS NULL OR tenant_id = ANY($5::uuid[]))
+          AND COALESCE(encerrado_em, iniciado_em) >= $4::date
+          AND COALESCE(encerrado_em, iniciado_em) < $2::date
+      )
+      SELECT
+        COALESCE(SUM(lp.total_lives), 0)::int AS total_lives_mes,
+        COALESCE(SUM(lp.gmv_total), 0) AS gmv_total_mes,
+        (SELECT gmv_total FROM lives_anterior) AS gmv_total_mes_anterior
+      FROM lives_periodo lp
+    `,
+    [
+      masterTenantId,
+      periodInfo.currentStart,
+      periodInfo.currentEnd,
+      periodInfo.previousStart,
+      allowedTenantIds,
+    ]
+  )
+  const row = result.rows[0] ?? {}
+  return {
+    total_lives_mes: toInt(row.total_lives_mes),
+    gmv_total_mes: toMoney(row.gmv_total_mes),
+    gmv_total_mes_anterior: toMoney(row.gmv_total_mes_anterior),
+  }
+}
+
+function buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stalledContracts, totals = null) {
   const periods = periodInfo.historyPeriods
   const { networkHistory } = buildHistoryMaps(
     historyRows,
@@ -805,10 +891,32 @@ function buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stal
     ticket_medio_unidade: ticketMedio,
   }
 
+  const { top: unidadeTop, bottom: unidadePior } = findTopBottomUnit(units)
+  const unidadesEmRisco = buildUnidadesEmRisco(units)
+  const totalsResolved = totals ?? {
+    gmv_total_mes: faturamentoBruto,
+    gmv_total_mes_anterior: faturamentoAnterior,
+    total_lives_mes: 0,
+  }
+  const gmvCrescimentoPct = calculateGrowth(
+    totalsResolved.gmv_total_mes,
+    totalsResolved.gmv_total_mes_anterior
+  )
+
   return {
     periodo: periodInfo.period,
     periodo_anterior: periodInfo.previousPeriod,
     cards,
+    // Campos top-level F3 (Dashboard Master cross-tenant)
+    gmv_total_mes: toMoney(totalsResolved.gmv_total_mes),
+    gmv_crescimento_pct: gmvCrescimentoPct,
+    royalties_total_mes: receitaFranqueadora,
+    total_unidades_ativas: unidadesAtivas,
+    total_lives_mes: totalsResolved.total_lives_mes,
+    total_clientes_ativos: clientesAtivos,
+    unidade_top_gmv: unidadeTop,
+    unidade_pior_gmv: unidadePior,
+    unidades_em_risco: unidadesEmRisco,
     resumo_executivo: buildExecutiveSummary(cards, uniqueAlertUnits),
     rankings: {
       faturamento: [...units]
@@ -853,8 +961,17 @@ function buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stal
 }
 
 export async function franqueadoRoutes(app) {
+  // masterAccess: aceita franqueador_master OU gerente_regional.
+  // requireTenantAccess injeta:
+  //   request.isMaster = true        → vê todas as unidades (legado)
+  //   request.isMaster = false       → gerente_regional, vê só
+  //   request.allowedTenantIds = []  → subset configurado em user_tenant_access
   const masterAccess = {
-    onRequest: [app.authenticate, app.requirePapel(['franqueador_master'])],
+    onRequest: [
+      app.authenticate,
+      app.requirePapel(['franqueador_master', 'gerente_regional']),
+      app.requireTenantAccess,
+    ],
   }
 
   // Compatibilidade com a tela antiga do franqueador.
@@ -882,10 +999,11 @@ export async function franqueadoRoutes(app) {
               ON l.tenant_id = t.id
              AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
             WHERE t.id != $1
+              AND ($2::uuid[] IS NULL OR t.id = ANY($2::uuid[]))
             GROUP BY t.id, t.nome
             ORDER BY fat_mes DESC
           `,
-          [req.user.tenant_id]
+          [req.user.tenant_id, req.allowedTenantIds]
         )
 
         const unidades = rows.map((row) => ({
@@ -906,16 +1024,366 @@ export async function franqueadoRoutes(app) {
   app.get('/v1/master/dashboard', masterAccess, async (request, reply) => {
     try {
       const periodInfo = parsePeriod(request.query?.periodo)
-      const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo)
-      const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo)
+      const allowed = request.allowedTenantIds
+      const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo, 'todos', allowed)
+      const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo, allowed)
       const crmSnapshot = await fetchCrmSnapshot(app, request.user.tenant_id, periodInfo)
-      const stalledContracts = await fetchStalledContracts(app, request.user.tenant_id, periodInfo)
+      const stalledContracts = await fetchStalledContracts(app, request.user.tenant_id, periodInfo, allowed)
+      const totals = await fetchMasterTotals(app, request.user.tenant_id, periodInfo, allowed)
 
       return reply.send(
-        buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stalledContracts)
+        buildDashboardPayload(
+          units,
+          historyRows,
+          periodInfo,
+          crmSnapshot,
+          stalledContracts,
+          totals
+        )
       )
     } catch (err) {
       request.log.error({ err }, 'master/dashboard: erro')
+      throw err
+    }
+  })
+
+  // F3 — Ranking de unidades cross-tenant
+  app.get('/v1/master/ranking', masterAccess, async (request, reply) => {
+    try {
+      const periodInfo = parsePeriod(request.query?.periodo)
+      const result = await app.db.query(
+        `
+          WITH lives_atual AS (
+            SELECT tenant_id,
+                   COUNT(*)::int AS total_lives,
+                   COALESCE(SUM(fat_gerado), 0) AS gmv_mes
+            FROM lives
+            WHERE tenant_id <> $1
+              AND COALESCE(encerrado_em, iniciado_em) >= $2::date
+              AND COALESCE(encerrado_em, iniciado_em) < $3::date
+            GROUP BY tenant_id
+          ),
+          lives_anterior AS (
+            SELECT tenant_id,
+                   COALESCE(SUM(fat_gerado), 0) AS gmv_mes_anterior
+            FROM lives
+            WHERE tenant_id <> $1
+              AND COALESCE(encerrado_em, iniciado_em) >= $4::date
+              AND COALESCE(encerrado_em, iniciado_em) < $2::date
+            GROUP BY tenant_id
+          ),
+          clientes_ativos AS (
+            SELECT tenant_id, COUNT(*)::int AS total_clientes
+            FROM clientes
+            WHERE status = 'ativo'
+              AND criado_em < $3::date
+            GROUP BY tenant_id
+          ),
+          clientes_anterior AS (
+            SELECT tenant_id, COUNT(*)::int AS total_clientes_ant
+            FROM clientes
+            WHERE status = 'ativo'
+              AND criado_em < $2::date
+            GROUP BY tenant_id
+          )
+          SELECT
+            t.id,
+            t.nome,
+            COALESCE(la.gmv_mes, 0) AS gmv_mes,
+            COALESCE(lp.gmv_mes_anterior, 0) AS gmv_mes_anterior,
+            COALESCE(la.total_lives, 0) AS total_lives,
+            COALESCE(ca.total_clientes, 0) AS total_clientes_ativos,
+            COALESCE(cant.total_clientes_ant, 0) AS total_clientes_ant
+          FROM tenants t
+          LEFT JOIN lives_atual la ON la.tenant_id = t.id
+          LEFT JOIN lives_anterior lp ON lp.tenant_id = t.id
+          LEFT JOIN clientes_ativos ca ON ca.tenant_id = t.id
+          LEFT JOIN clientes_anterior cant ON cant.tenant_id = t.id
+          WHERE t.id <> $1
+            AND ($5::uuid[] IS NULL OR t.id = ANY($5::uuid[]))
+            AND t.criado_em < $3::date
+          ORDER BY COALESCE(la.gmv_mes, 0) DESC, t.nome ASC
+        `,
+        [
+          request.user.tenant_id,
+          periodInfo.currentStart,
+          periodInfo.currentEnd,
+          periodInfo.previousStart,
+          request.allowedTenantIds,
+        ]
+      )
+
+      const ranking = result.rows.map((row, index) => {
+        const gmvMes = toMoney(row.gmv_mes)
+        const gmvMesAnt = toMoney(row.gmv_mes_anterior)
+        const totalClientesAtuais = toInt(row.total_clientes_ativos)
+        const totalClientesAnt = toInt(row.total_clientes_ant)
+        let taxaRetencao = 0
+        if (totalClientesAnt > 0) {
+          taxaRetencao = Number(
+            ((Math.min(totalClientesAtuais, totalClientesAnt) / totalClientesAnt) * 100).toFixed(1)
+          )
+        } else if (totalClientesAtuais > 0) {
+          taxaRetencao = 100
+        }
+        return {
+          posicao: index + 1,
+          tenant_id: row.id,
+          tenant_nome: row.nome,
+          gmv_mes: gmvMes,
+          gmv_mes_anterior: gmvMesAnt,
+          crescimento_pct: calculateGrowth(gmvMes, gmvMesAnt),
+          total_lives: toInt(row.total_lives),
+          total_clientes_ativos: totalClientesAtuais,
+          taxa_retencao: taxaRetencao,
+        }
+      })
+
+      return reply.send(ranking)
+    } catch (err) {
+      request.log.error({ err }, 'master/ranking: erro')
+      throw err
+    }
+  })
+
+  // F3 — Histórico de uma unidade (últimos 6 meses)
+  app.get('/v1/master/unidade/:tenantId/historico', masterAccess, async (request, reply) => {
+    try {
+      const { tenantId } = request.params
+      if (!tenantId || typeof tenantId !== 'string' || tenantId.length < 8) {
+        return reply.code(400).send({ error: 'tenantId inválido' })
+      }
+      // Master só pode consultar tenants diferentes do dele.
+      if (tenantId === request.user.tenant_id) {
+        return reply.code(400).send({ error: 'tenantId deve ser de uma unidade da rede' })
+      }
+      // gerente_regional: precisa ter o tenant na lista permitida.
+      if (
+        !request.isMaster &&
+        Array.isArray(request.allowedTenantIds) &&
+        !request.allowedTenantIds.includes(tenantId)
+      ) {
+        return reply.code(403).send({ error: 'Acesso não autorizado a esta unidade' })
+      }
+      const result = await app.db.query(
+        `
+          WITH meses AS (
+            SELECT generate_series(
+              date_trunc('month', NOW()) - interval '5 months',
+              date_trunc('month', NOW()),
+              interval '1 month'
+            )::date AS mes_inicio
+          ),
+          agregados AS (
+            SELECT
+              date_trunc('month', COALESCE(l.encerrado_em, l.iniciado_em))::date AS mes_inicio,
+              COUNT(*)::int AS lives,
+              COALESCE(SUM(l.fat_gerado), 0) AS gmv
+            FROM lives l
+            WHERE l.tenant_id = $1
+              AND COALESCE(l.encerrado_em, l.iniciado_em) >= date_trunc('month', NOW()) - interval '5 months'
+              AND COALESCE(l.encerrado_em, l.iniciado_em) < date_trunc('month', NOW()) + interval '1 month'
+            GROUP BY 1
+          )
+          SELECT
+            to_char(m.mes_inicio, 'YYYY-MM') AS mes,
+            COALESCE(a.gmv, 0) AS gmv,
+            COALESCE(a.lives, 0)::int AS lives
+          FROM meses m
+          LEFT JOIN agregados a ON a.mes_inicio = m.mes_inicio
+          ORDER BY m.mes_inicio ASC
+        `,
+        [tenantId]
+      )
+      return reply.send(
+        result.rows.map((row) => ({
+          mes: row.mes,
+          gmv: toMoney(row.gmv),
+          lives: toInt(row.lives),
+        }))
+      )
+    } catch (err) {
+      request.log.error({ err }, 'master/unidade/historico: erro')
+      throw err
+    }
+  })
+
+  // F3 — Alertas operacionais cross-tenant
+  app.get('/v1/master/alertas', masterAccess, async (request, reply) => {
+    try {
+      const periodInfo = parsePeriod(request.query?.periodo)
+      const allowed = request.allowedTenantIds
+      const params = [
+        request.user.tenant_id,
+        periodInfo.currentStart,
+        periodInfo.previousStart,
+        allowed,
+      ]
+
+      // 1. GMV queda >= 30% vs mês anterior
+      const gmvQuedaQuery = app.db.query(
+        `
+          WITH atual AS (
+            SELECT tenant_id, COALESCE(SUM(fat_gerado), 0) AS gmv
+            FROM lives
+            WHERE tenant_id <> $1
+              AND ($4::uuid[] IS NULL OR tenant_id = ANY($4::uuid[]))
+              AND COALESCE(encerrado_em, iniciado_em) >= $2::date
+            GROUP BY tenant_id
+          ),
+          anterior AS (
+            SELECT tenant_id, COALESCE(SUM(fat_gerado), 0) AS gmv
+            FROM lives
+            WHERE tenant_id <> $1
+              AND ($4::uuid[] IS NULL OR tenant_id = ANY($4::uuid[]))
+              AND COALESCE(encerrado_em, iniciado_em) >= $3::date
+              AND COALESCE(encerrado_em, iniciado_em) < $2::date
+            GROUP BY tenant_id
+          )
+          SELECT t.id AS tenant_id, t.nome,
+                 COALESCE(a.gmv, 0) AS gmv_atual,
+                 COALESCE(p.gmv, 0) AS gmv_anterior
+          FROM tenants t
+          LEFT JOIN atual a ON a.tenant_id = t.id
+          LEFT JOIN anterior p ON p.tenant_id = t.id
+          WHERE t.id <> $1
+            AND ($4::uuid[] IS NULL OR t.id = ANY($4::uuid[]))
+            AND COALESCE(p.gmv, 0) > 0
+            AND COALESCE(a.gmv, 0) <= COALESCE(p.gmv, 0) * 0.7
+          ORDER BY (COALESCE(p.gmv, 0) - COALESCE(a.gmv, 0)) DESC
+          LIMIT 10
+        `,
+        params
+      )
+
+      // 2. Sem lives nos últimos 7 dias
+      const semLivesQuery = app.db.query(
+        `
+          SELECT t.id AS tenant_id, t.nome,
+                 MAX(COALESCE(l.encerrado_em, l.iniciado_em)) AS ultima_live
+          FROM tenants t
+          LEFT JOIN lives l ON l.tenant_id = t.id
+          WHERE t.id <> $1
+            AND ($2::uuid[] IS NULL OR t.id = ANY($2::uuid[]))
+            AND t.ativo = TRUE
+          GROUP BY t.id, t.nome
+          HAVING MAX(COALESCE(l.encerrado_em, l.iniciado_em)) IS NULL
+              OR MAX(COALESCE(l.encerrado_em, l.iniciado_em)) < NOW() - interval '7 days'
+          ORDER BY ultima_live ASC NULLS FIRST
+          LIMIT 10
+        `,
+        [request.user.tenant_id, allowed]
+      )
+
+      // 3. Boletos vencidos (status='vencido' OU pendente com vencimento < hoje)
+      const boletosVencidosQuery = app.db.query(
+        `
+          SELECT t.id AS tenant_id, t.nome,
+                 COUNT(b.id)::int AS total_vencidos,
+                 COALESCE(SUM(b.valor), 0) AS valor_total
+          FROM boletos b
+          JOIN tenants t ON t.id = b.tenant_id
+          WHERE b.tenant_id <> $1
+            AND ($2::uuid[] IS NULL OR b.tenant_id = ANY($2::uuid[]))
+            AND (b.status = 'vencido'
+                 OR (b.status = 'pendente' AND b.vencimento < CURRENT_DATE))
+          GROUP BY t.id, t.nome
+          ORDER BY valor_total DESC
+          LIMIT 10
+        `,
+        [request.user.tenant_id, allowed]
+      )
+
+      // 4. Contratos expirando em até 30 dias (ativos com fim próximo)
+      const contratosExpirandoQuery = app.db.query(
+        `
+          SELECT t.id AS tenant_id, t.nome,
+                 c.id AS contrato_id,
+                 cl.nome AS cliente_nome,
+                 c.fim
+          FROM contratos c
+          JOIN tenants t ON t.id = c.tenant_id
+          LEFT JOIN clientes cl ON cl.id = c.cliente_id
+          WHERE c.tenant_id <> $1
+            AND ($2::uuid[] IS NULL OR c.tenant_id = ANY($2::uuid[]))
+            AND c.status = 'ativo'
+            AND c.fim IS NOT NULL
+            AND c.fim >= CURRENT_DATE
+            AND c.fim <= CURRENT_DATE + interval '30 days'
+          ORDER BY c.fim ASC
+          LIMIT 10
+        `,
+        [request.user.tenant_id, allowed]
+      )
+
+      const [gmvQuedaRes, semLivesRes, boletosRes, contratosRes] = await Promise.all([
+        gmvQuedaQuery.catch((err) => {
+          request.log.warn({ err }, 'master/alertas: falha gmv_queda')
+          return { rows: [] }
+        }),
+        semLivesQuery.catch((err) => {
+          request.log.warn({ err }, 'master/alertas: falha sem_lives')
+          return { rows: [] }
+        }),
+        boletosVencidosQuery.catch((err) => {
+          request.log.warn({ err }, 'master/alertas: falha boletos')
+          return { rows: [] }
+        }),
+        contratosExpirandoQuery.catch((err) => {
+          request.log.warn({ err }, 'master/alertas: falha contratos')
+          return { rows: [] }
+        }),
+      ])
+
+      const alertas = []
+
+      for (const row of gmvQuedaRes.rows) {
+        const atual = toMoney(row.gmv_atual)
+        const anterior = toMoney(row.gmv_anterior)
+        const queda = anterior > 0 ? Math.round(((anterior - atual) / anterior) * 100) : 0
+        alertas.push({
+          tenant_id: row.tenant_id,
+          nome: row.nome,
+          tipo_alerta: 'gmv_queda_30pct',
+          detalhe: `GMV de ${formatCurrency(atual)} vs ${formatCurrency(anterior)} no mês anterior (queda ${queda}%)`,
+        })
+      }
+
+      for (const row of semLivesRes.rows) {
+        const ultima = row.ultima_live
+          ? new Date(row.ultima_live).toLocaleDateString('pt-BR')
+          : 'nunca'
+        alertas.push({
+          tenant_id: row.tenant_id,
+          nome: row.nome,
+          tipo_alerta: 'sem_lives_7dias',
+          detalhe: `Última live em ${ultima}`,
+        })
+      }
+
+      for (const row of boletosRes.rows) {
+        alertas.push({
+          tenant_id: row.tenant_id,
+          nome: row.nome,
+          tipo_alerta: 'boleto_vencido',
+          detalhe: `${toInt(row.total_vencidos)} boleto(s) vencido(s) — ${formatCurrency(toMoney(row.valor_total))} em aberto`,
+        })
+      }
+
+      for (const row of contratosRes.rows) {
+        const fim = row.fim ? new Date(row.fim).toLocaleDateString('pt-BR') : ''
+        const cliente = row.cliente_nome ? ` (${row.cliente_nome})` : ''
+        alertas.push({
+          tenant_id: row.tenant_id,
+          nome: row.nome,
+          tipo_alerta: 'contrato_expirando_30dias',
+          detalhe: `Contrato${cliente} expira em ${fim}`,
+        })
+      }
+
+      return reply.send(alertas)
+    } catch (err) {
+      request.log.error({ err }, 'master/alertas: erro')
       throw err
     }
   })
@@ -924,9 +1392,10 @@ export async function franqueadoRoutes(app) {
     try {
       const periodInfo = parsePeriod(request.query?.periodo)
       const status = normalizeStatus(request.query?.status)
-      const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo, status)
-      const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo)
-      const unitClients = await fetchUnitClients(app, request.user.tenant_id, periodInfo)
+      const allowed = request.allowedTenantIds
+      const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo, status, allowed)
+      const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo, allowed)
+      const unitClients = await fetchUnitClients(app, request.user.tenant_id, periodInfo, allowed)
       const { unitHistoryMap } = buildHistoryMaps(
         historyRows,
         units.map((unit) => unit.id),
@@ -992,8 +1461,9 @@ export async function franqueadoRoutes(app) {
     try {
       const periodInfo = parsePeriod(request.query?.periodo)
       const status = normalizeStatus(request.query?.status)
-      const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo, status)
-      const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo)
+      const allowed = request.allowedTenantIds
+      const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo, status, allowed)
+      const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo, allowed)
       const { networkHistory } = buildHistoryMaps(
         historyRows,
         units.map((unit) => unit.id),
@@ -1055,8 +1525,15 @@ export async function franqueadoRoutes(app) {
 
   app.get('/v1/master/crm', masterAccess, async (request, reply) => {
     try {
+      const allowed = request.allowedTenantIds
       const crmSnapshot = await fetchCrmSnapshot(app, request.user.tenant_id)
-      const units = await fetchUnitSummaries(app, request.user.tenant_id, parsePeriod(request.query?.periodo))
+      const units = await fetchUnitSummaries(
+        app,
+        request.user.tenant_id,
+        parsePeriod(request.query?.periodo),
+        'todos',
+        allowed
+      )
 
       return reply.send({
         ...crmSnapshot,

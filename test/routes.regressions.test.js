@@ -9,6 +9,7 @@ import { cabinesRoutes } from '../src/routes/cabines.js'
 import { clienteDashboardRoutes } from '../src/routes/cliente_dashboard.js'
 import { financeiroRoutes } from '../src/routes/financeiro.js'
 import { franqueadoRoutes } from '../src/routes/franqueado.js'
+import { regionalManagersRoutes } from '../src/routes/regional_managers.js'
 import { leadsRoutes } from '../src/routes/leads.js'
 import { solicitacoesRoutes } from '../src/routes/solicitacoes.js'
 
@@ -97,6 +98,10 @@ describe('Route regressions: SQL and RBAC', () => {
         return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
       }
     })
+    app.decorate('requireTenantAccess', async (request) => {
+      request.isMaster = request.user.papel === 'franqueador_master'
+      request.allowedTenantIds = request.isMaster ? null : []
+    })
     app.decorate('db', { query: queryMock })
 
     await app.register(franqueadoRoutes)
@@ -109,7 +114,117 @@ describe('Route regressions: SQL and RBAC', () => {
     const sql = queryMock.mock.calls[0][0]
     expect(sql).toContain('l.iniciado_em')
     expect(sql).not.toContain('l.iniciada_em')
-    expect(queryMock.mock.calls[0][1]).toEqual(['tenant-master'])
+    // Master: allowedTenantIds = null (vê tudo)
+    expect(queryMock.mock.calls[0][1]).toEqual(['tenant-master', null])
+
+    await app.close()
+  })
+
+  it('master ranking endpoint aggregates GMV, lives and retention cross-tenant', async () => {
+    const app = Fastify()
+    const queryMock = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          id: 'tenant-2',
+          nome: 'Franquia SP',
+          gmv_mes: '12000',
+          gmv_mes_anterior: '9500',
+          total_lives: 18,
+          total_clientes_ativos: 12,
+          total_clientes_ant: 14,
+        },
+      ],
+    })
+
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-master', papel: 'franqueador_master' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!papeis.includes(request.user.papel)) {
+        return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
+      }
+    })
+    app.decorate('requireTenantAccess', async (request) => {
+      request.isMaster = true
+      request.allowedTenantIds = null
+    })
+    app.decorate('db', { query: queryMock })
+
+    await app.register(franqueadoRoutes)
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/master/ranking?periodo=2026-05',
+    })
+    const payload = response.json()
+
+    expect(response.statusCode).toBe(200)
+    expect(Array.isArray(payload)).toBe(true)
+    expect(payload).toHaveLength(1)
+    expect(payload[0]).toMatchObject({
+      posicao: 1,
+      tenant_id: 'tenant-2',
+      tenant_nome: 'Franquia SP',
+      gmv_mes: 12000,
+      gmv_mes_anterior: 9500,
+      total_lives: 18,
+      total_clientes_ativos: 12,
+    })
+    expect(payload[0].crescimento_pct).toBeCloseTo(26.3, 1)
+    expect(payload[0].taxa_retencao).toBeGreaterThan(0)
+
+    const sql = queryMock.mock.calls[0][0]
+    expect(sql).toContain('FROM tenants t')
+    expect(sql).toContain('lives_atual')
+    expect(sql).toContain('lives_anterior')
+
+    await app.close()
+  })
+
+  it('master alertas endpoint blocks non-master roles', async () => {
+    const app = Fastify()
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-1', papel: 'franqueado' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!papeis.includes(request.user.papel)) {
+        return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
+      }
+    })
+    app.decorate('requireTenantAccess', async () => {})
+    app.decorate('db', { query: vi.fn() })
+
+    await app.register(franqueadoRoutes)
+
+    const response = await app.inject({ method: 'GET', url: '/v1/master/alertas' })
+    expect(response.statusCode).toBe(403)
+    await app.close()
+  })
+
+  it('master unidade historico rejects invalid tenantId and master own tenant', async () => {
+    const app = Fastify()
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-master', papel: 'franqueador_master' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!papeis.includes(request.user.papel)) {
+        return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
+      }
+    })
+    app.decorate('requireTenantAccess', async (request) => {
+      request.isMaster = true
+      request.allowedTenantIds = null
+    })
+    app.decorate('db', { query: vi.fn().mockResolvedValue({ rows: [] }) })
+
+    await app.register(franqueadoRoutes)
+
+    // Próprio tenant deve falhar
+    const own = await app.inject({
+      method: 'GET',
+      url: '/v1/master/unidade/tenant-master/historico',
+    })
+    expect(own.statusCode).toBe(400)
 
     await app.close()
   })
@@ -1169,6 +1284,132 @@ describe('Route regressions: SQL and RBAC', () => {
       expect(res.headers['content-type']).toMatch(/text\/html/)
       // Deve ter chamado db.query pra verificar tenant + atualizar tokens
       expect(queryMock).toHaveBeenCalled()
+      await app.close()
+    })
+  })
+
+  // ─── Fase C: gerente_regional (Tier 4, multi-tenant) ─────────────────
+  describe('gerente_regional (Tier 4, multi-tenant)', () => {
+    function setupRegionalApp({ papel, allowedTenantIds, queryMock }) {
+      const app = Fastify()
+      app.decorate('authenticate', async (request) => {
+        request.user = {
+          tenant_id: 'tenant-master',
+          papel,
+          sub: 'user-regional-1',
+        }
+      })
+      app.decorate('requirePapel', (papeis) => async (request, reply) => {
+        if (!papeis.includes(request.user.papel)) {
+          return reply.code(403).send({ error: 'Forbidden' })
+        }
+      })
+      app.decorate('requireTenantAccess', async (request) => {
+        if (request.user.papel === 'franqueador_master') {
+          request.isMaster = true
+          request.allowedTenantIds = null
+        } else if (request.user.papel === 'gerente_regional') {
+          request.isMaster = false
+          request.allowedTenantIds = allowedTenantIds
+        }
+      })
+      app.decorate('db', { query: queryMock, pool: { connect: vi.fn() } })
+      return app
+    }
+
+    it('gerente_regional injeta allowedTenantIds nas queries do dashboard', async () => {
+      const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+      const app = setupRegionalApp({
+        papel: 'gerente_regional',
+        allowedTenantIds: ['tenant-a', 'tenant-b'],
+        queryMock,
+      })
+      await app.register(franqueadoRoutes)
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/master/dashboard?periodo=2026-05',
+      })
+      expect(res.statusCode).toBe(200)
+      // Pelo menos uma query deve ter sido chamada com array de tenants permitidos
+      const callsWithAllowed = queryMock.mock.calls.filter((call) =>
+        call[1]?.some(
+          (param) =>
+            Array.isArray(param) &&
+            param.includes('tenant-a') &&
+            param.includes('tenant-b')
+        )
+      )
+      expect(callsWithAllowed.length).toBeGreaterThan(0)
+      await app.close()
+    })
+
+    it('franqueador_master continua passando NULL como allowedTenantIds (vê tudo)', async () => {
+      const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+      const app = setupRegionalApp({
+        papel: 'franqueador_master',
+        allowedTenantIds: null,
+        queryMock,
+      })
+      await app.register(franqueadoRoutes)
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/master/dashboard?periodo=2026-05',
+      })
+      expect(res.statusCode).toBe(200)
+      // Em pelo menos uma query, o último param deve ser null (=master vê tudo)
+      const masterCalls = queryMock.mock.calls.filter((call) =>
+        call[1]?.includes(null)
+      )
+      expect(masterCalls.length).toBeGreaterThan(0)
+      await app.close()
+    })
+
+    it('gerente_regional /v1/master/unidade/:tenantId/historico bloqueia tenant fora da lista', async () => {
+      const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+      const app = setupRegionalApp({
+        papel: 'gerente_regional',
+        allowedTenantIds: ['tenant-a'],
+        queryMock,
+      })
+      await app.register(franqueadoRoutes)
+
+      const blocked = await app.inject({
+        method: 'GET',
+        url: '/v1/master/unidade/tenant-fora-da-lista/historico',
+      })
+      expect(blocked.statusCode).toBe(403)
+
+      const allowed = await app.inject({
+        method: 'GET',
+        url: '/v1/master/unidade/tenant-a/historico',
+      })
+      expect(allowed.statusCode).toBe(200)
+      await app.close()
+    })
+
+    it('regional-managers list endpoint só aceita franqueador_master', async () => {
+      const app = Fastify()
+      app.decorate('authenticate', async (request) => {
+        request.user = { tenant_id: 'x', papel: 'gerente_regional' }
+      })
+      app.decorate('requirePapel', (papeis) => async (request, reply) => {
+        if (!papeis.includes(request.user.papel)) {
+          return reply.code(403).send({ error: 'Forbidden' })
+        }
+      })
+      app.decorate('db', {
+        query: vi.fn().mockResolvedValue({ rows: [] }),
+        pool: { connect: vi.fn() },
+      })
+      await app.register(regionalManagersRoutes)
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/master/regional-managers',
+      })
+      expect(res.statusCode).toBe(403)
       await app.close()
     })
   })

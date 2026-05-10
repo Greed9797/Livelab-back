@@ -14,6 +14,7 @@ import { analyticsRoutes } from './routes/analytics.js'
 import { clientesRoutes } from './routes/clientes.js'
 import { contratosRoutes } from './routes/contratos.js'
 import { financeiroRoutes } from './routes/financeiro.js'
+import { relatoriosRoutes } from './routes/relatorios.js'
 import { cabinesRoutes } from './routes/cabines.js'
 import { clienteDashboardRoutes } from './routes/cliente_dashboard.js'
 import { leadsRoutes } from './routes/leads.js'
@@ -21,6 +22,7 @@ import { boletosRoutes } from './routes/boletos.js'
 import { excelenciaRoutes } from './routes/excelencia.js'
 import { recomendacoesRoutes } from './routes/recomendacoes.js'
 import { franqueadoRoutes } from './routes/franqueado.js'
+import { regionalManagersRoutes } from './routes/regional_managers.js'
 import { manuaisRoutes } from './routes/manuais.js'
 import { knowledgeRoutes } from './routes/knowledge.js'
 import { clienteNotasRoutes } from './routes/cliente_notas.js'
@@ -31,12 +33,15 @@ import { solicitacoesRoutes } from './routes/solicitacoes.js'
 import { pacotesRoutes } from './routes/pacotes.js'
 import { usuariosRoutes } from './routes/usuarios.js'
 import { apresentadorasRoutes } from './routes/apresentadoras.js'
+import { apresentadoraDisponibilidadeRoutes } from './routes/apresentadora_disponibilidade.js'
 import { liveApresentadoresRoutes } from './routes/live_apresentadores.js'
 import { clientePortalRoutes } from './routes/cliente_portal.js'
 import onboardingRoutes from './routes/onboarding.js'
 import { tenantsRoutes } from './routes/tenants.js'
 import { webhookBioCrmRoutes } from './routes/webhook_bio_crm.js'
 import { appmaxRoutes } from './routes/appmax.js'
+import { notificacoesRoutes } from './routes/notificacoes.js'
+import { auditLogRoutes } from './routes/audit_log.js'
 
 export async function buildApp(opts = {}) {
   // S-08: secrets obrigatórios em produção. Falha cedo (boot-time) em vez de
@@ -142,6 +147,7 @@ export async function buildApp(opts = {}) {
   await app.register(clientesRoutes)
   await app.register(contratosRoutes)
   await app.register(financeiroRoutes)
+  await app.register(relatoriosRoutes)
   await app.register(cabinesRoutes)
   await app.register(clienteDashboardRoutes)
   await app.register(leadsRoutes)
@@ -149,6 +155,7 @@ export async function buildApp(opts = {}) {
   await app.register(excelenciaRoutes)
   await app.register(recomendacoesRoutes)
   await app.register(franqueadoRoutes)
+  await app.register(regionalManagersRoutes)
   await app.register(manuaisRoutes)
   await app.register(knowledgeRoutes)
   await app.register(clienteNotasRoutes)
@@ -159,12 +166,15 @@ export async function buildApp(opts = {}) {
   await app.register(pacotesRoutes)
   await app.register(usuariosRoutes)
   await app.register(apresentadorasRoutes)
+  await app.register(apresentadoraDisponibilidadeRoutes)
   await app.register(liveApresentadoresRoutes)
   await app.register(clientePortalRoutes)
   await app.register(onboardingRoutes)
   await app.register(tenantsRoutes)
   await app.register(webhookBioCrmRoutes)
   await app.register(appmaxRoutes)
+  await app.register(notificacoesRoutes)
+  await app.register(auditLogRoutes)
 
   // S-11: opcional — se HEALTH_CHECK_TOKEN setado, exige header pra responder.
   // 404 (não 401) pra não confirmar existência do endpoint a scanners.

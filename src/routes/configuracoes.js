@@ -17,6 +17,12 @@ const configSchema = z.object({
   tiktok_shop_id:      z.string().optional().nullable(),
   nova_senha:          z.string().min(6).optional().nullable(),
   meta_diaria_gmv:     z.number().positive().optional().nullable(),
+  // F1: flags de notificação por e-mail (Resend)
+  notif_email_ativo:    z.boolean().optional(),
+  notif_live_meta:      z.boolean().optional(),
+  notif_boleto_vencido: z.boolean().optional(),
+  notif_lead_novo:      z.boolean().optional(),
+  notif_contrato:       z.boolean().optional(),
 })
 
 export async function configuracoesRoutes(app) {
@@ -79,7 +85,9 @@ export async function configuracoesRoutes(app) {
                telefone_contato, email_contato,
                gateway_api_key, gateway_wallet_id,
                tiktok_access_token, tiktok_shop_id,
-               meta_diaria_gmv
+               meta_diaria_gmv,
+               notif_email_ativo, notif_live_meta, notif_boleto_vencido,
+               notif_lead_novo, notif_contrato
         FROM tenants WHERE id = $1
       `, [tenant_id])
 
@@ -114,6 +122,11 @@ export async function configuracoesRoutes(app) {
         has_tiktok:             !!conf.tiktok_access_token,
         tiktok_shop_id:         conf.tiktok_shop_id,
         meta_diaria_gmv:        conf.meta_diaria_gmv ? Number(conf.meta_diaria_gmv) : 10000,
+        notif_email_ativo:      conf.notif_email_ativo ?? true,
+        notif_live_meta:        conf.notif_live_meta ?? true,
+        notif_boleto_vencido:   conf.notif_boleto_vencido ?? true,
+        notif_lead_novo:        conf.notif_lead_novo ?? true,
+        notif_contrato:         conf.notif_contrato ?? true,
         contact_history:        histRows.rows,
       }
     })
@@ -148,6 +161,12 @@ export async function configuracoesRoutes(app) {
         if (data.tiktok_access_token !== undefined) { updates.push(`tiktok_access_token = $${paramIdx++}`); values.push(data.tiktok_access_token) }
         if (data.tiktok_shop_id !== undefined)  { updates.push(`tiktok_shop_id = $${paramIdx++}`);  values.push(data.tiktok_shop_id) }
         if (data.meta_diaria_gmv !== undefined) { updates.push(`meta_diaria_gmv = $${paramIdx++}`); values.push(data.meta_diaria_gmv) }
+        // F1: flags de notificação
+        if (data.notif_email_ativo !== undefined)    { updates.push(`notif_email_ativo = $${paramIdx++}`);    values.push(data.notif_email_ativo) }
+        if (data.notif_live_meta !== undefined)      { updates.push(`notif_live_meta = $${paramIdx++}`);      values.push(data.notif_live_meta) }
+        if (data.notif_boleto_vencido !== undefined) { updates.push(`notif_boleto_vencido = $${paramIdx++}`); values.push(data.notif_boleto_vencido) }
+        if (data.notif_lead_novo !== undefined)      { updates.push(`notif_lead_novo = $${paramIdx++}`);      values.push(data.notif_lead_novo) }
+        if (data.notif_contrato !== undefined)       { updates.push(`notif_contrato = $${paramIdx++}`);       values.push(data.notif_contrato) }
 
         // Campos de contato com histórico
         if (data.telefone_contato !== undefined || data.email_contato !== undefined) {

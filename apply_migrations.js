@@ -3,6 +3,13 @@ import fs from 'fs'
 import path from 'path'
 import 'dotenv/config'
 
+// Lista parte da 016 — migrations 001-015 foram aplicadas no banco original
+// e existem em migrations/ apenas como histórico. Para banco novo (fresh setup
+// dev/staging/restore), aplicar 001-015 manualmente antes deste script ou
+// criar setup_fresh.js dedicado.
+//
+// Gap 027/028: numeros pulados intencionalmente — versionamento descontínuo
+// durante refactor de schema, sem migrations correspondentes.
 const MIGRATIONS_LIST = [
   '016_auditoria_implantacao.sql',
   '017_cabines_reservas_eventos.sql',
@@ -12,10 +19,10 @@ const MIGRATIONS_LIST = [
   '021_tiktok_live_connector.sql',
   '022_tenant_settings.sql',
   '023_billing_batch_setup.sql',
-  '024_schema_fixes.txt',
-  '025_create_live_requests.txt',
-  '026_add_analytics_dashboard_indexes.txt',
-  '029_lives_tiktok_fields.txt',
+  '024_schema_fixes.sql',
+  '025_create_live_requests.sql',
+  '026_add_analytics_dashboard_indexes.sql',
+  '029_lives_tiktok_fields.sql',
   '030_create_pacotes.sql',
   '031_pacotes_contratos_horas.sql',
   '032_cabines_config.sql',

@@ -523,8 +523,9 @@ export async function contratosRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `UPDATE contratos SET status = 'cancelado', reprovacao_motivo = $2,
-         cancelado_em = NOW(), reviewed_at = NOW()
+        `UPDATE contratos SET status = 'reprovado', reprovacao_motivo = $2,
+         reviewed_at = NOW(),
+         prazo_decisao_ate = NOW() + INTERVAL '5 days'
          WHERE id = $1 AND status = 'em_analise' RETURNING id, status`,
         [request.params.id, motivo]
       )

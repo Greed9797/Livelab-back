@@ -302,6 +302,34 @@ export async function usuariosRoutes(app) {
     })
   })
 
+  // POST /v1/usuarios/:id/force-logout
+  // Invalida todos os tokens (refresh + access JWT) imediatamente.
+  // Use case: master suspeita que conta foi comprometida e quer matar
+  // todas as sessões agora — sem esperar TTL de 15min do JWT.
+  app.post('/v1/usuarios/:id/force-logout', { preHandler: rbac }, async (request, reply) => {
+    return app.withTenant(request.user.tenant_id, async (db) => {
+      // Bump token_version: invalida TODOS os JWTs já emitidos (app.authenticate
+      // checa contra DB.token_version).
+      const result = await db.query(
+        `UPDATE users
+            SET token_version = token_version + 1,
+                atualizado_em = NOW()
+          WHERE id = $1 AND tenant_id = $2
+          RETURNING id, token_version`,
+        [request.params.id, request.user.tenant_id]
+      )
+      if (result.rows.length === 0) {
+        return reply.code(404).send({ error: 'Usuário não encontrado' })
+      }
+      // Revoga refresh tokens em paralelo (defesa em profundidade).
+      await db.query(
+        `UPDATE refresh_tokens SET revogado = true WHERE user_id = $1`,
+        [request.params.id]
+      )
+      return { ok: true, token_version: result.rows[0].token_version }
+    })
+  })
+
   // DELETE /v1/usuarios/:id — soft delete
   app.delete('/v1/usuarios/:id', { preHandler: rbac }, async (request, reply) => {
     if (request.params.id === request.user.sub) {

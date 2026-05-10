@@ -28,7 +28,7 @@ export async function regionalManagersRoutes(app) {
             u.nome,
             u.email,
             u.ativo,
-            u.created_at,
+            u.criado_em AS created_at,
             COALESCE(
               (
                 SELECT json_agg(

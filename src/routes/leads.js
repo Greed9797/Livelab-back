@@ -196,7 +196,7 @@ export async function leadsRoutes(app) {
 
   // POST /v1/leads/:id/ganhar — converte lead em cliente + contrato ativo
   app.post('/v1/leads/:id/ganhar', { preHandler: writeAccess }, async (request, reply) => {
-    const { tenant_id } = request.user
+    const { tenant_id, sub: userId } = request.user
     const { pacote_id } = request.body ?? {}
 
     const client = await app.db.pool.connect()
@@ -237,9 +237,9 @@ export async function leadsRoutes(app) {
 
       // Cria contrato ativo
       await client.query(
-        `INSERT INTO contratos (tenant_id, cliente_id, pacote_id, valor_fixo, comissao_pct, horas_incluidas, status)
-         VALUES ($1, $2, $3, $4, $5, $6, 'ativo')`,
-        [tenant_id, clienteId, pacote_id ?? null, valorFixo, comissaoPct, horasIncluidas]
+        `INSERT INTO contratos (tenant_id, cliente_id, user_id, pacote_id, valor_fixo, comissao_pct, horas_contratadas, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ativo')`,
+        [tenant_id, clienteId, userId, pacote_id ?? null, valorFixo, comissaoPct, horasIncluidas]
       )
 
       // Marca lead como ganho

@@ -36,6 +36,7 @@ if (process.env.SENTRY_DSN) {
 }
 import { TikTokService } from './services/tiktok.js'
 import { cleanupOrphanContracts } from './jobs/cleanup_orphan_contracts.js'
+import { cleanupPasswordResetTokens } from './jobs/cleanup_password_reset_tokens.js'
 import * as connectorManager from './services/tiktok-connector-manager.js'
 import { startBillingEngine } from './jobs/billing_engine.js'
 import { startClienteMetricasSnapshotCron } from './jobs/cliente_metricas_snapshot.js'
@@ -127,5 +128,15 @@ cron.schedule('30 2 * * *', async () => {
     await notifyBoletosVencidos(app)
   } catch (error) {
     app.log.error({ error }, 'Falha ao notificar boletos vencidos')
+  }
+}, { timezone: 'America/Sao_Paulo' })
+
+// Daily 03:00 SP — housekeeping: remove password_reset_tokens > 30 days
+// Job tem try/catch interno; nunca derruba o cron loop.
+cron.schedule('0 3 * * *', async () => {
+  try {
+    await cleanupPasswordResetTokens(app)
+  } catch (error) {
+    app.log.error({ error }, 'Falha ao limpar password_reset_tokens')
   }
 }, { timezone: 'America/Sao_Paulo' })

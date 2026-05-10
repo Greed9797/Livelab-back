@@ -224,7 +224,7 @@ export async function cabinesRoutes(app) {
          SELECT $1, COALESCE(MAX(numero), 0) + 1, $2, $3, $4, 'disponivel'
          FROM cabines
          WHERE tenant_id = $1
-         RETURNING id, numero, nome, tamanho, descricao, status, criado_em`,
+         RETURNING id, numero, nome, tamanho, descricao, status`,
         [tenant_id, nome, tamanho ?? null, descricao ?? null]
       )
       return reply.code(201).send(result.rows[0])
@@ -253,10 +253,10 @@ export async function cabinesRoutes(app) {
         return reply.code(409).send({ error: 'Libere a cabine antes de deletá-la' })
       }
 
-      // Check FK refs: lives and solicitacoes
+      // Check FK refs: lives and live_requests (tabela renomeada de solicitacoes)
       const [livesRef, solRef] = await Promise.all([
         db.query(`SELECT id FROM lives WHERE cabine_id = $1 LIMIT 1`, [request.params.id]),
-        db.query(`SELECT id FROM solicitacoes WHERE cabine_id = $1 LIMIT 1`, [request.params.id]),
+        db.query(`SELECT id FROM live_requests WHERE cabine_id = $1 LIMIT 1`, [request.params.id]),
       ])
       if (livesRef.rowCount > 0) {
         return reply.code(409).send({ error: 'Cabine possui histórico de lives. Não pode ser deletada.' })

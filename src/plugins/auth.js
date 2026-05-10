@@ -17,6 +17,34 @@ async function authPlugin(app) {
     },
   })
 
+  // Helper: valida que JWT.token_version está atualizado vs DB.
+  // Se DB.token_version > JWT.token_version, o JWT foi invalidado por
+  // /redefinir-senha ou /usuarios/:id/force-logout — retorna 401.
+  //
+  // Tolerante a falhas: se a query falhar (db down) ou o user não existir,
+  // não bloqueia (cai pra comportamento atual). Se token_version não estiver
+  // no payload (JWT antigo emitido antes do deploy), trata como version 1
+  // (compatibilidade durante rollout — JWTs anteriores expiram em 15min).
+  async function _verifyTokenVersion(request, reply) {
+    const userId = request.user?.sub
+    if (!userId) return // sem sub: outros checks vão recusar
+    const jwtVersion = Number.isInteger(request.user?.token_version)
+      ? request.user.token_version
+      : 1
+    try {
+      const { rows } = await app.db.query(
+        `SELECT token_version FROM users WHERE id = $1`,
+        [userId]
+      )
+      const dbVersion = rows[0]?.token_version ?? jwtVersion
+      if (dbVersion > jwtVersion) {
+        return reply.code(401).send({ error: 'Sessão expirada' })
+      }
+    } catch (err) {
+      app.log.warn({ err }, 'token_version check falhou — permitindo (fail-open)')
+    }
+  }
+
   // preHandler reutilizável: app.authenticate
   app.decorate('authenticate', async function (request, reply) {
     try {
@@ -25,6 +53,7 @@ async function authPlugin(app) {
       app.log.warn({ msg: err.message, code: err.code }, 'JWT verification failed')
       return reply.code(401).send({ error: 'Token inválido ou expirado' })
     }
+    return _verifyTokenVersion(request, reply)
   })
 
   // preHandler: verifica papel específico
@@ -42,6 +71,8 @@ async function authPlugin(app) {
     if (!papeis.includes(request.user.papel)) {
       return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
     }
+
+    return _verifyTokenVersion(request, reply)
   })
 
   // preHandler para rotas /v1/master/* compartilhadas entre franqueador_master

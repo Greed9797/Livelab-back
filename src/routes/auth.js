@@ -46,6 +46,10 @@ export async function authRoutes(app) {
       nome: user.nome,
       email: user.email,
       onboarding_completed: user.onboarding_completed ?? false,
+      // Snapshot da versão atual: app.authenticate compara contra DB.
+      // Se token_version no DB for incrementado (force-logout/redefinir-senha),
+      // este JWT vira inválido instantaneamente.
+      token_version: user.token_version ?? 1,
     }
 
     const accessToken = app.jwt.sign(payload)
@@ -88,7 +92,8 @@ export async function authRoutes(app) {
       .digest('hex')
 
     const result = await app.db.query(
-      `SELECT rt.*, u.tenant_id, u.papel, u.nome, u.email, u.ativo, u.onboarding_completed
+      `SELECT rt.*, u.tenant_id, u.papel, u.nome, u.email, u.ativo, u.onboarding_completed,
+              u.token_version
        FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id
        WHERE rt.token_hash = $1
          AND rt.revogado = false
@@ -113,6 +118,7 @@ export async function authRoutes(app) {
       nome: rt.nome,
       email: rt.email,
       onboarding_completed: rt.onboarding_completed ?? false,
+      token_version: rt.token_version ?? 1,
     })
 
     // Emitir novo refresh token
@@ -328,9 +334,16 @@ export async function authRoutes(app) {
 
       const novoHash = await bcrypt.hash(nova_senha, SECURITY.BCRYPT_ROUNDS)
 
+      // Atualiza senha + INCREMENTA token_version no mesmo statement.
+      // O bump invalida instantaneamente quaisquer JWTs (access tokens, 15min)
+      // emitidos antes do reset — fecha a janela de exposição que sobrava
+      // mesmo após revogar refresh_tokens (apenas access tokens precisariam
+      // expirar pelo TTL).
       await app.db.query(
         `UPDATE users
-            SET senha_hash = $1, atualizado_em = NOW()
+            SET senha_hash = $1,
+                token_version = token_version + 1,
+                atualizado_em = NOW()
           WHERE id = $2 AND ativo = true`,
         [novoHash, userId]
       )
@@ -387,7 +400,7 @@ export async function authRoutes(app) {
             AND invite_expira_em > NOW()
             AND primeiro_acesso = false
             AND ativo = true
-          RETURNING id, tenant_id, papel, nome, email, onboarding_completed`,
+          RETURNING id, tenant_id, papel, nome, email, onboarding_completed, token_version`,
         [novoHash, tokenHash]
       )
 
@@ -405,6 +418,9 @@ export async function authRoutes(app) {
       const tenantNome = tenantResult.rows[0]?.nome ?? null
 
       // Auto-login: emite tokens igual ao /login.
+      // aceitar-convite NÃO incrementa token_version (primeiro acesso, sem
+      // sessões prévias pra invalidar — manteria o JWT recém-emitido inválido
+      // contra ele mesmo).
       const accessToken = app.jwt.sign({
         sub: user.id,
         tenant_id: user.tenant_id,
@@ -412,6 +428,7 @@ export async function authRoutes(app) {
         nome: user.nome,
         email: user.email,
         onboarding_completed: user.onboarding_completed ?? false,
+        token_version: user.token_version ?? 1,
       })
 
       const rawRefresh = crypto.randomBytes(40).toString('hex')

@@ -215,14 +215,16 @@ export async function relatoriosRoutes(app) {
         const horasContratadas = Number(contRows[0]?.horas_contratadas ?? 0)
 
         // Próximas lives (a partir de hoje, próximas 10)
+        // Schema correto: tabela live_requests (renomeada de solicitacoes), coluna data_solicitada
         const { rows: proxRows } = await db.query(
-          `SELECT data_inicio, hora_inicio, ap.nome AS apresentador
-           FROM solicitacoes s
+          `SELECT s.data_solicitada AS data_inicio, s.hora_inicio, ap.nome AS apresentador
+           FROM live_requests s
            LEFT JOIN apresentadoras ap ON ap.id = s.apresentadora_id AND ap.tenant_id = $1::uuid
            WHERE s.tenant_id = $1::uuid
              AND s.cliente_id = $2
-             AND s.data_inicio >= CURRENT_DATE
-           ORDER BY s.data_inicio ASC, s.hora_inicio ASC
+             AND s.data_solicitada >= CURRENT_DATE
+             AND s.status = 'aprovada'
+           ORDER BY s.data_solicitada ASC, s.hora_inicio ASC
            LIMIT 10`,
           [tenant_id, clienteId]
         ).catch(() => ({ rows: [] }))

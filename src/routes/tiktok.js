@@ -507,10 +507,17 @@ function _successPage(frontendUrl) {
     <p style="color:#666">Esta aba será fechada automaticamente...</p>
   </div>
   <script>
-    setTimeout(() => {
-      window.close();
-      if (window.opener) { window.opener.postMessage('tiktok_connected', '${frontendUrl}'); }
-    }, 1500);
+    // Notifica o opener (popup OAuth flow): envia tanto o evento legado
+    // ('tiktok_connected') quanto o novo ('tiktok_oauth_complete') pra
+    // compat com clientes antigos e novos. Targets '*' pra funcionar
+    // mesmo quando frontendUrl != origin atual (multi-domínio).
+    function notify() {
+      if (!window.opener) return;
+      try { window.opener.postMessage('tiktok_connected', '${frontendUrl}'); } catch (_) {}
+      try { window.opener.postMessage('tiktok_oauth_complete', '*'); } catch (_) {}
+    }
+    notify();
+    setTimeout(() => { notify(); window.close(); }, 1500);
   </script>
 </body></html>`
 }

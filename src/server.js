@@ -140,3 +140,21 @@ cron.schedule('0 3 * * *', async () => {
     app.log.error({ error }, 'Falha ao limpar password_reset_tokens')
   }
 }, { timezone: 'America/Sao_Paulo' })
+
+// Daily 03:00 SP — offsite PostgreSQL backup → S3/R2
+// Only runs in production AND when BACKUP_S3_BUCKET is configured.
+// Uses nohup-style detached exec to avoid blocking the event loop.
+if (process.env.NODE_ENV === 'production' && process.env.BACKUP_S3_BUCKET) {
+  const { exec } = await import('node:child_process')
+  cron.schedule('0 3 * * *', () => {
+    const scriptPath = new URL('../../scripts/pg_dump_offsite.sh', import.meta.url).pathname
+    exec(`bash "${scriptPath}"`, { timeout: 30 * 60 * 1000 }, (err, stdout, stderr) => {
+      if (err) {
+        app.log.error({ stderr: stderr?.slice(0, 500) }, '[backup] pg_dump_offsite falhou')
+        return
+      }
+      app.log.info({ stdout: stdout?.slice(0, 500) }, '[backup] pg_dump_offsite concluído')
+    })
+  }, { timezone: 'America/Sao_Paulo' })
+  app.log.info('[backup] pg_dump_offsite cron agendado (03:00 SP diário)')
+}

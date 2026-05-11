@@ -337,6 +337,94 @@ Template em `docs/incidents/<YYYY-MM-DD>-<slug>.md`.
 
 ---
 
+## 11. Restore de Backup PostgreSQL (Offsite S3/R2)
+
+**Quando usar**: seção 3 (DB Down) esgotou opções Supabase nativas, ou dado foi deletado e Supabase backup não cobre.
+
+### Pré-requisitos
+
+- AWS CLI instalada e configurada com as creds do bucket (`BACKUP_S3_ACCESS_KEY` / `BACKUP_S3_SECRET_KEY`)
+- `pg_restore` instalado (PostgreSQL client tools)
+- Acesso à variável `DATABASE_URL` de produção (Railway)
+
+### Steps
+
+**1. Listar backups disponíveis**
+
+```bash
+# AWS S3
+aws s3 ls s3://$BACKUP_S3_BUCKET/postgres/ --region $BACKUP_S3_REGION
+
+# Cloudflare R2 (com endpoint customizado)
+aws s3 ls s3://$BACKUP_S3_BUCKET/postgres/ --endpoint-url=$BACKUP_S3_ENDPOINT
+```
+
+**2. Baixar backup desejado**
+
+```bash
+DUMP_FILE="liveshop-2026-05-08-0300.dump.gz"
+aws s3 cp s3://$BACKUP_S3_BUCKET/postgres/$DUMP_FILE /tmp/$DUMP_FILE \
+  ${BACKUP_S3_ENDPOINT:+--endpoint-url=$BACKUP_S3_ENDPOINT}
+```
+
+**3. Descomprimir**
+
+```bash
+gunzip /tmp/$DUMP_FILE
+# Resulta em /tmp/liveshop-2026-05-08-0300.dump (custom format)
+```
+
+**4. Restore (CUIDADO — substitui dados existentes)**
+
+```bash
+# Opção A: restore completo em DB nova (recomendado para DR)
+pg_restore --no-owner --no-acl -d "$NEW_DATABASE_URL" /tmp/liveshop-2026-05-08-0300.dump
+
+# Opção B: restore seletivo de tabela específica
+pg_restore --no-owner --no-acl -t nome_da_tabela -d "$DATABASE_URL" /tmp/liveshop-2026-05-08-0300.dump
+```
+
+**5. Validar restore**
+
+```sql
+-- Verificar contagem básica de dados
+SELECT COUNT(*) FROM tenants;
+SELECT COUNT(*) FROM lives WHERE created_at > NOW() - INTERVAL '7 days';
+```
+
+**6. Atualizar DATABASE_URL no Railway se for DB nova**
+
+```bash
+railway variables set DATABASE_URL="<nova-connection-string>"
+railway service redeploy
+```
+
+### RTO / RPO
+
+| Métrica | Valor | Detalhe |
+|---|---|---|
+| **RPO** (perda máxima de dados) | 24h | Backup diário às 03:00 BRT |
+| **RTO** (tempo de recuperação) | ~30–60min | Download + restore + validação |
+
+### Validação semanal recomendada (domingo)
+
+```bash
+# 1. Pegar último dump
+LATEST=$(aws s3 ls s3://$BACKUP_S3_BUCKET/postgres/ | sort | tail -1 | awk '{print $4}')
+aws s3 cp s3://$BACKUP_S3_BUCKET/postgres/$LATEST /tmp/$LATEST
+
+# 2. Restaurar em DB temporária Supabase (criar no dashboard, branch free)
+gunzip /tmp/$LATEST
+pg_restore --no-owner --no-acl -d "$TEST_DATABASE_URL" /tmp/${LATEST%.gz}
+
+# 3. Verificar
+psql "$TEST_DATABASE_URL" -c "SELECT COUNT(*) FROM tenants"
+
+# 4. Drop DB temp via Supabase dashboard
+```
+
+---
+
 ## Manutenção deste playbook
 
 - Cada incidente real → adicionar nova entrada à seção relevante

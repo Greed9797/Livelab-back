@@ -174,16 +174,18 @@ export function gerarIdempotencyKey(tenantId, liveId, tipo) {
  * billingType padrão BOLETO (Appmax aceita 'boleto', 'pix', 'credit-card').
  */
 export async function criarCobranca({
-  asaasCustomerId,        // mantido pelo nome legado, é gateway_customer_id
+  asaasCustomerId,        // mantido pelo nome legado, é gateway_customer_id — será renomeado em Appmax v2
   valor,
   vencimento,
   descricao,
   externalReference,
   billingType = 'BOLETO',
 }) {
+  const gatewayCustomerId = asaasCustomerId  // compatibilidade interna
+
   // 1. Cria order primeiro (Appmax exige order antes do payment)
   const order = await createOrder({
-    customer_id: asaasCustomerId,
+    customer_id: gatewayCustomerId,
     products: [
       { sku: externalReference, name: descricao, qty: 1, price: valor, digital_product: 1 },
     ],
@@ -198,13 +200,13 @@ export async function criarCobranca({
   if (t === 'PIX') {
     payment = await chargePix({
       orderId,
-      customerId: asaasCustomerId,
+      customerId: gatewayCustomerId,
       expirationDate: vencimento,
     })
   } else {
     payment = await chargeBoleto({
       orderId,
-      customerId: asaasCustomerId,
+      customerId: gatewayCustomerId,
       dueDate: vencimento,
     })
   }

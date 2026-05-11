@@ -206,4 +206,46 @@ export async function tenantsRoutes(app) {
       client.release()
     }
   })
+
+  // GET /v1/master/tiktok-apps — visão multi-tenant da integração TikTok Shop.
+  // Master only. Retorna status (connected/expired/disconnected), shop_id e
+  // expires_at de cada tenant. Não expõe access_token nem refresh_token.
+  // Suporta ?status=connected|disconnected|expired pra filtrar.
+  app.get('/v1/master/tiktok-apps', { preHandler: masterOnly }, async (request, reply) => {
+    const { status } = request.query ?? {}
+    const result = await app.db.query(`
+      SELECT t.id              AS tenant_id,
+             t.nome            AS tenant_nome,
+             t.cidade,
+             t.uf,
+             t.ativo,
+             t.tiktok_user_id  AS shop_id,
+             t.tiktok_token_expires_at AS expires_at,
+             (t.tiktok_access_token IS NOT NULL) AS has_token
+      FROM tenants t
+      ORDER BY t.nome ASC
+    `)
+    const now = Date.now()
+    const apps = result.rows.map((r) => {
+      const expiresAtMs = r.expires_at ? new Date(r.expires_at).getTime() : null
+      let appStatus = 'disconnected'
+      if (r.has_token && expiresAtMs && expiresAtMs > now) appStatus = 'connected'
+      else if (r.has_token && expiresAtMs && expiresAtMs <= now) appStatus = 'expired'
+      return {
+        tenant_id: r.tenant_id,
+        tenant_nome: r.tenant_nome,
+        cidade: r.cidade,
+        uf: r.uf,
+        ativo: r.ativo,
+        connected: appStatus === 'connected',
+        status: appStatus,
+        shop_id: r.shop_id,
+        expires_at: r.expires_at,
+      }
+    })
+    if (status && ['connected', 'disconnected', 'expired'].includes(status)) {
+      return apps.filter((a) => a.status === status)
+    }
+    return apps
+  })
 }

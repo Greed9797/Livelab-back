@@ -139,9 +139,9 @@ export async function cabinesRoutes(app) {
       const result = await db.query(
         `SELECT c.id, c.numero, c.status, c.live_atual_id, c.contrato_id,
                 ct.tiktok_username,
-                COALESCE(l.cliente_id, ct.cliente_id) AS cliente_id,
+                COALESCE(l.cliente_id, ct.cliente_id, lr_next.next_cliente_id) AS cliente_id,
                 u.nome AS apresentador_nome,
-                cl.nome AS cliente_nome,
+                COALESCE(cl.nome, lr_next.next_cliente_nome) AS cliente_nome,
                 l.iniciado_em,
                 COALESCE(ls.viewer_count, 0) AS viewer_count,
                 COALESCE(ls.gmv, 0) AS gmv_atual,
@@ -149,7 +149,8 @@ export async function cabinesRoutes(app) {
                 COALESCE(ls.comments_count, 0) AS comments_count,
                 COALESCE(ls.shares_count, 0) AS shares_count,
                 COALESCE(ls.gifts_diamonds, 0) AS gifts_diamonds,
-                COALESCE(ls.total_orders, 0) AS total_orders
+                COALESCE(ls.total_orders, 0) AS total_orders,
+                COALESCE(lr_agg.agenda, '[]'::json) AS agenda
          FROM cabines c
          LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = c.tenant_id
          LEFT JOIN lives l ON l.id = c.live_atual_id AND l.tenant_id = c.tenant_id
@@ -164,6 +165,34 @@ export async function cabinesRoutes(app) {
            ORDER BY captured_at DESC
            LIMIT 1
          ) ls ON true
+         LEFT JOIN LATERAL (
+           SELECT lr.cliente_id AS next_cliente_id, cl2.nome AS next_cliente_nome
+           FROM live_requests lr
+           JOIN clientes cl2 ON cl2.id = lr.cliente_id AND cl2.tenant_id = c.tenant_id
+           WHERE lr.cabine_id = c.id
+             AND lr.tenant_id = c.tenant_id
+             AND lr.status = 'aprovada'
+             AND (lr.data_solicitada > CURRENT_DATE
+                  OR (lr.data_solicitada = CURRENT_DATE AND lr.hora_fim > CURRENT_TIME))
+           ORDER BY lr.data_solicitada, lr.hora_inicio
+           LIMIT 1
+         ) lr_next ON true
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(json_agg(json_build_object(
+             'id', lr.id,
+             'data', lr.data_solicitada,
+             'hora_inicio', lr.hora_inicio::text,
+             'hora_fim', lr.hora_fim::text,
+             'cliente_nome', cl2.nome,
+             'cliente_id', lr.cliente_id
+           ) ORDER BY lr.data_solicitada, lr.hora_inicio), '[]'::json) AS agenda
+           FROM live_requests lr
+           JOIN clientes cl2 ON cl2.id = lr.cliente_id AND cl2.tenant_id = c.tenant_id
+           WHERE lr.cabine_id = c.id
+             AND lr.tenant_id = c.tenant_id
+             AND lr.status = 'aprovada'
+             AND lr.data_solicitada >= CURRENT_DATE
+         ) lr_agg ON true
          WHERE c.tenant_id = $1::uuid
          ORDER BY c.numero`,
         [tenant_id]
@@ -178,6 +207,7 @@ export async function cabinesRoutes(app) {
         shares_count: Number(c.shares_count ?? 0),
         gifts_diamonds: Number(c.gifts_diamonds ?? 0),
         total_orders: Number(c.total_orders ?? 0),
+        agenda: c.agenda ?? [],
       }))
     })
   })

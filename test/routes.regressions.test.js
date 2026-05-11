@@ -345,7 +345,7 @@ describe('Route regressions: SQL and RBAC', () => {
 
     const sql = queryMock.mock.calls[0][0]
     expect(sql).toContain('c.contrato_id')
-    expect(sql).toContain('COALESCE(l.cliente_id, ct.cliente_id) AS cliente_id')
+    expect(sql).toContain('COALESCE(l.cliente_id, ct.cliente_id, lr_next.next_cliente_id) AS cliente_id')
     expect(sql).toContain('COALESCE(ls.viewer_count, 0) AS viewer_count')
     expect(sql).toContain('COALESCE(ls.gmv, 0) AS gmv_atual')
     expect(releaseMock).toHaveBeenCalledTimes(1)

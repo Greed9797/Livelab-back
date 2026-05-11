@@ -913,9 +913,33 @@ export async function cabinesRoutes(app) {
           return reply.code(404).send({ error: 'Cabine não encontrada' })
         }
 
+        // Auto-reserve if disponivel with an approved live_request for today
+        let resolvedContratoId = cabine.contrato_id
         if (!['reservada', 'ativa'].includes(cabine.status) || !cabine.contrato_id) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Cabine precisa estar reservada ou ativa para iniciar a live' })
+          if (cabine.status !== 'disponivel') {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: 'Cabine precisa estar reservada ou ativa para iniciar a live' })
+          }
+          const lrQ = await db.query(
+            `SELECT lr.cliente_id, ct.id AS contrato_id
+             FROM live_requests lr
+             JOIN contratos ct ON ct.cliente_id = lr.cliente_id AND ct.status = 'ativo'
+             WHERE lr.cabine_id = $1
+               AND lr.status = 'aprovada'
+               AND lr.data_solicitada = CURRENT_DATE
+             ORDER BY lr.hora_inicio
+             LIMIT 1`,
+            [cabine_id]
+          )
+          if (!lrQ.rows[0]) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: 'Cabine precisa estar reservada ou ativa para iniciar a live' })
+          }
+          resolvedContratoId = lrQ.rows[0].contrato_id
+          await db.query(
+            `UPDATE cabines SET status = 'reservada', contrato_id = $1 WHERE id = $2`,
+            [resolvedContratoId, cabine_id]
+          )
         }
 
         if (cabine.live_atual_id) {
@@ -928,7 +952,7 @@ export async function cabinesRoutes(app) {
            FROM contratos
            WHERE id = $1
            FOR UPDATE`,
-          [cabine.contrato_id]
+          [resolvedContratoId]
         )
         const contrato = contratoQ.rows[0]
 
@@ -955,7 +979,7 @@ export async function cabinesRoutes(app) {
         await logCabineEvent(db, {
           tenantId: tenant_id,
           cabineId: cabine_id,
-          contratoId: cabine.contrato_id,
+          contratoId: resolvedContratoId,
           tipoEvento: 'cabine_live_iniciada',
           actorUserId: sub,
           actorPapel: papel,
@@ -974,7 +998,7 @@ export async function cabinesRoutes(app) {
           app.log.warn({ err, liveId: live.id }, 'syncLives pós-iniciar-live falhou')
         )
 
-        app.audit?.log?.(request, { action: 'live.start', entity_type: 'live', entity_id: live.id, metadata: { cabine_id, cliente_id: contrato.cliente_id, contrato_id: cabine.contrato_id } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        app.audit?.log?.(request, { action: 'live.start', entity_type: 'live', entity_id: live.id, metadata: { cabine_id, cliente_id: contrato.cliente_id, contrato_id: resolvedContratoId } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return reply.code(201).send(live)
       } catch (error) {
         await db.query('ROLLBACK')

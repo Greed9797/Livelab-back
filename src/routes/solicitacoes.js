@@ -94,7 +94,7 @@ export async function solicitacoesRoutes(app) {
 
       // Lock pessimista para evitar double-approve simultâneo
       const lockQ = await client.query(`
-        SELECT id, cabine_id, data_solicitada, hora_inicio, hora_fim, status
+        SELECT id, cabine_id, data_solicitada, hora_inicio, hora_fim, status, cliente_id
         FROM live_requests
         WHERE id = $1 AND tenant_id = $2
         FOR UPDATE
@@ -127,6 +127,24 @@ export async function solicitacoesRoutes(app) {
         return reply.code(409).send({ error: 'Conflito de horário: já existe uma live aprovada neste período para esta cabine' })
       }
 
+      // Validar contrato ativo do cliente antes de aprovar
+      const ctQ = await client.query(
+        `SELECT id FROM contratos
+         WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativo'
+         ORDER BY ativado_em DESC NULLS LAST, criado_em DESC
+         LIMIT 1`,
+        [row.cliente_id, tenant_id]
+      )
+      if (!ctQ.rows[0]) {
+        await client.query('ROLLBACK')
+        return reply.code(422).send({
+          error: 'Cliente sem contrato ativo. Crie ou ative um contrato antes de aprovar a solicitação.',
+          code: 'NO_ACTIVE_CONTRACT',
+          cliente_id: row.cliente_id,
+        })
+      }
+      const contratoId = ctQ.rows[0].id
+
       // Aprova
       const updated = await client.query(`
         UPDATE live_requests
@@ -134,6 +152,14 @@ export async function solicitacoesRoutes(app) {
         WHERE id = $2 AND tenant_id = $3
         RETURNING id, status, atualizado_em
       `, [user_id, id, tenant_id])
+
+      // Reservar cabine SE ainda disponível (idempotente)
+      await client.query(
+        `UPDATE cabines
+         SET status = 'reservada', contrato_id = $1
+         WHERE id = $2 AND tenant_id = $3 AND status = 'disponivel'`,
+        [contratoId, row.cabine_id, tenant_id]
+      )
 
       await client.query('COMMIT')
       return updated.rows[0]

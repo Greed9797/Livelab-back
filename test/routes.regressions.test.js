@@ -357,10 +357,12 @@ describe('Route regressions: SQL and RBAC', () => {
     const app = Fastify()
     const requestId = '11111111-1111-4111-8111-111111111111'
     const cabineId = '22222222-2222-4222-8222-222222222222'
+    const clienteId = '33333333-3333-4333-8333-333333333333'
+    const contratoId = '44444444-4444-4444-8444-444444444444'
     const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({
+      .mockResolvedValueOnce({ rows: [] })                    // BEGIN
+      .mockResolvedValueOnce({ rows: [] })                    // set_config RLS
+      .mockResolvedValueOnce({                                // lockQ FOR UPDATE
         rows: [{
           id: requestId,
           cabine_id: cabineId,
@@ -368,13 +370,16 @@ describe('Route regressions: SQL and RBAC', () => {
           hora_inicio: '14:00:00',
           hora_fim: '16:00:00',
           status: 'pendente',
+          cliente_id: clienteId,
         }],
       })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({
+      .mockResolvedValueOnce({ rows: [] })                    // overlap check
+      .mockResolvedValueOnce({ rows: [{ id: contratoId }] }) // contratos check
+      .mockResolvedValueOnce({                                // UPDATE live_requests
         rows: [{ id: requestId, status: 'aprovada', atualizado_em: '2026-04-24T12:00:00.000Z' }],
       })
-      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })                    // UPDATE cabines reservada
+      .mockResolvedValueOnce({ rows: [] })                    // COMMIT
     const releaseMock = vi.fn()
     const connectMock = vi.fn().mockResolvedValue({
       query: queryMock,
@@ -405,7 +410,8 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({ id: requestId, status: 'aprovada' })
     expect(queryMock.mock.calls[2][0]).toContain('FROM live_requests')
-    expect(queryMock.mock.calls[4][0]).toContain("SET status = 'aprovada'")
+    expect(queryMock.mock.calls[5][0]).toContain("SET status = 'aprovada'")
+    expect(queryMock.mock.calls[6][0]).toContain("SET status = 'reservada', contrato_id")
     expect(releaseMock).toHaveBeenCalledTimes(1)
 
     await app.close()
@@ -1286,6 +1292,163 @@ describe('Route regressions: SQL and RBAC', () => {
       expect(queryMock).toHaveBeenCalled()
       await app.close()
     })
+  })
+
+  it('solicitacoes aprovar retorna 422 quando cliente nao tem contrato ativo', async () => {
+    const app = Fastify()
+    const requestId = 'aaaa1111-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const cabineId = 'bbbb2222-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const clienteId = 'cccc3333-cccc-4ccc-8ccc-cccccccccccc'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })           // BEGIN
+      .mockResolvedValueOnce({ rows: [] })           // set_config RLS
+      .mockResolvedValueOnce({                       // lockQ FOR UPDATE
+        rows: [{
+          id: requestId, cabine_id: cabineId,
+          data_solicitada: '2026-05-11',
+          hora_inicio: '14:00:00', hora_fim: '16:00:00',
+          status: 'pendente', cliente_id: clienteId,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })           // overlap check
+      .mockResolvedValueOnce({ rows: [] })           // contratos check → nenhum ativo
+      .mockResolvedValueOnce({ rows: [] })           // ROLLBACK
+    const releaseMock = vi.fn()
+    const connectMock = vi.fn().mockResolvedValue({ query: queryMock, release: releaseMock })
+
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel: 'franqueado' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!request.user) request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel: 'franqueado' }
+      if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+    })
+    app.decorate('db', { pool: { connect: connectMock } })
+    await app.register(solicitacoesRoutes)
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/v1/solicitacoes/${requestId}/aprovar`,
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(422)
+    expect(response.json()).toMatchObject({ code: 'NO_ACTIVE_CONTRACT', cliente_id: clienteId })
+    expect(queryMock.mock.calls[4][0]).toContain('FROM contratos')
+    expect(releaseMock).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  it('solicitacoes aprovar com contrato ativo reserva cabine na mesma transacao', async () => {
+    const app = Fastify()
+    const requestId = 'dddd4444-dddd-4ddd-8ddd-dddddddddddd'
+    const cabineId = 'eeee5555-eeee-4eee-8eee-eeeeeeeeeeee'
+    const clienteId = 'ffff6666-ffff-4fff-8fff-ffffffffffff'
+    const contratoId = '00007777-0000-4000-8000-000000000000'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })                    // BEGIN
+      .mockResolvedValueOnce({ rows: [] })                    // set_config RLS
+      .mockResolvedValueOnce({                                // lockQ FOR UPDATE
+        rows: [{
+          id: requestId, cabine_id: cabineId,
+          data_solicitada: '2026-05-11',
+          hora_inicio: '10:00:00', hora_fim: '12:00:00',
+          status: 'pendente', cliente_id: clienteId,
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })                    // overlap check
+      .mockResolvedValueOnce({ rows: [{ id: contratoId }] }) // contratos check → ativo
+      .mockResolvedValueOnce({                                // UPDATE live_requests
+        rows: [{ id: requestId, status: 'aprovada', atualizado_em: '2026-05-11T12:00:00.000Z' }],
+      })
+      .mockResolvedValueOnce({ rows: [] })                    // UPDATE cabines reservada
+      .mockResolvedValueOnce({ rows: [] })                    // COMMIT
+    const releaseMock = vi.fn()
+    const connectMock = vi.fn().mockResolvedValue({ query: queryMock, release: releaseMock })
+
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel: 'franqueado' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!request.user) request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel: 'franqueado' }
+      if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+    })
+    app.decorate('db', { pool: { connect: connectMock } })
+    await app.register(solicitacoesRoutes)
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/v1/solicitacoes/${requestId}/aprovar`,
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ id: requestId, status: 'aprovada' })
+    expect(queryMock.mock.calls[6][0]).toContain("SET status = 'reservada', contrato_id")
+    expect(queryMock.mock.calls[6][1]).toEqual([contratoId, cabineId, 'tenant-1'])
+    expect(releaseMock).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  it('POST /v1/lives auto-reserves cabine disponivel with approved LR and active contrato', async () => {
+    const app = Fastify()
+    const cabineId = 'a1111111-a111-4a11-8a11-a11111111111'
+    const clienteId = 'b2222222-b222-4b22-8b22-b22222222222'
+    const contratoId = 'c3333333-c333-4c33-8c33-c33333333333'
+    const userId = 'd4444444-d444-4d44-8d44-d44444444444'
+    const liveId = 'e5555555-e555-4e55-8e55-e55555555555'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })           // BEGIN
+      .mockResolvedValueOnce({                       // SELECT cabine FOR UPDATE → disponivel
+        rows: [{ id: cabineId, numero: 1, status: 'disponivel', contrato_id: null, live_atual_id: null }],
+      })
+      .mockResolvedValueOnce({                       // SELECT live_requests (auto-reserve)
+        rows: [{ cliente_id: clienteId }],
+      })
+      .mockResolvedValueOnce({                       // SELECT contratos (ctLrQ)
+        rows: [{ id: contratoId }],
+      })
+      .mockResolvedValueOnce({ rows: [] })           // UPDATE cabines reservada
+      .mockResolvedValueOnce({                       // SELECT contratos FOR UPDATE
+        rows: [{ id: contratoId, cliente_id: clienteId, status: 'ativo' }],
+      })
+      .mockResolvedValueOnce({                       // INSERT INTO lives
+        rows: [{ id: liveId, iniciado_em: new Date().toISOString(), cliente_id: clienteId, apresentador_id: userId }],
+      })
+      .mockResolvedValueOnce({ rows: [] })           // UPDATE cabines ao_vivo
+      .mockResolvedValueOnce({ rows: [] })           // INSERT cabine_eventos
+      .mockResolvedValueOnce({ rows: [] })           // COMMIT
+    const releaseMock = vi.fn()
+
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-1', sub: userId, papel: 'franqueado' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+    })
+    app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
+    await app.register(cabinesRoutes)
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/lives',
+      payload: { cabine_id: cabineId },
+    })
+
+    expect(response.statusCode).toBe(201)
+    expect(queryMock.mock.calls[2][0]).toContain('FROM live_requests')
+    expect(queryMock.mock.calls[2][1]).toEqual([cabineId, 'tenant-1'])
+    expect(queryMock.mock.calls[4][0]).toContain("SET status = 'reservada', contrato_id")
+    expect(queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO lives'),
+      expect.arrayContaining([cabineId, clienteId])
+    )
+    expect(releaseMock).toHaveBeenCalledTimes(1)
+    await app.close()
   })
 
   // ─── Fase C: gerente_regional (Tier 4, multi-tenant) ─────────────────

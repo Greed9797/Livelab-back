@@ -913,29 +913,42 @@ export async function cabinesRoutes(app) {
           return reply.code(404).send({ error: 'Cabine não encontrada' })
         }
 
-        // Auto-reserve if disponivel with an approved live_request for today
+        // Auto-reserve: se cabine não está reservada/ativa, busca live_request aprovada do dia
         let resolvedContratoId = cabine.contrato_id
         if (!['reservada', 'ativa'].includes(cabine.status) || !cabine.contrato_id) {
           if (cabine.status !== 'disponivel') {
             await db.query('ROLLBACK')
-            return reply.code(409).send({ error: 'Cabine precisa estar reservada ou ativa para iniciar a live' })
+            return reply.code(409).send({ error: 'Cabine indisponível para iniciar live', code: 'CABINE_NOT_AVAILABLE' })
           }
           const lrQ = await db.query(
-            `SELECT lr.cliente_id, ct.id AS contrato_id
+            `SELECT lr.cliente_id
              FROM live_requests lr
-             JOIN contratos ct ON ct.cliente_id = lr.cliente_id AND ct.status = 'ativo'
              WHERE lr.cabine_id = $1
+               AND lr.tenant_id = $2
                AND lr.status = 'aprovada'
                AND lr.data_solicitada = CURRENT_DATE
+               AND (lr.hora_inicio - INTERVAL '15 min')::TIME <= NOW()::TIME
+               AND NOW()::TIME <= (lr.hora_fim + INTERVAL '15 min')::TIME
              ORDER BY lr.hora_inicio
              LIMIT 1`,
-            [cabine_id]
+            [cabine_id, tenant_id]
           )
           if (!lrQ.rows[0]) {
             await db.query('ROLLBACK')
-            return reply.code(409).send({ error: 'Cabine precisa estar reservada ou ativa para iniciar a live' })
+            return reply.code(409).send({ error: 'Nenhuma solicitação aprovada para o horário atual nesta cabine', code: 'NO_APPROVED_REQUEST' })
           }
-          resolvedContratoId = lrQ.rows[0].contrato_id
+          const ctLrQ = await db.query(
+            `SELECT id FROM contratos
+             WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativo'
+             ORDER BY ativado_em DESC NULLS LAST, criado_em DESC
+             LIMIT 1`,
+            [lrQ.rows[0].cliente_id, tenant_id]
+          )
+          if (!ctLrQ.rows[0]) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: 'Cliente da solicitação não possui contrato ativo', code: 'NO_ACTIVE_CONTRACT' })
+          }
+          resolvedContratoId = ctLrQ.rows[0].id
           await db.query(
             `UPDATE cabines SET status = 'reservada', contrato_id = $1 WHERE id = $2`,
             [resolvedContratoId, cabine_id]

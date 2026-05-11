@@ -44,8 +44,11 @@ const liveManualSchema = z.object({
   fat_gerado:       z.number().min(0),
   qtd_pedidos:      z.number().int().min(0),
   resumo:           z.string().max(2000).optional(),
-  manual_likes:     z.number().int().min(0).optional(),
   manual_views:     z.number().int().min(0).optional(),
+  manual_likes:     z.number().int().min(0).optional(),
+  manual_comments:  z.number().int().min(0).optional(),
+  manual_shares:    z.number().int().min(0).optional(),
+  manual_diamonds:  z.number().int().min(0).optional(),
   manual_orders:    z.number().int().min(0).optional(),
   manual_gmv:       z.number().min(0).optional(),
 }).refine(d => d.hora_fim > d.hora_inicio, {
@@ -66,6 +69,13 @@ const liveManualEditSchema = z.object({
   fat_gerado:       z.number().min(0).optional(),
   qtd_pedidos:      z.number().int().min(0).optional(),
   resumo:           z.string().max(2000).optional(),
+  manual_views:     z.number().int().min(0).optional(),
+  manual_likes:     z.number().int().min(0).optional(),
+  manual_comments:  z.number().int().min(0).optional(),
+  manual_shares:    z.number().int().min(0).optional(),
+  manual_diamonds:  z.number().int().min(0).optional(),
+  manual_orders:    z.number().int().min(0).optional(),
+  manual_gmv:       z.number().min(0).optional(),
 })
 
 const atualizarStatusSchema = z.object({
@@ -1009,13 +1019,15 @@ export async function cabinesRoutes(app) {
              (tenant_id, cabine_id, cliente_id, apresentador_id, gestor_id,
               status, iniciado_em, encerrado_em, fat_gerado, comissao_calculada,
               final_orders_count, resumo,
-              manual_likes, manual_views, manual_orders, manual_gmv)
-           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+              manual_views, manual_likes, manual_comments, manual_shares, manual_diamonds,
+              manual_orders, manual_gmv)
+           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
            RETURNING id`,
           [
             tenant_id, d.cabine_id, d.cliente_id, d.apresentador_id, d.gestor_id,
             iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
-            d.manual_likes ?? null, d.manual_views ?? null,
+            d.manual_views ?? null, d.manual_likes ?? null,
+            d.manual_comments ?? null, d.manual_shares ?? null, d.manual_diamonds ?? null,
             d.manual_orders ?? null, d.manual_gmv ?? null,
           ]
         )
@@ -1083,9 +1095,16 @@ export async function cabinesRoutes(app) {
         if (d.cliente_id   !== undefined) addField('cliente_id',         d.cliente_id)
         if (d.apresentador_id !== undefined) addField('apresentador_id', d.apresentador_id)
         if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
-        if (d.fat_gerado   !== undefined) { addField('fat_gerado', d.fat_gerado); addField('comissao_calculada', comissao) }
-        if (d.qtd_pedidos  !== undefined) addField('final_orders_count', d.qtd_pedidos)
-        if (d.resumo       !== undefined) addField('resumo',             d.resumo)
+        if (d.fat_gerado      !== undefined) { addField('fat_gerado', d.fat_gerado); addField('comissao_calculada', comissao) }
+        if (d.qtd_pedidos     !== undefined) addField('final_orders_count', d.qtd_pedidos)
+        if (d.resumo          !== undefined) addField('resumo',             d.resumo)
+        if (d.manual_views    !== undefined) addField('manual_views',    d.manual_views)
+        if (d.manual_likes    !== undefined) addField('manual_likes',    d.manual_likes)
+        if (d.manual_comments !== undefined) addField('manual_comments', d.manual_comments)
+        if (d.manual_shares   !== undefined) addField('manual_shares',   d.manual_shares)
+        if (d.manual_diamonds !== undefined) addField('manual_diamonds', d.manual_diamonds)
+        if (d.manual_orders   !== undefined) addField('manual_orders',   d.manual_orders)
+        if (d.manual_gmv      !== undefined) addField('manual_gmv',      d.manual_gmv)
 
         if (d.data !== undefined || d.hora_inicio !== undefined || d.hora_fim !== undefined) {
           const currentInicio = new Date(live.iniciado_em)

@@ -67,11 +67,15 @@ export async function clientesRoutes(app) {
     let cidade = d.cidade ?? null
     let estado = d.estado ?? null
     if (d.cep && (lat == null || lng == null)) {
-      const geo = await resolveCepToGeo(d.cep)
-      lat = lat ?? geo.lat ?? null
-      lng = lng ?? geo.lng ?? null
-      cidade = cidade ?? geo.cidade ?? null
-      estado = estado ?? geo.estado ?? null
+      try {
+        const geo = await resolveCepToGeo(d.cep)
+        lat = lat ?? geo.lat ?? null
+        lng = lng ?? geo.lng ?? null
+        cidade = cidade ?? geo.cidade ?? null
+        estado = estado ?? geo.estado ?? null
+      } catch (_geoErr) {
+        // geocoding failure is non-critical — continue without coordinates
+      }
     }
 
     return app.withTenant(tenant_id, async (db) => {

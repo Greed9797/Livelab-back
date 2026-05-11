@@ -42,6 +42,7 @@ import { webhookBioCrmRoutes } from './routes/webhook_bio_crm.js'
 import { appmaxRoutes } from './routes/appmax.js'
 import { notificacoesRoutes } from './routes/notificacoes.js'
 import { auditLogRoutes } from './routes/audit_log.js'
+import { AppError } from './lib/errors.js'
 
 export async function buildApp(opts = {}) {
   // S-08: secrets obrigatórios em produção. Falha cedo (boot-time) em vez de
@@ -191,18 +192,28 @@ export async function buildApp(opts = {}) {
   })
 
   app.setErrorHandler((error, request, reply) => {
-    const status = error.statusCode ?? 500
+    // Custom AppError subclasses: usa statusCode/sentryTag/reportable da classe
+    const isAppError = error instanceof AppError
+    const status = isAppError ? error.statusCode : (error.statusCode ?? 500)
+    const shouldReport = status >= 500 || (isAppError && error.reportable === true)
+
     if (status >= 500) {
       request.log.error({ err: error }, 'Unhandled error')
-      // Reportar 5xx para Sentry com tags úteis (sem PII — beforeSend filtra)
-      if (process.env.SENTRY_DSN) {
-        Sentry.withScope((scope) => {
-          scope.setTag('route', request.routeOptions?.url ?? request.url)
-          scope.setTag('method', request.method)
-          scope.setUser(request.user ? { id: request.user.sub, papel: request.user.papel } : undefined)
-          Sentry.captureException(error)
-        })
-      }
+    } else if (isAppError && error.reportable) {
+      request.log.warn({ err: error, sentryTag: error.sentryTag }, 'Reportable AppError')
+    }
+
+    if (shouldReport && process.env.SENTRY_DSN) {
+      Sentry.withScope((scope) => {
+        scope.setTag('route', request.routeOptions?.url ?? request.url)
+        scope.setTag('method', request.method)
+        if (isAppError) scope.setTag('error_class', error.sentryTag)
+        scope.setUser(request.user ? { id: request.user.sub, papel: request.user.papel } : undefined)
+        Sentry.captureException(error)
+      })
+    }
+
+    if (status >= 500) {
       return reply.code(500).send({ error: 'Erro interno do servidor' })
     }
     return reply.code(status).send({ error: error.message })

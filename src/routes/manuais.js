@@ -48,6 +48,7 @@ export async function manuaisRoutes(app) {
        RETURNING id, titulo, url, categoria, paginas, destaque, atualizado_em`,
       [titulo, url, categoria ?? null, paginas ?? null, destaque ?? false]
     )
+    app.audit?.log?.(request, { action: 'manual.create', entity_type: 'manual', entity_id: result.rows[0].id, metadata: { titulo, categoria: categoria ?? null, destaque: destaque ?? false } })?.catch(err => app.log.error({ err }, 'audit log failed'))
     return reply.code(201).send(result.rows[0])
   })
 
@@ -74,12 +75,14 @@ export async function manuaisRoutes(app) {
       values
     )
     if (result.rows.length === 0) return reply.code(404).send({ error: 'Manual não encontrado' })
+    app.audit?.log?.(request, { action: 'manual.update', entity_type: 'manual', entity_id: request.params.id, metadata: { changed_fields: Object.keys(fields) } })?.catch(err => app.log.error({ err }, 'audit log failed'))
     return result.rows[0]
   })
 
   app.delete('/v1/manuais/:id', { preHandler: masterOnly }, async (request, reply) => {
     const result = await app.db.query('DELETE FROM manuais WHERE id = $1 RETURNING id', [request.params.id])
     if (result.rows.length === 0) return reply.code(404).send({ error: 'Manual não encontrado' })
+    app.audit?.log?.(request, { action: 'manual.delete', entity_type: 'manual', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
     return reply.code(204).send()
   })
 }

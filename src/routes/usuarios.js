@@ -391,6 +391,131 @@ export async function usuariosRoutes(app) {
     })
   })
 
+  // GET /v1/usuarios/convites-pendentes
+  // Lista usuários que receberam convite mas ainda não aceitaram (primeiro_acesso = false)
+  app.get('/v1/usuarios/convites-pendentes', { preHandler: rbac }, async (request, reply) => {
+    return app.withTenant(request.user.tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT
+           u.id, u.nome, u.email, u.papel, u.criado_em,
+           u.invite_expira_em,
+           (u.invite_expira_em IS NOT NULL AND u.invite_expira_em < NOW()) AS expirou,
+           CASE
+             WHEN u.invite_expira_em IS NULL THEN NULL
+             WHEN u.invite_expira_em < NOW() THEN 0
+             ELSE GREATEST(0, EXTRACT(EPOCH FROM (u.invite_expira_em - NOW())) / 86400)::int
+           END AS dias_restantes,
+           c.nome AS convidado_por_nome
+         FROM users u
+         LEFT JOIN users c ON c.id = u.criado_por AND c.tenant_id = u.tenant_id
+         WHERE u.tenant_id = $1
+           AND u.invite_token_hash IS NOT NULL
+           AND u.primeiro_acesso = false
+           AND u.ativo = true
+         ORDER BY u.invite_expira_em ASC NULLS LAST`,
+        [request.user.tenant_id]
+      )
+      return result.rows
+    })
+  })
+
+  // POST /v1/usuarios/convites/reenviar-bulk
+  // Reenviar convite em lote. Max 50 ids por chamada (anti DoS).
+  app.post('/v1/usuarios/convites/reenviar-bulk', { preHandler: rbac }, async (request, reply) => {
+    const { ids } = request.body ?? {}
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return reply.code(400).send({ error: 'ids deve ser um array não vazio' })
+    }
+    if (ids.length > 50) {
+      return reply.code(400).send({ error: 'Máximo 50 convites por chamada' })
+    }
+    // Validar que todos são UUIDs básicos
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    if (!ids.every(id => typeof id === 'string' && uuidRegex.test(id))) {
+      return reply.code(400).send({ error: 'ids inválidos — use UUIDs' })
+    }
+
+    const reenviados = []
+    const falhas = []
+
+    for (const id of ids) {
+      try {
+        await app.withTenant(request.user.tenant_id, async (db) => {
+          const user = await db.query(
+            `SELECT id, nome, email, primeiro_acesso
+             FROM users
+             WHERE id = $1 AND tenant_id = $2`,
+            [id, request.user.tenant_id]
+          )
+          if (user.rows.length === 0) {
+            throw new Error('Usuário não encontrado')
+          }
+          if (user.rows[0].primeiro_acesso === true) {
+            throw new Error('Usuário já aceitou o convite')
+          }
+
+          const inviteRawToken = crypto.randomBytes(32).toString('hex')
+          const inviteTokenHash = crypto.createHash('sha256').update(inviteRawToken).digest('hex')
+          const inviteExpiraEm = new Date(Date.now() + 72 * 60 * 60 * 1000)
+
+          await db.query(
+            `UPDATE users SET invite_token_hash = $1, invite_expira_em = $2, atualizado_em = NOW()
+             WHERE id = $3 AND tenant_id = $4`,
+            [inviteTokenHash, inviteExpiraEm, id, request.user.tenant_id]
+          )
+
+          const inviteUrl = `${_frontendUrl()}/aceitar-convite?token=${encodeURIComponent(inviteRawToken)}`
+          notify('convite_usuario', {
+            usuario_nome: user.rows[0].nome,
+            usuario_email: user.rows[0].email,
+            invite_url: inviteUrl,
+            expira_em: inviteExpiraEm.toLocaleString('pt-BR'),
+          }).catch(err => app.log.error({ err }, 'Failed to send bulk invite email'))
+
+          app.audit?.log?.(request, { action: 'usuarios.invite_resend_bulk', entity_type: 'user', entity_id: id })?.catch(err => app.log.error({ err }, 'audit log failed'))
+          reenviados.push(id)
+        })
+      } catch (err) {
+        falhas.push({ id, erro: err.message ?? 'Erro desconhecido' })
+      }
+    }
+
+    return { reenviados: reenviados.length, falhas }
+  })
+
+  // DELETE /v1/usuarios/convites/:id
+  // Cancela convite — deleta user que nunca aceitou (primeiro_acesso = false)
+  app.delete('/v1/usuarios/convites/:id', { preHandler: rbac }, async (request, reply) => {
+    if (request.params.id === request.user.sub) {
+      return reply.code(400).send({ error: 'Não é possível cancelar o próprio convite' })
+    }
+
+    return app.withTenant(request.user.tenant_id, async (db) => {
+      // Verificar que o usuário existe, pertence ao tenant e nunca aceitou
+      const user = await db.query(
+        `SELECT id, primeiro_acesso FROM users
+         WHERE id = $1 AND tenant_id = $2`,
+        [request.params.id, request.user.tenant_id]
+      )
+      if (user.rows.length === 0) {
+        return reply.code(404).send({ error: 'Usuário não encontrado' })
+      }
+      if (user.rows[0].primeiro_acesso === true) {
+        return reply.code(400).send({ error: 'Não é possível cancelar convite de usuário que já aceitou' })
+      }
+
+      // Limpar tokens antes de deletar
+      await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+      await db.query(
+        'DELETE FROM users WHERE id = $1 AND tenant_id = $2',
+        [request.params.id, request.user.tenant_id]
+      )
+
+      app.audit?.log?.(request, { action: 'usuarios.invite_cancel', entity_type: 'user', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      return reply.code(204).send()
+    })
+  })
+
   // DELETE /v1/usuarios/:id — soft delete
   app.delete('/v1/usuarios/:id', { preHandler: rbac }, async (request, reply) => {
     if (request.params.id === request.user.sub) {

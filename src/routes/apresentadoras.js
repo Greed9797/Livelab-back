@@ -71,6 +71,7 @@ export async function apresentadorasRoutes(app) {
          d.cpf_cnpj ?? null, d.cidade ?? null, d.fixo, d.comissao_pct, d.meta_diaria_gmv, d.observacoes ?? null,
          d.link_contrato ?? null, d.data_aniversario ?? null, d.data_inicio ?? null, d.data_fim ?? null]
       )
+      app.audit?.log?.(request, { action: 'apresentadora.create', entity_type: 'apresentadora', entity_id: result.rows[0].id, metadata: { nome: d.nome, cargo: d.cargo ?? null, fixo: d.fixo, comissao_pct: d.comissao_pct } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(result.rows[0])
     })
   })
@@ -96,6 +97,7 @@ export async function apresentadorasRoutes(app) {
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      app.audit?.log?.(request, { action: 'apresentadora.update', entity_type: 'apresentadora', entity_id: request.params.id, metadata: { changed_fields: fields } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })
@@ -111,6 +113,7 @@ export async function apresentadorasRoutes(app) {
         [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      app.audit?.log?.(request, { action: 'apresentadora.delete', entity_type: 'apresentadora', entity_id: request.params.id, metadata: { soft_delete: true } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(204).send()
     })
   })

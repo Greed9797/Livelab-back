@@ -271,6 +271,7 @@ export async function knowledgeRoutes(app) {
           req.user.sub,
         ],
       )
+      app.audit?.log?.(req, { action: 'knowledge.article.create', entity_type: 'knowledge_article', entity_id: r.rows[0].id, metadata: { titulo: d.titulo, slug, status: d.status ?? 'draft', category_id: d.category_id ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(r.rows[0])
     } catch (e) {
       if (e.code === '23505') return reply.code(409).send({ error: 'Slug duplicado, tente novamente' })
@@ -309,6 +310,7 @@ export async function knowledgeRoutes(app) {
       values,
     )
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Artigo não encontrado' })
+    app.audit?.log?.(req, { action: 'knowledge.article.update', entity_type: 'knowledge_article', entity_id: req.params.id, metadata: { changed_fields: Object.keys(d) } })?.catch(err => app.log.error({ err }, 'audit log failed'))
     return r.rows[0]
   })
 
@@ -322,6 +324,7 @@ export async function knowledgeRoutes(app) {
       [req.user.sub, req.params.id],
     )
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Artigo não encontrado' })
+    app.audit?.log?.(req, { action: 'knowledge.article.status_change', entity_type: 'knowledge_article', entity_id: req.params.id, metadata: { status_to: 'published' } })?.catch(err => app.log.error({ err }, 'audit log failed'))
     return r.rows[0]
   })
 
@@ -332,12 +335,14 @@ export async function knowledgeRoutes(app) {
       [req.user.sub, req.params.id],
     )
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Artigo não encontrado' })
+    app.audit?.log?.(req, { action: 'knowledge.article.status_change', entity_type: 'knowledge_article', entity_id: req.params.id, metadata: { status_to: 'archived' } })?.catch(err => app.log.error({ err }, 'audit log failed'))
     return r.rows[0]
   })
 
   app.delete('/v1/knowledge/articles/:id', { onRequest: masterOnly }, async (req, reply) => {
     const r = await app.db.query('DELETE FROM manuais WHERE id = $1 RETURNING id', [req.params.id])
     if (r.rows.length === 0) return reply.code(404).send({ error: 'Artigo não encontrado' })
+    app.audit?.log?.(req, { action: 'knowledge.article.delete', entity_type: 'knowledge_article', entity_id: req.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
     return reply.code(204).send()
   })
 

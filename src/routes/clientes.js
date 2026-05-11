@@ -87,6 +87,7 @@ export async function clientesRoutes(app) {
          d.cep ?? null, cidade, estado, d.siga ?? null,
          d.tiktok_username ?? null]
       )
+      app.audit?.log?.(request, { action: 'cliente.create', entity_type: 'cliente', entity_id: result.rows[0].id, metadata: { nome: d.nome, nicho: d.nicho ?? null, fat_anual: d.fat_anual, vende_tiktok: d.vende_tiktok } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(result.rows[0])
     })
   })
@@ -284,6 +285,7 @@ export async function clientesRoutes(app) {
         [...vals, request.params.id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      app.audit?.log?.(request, { action: 'cliente.update', entity_type: 'cliente', entity_id: request.params.id, metadata: { changed_fields: keys, status_change: updates.status ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })

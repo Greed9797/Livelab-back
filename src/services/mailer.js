@@ -13,8 +13,32 @@
 //     de enviar duplicata pra mesmo (tipo, ref_id).
 
 import { Resend } from 'resend'
+import * as Sentry from '@sentry/node'
 
 let _resendClient = null
+
+// Mascara PII (email) pra breadcrumb: a***@b.com
+function _maskEmail(email) {
+  if (!email || typeof email !== 'string') return null
+  const [user, domain] = email.split('@')
+  if (!domain) return '***'
+  const head = user.slice(0, 1)
+  return `${head}***@${domain}`
+}
+
+function _emailBreadcrumb(level, template, to, extra = {}) {
+  if (!process.env.SENTRY_DSN) return
+  try {
+    Sentry.addBreadcrumb({
+      category: 'email',
+      message: level === 'error' ? 'email.failed' : 'email.sent',
+      level: level === 'error' ? 'error' : 'info',
+      data: { template, to_masked: _maskEmail(to), ...extra },
+    })
+  } catch {
+    // breadcrumb nunca pode quebrar fluxo
+  }
+}
 
 function _client() {
   if (!process.env.RESEND_API_KEY) return null
@@ -118,6 +142,7 @@ export async function sendEmail({ to, subject, html, tenantId, tipo, refId, pool
         tenantId, tipo, refId, destinatario: to, assunto: subject,
         enviadoEm: null, erro: errMsg,
       })
+      _emailBreadcrumb('error', tipo, to, { reason: 'provider_error' })
       return { ok: false, error: errMsg }
     }
 
@@ -125,6 +150,7 @@ export async function sendEmail({ to, subject, html, tenantId, tipo, refId, pool
       tenantId, tipo, refId, destinatario: to, assunto: subject,
       enviadoEm: new Date(), erro: null,
     })
+    _emailBreadcrumb('info', tipo, to)
     return { ok: true, id: result?.data?.id }
   } catch (err) {
     const errMsg = err?.message ?? String(err)
@@ -132,6 +158,7 @@ export async function sendEmail({ to, subject, html, tenantId, tipo, refId, pool
       tenantId, tipo, refId, destinatario: to, assunto: subject,
       enviadoEm: null, erro: errMsg,
     })
+    _emailBreadcrumb('error', tipo, to, { reason: 'exception' })
     return { ok: false, error: errMsg }
   }
 }

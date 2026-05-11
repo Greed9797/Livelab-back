@@ -1,5 +1,6 @@
 import fp from 'fastify-plugin'
 import jwt from '@fastify/jwt'
+import * as Sentry from '@sentry/node'
 
 async function authPlugin(app) {
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
@@ -52,6 +53,19 @@ async function authPlugin(app) {
     } catch (err) {
       app.log.warn({ msg: err.message, code: err.code }, 'JWT verification failed')
       return reply.code(401).send({ error: 'Token inválido ou expirado' })
+    }
+    // Sentry breadcrumb — observabilidade sem PII (apenas user_id e papel)
+    if (process.env.SENTRY_DSN) {
+      try {
+        Sentry.addBreadcrumb({
+          category: 'auth',
+          message: 'authenticated',
+          level: 'info',
+          data: { user_id: request.user?.sub, papel: request.user?.papel },
+        })
+      } catch {
+        // breadcrumb nunca pode quebrar fluxo
+      }
     }
     return _verifyTokenVersion(request, reply)
   })

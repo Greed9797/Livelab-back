@@ -70,6 +70,7 @@ export async function clienteNotasRoutes(app) {
                    criado_em, editado_em`,
         [tenant_id, req.params.clienteId, autorId, autorNome ?? 'Usuário', parsed.data.texto, parsed.data.tipo],
       )
+      app.audit?.log?.(req, { action: 'cliente_nota.create', entity_type: 'cliente_nota', entity_id: rows[0].id, metadata: { cliente_id: req.params.clienteId, tipo: parsed.data.tipo } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(rows[0])
     })
   })

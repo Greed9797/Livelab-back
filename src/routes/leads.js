@@ -133,6 +133,7 @@ export async function leadsRoutes(app) {
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+      app.audit?.log?.(request, { action: 'lead.update', entity_type: 'lead', entity_id: request.params.id, metadata: { changed_fields: fields, etapa_to: updates.crm_etapa ?? null, motivo_perda: updates.motivo_perda ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })
@@ -252,6 +253,7 @@ export async function leadsRoutes(app) {
       )
 
       await client.query('COMMIT')
+      app.audit?.log?.(request, { action: 'lead.converted', entity_type: 'lead', entity_id: request.params.id, metadata: { cliente_id: clienteId, pacote_id: pacote_id ?? null, valor_fixo: valorFixo, comissao_pct: comissaoPct } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { ok: true, cliente_id: clienteId }
     } catch (e) {
       await client.query('ROLLBACK')
@@ -289,6 +291,7 @@ export async function leadsRoutes(app) {
                    (NOW() - criado_em) < interval '24 hours' AS is_novo`,
         values
       )
+      app.audit?.log?.(request, { action: 'lead.create', entity_type: 'lead', entity_id: result.rows[0].id, metadata: { nome: data.nome, origem: data.origem ?? null, crm_etapa: data.crm_etapa ?? 'lead_novo' } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(result.rows[0])
     })
   })

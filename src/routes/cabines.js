@@ -292,6 +292,7 @@ export async function cabinesRoutes(app) {
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cabine não encontrada' })
+      app.audit?.log?.(request, { action: 'cabines.update', entity_type: 'cabine', entity_id: request.params.id, metadata: { changed_fields: fields } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })
@@ -384,6 +385,7 @@ export async function cabinesRoutes(app) {
         })
 
         await db.query('COMMIT')
+        app.audit?.log?.(request, { action: 'cabines.reserve', entity_type: 'cabine', entity_id: request.params.id, metadata: { contrato_id, cliente_id: contrato.cliente_id } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return result.rows[0]
       } catch (error) {
         await db.query('ROLLBACK')
@@ -925,6 +927,7 @@ export async function cabinesRoutes(app) {
           app.log.warn({ err, liveId: live.id }, 'syncLives pós-iniciar-live falhou')
         )
 
+        app.audit?.log?.(request, { action: 'live.start', entity_type: 'live', entity_id: live.id, metadata: { cabine_id, cliente_id: contrato.cliente_id, contrato_id: cabine.contrato_id } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return reply.code(201).send(live)
       } catch (error) {
         await db.query('ROLLBACK')
@@ -1266,6 +1269,7 @@ export async function cabinesRoutes(app) {
           }
         })()
 
+        app.audit?.log?.(request, { action: 'live.end', entity_type: 'live', entity_id: live.id, metadata: { cabine_id: live.cabine_id, fat_gerado: parsed.data.fat_gerado, comissao_calculada: comissao, qtd_pedidos: parsed.data.qtd_pedidos ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return { ok: true, fat_gerado: parsed.data.fat_gerado, comissao_calculada: comissao }
       } catch (error) {
         await db.query('ROLLBACK')

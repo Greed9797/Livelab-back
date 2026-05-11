@@ -72,6 +72,7 @@ export async function contratosRoutes(app) {
          VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, cliente_id, status`,
         [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null]
       )
+      app.audit?.log?.(request, { action: 'contratos.create_quick', entity_type: 'contrato', entity_id: result.rows[0].id, metadata: { cliente_id, pacote_id: pacote_id ?? null, valor_fixo, comissao_pct } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(result.rows[0])
     })
   })
@@ -618,6 +619,7 @@ export async function contratosRoutes(app) {
           actorUserId: sub, actorPapel: papel, ip,
           acao: 'assumir_risco', confirmacao,
         })
+        app.audit?.log?.(request, { action: 'contratos.flag_risk', entity_type: 'contrato', entity_id: request.params.id, metadata: { confirmacao } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return { ...result, is_risco_franqueado: true }
       } catch (err) {
         return reply.code(err.statusCode ?? 500).send({ error: err.message })

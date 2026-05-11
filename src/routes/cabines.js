@@ -182,8 +182,7 @@ export async function cabinesRoutes(app) {
            WHERE lr.cabine_id = c.id
              AND lr.tenant_id = c.tenant_id
              AND lr.status = 'aprovada'
-             AND (lr.data_solicitada > CURRENT_DATE
-                  OR (lr.data_solicitada = CURRENT_DATE AND lr.hora_fim > CURRENT_TIME))
+             AND lr.data_solicitada >= CURRENT_DATE
            ORDER BY lr.data_solicitada, lr.hora_inicio
            LIMIT 1
          ) lr_next ON true

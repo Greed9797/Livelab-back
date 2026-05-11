@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { authPlugin } from '../src/plugins/auth.js'
 import { analyticsRoutes } from '../src/routes/analytics.js'
 import { cabinesRoutes } from '../src/routes/cabines.js'
+import { contratosRoutes } from '../src/routes/contratos.js'
 import { clienteDashboardRoutes } from '../src/routes/cliente_dashboard.js'
 import { financeiroRoutes } from '../src/routes/financeiro.js'
 import { franqueadoRoutes } from '../src/routes/franqueado.js'
@@ -1448,6 +1449,77 @@ describe('Route regressions: SQL and RBAC', () => {
       expect.arrayContaining([cabineId, clienteId])
     )
     expect(releaseMock).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  // ─── Contratos — GET ?cliente_id e PATCH /ativar ─────────────────────
+  it('GET /v1/contratos?cliente_id filtra contratos por cliente', async () => {
+    const app = Fastify()
+    const clienteId = 'aaaaaa01-0000-4000-8000-000000000001'
+    const contratoId = 'bbbbbb01-0000-4000-8000-000000000001'
+    const queryMock = vi.fn().mockResolvedValueOnce({
+      rows: [{ id: contratoId, status: 'rascunho', valor_fixo: '0', comissao_pct: '0', criado_em: new Date() }],
+    })
+    const releaseMock = vi.fn()
+
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel: 'franqueado' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!request.user) request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel: 'franqueado' }
+      if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+    })
+    app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
+    app.decorate('audit', { log: vi.fn().mockReturnValue(Promise.resolve()) })
+    await app.register(contratosRoutes)
+
+    const res = await app.inject({ method: 'GET', url: `/v1/contratos?cliente_id=${clienteId}` })
+
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(Array.isArray(body)).toBe(true)
+    const sql = queryMock.mock.calls[0][0]
+    expect(sql).toContain('c.cliente_id = $1')
+    expect(queryMock.mock.calls[0][1]).toEqual([clienteId])
+    await app.close()
+  })
+
+  it('PATCH /v1/contratos/:id/ativar ativa contrato rascunho e retorna status ativo', async () => {
+    const app = Fastify()
+    const contratoId = 'cccccc01-0000-4000-8000-000000000001'
+    const userId = 'dddddd01-0000-4000-8000-000000000001'
+    const now = new Date().toISOString()
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: contratoId, status: 'rascunho' }] })  // SELECT check
+      .mockResolvedValueOnce({ rows: [{ id: contratoId, status: 'ativo', ativado_em: now }] }) // UPDATE
+    const releaseMock = vi.fn()
+
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-1', sub: userId, papel: 'franqueado' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!request.user) request.user = { tenant_id: 'tenant-1', sub: userId, papel: 'franqueado' }
+      if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+    })
+    app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
+    app.decorate('audit', { log: vi.fn().mockReturnValue(Promise.resolve()) })
+    await app.register(contratosRoutes)
+
+    const res = await app.inject({ method: 'PATCH', url: `/v1/contratos/${contratoId}/ativar` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ id: contratoId, status: 'ativo' })
+    const updateSql = queryMock.mock.calls[1][0]
+    expect(updateSql).toContain("SET status = 'ativo'")
+    expect(queryMock.mock.calls[1][1]).toEqual([userId, contratoId])
     await app.close()
   })
 

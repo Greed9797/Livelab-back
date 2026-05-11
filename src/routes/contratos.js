@@ -148,10 +148,17 @@ export async function contratosRoutes(app) {
     })
   })
 
-  // GET /v1/contratos — lista todos os contratos do tenant
+  // GET /v1/contratos — lista todos os contratos do tenant; ?cliente_id=X filtra por cliente
   app.get('/v1/contratos', { preHandler: app.requirePapel(READ_CONTRATOS) }, async (request) => {
     const { tenant_id } = request.user
+    const { cliente_id } = request.query
     return app.withTenant(tenant_id, async (db) => {
+      const params = []
+      let clienteFilter = ''
+      if (cliente_id && typeof cliente_id === 'string') {
+        params.push(cliente_id)
+        clienteFilter = `AND c.cliente_id = $${params.length}`
+      }
       const result = await db.query(`
         SELECT c.id, c.status, c.valor_fixo, c.comissao_pct,
                c.de_risco, c.assinado_em, c.ativado_em, c.cancelado_em,
@@ -162,8 +169,9 @@ export async function contratosRoutes(app) {
         FROM contratos c
         JOIN clientes cl ON cl.id = c.cliente_id AND cl.tenant_id = c.tenant_id
         WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
+          ${clienteFilter}
         ORDER BY c.criado_em DESC
-      `)
+      `, params)
       return result.rows
     })
   })
@@ -602,6 +610,30 @@ export async function contratosRoutes(app) {
       } catch (err) {
         return reply.code(err.statusCode ?? 500).send({ error: err.message })
       }
+    })
+  })
+
+  // PATCH /v1/contratos/:id/ativar — ativa contrato diretamente (franqueado, sem fluxo de assinatura)
+  app.patch('/v1/contratos/:id/ativar', { preHandler: app.requirePapel(WRITE_CONTRATOS) }, async (request, reply) => {
+    const { tenant_id, sub: user_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const check = await db.query(
+        `SELECT id, status FROM contratos WHERE id = $1`,
+        [request.params.id]
+      )
+      if (!check.rows[0]) return reply.code(404).send({ error: 'Contrato não encontrado' })
+      const { status } = check.rows[0]
+      if (status === 'ativo') return reply.code(409).send({ error: 'Contrato já está ativo' })
+      if (['cancelado', 'reprovado', 'arquivado', 'cancelado_automaticamente'].includes(status)) {
+        return reply.code(422).send({ error: `Contrato não pode ser ativado (status: ${status})` })
+      }
+      const updated = await db.query(
+        `UPDATE contratos SET status = 'ativo', ativado_em = NOW(), approved_by = $1, approved_at = NOW()
+         WHERE id = $2 RETURNING id, status, ativado_em`,
+        [user_id, request.params.id]
+      )
+      app.audit?.log?.(request, { action: 'contratos.ativar', entity_type: 'contrato', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      return updated.rows[0]
     })
   })
 

@@ -35,9 +35,9 @@ const encerrarSchema = z.object({
 const liveManualSchema = z.object({
   cabine_id:        z.string().uuid(),
   cliente_id:       z.string().uuid(),
-  apresentador_id:  z.string().uuid(),
+  apresentador_id:  z.string().uuid().optional(),
   apresentador2_id: z.string().uuid().optional(),
-  gestor_id:        z.string().uuid(),
+  gestor_id:        z.string().uuid().optional(),
   data:             z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   hora_inicio:      z.string().regex(/^\d{2}:\d{2}$/),
   hora_fim:         z.string().regex(/^\d{2}:\d{2}$/),
@@ -995,7 +995,8 @@ export async function cabinesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const d = parsed.data
-    const { tenant_id } = request.user
+    const { tenant_id, sub } = request.user
+    const gestorId = d.gestor_id ?? sub
     return app.withTenant(tenant_id, async (db) => {
       try {
         await db.query('BEGIN')
@@ -1023,7 +1024,7 @@ export async function cabinesRoutes(app) {
            VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
            RETURNING id`,
           [
-            tenant_id, d.cabine_id, d.cliente_id, d.apresentador_id, d.gestor_id,
+            tenant_id, d.cabine_id, d.cliente_id, d.apresentador_id ?? null, gestorId,
             iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
             d.manual_views ?? null, d.manual_likes ?? null,
             d.manual_comments ?? null, d.manual_shares ?? null, d.manual_diamonds ?? null,

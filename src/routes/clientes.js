@@ -81,8 +81,8 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `INSERT INTO clientes (tenant_id, nome, celular, cpf, cnpj, razao_social, email,
-          fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga, tiktok_username)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+          fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga, tiktok_username, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'ativo')
          RETURNING *`,
         [tenant_id, d.nome, d.celular, d.cpf ?? null, d.cnpj ?? null,
          d.razao_social ?? null, d.email ?? null, d.fat_anual,

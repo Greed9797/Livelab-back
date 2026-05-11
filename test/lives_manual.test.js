@@ -42,10 +42,11 @@ describe('POST /v1/lives/manual', () => {
   it('creates a closed live and returns 201 with id', async () => {
     const liveId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
     const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [] })                     // BEGIN
+      .mockResolvedValueOnce({ rows: [] })                        // BEGIN
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '10' }] }) // cabine/contrato
-      .mockResolvedValueOnce({ rows: [{ id: liveId }] })       // INSERT lives
-      .mockResolvedValueOnce({ rows: [] })                     // COMMIT
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] }) // apresentadoras lookup ap1
+      .mockResolvedValueOnce({ rows: [{ id: liveId }] })          // INSERT lives
+      .mockResolvedValueOnce({ rows: [] })                        // COMMIT
 
     const { app } = buildApp({ queryMock })
     await app.register(cabinesRoutes)
@@ -65,6 +66,7 @@ describe('POST /v1/lives/manual', () => {
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '20' }] })
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] }) // apresentadoras lookup ap1
       .mockImplementationOnce((sql, args) => { insertArgs = args; return { rows: [{ id: 'id-1' }] } })
       .mockResolvedValueOnce({ rows: [] })
 
@@ -83,9 +85,12 @@ describe('POST /v1/lives/manual', () => {
 
   it('inserts apresentador2 into live_apresentadores junction', async () => {
     const junctionCalls = []
+    const ap2UserId = '66666666-6666-4666-8666-666666666666'
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '0' }] })
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })      // ap1 lookup
+      .mockResolvedValueOnce({ rows: [{ user_id: ap2UserId }] })         // ap2 lookup
       .mockResolvedValueOnce({ rows: [{ id: 'live-2' }] })
       .mockImplementationOnce((sql, args) => { junctionCalls.push({ sql, args }); return { rows: [] } })
       .mockResolvedValueOnce({ rows: [] })
@@ -101,7 +106,7 @@ describe('POST /v1/lives/manual', () => {
     })
 
     expect(junctionCalls).toHaveLength(1)
-    expect(junctionCalls[0].args[2]).toBe(ap2)
+    expect(junctionCalls[0].args[2]).toBe(ap2UserId)
   })
 
   it('returns 400 when hora_fim <= hora_inicio', async () => {

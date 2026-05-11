@@ -1048,6 +1048,25 @@ export async function cabinesRoutes(app) {
         const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
         const comissao = d.fat_gerado * (comissaoPct / 100)
 
+        // Resolve apresentadoras.id → users.id (pode ser null para apresentadoras sem conta)
+        let apresentadorUserId = null
+        if (d.apresentador_id) {
+          const apRow = await db.query(
+            `SELECT user_id FROM apresentadoras WHERE id = $1`,
+            [d.apresentador_id]
+          )
+          apresentadorUserId = apRow.rows[0]?.user_id ?? null
+        }
+
+        let apresentador2UserId = null
+        if (d.apresentador2_id) {
+          const ap2Row = await db.query(
+            `SELECT user_id FROM apresentadoras WHERE id = $1`,
+            [d.apresentador2_id]
+          )
+          apresentador2UserId = ap2Row.rows[0]?.user_id ?? null
+        }
+
         const iniciado = `${d.data} ${d.hora_inicio}:00`
         const encerrado = `${d.data} ${d.hora_fim}:00`
 
@@ -1061,7 +1080,7 @@ export async function cabinesRoutes(app) {
            VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
            RETURNING id`,
           [
-            tenant_id, d.cabine_id, d.cliente_id, d.apresentador_id ?? null, gestorId,
+            tenant_id, d.cabine_id, d.cliente_id, apresentadorUserId, gestorId,
             iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
             d.manual_views ?? null, d.manual_likes ?? null,
             d.manual_comments ?? null, d.manual_shares ?? null, d.manual_diamonds ?? null,
@@ -1070,11 +1089,11 @@ export async function cabinesRoutes(app) {
         )
         const liveId = ins.rows[0].id
 
-        if (d.apresentador2_id) {
+        if (apresentador2UserId) {
           await db.query(
             `INSERT INTO live_apresentadores (tenant_id, live_id, apresentador_id)
              VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-            [tenant_id, liveId, d.apresentador2_id]
+            [tenant_id, liveId, apresentador2UserId]
           )
         }
 

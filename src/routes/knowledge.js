@@ -63,6 +63,8 @@ const articleSchema = z.object({
   { message: 'video_url obrigatório quando video_provider != none', path: ['video_url'] },
 )
 
+const ALLOWED_COVER_MIME = ['image/jpeg', 'image/png', 'image/webp']
+
 export async function knowledgeRoutes(app) {
   const masterOnly = [app.authenticate, app.requirePapel(['franqueador_master'])]
   const allReaders = [
@@ -79,6 +81,56 @@ export async function knowledgeRoutes(app) {
       'cliente_parceiro',
     ]),
   ]
+
+  // ─── UPLOAD DE CAPA ─────────────────────────────────────────────────────
+
+  // POST /v1/knowledge/upload-cover — upload de imagem de capa para Supabase Storage
+  app.post('/v1/knowledge/upload-cover', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado'])],
+  }, async (request, reply) => {
+    const supabaseUrl = process.env.SUPABASE_URL
+    const supabaseKey = process.env.SUPABASE_SERVICE_KEY
+    if (!supabaseUrl || !supabaseKey) {
+      return reply.code(503).send({ error: 'Armazenamento de imagens não configurado no servidor.' })
+    }
+
+    const data = await request.file()
+    if (!data) return reply.code(400).send({ error: 'Nenhum arquivo enviado.' })
+    if (!ALLOWED_COVER_MIME.includes(data.mimetype)) {
+      return reply.code(400).send({ error: 'Formato não suportado. Use JPEG, PNG ou WebP.' })
+    }
+
+    const chunks = []
+    for await (const chunk of data.file) chunks.push(chunk)
+    const buffer = Buffer.concat(chunks)
+    if (buffer.length > 2 * 1024 * 1024) {
+      return reply.code(400).send({ error: 'Imagem muito grande. Máximo 2 MB.' })
+    }
+
+    const { tenant_id } = request.user
+    const ext = data.mimetype.split('/')[1].replace('jpeg', 'jpg')
+    const filename = `covers/${tenant_id}-${Date.now()}.${ext}`
+    const bucket = 'knowledge-covers'
+
+    const uploadRes = await fetch(`${supabaseUrl}/storage/v1/object/${bucket}/${filename}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${supabaseKey}`,
+        'Content-Type': data.mimetype,
+        'x-upsert': 'true',
+      },
+      body: buffer,
+    })
+
+    if (!uploadRes.ok) {
+      const err = await uploadRes.text().catch(() => '')
+      request.log.error({ err }, 'Supabase Storage knowledge cover upload failed')
+      return reply.code(500).send({ error: 'Falha ao salvar imagem. Tente novamente.' })
+    }
+
+    const publicUrl = `${supabaseUrl}/storage/v1/object/public/${bucket}/${filename}`
+    return { url: publicUrl }
+  })
 
   // ─── CATEGORIAS ─────────────────────────────────────────────────────────
 

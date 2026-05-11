@@ -23,9 +23,13 @@ const iniciarLiveSchema = z.object({
 })
 
 const encerrarSchema = z.object({
-  fat_gerado:  z.number().min(0),
-  qtd_pedidos: z.number().int().min(0).optional(),
-  resumo:      z.string().max(2000).optional(),
+  fat_gerado:    z.number().min(0),
+  qtd_pedidos:   z.number().int().min(0).optional(),
+  resumo:        z.string().max(2000).optional(),
+  manual_likes:  z.number().int().min(0).optional(),
+  manual_views:  z.number().int().min(0).optional(),
+  manual_orders: z.number().int().min(0).optional(),
+  manual_gmv:    z.number().min(0).optional(),
 })
 
 const liveManualSchema = z.object({
@@ -40,6 +44,10 @@ const liveManualSchema = z.object({
   fat_gerado:       z.number().min(0),
   qtd_pedidos:      z.number().int().min(0),
   resumo:           z.string().max(2000).optional(),
+  manual_likes:     z.number().int().min(0).optional(),
+  manual_views:     z.number().int().min(0).optional(),
+  manual_orders:    z.number().int().min(0).optional(),
+  manual_gmv:       z.number().min(0).optional(),
 }).refine(d => d.hora_fim > d.hora_inicio, {
   message: 'hora_fim deve ser maior que hora_inicio',
 }).refine(d => !d.apresentador2_id || d.apresentador2_id !== d.apresentador_id, {
@@ -970,12 +978,15 @@ export async function cabinesRoutes(app) {
           `INSERT INTO lives
              (tenant_id, cabine_id, cliente_id, apresentador_id, gestor_id,
               status, iniciado_em, encerrado_em, fat_gerado, comissao_calculada,
-              final_orders_count, resumo)
-           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11)
+              final_orders_count, resumo,
+              manual_likes, manual_views, manual_orders, manual_gmv)
+           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
            RETURNING id`,
           [
             tenant_id, d.cabine_id, d.cliente_id, d.apresentador_id, d.gestor_id,
             iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
+            d.manual_likes ?? null, d.manual_views ?? null,
+            d.manual_orders ?? null, d.manual_gmv ?? null,
           ]
         )
         const liveId = ins.rows[0].id
@@ -1163,7 +1174,11 @@ export async function cabinesRoutes(app) {
            SET status = 'encerrada', encerrado_em = NOW(),
                fat_gerado = $1, comissao_calculada = $2,
                final_orders_count = COALESCE($3, final_orders_count),
-               resumo = COALESCE($4, resumo)
+               resumo = COALESCE($4, resumo),
+               manual_likes  = COALESCE($6, manual_likes),
+               manual_views  = COALESCE($7, manual_views),
+               manual_orders = COALESCE($8, manual_orders),
+               manual_gmv    = COALESCE($9, manual_gmv)
            WHERE id = $5`,
           [
             parsed.data.fat_gerado,
@@ -1171,6 +1186,10 @@ export async function cabinesRoutes(app) {
             parsed.data.qtd_pedidos ?? null,
             parsed.data.resumo ?? null,
             request.params.id,
+            parsed.data.manual_likes  ?? null,
+            parsed.data.manual_views  ?? null,
+            parsed.data.manual_orders ?? null,
+            parsed.data.manual_gmv    ?? null,
           ]
         )
 

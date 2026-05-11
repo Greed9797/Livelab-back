@@ -175,6 +175,7 @@ export async function clientesRoutes(app) {
          ) c ON true
          WHERE cl.tenant_id = $1::uuid
            AND cl.status IN ('ativo', 'inadimplente', 'cancelado')
+           AND cl.deleted_at IS NULL
          ORDER BY cl.criado_em DESC`,
         [tenant_id]
       )
@@ -287,6 +288,24 @@ export async function clientesRoutes(app) {
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       app.audit?.log?.(request, { action: 'cliente.update', entity_type: 'cliente', entity_id: request.params.id, metadata: { changed_fields: keys, status_change: updates.status ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
+    })
+  })
+
+  // DELETE /v1/clientes/:id — soft-delete
+  app.delete('/v1/clientes/:id', {
+    preHandler: app.requirePapel(['franqueado', 'gerente', 'franqueador_master']),
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `UPDATE clientes SET deleted_at = NOW()
+         WHERE id = $1 AND tenant_id = $2::uuid AND deleted_at IS NULL
+         RETURNING id`,
+        [request.params.id, tenant_id]
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      app.audit?.log?.(request, { action: 'cliente.delete', entity_type: 'cliente', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      return { success: true }
     })
   })
 }

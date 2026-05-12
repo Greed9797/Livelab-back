@@ -1217,7 +1217,7 @@ export async function cabinesRoutes(app) {
          FROM lives l
          JOIN cabines c ON c.id = l.cabine_id
          JOIN clientes cl ON cl.id = l.cliente_id
-         JOIN users u ON u.id = l.apresentador_id
+         LEFT JOIN users u ON u.id = l.apresentador_id
          ${where}
          ORDER BY l.iniciado_em DESC LIMIT 100`,
         params

@@ -1147,9 +1147,19 @@ export async function cabinesRoutes(app) {
 
         const addField = (col, val) => { updates.push(`${col} = $${idx++}`); values.push(val) }
 
-        if (d.cabine_id    !== undefined) addField('cabine_id',          d.cabine_id)
-        if (d.cliente_id   !== undefined) addField('cliente_id',         d.cliente_id)
-        if (d.apresentador_id !== undefined) addField('apresentador_id', d.apresentador_id)
+        let resolvedApresentadorId
+        if (d.apresentador_id !== undefined) {
+          const apRow = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1', [d.apresentador_id])
+          resolvedApresentadorId = apRow.rows[0]?.user_id
+          if (!resolvedApresentadorId) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+          }
+        }
+
+        if (d.cabine_id    !== undefined) addField('cabine_id',    d.cabine_id)
+        if (d.cliente_id   !== undefined) addField('cliente_id',   d.cliente_id)
+        if (resolvedApresentadorId !== undefined) addField('apresentador_id', resolvedApresentadorId)
         if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
         if (d.fat_gerado      !== undefined) { addField('fat_gerado', d.fat_gerado); addField('comissao_calculada', comissao) }
         if (d.qtd_pedidos     !== undefined) addField('final_orders_count', d.qtd_pedidos)
@@ -1184,10 +1194,14 @@ export async function cabinesRoutes(app) {
         if ('apresentador2_id' in d) {
           await db.query(`DELETE FROM live_apresentadores WHERE live_id = $1`, [request.params.id])
           if (d.apresentador2_id) {
-            await db.query(
-              `INSERT INTO live_apresentadores (tenant_id, live_id, apresentador_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
-              [tenant_id, request.params.id, d.apresentador2_id]
-            )
+            const ap2Row = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1', [d.apresentador2_id])
+            const ap2UserId = ap2Row.rows[0]?.user_id
+            if (ap2UserId) {
+              await db.query(
+                `INSERT INTO live_apresentadores (tenant_id, live_id, apresentador_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+                [tenant_id, request.params.id, ap2UserId]
+              )
+            }
           }
         }
 
@@ -1213,16 +1227,41 @@ export async function cabinesRoutes(app) {
       }
       const result = await db.query(
         `SELECT l.*, c.numero AS cabine_numero, c.contrato_id, cl.nome AS cliente_nome,
-                u.nome AS apresentador_nome
+                u.nome AS apresentador_nome, ap.id AS apresentadora_id
          FROM lives l
          JOIN cabines c ON c.id = l.cabine_id
          JOIN clientes cl ON cl.id = l.cliente_id
          LEFT JOIN users u ON u.id = l.apresentador_id
+         LEFT JOIN apresentadoras ap ON ap.user_id = l.apresentador_id
          ${where}
          ORDER BY l.iniciado_em DESC LIMIT 100`,
         params
       )
       return result.rows
+    })
+  })
+
+  // DELETE /v1/lives/:id
+  app.delete('/v1/lives/:id', { preHandler: gestorRoleAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const liveQ = await db.query(`SELECT id, status FROM lives WHERE id = $1`, [request.params.id])
+      const live = liveQ.rows[0]
+      if (!live) return reply.code(404).send({ error: 'Live não encontrada' })
+      if (live.status === 'em_andamento') {
+        return reply.code(422).send({ error: 'Não é possível excluir uma live em andamento' })
+      }
+      await db.query('BEGIN')
+      try {
+        await db.query('DELETE FROM live_apresentadores WHERE live_id = $1', [request.params.id])
+        await db.query('DELETE FROM live_snapshots WHERE live_id = $1', [request.params.id])
+        await db.query('DELETE FROM lives WHERE id = $1', [request.params.id])
+        await db.query('COMMIT')
+        return reply.code(204).send()
+      } catch (e) {
+        await db.query('ROLLBACK')
+        throw e
+      }
     })
   })
 

@@ -148,6 +148,7 @@ export async function cabinesRoutes(app) {
       // retornariam dados de todos os tenants.
       const result = await db.query(
         `SELECT c.id, c.numero, c.status, c.live_atual_id, c.contrato_id,
+                ct.status AS contrato_status,
                 ct.tiktok_username,
                 COALESCE(l.cliente_id, ct.cliente_id, lr_next.next_cliente_id) AS cliente_id,
                 u.nome AS apresentador_nome,
@@ -971,7 +972,7 @@ export async function cabinesRoutes(app) {
 
         if (!contrato || contrato.status !== 'ativo') {
           await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Contrato vinculado não está apto para iniciar live' })
+          return reply.code(409).send({ error: 'Contrato em rascunho — ative o contrato em Clientes → Contratos → Ativar', code: 'CONTRACT_NOT_ACTIVE' })
         }
 
         const liveQ = await db.query(

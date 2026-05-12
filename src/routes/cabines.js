@@ -1150,11 +1150,12 @@ export async function cabinesRoutes(app) {
         let resolvedApresentadorId
         if (d.apresentador_id !== undefined) {
           const apRow = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1', [d.apresentador_id])
-          resolvedApresentadorId = apRow.rows[0]?.user_id
-          if (!resolvedApresentadorId) {
+          if (!apRow.rows[0]) {
             await db.query('ROLLBACK')
             return reply.code(404).send({ error: 'Apresentadora não encontrada' })
           }
+          // user_id é nullable — apresentadoras sem conta não atualizam lives.apresentador_id
+          if (apRow.rows[0].user_id) resolvedApresentadorId = apRow.rows[0].user_id
         }
 
         if (d.cabine_id    !== undefined) addField('cabine_id',    d.cabine_id)

@@ -568,6 +568,28 @@ export async function cabinesRoutes(app) {
         FROM lives WHERE cabine_id = $1 AND status = 'encerrada'
       `, [cabineId])
 
+      const livesRecentesQ = await db.query(`
+        SELECT
+          l.id,
+          l.iniciado_em,
+          l.encerrado_em,
+          l.fat_gerado,
+          l.final_total_likes,
+          l.final_total_comments,
+          l.final_total_shares,
+          l.final_peak_viewers,
+          l.final_orders_count,
+          cl.nome AS cliente_nome,
+          EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 60 AS duracao_minutos
+        FROM lives l
+        LEFT JOIN clientes cl ON cl.id = l.cliente_id
+        WHERE l.cabine_id = $1
+          AND l.status = 'encerrada'
+          AND l.iniciado_em > NOW() - ($2 * interval '1 day')
+        ORDER BY l.iniciado_em DESC
+        LIMIT 50
+      `, [cabineId, dias])
+
       return {
         top_clientes: topClientesQ.rows.map((r) => ({
           nome: r.nome,
@@ -592,6 +614,19 @@ export async function cabinesRoutes(app) {
           total_lives: parseInt(totaisQ.rows[0].total_lives || 0),
           gmv_total: parseFloat(totaisQ.rows[0].gmv_total || 0),
         },
+        lives_recentes: livesRecentesQ.rows.map((r) => ({
+          id: r.id,
+          iniciado_em: r.iniciado_em,
+          encerrado_em: r.encerrado_em,
+          fat_gerado: parseFloat(r.fat_gerado || 0),
+          final_total_likes: parseInt(r.final_total_likes || 0),
+          final_total_comments: parseInt(r.final_total_comments || 0),
+          final_total_shares: parseInt(r.final_total_shares || 0),
+          final_peak_viewers: parseInt(r.final_peak_viewers || 0),
+          final_orders_count: parseInt(r.final_orders_count || 0),
+          cliente_nome: r.cliente_nome,
+          duracao_minutos: Math.round(parseFloat(r.duracao_minutos || 0)),
+        })),
       }
     })
   })

@@ -46,6 +46,7 @@ export async function appmaxRoutes(app) {
     return reply.send({
       ok: true,
       app_id: appId,
+      'external-id': crypto.randomUUID(),
       service: 'liveshop-saas-api',
     })
   })
@@ -59,6 +60,7 @@ export async function appmaxRoutes(app) {
     return reply.send({
       ok: true,
       app_id: appId,
+      'external-id': crypto.randomUUID(),
     })
   })
 

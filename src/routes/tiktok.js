@@ -392,6 +392,9 @@ export async function tiktokRoutes(app) {
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
+      'Access-Control-Allow-Origin': request.headers.origin ?? '*',
+      'Access-Control-Allow-Credentials': 'true',
+      'Vary': 'Origin',
     })
     reply.raw.flushHeaders()
 
@@ -443,6 +446,9 @@ export async function tiktokRoutes(app) {
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
+      'Access-Control-Allow-Origin': request.headers.origin ?? '*',
+      'Access-Control-Allow-Credentials': 'true',
+      'Vary': 'Origin',
     })
     reply.raw.flushHeaders()
 

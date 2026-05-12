@@ -20,6 +20,7 @@ const reservarCabineSchema = z.object({
 
 const iniciarLiveSchema = z.object({
   cabine_id: z.string().uuid(),
+  tiktok_username: z.string().max(100).optional().nullable(),
 })
 
 const encerrarSchema = z.object({
@@ -894,7 +895,8 @@ export async function cabinesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
-    const { cabine_id } = parsed.data
+    const { cabine_id, tiktok_username: rawTiktok } = parsed.data
+    const tiktokUsername = rawTiktok ? rawTiktok.replace(/^@/, '').trim() || null : null
     const ip = getRequestIp(request)
     return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
@@ -991,6 +993,13 @@ export async function cabinesRoutes(app) {
             await db.query('ROLLBACK')
             return reply.code(409).send({ error: 'Contrato em rascunho — ative o contrato em Clientes → Contratos → Ativar', code: 'CONTRACT_NOT_ACTIVE' })
           }
+        }
+
+        if (tiktokUsername) {
+          await db.query(
+            `UPDATE contratos SET tiktok_username = $1 WHERE id = $2`,
+            [tiktokUsername, resolvedContratoId]
+          )
         }
 
         const liveQ = await db.query(

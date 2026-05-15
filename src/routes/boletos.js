@@ -7,6 +7,14 @@ export async function boletosRoutes(app) {
     app.authenticate,
     app.requirePapel(READ_BOLETOS),
   ]
+
+  async function resolveClienteParceiroId(db, { tenantId, userId }) {
+    const clienteQ = await db.query(
+      `SELECT id FROM clientes WHERE user_id = $1 AND tenant_id = $2::uuid LIMIT 1`,
+      [userId, tenantId]
+    )
+    return clienteQ.rows[0]?.id ?? null
+  }
   
   // GET /v1/boletos/alertas
   app.get('/v1/boletos/alertas', { preHandler: boletoAccess }, async (request) => {
@@ -16,10 +24,7 @@ export async function boletosRoutes(app) {
       const values = [tenant_id]
 
       if (papel === 'cliente_parceiro') {
-        const userQ = await db.query('SELECT email FROM users WHERE id = $1', [user_id])
-        const email = userQ.rows[0]?.email
-        const clienteQ = await db.query('SELECT id FROM clientes WHERE email = $1', [email])
-        const clienteId = clienteQ.rows[0]?.id
+        const clienteId = await resolveClienteParceiroId(db, { tenantId: tenant_id, userId: user_id })
         
         if (clienteId) {
           extraFilter = 'AND cliente_id = $2'
@@ -52,11 +57,20 @@ export async function boletosRoutes(app) {
 
   // PATCH /v1/boletos/:id/visto
   app.patch('/v1/boletos/:id/visto', { preHandler: boletoAccess }, async (request, reply) => {
-    const { tenant_id } = request.user
+    const { tenant_id, sub: user_id, papel } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      let extraFilter = ''
+      const values = [request.params.id, tenant_id]
+      if (papel === 'cliente_parceiro') {
+        const clienteId = await resolveClienteParceiroId(db, { tenantId: tenant_id, userId: user_id })
+        if (!clienteId) return reply.code(404).send({ error: 'Boleto não encontrado' })
+        extraFilter = ' AND cliente_id = $3'
+        values.push(clienteId)
+      }
+
       const res = await db.query(
-        `UPDATE boletos SET notificado_em = NOW() WHERE id = $1 AND tenant_id = $2`,
-        [request.params.id, tenant_id]
+        `UPDATE boletos SET notificado_em = NOW() WHERE id = $1 AND tenant_id = $2::uuid${extraFilter}`,
+        values
       )
       if (res.rowCount === 0) return reply.code(404).send({ error: 'Boleto não encontrado' })
       return { ok: true }
@@ -64,16 +78,26 @@ export async function boletosRoutes(app) {
   })
 // GET /v1/boletos
   app.get('/v1/boletos', { preHandler: boletoAccess }, async (request) => {
-    const { tenant_id } = request.user
+    const { tenant_id, sub: user_id, papel } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      let extraFilter = ''
+      const values = [tenant_id]
+      if (papel === 'cliente_parceiro') {
+        const clienteId = await resolveClienteParceiroId(db, { tenantId: tenant_id, userId: user_id })
+        if (!clienteId) return []
+        extraFilter = 'AND cliente_id = $2'
+        values.push(clienteId)
+      }
+
       const result = await db.query(
         `SELECT id, tipo, valor, vencimento, status, pago_em, referencia_externa, competencia,
                 gateway_id, gateway_url, gateway_pix_copia_cola, gateway_provider,
                 gerado_automaticamente, gateway_error
          FROM boletos
          WHERE tenant_id = $1::uuid
+           ${extraFilter}
          ORDER BY vencimento DESC`,
-        [tenant_id]
+        values
       )
       return result.rows.map(b => ({ ...b, valor: Number(b.valor ?? 0) }))
     })
@@ -81,11 +105,20 @@ export async function boletosRoutes(app) {
 
   // GET /v1/boletos/:id
   app.get('/v1/boletos/:id', { preHandler: boletoAccess }, async (request, reply) => {
-    const { tenant_id } = request.user
+    const { tenant_id, sub: user_id, papel } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      let extraFilter = ''
+      const values = [request.params.id, tenant_id]
+      if (papel === 'cliente_parceiro') {
+        const clienteId = await resolveClienteParceiroId(db, { tenantId: tenant_id, userId: user_id })
+        if (!clienteId) return reply.code(404).send({ error: 'Boleto não encontrado' })
+        extraFilter = ' AND cliente_id = $3'
+        values.push(clienteId)
+      }
+
       const result = await db.query(
-        `SELECT * FROM boletos WHERE id = $1 AND tenant_id = $2::uuid`,
-        [request.params.id, tenant_id]
+        `SELECT * FROM boletos WHERE id = $1 AND tenant_id = $2::uuid${extraFilter}`,
+        values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Boleto não encontrado' })
       return { ...result.rows[0], url_boleto: `https://sandbox.pagar.me/boletos/${result.rows[0].referencia_externa ?? result.rows[0].id}` }

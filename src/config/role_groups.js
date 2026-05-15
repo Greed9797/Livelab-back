@@ -79,6 +79,33 @@ export const READ_ANALYTICS = [
   'marketing', 'comercial_readonly',
 ]
 
+// ─── CONTEÚDO / MARCAS / AGENDA / VÍDEOS ─────────────────────────────
+export const READ_MARCAS = READ_CLIENTES
+export const WRITE_MARCAS = WRITE_CLIENTES
+
+export const READ_AGENDA = [
+  ...ADMIN, 'apresentador', 'apresentadora',
+  'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
+]
+export const WRITE_AGENDA = [...ADMIN, 'operacional', 'produtor_live']
+
+export const READ_VIDEOS = READ_AGENDA
+export const WRITE_VIDEOS = WRITE_AGENDA
+
+export const READ_VENDAS_ATRIBUIDAS = [
+  ...ADMIN,
+  'financeiro', 'financeiro_readonly', 'auditor', 'suporte',
+  'produtor_live', 'marketing', 'comercial_readonly',
+]
+export const WRITE_VENDAS_ATRIBUIDAS = [
+  ...ADMIN, 'financeiro', 'produtor_live',
+]
+
+export const READ_COMISSOES = [
+  ...ADMIN, 'financeiro', 'financeiro_readonly',
+  'auditor', 'produtor_live', 'marketing', 'comercial_readonly',
+]
+
 // ─── CONFIGURAÇÕES / USUÁRIOS ────────────────────────────────────────
 export const READ_CONFIGURACOES = [...ADMIN, 'auditor']
 export const WRITE_CONFIGURACOES = [...ADMIN]

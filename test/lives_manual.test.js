@@ -38,6 +38,39 @@ function buildApp({ papel = 'franqueado', queryRows = [], queryMock } = {}) {
   return { app, _query, release }
 }
 
+describe('POST /v1/cabines', () => {
+  it('creates cabine without tamanho and persists tamanho as null', async () => {
+    let insertArgs = null
+    const queryMock = vi.fn().mockImplementation((sql, args) => {
+      insertArgs = args
+      return {
+        rows: [{
+          id: 'cabine-1',
+          numero: 1,
+          nome: 'Cabine QA',
+          tamanho: null,
+          descricao: 'Operacional',
+          status: 'disponivel',
+        }],
+      }
+    })
+
+    const { app } = buildApp({ queryMock })
+    await app.register(cabinesRoutes)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/cabines',
+      payload: { nome: 'Cabine QA', descricao: 'Operacional' },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toMatchObject({ nome: 'Cabine QA', tamanho: null, status: 'disponivel' })
+    expect(insertArgs).toEqual(['tenant-1', 'Cabine QA', null, 'Operacional'])
+    await app.close()
+  })
+})
+
 describe('POST /v1/lives/manual', () => {
   it('creates a closed live and returns 201 with id', async () => {
     const liveId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'

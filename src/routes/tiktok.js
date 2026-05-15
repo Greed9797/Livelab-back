@@ -315,30 +315,35 @@ export async function tiktokRoutes(app) {
     const { tenant_id } = request.user
     const { liveId } = request.params
 
-    const liveQ = await app.db.query(
-      `SELECT l.id, l.status, l.tiktok_connector_status,
-              COALESCE(ct.tiktok_username, cl.tiktok_username) AS tiktok_username
-       FROM lives l
-       LEFT JOIN cabines cb ON cb.live_atual_id = l.id
-       LEFT JOIN contratos ct ON ct.id = cb.contrato_id
-       LEFT JOIN clientes cl ON cl.id = COALESCE(ct.cliente_id, l.cliente_id)
-       WHERE l.id = $1 AND l.tenant_id = $2::uuid`,
-      [liveId, tenant_id]
-    )
-    if (liveQ.rows.length === 0) {
+    const { live, snap } = await app.withTenant(tenant_id, async (db) => {
+      const liveQ = await db.query(
+        `SELECT l.id, l.status, l.tiktok_connector_status,
+                COALESCE(ct.tiktok_username, cl.tiktok_username) AS tiktok_username
+         FROM lives l
+         LEFT JOIN cabines cb ON cb.live_atual_id = l.id AND cb.tenant_id = l.tenant_id
+         LEFT JOIN contratos ct ON ct.id = cb.contrato_id AND ct.tenant_id = l.tenant_id
+         LEFT JOIN clientes cl ON cl.id = COALESCE(ct.cliente_id, l.cliente_id) AND cl.tenant_id = l.tenant_id
+         WHERE l.id = $1 AND l.tenant_id = $2::uuid`,
+        [liveId, tenant_id]
+      )
+      const live = liveQ.rows[0] ?? null
+      if (!live) return { live: null, snap: null }
+
+      const snapQ = await db.query(
+        `SELECT viewer_count, captured_at
+         FROM live_snapshots
+         WHERE live_id = $1 AND tenant_id = $2::uuid
+         ORDER BY captured_at DESC
+         LIMIT 1`,
+        [liveId, tenant_id]
+      )
+
+      return { live, snap: snapQ.rows[0] ?? null }
+    })
+
+    if (!live) {
       return reply.code(404).send({ error: 'Live não encontrada' })
     }
-    const live = liveQ.rows[0]
-
-    const snapQ = await app.db.query(
-      `SELECT viewer_count, captured_at
-       FROM live_snapshots
-       WHERE live_id = $1 AND tenant_id = $2::uuid
-       ORDER BY captured_at DESC
-       LIMIT 1`,
-      [liveId, tenant_id]
-    )
-    const snap = snapQ.rows[0] ?? null
 
     const inMemory = connectorManager.has(liveId)
     let status
@@ -377,12 +382,15 @@ export async function tiktokRoutes(app) {
     const { tenant_id } = request.user
     const { liveId } = request.params
 
-    // Validar ownership e status — mesma query do /stream existente
-    const { rows } = await app.db.query(
-      `SELECT id FROM lives WHERE id = $1 AND tenant_id = $2 AND status = 'em_andamento'`,
-      [liveId, tenant_id]
-    )
-    if (rows.length === 0) {
+    // Validar ownership e status antes de abrir SSE; nenhuma conexão fica presa no stream.
+    const exists = await app.withTenant(tenant_id, async (db) => {
+      const { rows } = await db.query(
+        `SELECT id FROM lives WHERE id = $1 AND tenant_id = $2::uuid AND status = 'em_andamento'`,
+        [liveId, tenant_id]
+      )
+      return rows.length > 0
+    })
+    if (!exists) {
       return reply.code(404).send({ error: 'Live não encontrada ou não está ao vivo' })
     }
 
@@ -429,12 +437,26 @@ export async function tiktokRoutes(app) {
     const { tenant_id } = request.user
     const { liveId } = request.params
 
-    // Validate live belongs to tenant and is active
-    const { rows } = await app.db.query(
-      `SELECT id FROM lives WHERE id = $1 AND tenant_id = $2 AND status = 'em_andamento'`,
-      [liveId, tenant_id]
-    )
-    if (rows.length === 0) {
+    // Validate live and load initial snapshot before hijacking; do not hold DB connections during SSE.
+    const streamState = await app.withTenant(tenant_id, async (db) => {
+      const { rows } = await db.query(
+        `SELECT id FROM lives WHERE id = $1 AND tenant_id = $2::uuid AND status = 'em_andamento'`,
+        [liveId, tenant_id]
+      )
+      if (rows.length === 0) return { found: false, snapshot: null }
+
+      const { rows: snap } = await db.query(
+        `SELECT viewer_count, total_viewers, total_orders, gmv, likes_count, comments_count
+         FROM live_snapshots
+         WHERE live_id = $1
+           AND tenant_id = $2::uuid
+         ORDER BY captured_at DESC LIMIT 1`,
+        [liveId, tenant_id]
+      )
+
+      return { found: true, snapshot: snap[0] ?? null }
+    })
+    if (!streamState.found) {
       return reply.code(404).send({ error: 'Live não encontrada ou não está ao vivo' })
     }
 
@@ -453,19 +475,8 @@ export async function tiktokRoutes(app) {
     reply.raw.flushHeaders()
 
     // Send the most recent snapshot immediately (initial state)
-    try {
-      const { rows: snap } = await app.db.query(
-        `SELECT viewer_count, total_viewers, total_orders, gmv, likes_count, comments_count
-         FROM live_snapshots
-         WHERE live_id = $1
-         ORDER BY captured_at DESC LIMIT 1`,
-        [liveId]
-      )
-      if (snap[0]) {
-        reply.raw.write(`data: ${JSON.stringify(snap[0])}\n\n`)
-      }
-    } catch (err) {
-      app.log.warn({ err, liveId }, 'SSE: falha ao buscar snapshot inicial')
+    if (streamState.snapshot) {
+      reply.raw.write(`data: ${JSON.stringify(streamState.snapshot)}\n\n`)
     }
 
     // Register listener on manager EventEmitter

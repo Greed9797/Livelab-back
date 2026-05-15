@@ -42,6 +42,11 @@ import { webhookBioCrmRoutes } from './routes/webhook_bio_crm.js'
 import { appmaxRoutes } from './routes/appmax.js'
 import { notificacoesRoutes } from './routes/notificacoes.js'
 import { auditLogRoutes } from './routes/audit_log.js'
+import { marcasRoutes } from './routes/marcas.js'
+import { agendaRoutes } from './routes/agenda.js'
+import { videosRoutes } from './routes/videos.js'
+import { vendasAtribuidasRoutes } from './routes/vendas_atribuidas.js'
+import { comissoesRoutes } from './routes/comissoes.js'
 import { AppError } from './lib/errors.js'
 
 export async function buildApp(opts = {}) {
@@ -176,6 +181,11 @@ export async function buildApp(opts = {}) {
   await app.register(appmaxRoutes)
   await app.register(notificacoesRoutes)
   await app.register(auditLogRoutes)
+  await app.register(marcasRoutes)
+  await app.register(agendaRoutes)
+  await app.register(videosRoutes)
+  await app.register(vendasAtribuidasRoutes)
+  await app.register(comissoesRoutes)
 
   // S-11: opcional — se HEALTH_CHECK_TOKEN setado, exige header pra responder.
   // 404 (não 401) pra não confirmar existência do endpoint a scanners.

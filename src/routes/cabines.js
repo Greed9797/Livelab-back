@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { has as managerHas, stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
 import { READ_CABINES, WRITE_CABINES, READ_LIVES, WRITE_LIVES } from '../config/role_groups.js'
 import { notify } from '../services/mailer.js'
+import { upsertVendaAtribuida } from './vendas_atribuidas.js'
 
 const cabineRoleAccess = (app) => [
   app.authenticate,
@@ -20,6 +21,7 @@ const reservarCabineSchema = z.object({
 
 const iniciarLiveSchema = z.object({
   cabine_id: z.string().uuid(),
+  cliente_id: z.string().uuid().optional(),
   tiktok_username: z.string().max(100).optional().nullable(),
 })
 
@@ -85,13 +87,13 @@ const atualizarStatusSchema = z.object({
 
 const atualizarCabineSchema = z.object({
   nome:      z.string().min(1).optional(),
-  tamanho:   z.string().optional(),
+  tamanho:   z.string().optional().nullable(),
   descricao: z.string().optional(),
 })
 
 const criarCabineSchema = z.object({
   nome:      z.string().min(1, 'Nome é obrigatório'),
-  tamanho:   z.enum(['P', 'M', 'G', 'GG'], { required_error: 'Tamanho é obrigatório' }),
+  tamanho:   z.enum(['P', 'M', 'G', 'GG']).optional().nullable(),
   descricao: z.string().optional(),
 })
 
@@ -264,7 +266,7 @@ export async function cabinesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id } = request.user
-    const { nome, tamanho, descricao } = parsed.data
+    const { nome, descricao } = parsed.data
 
     return app.withTenant(tenant_id, async (db) => {
       // Atomic: compute next numero and insert in a single statement to avoid race conditions
@@ -274,9 +276,9 @@ export async function cabinesRoutes(app) {
          FROM cabines
          WHERE tenant_id = $1
          RETURNING id, numero, nome, tamanho, descricao, status`,
-        [tenant_id, nome, tamanho ?? null, descricao ?? null]
+        [tenant_id, nome, null, descricao ?? null]
       )
-      app.audit?.log?.(request, { action: 'cabines.create', entity_type: 'cabine', entity_id: result.rows[0].id, metadata: { nome, tamanho: tamanho ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      app.audit?.log?.(request, { action: 'cabines.create', entity_type: 'cabine', entity_id: result.rows[0].id, metadata: { nome, tamanho: null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(result.rows[0])
     })
   })
@@ -323,7 +325,7 @@ export async function cabinesRoutes(app) {
 
 
   // PATCH /v1/cabines/:id — update name, size, description
-  app.patch('/v1/cabines/:id', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
+  app.patch('/v1/cabines/:id', { preHandler: cabineWriteAccess(app) }, async (request, reply) => {
     const parsed = atualizarCabineSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -333,7 +335,7 @@ export async function cabinesRoutes(app) {
     if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
     const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(', ')
-    const values = [request.params.id, ...fields.map((f) => updates[f])]
+    const values = [request.params.id, ...fields.map((f) => f === 'tamanho' ? null : updates[f])]
 
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
@@ -891,11 +893,6 @@ export async function cabinesRoutes(app) {
           return reply.code(409).send({ error: 'Libere a cabine antes de colocá-la em manutenção' })
         }
 
-        if (status === 'ativa' && !cabine.contrato_id) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Cabine sem contrato não pode ser marcada como ativa' })
-        }
-
         const result = await db.query(
           `UPDATE cabines SET status = $1 WHERE id = $2 RETURNING id, numero, status, contrato_id`,
           [status, request.params.id]
@@ -933,7 +930,7 @@ export async function cabinesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
-    const { cabine_id, tiktok_username: rawTiktok } = parsed.data
+    const { cabine_id, cliente_id: requestedClienteId, tiktok_username: rawTiktok } = parsed.data
     const tiktokUsername = rawTiktok ? rawTiktok.replace(/^@/, '').trim() || null : null
     const ip = getRequestIp(request)
     return app.withTenant(tenant_id, async (db) => {
@@ -956,8 +953,9 @@ export async function cabinesRoutes(app) {
 
         // Auto-reserve: se cabine não está reservada/ativa com contrato, busca contrato pelo cliente ou live_request
         let resolvedContratoId = cabine.contrato_id
+        let resolvedClienteId = requestedClienteId ?? null
         if (!['reservada', 'ativa'].includes(cabine.status) || !cabine.contrato_id) {
-          if (cabine.status !== 'disponivel') {
+          if (!['disponivel', 'ativa', 'reservada'].includes(cabine.status)) {
             await db.query('ROLLBACK')
             return reply.code(409).send({ error: 'Cabine indisponível para iniciar live', code: 'CABINE_NOT_AVAILABLE' })
           }
@@ -975,25 +973,27 @@ export async function cabinesRoutes(app) {
             [cabine_id, tenant_id]
           )
           if (!lrQ.rows[0]) {
-            await db.query('ROLLBACK')
-            return reply.code(409).send({ error: 'Nenhuma solicitação aprovada para hoje nesta cabine', code: 'NO_APPROVED_REQUEST' })
+            if (!resolvedClienteId) {
+              await db.query('ROLLBACK')
+              return reply.code(409).send({ error: 'Nenhuma solicitação aprovada para hoje nesta cabine', code: 'NO_APPROVED_REQUEST' })
+            }
+          } else {
+            resolvedClienteId = lrQ.rows[0].cliente_id
           }
           const ctLrQ = await db.query(
             `SELECT id FROM contratos
              WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativo'
              ORDER BY ativado_em DESC NULLS LAST, criado_em DESC
              LIMIT 1`,
-            [lrQ.rows[0].cliente_id, tenant_id]
+            [resolvedClienteId, tenant_id]
           )
-          if (!ctLrQ.rows[0]) {
-            await db.query('ROLLBACK')
-            return reply.code(409).send({ error: 'Cliente da solicitação não possui contrato ativo', code: 'NO_ACTIVE_CONTRACT' })
+          resolvedContratoId = ctLrQ.rows[0]?.id ?? null
+          if (resolvedContratoId) {
+            await db.query(
+              `UPDATE cabines SET status = 'reservada', contrato_id = $1 WHERE id = $2`,
+              [resolvedContratoId, cabine_id]
+            )
           }
-          resolvedContratoId = ctLrQ.rows[0].id
-          await db.query(
-            `UPDATE cabines SET status = 'reservada', contrato_id = $1 WHERE id = $2`,
-            [resolvedContratoId, cabine_id]
-          )
         }
 
         if (cabine.live_atual_id) {
@@ -1001,16 +1001,19 @@ export async function cabinesRoutes(app) {
           return reply.code(409).send({ error: 'Cabine já possui uma live em andamento' })
         }
 
-        const contratoQ = await db.query(
-          `SELECT id, cliente_id, status
-           FROM contratos
-           WHERE id = $1
-           FOR UPDATE`,
-          [resolvedContratoId]
-        )
+        const contratoQ = resolvedContratoId
+          ? await db.query(
+              `SELECT id, cliente_id, status
+               FROM contratos
+               WHERE id = $1
+               FOR UPDATE`,
+              [resolvedContratoId]
+            )
+          : { rows: [] }
         let contrato = contratoQ.rows[0]
+        if (contrato?.cliente_id) resolvedClienteId = contrato.cliente_id
 
-        if (!contrato || contrato.status !== 'ativo') {
+        if (contrato && contrato.status !== 'ativo') {
           // Tenta encontrar contrato ativo para o mesmo cliente (contrato vinculado pode ser rascunho antigo)
           const clienteIdFallback = contrato?.cliente_id ?? cabine.cliente_id
           if (clienteIdFallback) {
@@ -1027,13 +1030,18 @@ export async function cabinesRoutes(app) {
               await db.query('UPDATE cabines SET contrato_id = $1 WHERE id = $2', [contrato.id, cabine_id])
             }
           }
-          if (!contrato || contrato.status !== 'ativo') {
+          if (contrato && contrato.status !== 'ativo') {
             await db.query('ROLLBACK')
             return reply.code(409).send({ error: 'Contrato em rascunho — ative o contrato em Clientes → Contratos → Ativar', code: 'CONTRACT_NOT_ACTIVE' })
           }
         }
 
-        if (tiktokUsername) {
+        if (!resolvedClienteId) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'Informe cliente_id ou aprove uma solicitação para iniciar live sem contrato', code: 'CLIENTE_REQUIRED' })
+        }
+
+        if (tiktokUsername && resolvedContratoId) {
           await db.query(
             `UPDATE contratos SET tiktok_username = $1 WHERE id = $2`,
             [tiktokUsername, resolvedContratoId]
@@ -1044,7 +1052,7 @@ export async function cabinesRoutes(app) {
           `INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id)
            VALUES ($1, $2, $3, $4)
            RETURNING id, iniciado_em, cliente_id, apresentador_id`,
-          [tenant_id, cabine_id, contrato.cliente_id, sub]
+          [tenant_id, cabine_id, resolvedClienteId, sub]
         )
         const live = liveQ.rows[0]
 
@@ -1065,7 +1073,7 @@ export async function cabinesRoutes(app) {
           ip,
           payload: {
             live_id: live.id,
-            cliente_id: contrato.cliente_id,
+            cliente_id: resolvedClienteId,
             previous_status: cabine.status,
           },
         })
@@ -1077,7 +1085,7 @@ export async function cabinesRoutes(app) {
           app.log.warn({ err, liveId: live.id }, 'syncLives pós-iniciar-live falhou')
         )
 
-        app.audit?.log?.(request, { action: 'live.start', entity_type: 'live', entity_id: live.id, metadata: { cabine_id, cliente_id: contrato.cliente_id, contrato_id: resolvedContratoId } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        app.audit?.log?.(request, { action: 'live.start', entity_type: 'live', entity_id: live.id, metadata: { cabine_id, cliente_id: resolvedClienteId, contrato_id: resolvedContratoId } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return reply.code(201).send(live)
       } catch (error) {
         await db.query('ROLLBACK')
@@ -1161,6 +1169,30 @@ export async function cabinesRoutes(app) {
              VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
             [tenant_id, liveId, apresentador2UserId]
           )
+        }
+
+        const marcaQ = await db.query(
+          `SELECT id
+           FROM marcas
+           WHERE tenant_id = $1::uuid
+             AND cliente_id = $2::uuid
+             AND status = 'ativa'
+           ORDER BY criado_em ASC
+           LIMIT 1`,
+          [tenant_id, d.cliente_id],
+        )
+        if (marcaQ.rows[0]) {
+          await upsertVendaAtribuida(db, {
+            tenantId: tenant_id,
+            origem: 'live',
+            origemId: liveId,
+            marcaId: marcaQ.rows[0].id,
+            apresentadoraId: d.apresentador_id ?? null,
+            data: d.data,
+            gmv: d.fat_gerado,
+            pedidos: d.qtd_pedidos,
+            comissaoApresentadora: comissao,
+          })
         }
 
         await db.query('COMMIT')
@@ -1344,7 +1376,7 @@ export async function cabinesRoutes(app) {
 
       try {
         const liveQ = await db.query(
-          `SELECT id, cabine_id, cliente_id, status, iniciado_em
+          `SELECT id, cabine_id, cliente_id, apresentador_id, status, iniciado_em
            FROM lives
            WHERE id = $1 AND status = 'em_andamento'
            FOR UPDATE`,
@@ -1403,6 +1435,38 @@ export async function cabinesRoutes(app) {
             parsed.data.manual_gmv    ?? null,
           ]
         )
+
+        const marcaQ = await db.query(
+          `SELECT id
+           FROM marcas
+           WHERE tenant_id = $1::uuid
+             AND cliente_id = $2::uuid
+             AND status = 'ativa'
+           ORDER BY criado_em ASC
+           LIMIT 1`,
+          [tenant_id, live.cliente_id],
+        )
+        if (marcaQ.rows[0]) {
+          const apresentadoraQ = live.apresentador_id
+            ? await db.query(
+                `SELECT id FROM apresentadoras
+                 WHERE user_id = $1 AND tenant_id = $2::uuid
+                 LIMIT 1`,
+                [live.apresentador_id, tenant_id],
+              )
+            : { rows: [] }
+          await upsertVendaAtribuida(db, {
+            tenantId: tenant_id,
+            origem: 'live',
+            origemId: live.id,
+            marcaId: marcaQ.rows[0].id,
+            apresentadoraId: apresentadoraQ.rows[0]?.id ?? null,
+            data: new Date().toISOString().slice(0, 10),
+            gmv: parsed.data.fat_gerado,
+            pedidos: parsed.data.qtd_pedidos ?? 0,
+            comissaoApresentadora: comissao,
+          })
+        }
 
         // Deduct live duration from contrato's horas_consumidas
         if (contrato && live.iniciado_em) {

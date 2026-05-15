@@ -1136,6 +1136,113 @@ function buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stal
   }
 }
 
+async function fetchNetworkRanking(app, {
+  excludeTenantId = null,
+  periodInfo,
+  allowedTenantIds = null,
+  limit = null,
+}) {
+  return app.db.query(
+    `
+      WITH lives_atual AS (
+        SELECT tenant_id,
+               COUNT(*)::int AS total_lives,
+               COALESCE(SUM(fat_gerado), 0) AS gmv_mes
+        FROM lives
+        WHERE ($1::uuid IS NULL OR tenant_id <> $1::uuid)
+          AND COALESCE(encerrado_em, iniciado_em) >= $2::date
+          AND COALESCE(encerrado_em, iniciado_em) < $3::date
+        GROUP BY tenant_id
+      ),
+      lives_anterior AS (
+        SELECT tenant_id,
+               COALESCE(SUM(fat_gerado), 0) AS gmv_mes_anterior
+        FROM lives
+        WHERE ($1::uuid IS NULL OR tenant_id <> $1::uuid)
+          AND COALESCE(encerrado_em, iniciado_em) >= $4::date
+          AND COALESCE(encerrado_em, iniciado_em) < $2::date
+        GROUP BY tenant_id
+      ),
+      clientes_ativos AS (
+        SELECT tenant_id, COUNT(*)::int AS total_clientes
+        FROM clientes
+        WHERE status = 'ativo'
+          AND criado_em < $3::date
+        GROUP BY tenant_id
+      ),
+      clientes_anterior AS (
+        SELECT tenant_id, COUNT(*)::int AS total_clientes_ant
+        FROM clientes
+        WHERE status = 'ativo'
+          AND criado_em < $2::date
+        GROUP BY tenant_id
+      )
+      SELECT
+        t.id,
+        t.nome,
+        COALESCE(la.gmv_mes, 0) AS gmv_mes,
+        COALESCE(lp.gmv_mes_anterior, 0) AS gmv_mes_anterior,
+        COALESCE(la.total_lives, 0) AS total_lives,
+        COALESCE(ca.total_clientes, 0) AS total_clientes_ativos,
+        COALESCE(cant.total_clientes_ant, 0) AS total_clientes_ant
+      FROM tenants t
+      LEFT JOIN lives_atual la ON la.tenant_id = t.id
+      LEFT JOIN lives_anterior lp ON lp.tenant_id = t.id
+      LEFT JOIN clientes_ativos ca ON ca.tenant_id = t.id
+      LEFT JOIN clientes_anterior cant ON cant.tenant_id = t.id
+      WHERE ($1::uuid IS NULL OR t.id <> $1::uuid)
+        AND ($5::uuid[] IS NULL OR t.id = ANY($5::uuid[]))
+        AND t.criado_em < $3::date
+      ORDER BY COALESCE(la.gmv_mes, 0) DESC, t.nome ASC
+      LIMIT COALESCE($6::int, 2147483647)
+    `,
+    [
+      excludeTenantId,
+      periodInfo.currentStart,
+      periodInfo.currentEnd,
+      periodInfo.previousStart,
+      allowedTenantIds,
+      limit,
+    ]
+  )
+}
+
+function mapNetworkRanking(rows, { publicOnly = false } = {}) {
+  return rows.map((row, index) => {
+    const gmvMes = toMoney(row.gmv_mes)
+    const gmvMesAnt = toMoney(row.gmv_mes_anterior)
+    const totalClientesAtuais = toInt(row.total_clientes_ativos)
+    const totalClientesAnt = toInt(row.total_clientes_ant)
+    let taxaRetencao = 0
+    if (totalClientesAnt > 0) {
+      taxaRetencao = Number(
+        ((Math.min(totalClientesAtuais, totalClientesAnt) / totalClientesAnt) * 100).toFixed(1)
+      )
+    } else if (totalClientesAtuais > 0) {
+      taxaRetencao = 100
+    }
+
+    const base = {
+      posicao: index + 1,
+      nome: row.nome,
+      gmv_mes: gmvMes,
+      crescimento_pct: calculateGrowth(gmvMes, gmvMesAnt),
+      total_lives: toInt(row.total_lives),
+      total_clientes_ativos: totalClientesAtuais,
+    }
+
+    if (publicOnly) return base
+
+    return {
+      ...base,
+      tenant_id: row.id,
+      tenant_nome: row.nome,
+      gmv_mes_anterior: gmvMesAnt,
+      taxa_retencao: taxaRetencao,
+    }
+  })
+}
+
 export async function franqueadoRoutes(app) {
   // masterAccess: aceita franqueador_master OU gerente_regional.
   // requireTenantAccess injeta:
@@ -1228,99 +1335,37 @@ export async function franqueadoRoutes(app) {
     }
   })
 
+  // Ranking público cross-tenant com payload sanitizado.
+  app.get('/v1/public/ranking', async (request, reply) => {
+    try {
+      const periodInfo = parsePeriod(request.query?.periodo)
+      const rawLimit = Number(request.query?.limit ?? 10)
+      const limit = Number.isFinite(rawLimit)
+        ? Math.min(Math.max(Math.trunc(rawLimit), 1), 20)
+        : 10
+      const result = await fetchNetworkRanking(app, {
+        periodInfo,
+        limit,
+      })
+
+      return reply.send(mapNetworkRanking(result.rows, { publicOnly: true }))
+    } catch (err) {
+      request.log.error({ err }, 'public/ranking: erro')
+      throw err
+    }
+  })
+
   // F3 — Ranking de unidades cross-tenant
   app.get('/v1/master/ranking', masterAccess, async (request, reply) => {
     try {
       const periodInfo = parsePeriod(request.query?.periodo)
-      const result = await app.db.query(
-        `
-          WITH lives_atual AS (
-            SELECT tenant_id,
-                   COUNT(*)::int AS total_lives,
-                   COALESCE(SUM(fat_gerado), 0) AS gmv_mes
-            FROM lives
-            WHERE tenant_id <> $1
-              AND COALESCE(encerrado_em, iniciado_em) >= $2::date
-              AND COALESCE(encerrado_em, iniciado_em) < $3::date
-            GROUP BY tenant_id
-          ),
-          lives_anterior AS (
-            SELECT tenant_id,
-                   COALESCE(SUM(fat_gerado), 0) AS gmv_mes_anterior
-            FROM lives
-            WHERE tenant_id <> $1
-              AND COALESCE(encerrado_em, iniciado_em) >= $4::date
-              AND COALESCE(encerrado_em, iniciado_em) < $2::date
-            GROUP BY tenant_id
-          ),
-          clientes_ativos AS (
-            SELECT tenant_id, COUNT(*)::int AS total_clientes
-            FROM clientes
-            WHERE status = 'ativo'
-              AND criado_em < $3::date
-            GROUP BY tenant_id
-          ),
-          clientes_anterior AS (
-            SELECT tenant_id, COUNT(*)::int AS total_clientes_ant
-            FROM clientes
-            WHERE status = 'ativo'
-              AND criado_em < $2::date
-            GROUP BY tenant_id
-          )
-          SELECT
-            t.id,
-            t.nome,
-            COALESCE(la.gmv_mes, 0) AS gmv_mes,
-            COALESCE(lp.gmv_mes_anterior, 0) AS gmv_mes_anterior,
-            COALESCE(la.total_lives, 0) AS total_lives,
-            COALESCE(ca.total_clientes, 0) AS total_clientes_ativos,
-            COALESCE(cant.total_clientes_ant, 0) AS total_clientes_ant
-          FROM tenants t
-          LEFT JOIN lives_atual la ON la.tenant_id = t.id
-          LEFT JOIN lives_anterior lp ON lp.tenant_id = t.id
-          LEFT JOIN clientes_ativos ca ON ca.tenant_id = t.id
-          LEFT JOIN clientes_anterior cant ON cant.tenant_id = t.id
-          WHERE t.id <> $1
-            AND ($5::uuid[] IS NULL OR t.id = ANY($5::uuid[]))
-            AND t.criado_em < $3::date
-          ORDER BY COALESCE(la.gmv_mes, 0) DESC, t.nome ASC
-        `,
-        [
-          request.user.tenant_id,
-          periodInfo.currentStart,
-          periodInfo.currentEnd,
-          periodInfo.previousStart,
-          request.allowedTenantIds,
-        ]
-      )
-
-      const ranking = result.rows.map((row, index) => {
-        const gmvMes = toMoney(row.gmv_mes)
-        const gmvMesAnt = toMoney(row.gmv_mes_anterior)
-        const totalClientesAtuais = toInt(row.total_clientes_ativos)
-        const totalClientesAnt = toInt(row.total_clientes_ant)
-        let taxaRetencao = 0
-        if (totalClientesAnt > 0) {
-          taxaRetencao = Number(
-            ((Math.min(totalClientesAtuais, totalClientesAnt) / totalClientesAnt) * 100).toFixed(1)
-          )
-        } else if (totalClientesAtuais > 0) {
-          taxaRetencao = 100
-        }
-        return {
-          posicao: index + 1,
-          tenant_id: row.id,
-          tenant_nome: row.nome,
-          gmv_mes: gmvMes,
-          gmv_mes_anterior: gmvMesAnt,
-          crescimento_pct: calculateGrowth(gmvMes, gmvMesAnt),
-          total_lives: toInt(row.total_lives),
-          total_clientes_ativos: totalClientesAtuais,
-          taxa_retencao: taxaRetencao,
-        }
+      const result = await fetchNetworkRanking(app, {
+        excludeTenantId: request.user.tenant_id,
+        periodInfo,
+        allowedTenantIds: request.allowedTenantIds,
       })
 
-      return reply.send(ranking)
+      return reply.send(mapNetworkRanking(result.rows))
     } catch (err) {
       request.log.error({ err }, 'master/ranking: erro')
       throw err

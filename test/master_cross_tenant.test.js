@@ -71,6 +71,41 @@ describe('GET /v1/master/ranking', () => {
   })
 })
 
+describe('GET /v1/public/ranking', () => {
+  it('returns only safe public fields without authentication', async () => {
+    const queryMock = vi.fn().mockResolvedValue({
+      rows: [
+        {
+          id: OTHER_TENANT,
+          nome: 'Unidade A',
+          gmv_mes: 5000,
+          gmv_mes_anterior: 4000,
+          total_lives: 10,
+          total_clientes_ativos: 8,
+          total_clientes_ant: 6,
+        },
+      ],
+    })
+    const { app } = buildApp({ queryImpl: queryMock })
+    await app.register(franqueadoRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/public/ranking?periodo=2026-05' })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body[0]).toEqual({
+      posicao: 1,
+      nome: 'Unidade A',
+      gmv_mes: 5000,
+      crescimento_pct: 25,
+      total_lives: 10,
+      total_clientes_ativos: 8,
+    })
+    expect(body[0]).not.toHaveProperty('tenant_id')
+    expect(body[0]).not.toHaveProperty('tenant_nome')
+    await app.close()
+  })
+})
+
 describe('GET /v1/master/unidade/:tenantId/historico', () => {
   it('200 array de meses', async () => {
     const queryMock = vi.fn().mockResolvedValue({

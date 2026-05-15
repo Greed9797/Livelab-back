@@ -1051,7 +1051,7 @@ export async function cabinesRoutes(app) {
         const liveQ = await db.query(
           `INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, iniciado_em, cliente_id, apresentador_id`,
+           RETURNING id, cabine_id, iniciado_em, cliente_id, apresentador_id`,
           [tenant_id, cabine_id, resolvedClienteId, sub]
         )
         const live = liveQ.rows[0]

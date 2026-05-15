@@ -71,6 +71,7 @@ const MIGRATIONS_LIST = [
   '077_clientes_soft_delete.sql',
   '078_lives_manual_metrics_ext.sql',
   '079_lives_apresentador_nullable.sql',
+  '080_marcas_agenda_videos_vendas.sql',
 ]
 
 async function ensureMigrationsTable(client) {

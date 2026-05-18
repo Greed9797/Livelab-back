@@ -78,6 +78,7 @@ const MIGRATIONS_LIST = [
   '082_live_metric_revisions.sql',
   '083_vendas_atribuidas_aprovacao.sql',
   '084_performance_indexes.sql',
+  '085_agenda_operacional_campos.sql',
   '085_comissao_faixas_metas.sql',
 ]
 

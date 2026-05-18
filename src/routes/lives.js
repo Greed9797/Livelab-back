@@ -9,37 +9,43 @@ const iniciarLiveSchema = z.object({
   cabine_id: z.string().uuid(),
   cliente_id: z.string().uuid().optional(),
   tiktok_username: z.string().max(100).optional().nullable(),
+  tipo: z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
 })
 
 const encerrarSchema = z.object({
-  fat_gerado:    z.number().min(0),
-  qtd_pedidos:   z.number().int().min(0).optional(),
-  resumo:        z.string().max(2000).optional(),
-  manual_likes:  z.number().int().min(0).optional(),
-  manual_views:  z.number().int().min(0).optional(),
-  manual_orders: z.number().int().min(0).optional(),
-  manual_gmv:    z.number().min(0).optional(),
+  fat_gerado:         z.number().min(0),
+  qtd_pedidos:        z.number().int().min(0).optional(),
+  resumo:             z.string().max(2000).optional(),
+  manual_likes:       z.number().int().min(0).optional(),
+  manual_views:       z.number().int().min(0).optional(),
+  manual_orders:      z.number().int().min(0).optional(),
+  manual_gmv:         z.number().min(0).optional(),
+  status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
+  origem_dados:       z.enum(['manual', 'api']).optional().default('manual'),
 })
 
 const liveManualSchema = z.object({
-  cabine_id:        z.string().uuid(),
-  cliente_id:       z.string().uuid(),
-  apresentador_id:  z.string().uuid().optional(),
-  apresentador2_id: z.string().uuid().optional(),
-  gestor_id:        z.string().uuid().optional(),
-  data:             z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  hora_inicio:      z.string().regex(/^\d{2}:\d{2}$/),
-  hora_fim:         z.string().regex(/^\d{2}:\d{2}$/),
-  fat_gerado:       z.number().min(0),
-  qtd_pedidos:      z.number().int().min(0),
-  resumo:           z.string().max(2000).optional(),
-  manual_views:     z.number().int().min(0).optional(),
-  manual_likes:     z.number().int().min(0).optional(),
-  manual_comments:  z.number().int().min(0).optional(),
-  manual_shares:    z.number().int().min(0).optional(),
-  manual_diamonds:  z.number().int().min(0).optional(),
-  manual_orders:    z.number().int().min(0).optional(),
-  manual_gmv:       z.number().min(0).optional(),
+  cabine_id:          z.string().uuid(),
+  cliente_id:         z.string().uuid().optional(),
+  apresentador_id:    z.string().uuid().optional(),
+  apresentador2_id:   z.string().uuid().optional(),
+  gestor_id:          z.string().uuid().optional(),
+  data:               z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  hora_inicio:        z.string().regex(/^\d{2}:\d{2}$/),
+  hora_fim:           z.string().regex(/^\d{2}:\d{2}$/),
+  fat_gerado:         z.number().min(0),
+  qtd_pedidos:        z.number().int().min(0),
+  resumo:             z.string().max(2000).optional(),
+  manual_views:       z.number().int().min(0).optional(),
+  manual_likes:       z.number().int().min(0).optional(),
+  manual_comments:    z.number().int().min(0).optional(),
+  manual_shares:      z.number().int().min(0).optional(),
+  manual_diamonds:    z.number().int().min(0).optional(),
+  manual_orders:      z.number().int().min(0).optional(),
+  manual_gmv:         z.number().min(0).optional(),
+  tipo:               z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
+  status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
+  origem_dados:       z.enum(['manual', 'api']).optional().default('manual'),
 }).refine(d => d.hora_fim > d.hora_inicio, {
   message: 'hora_fim deve ser maior que hora_inicio',
 }).refine(d => !d.apresentador2_id || d.apresentador2_id !== d.apresentador_id, {
@@ -80,7 +86,7 @@ export async function livesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
-    const { cabine_id, cliente_id: requestedClienteId, tiktok_username: rawTiktok } = parsed.data
+    const { cabine_id, cliente_id: requestedClienteId, tiktok_username: rawTiktok, tipo } = parsed.data
     const tiktokUsername = rawTiktok ? rawTiktok.replace(/^@/, '').trim() || null : null
     const ip = getRequestIp(request)
     return app.withTenant(tenant_id, async (db) => {
@@ -110,39 +116,40 @@ export async function livesRoutes(app) {
             return reply.code(409).send({ error: 'Cabine indisponível para iniciar live', code: 'CABINE_NOT_AVAILABLE' })
           }
 
-          // Busca live_request aprovada para hoje nesta cabine (qualquer horário do dia)
-          const lrQ = await db.query(
-            `SELECT lr.cliente_id
-             FROM live_requests lr
-             WHERE lr.cabine_id = $1
-               AND lr.tenant_id = $2
-               AND lr.status = 'aprovada'
-               AND lr.data_solicitada = CURRENT_DATE
-             ORDER BY ABS(EXTRACT(EPOCH FROM (lr.hora_inicio - NOW()::TIME)))
-             LIMIT 1`,
-            [cabine_id, tenant_id]
-          )
-          if (!lrQ.rows[0]) {
-            if (!resolvedClienteId) {
-              await db.query('ROLLBACK')
-              return reply.code(409).send({ error: 'Nenhuma solicitação aprovada para hoje nesta cabine', code: 'NO_APPROVED_REQUEST' })
-            }
-          } else {
-            resolvedClienteId = lrQ.rows[0].cliente_id
-          }
-          const ctLrQ = await db.query(
-            `SELECT id FROM contratos
-             WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativo'
-             ORDER BY ativado_em DESC NULLS LAST, criado_em DESC
-             LIMIT 1`,
-            [resolvedClienteId, tenant_id]
-          )
-          resolvedContratoId = ctLrQ.rows[0]?.id ?? null
-          if (resolvedContratoId) {
-            await db.query(
-              `UPDATE cabines SET status = 'reservada', contrato_id = $1 WHERE id = $2`,
-              [resolvedContratoId, cabine_id]
+          // Para afiliado/teste: não é necessário live_request nem cliente_id
+          if (tipo === 'cliente') {
+            // Busca live_request aprovada para hoje nesta cabine (qualquer horário do dia)
+            const lrQ = await db.query(
+              `SELECT lr.cliente_id
+               FROM live_requests lr
+               WHERE lr.cabine_id = $1
+                 AND lr.tenant_id = $2
+                 AND lr.status = 'aprovada'
+                 AND lr.data_solicitada = CURRENT_DATE
+               ORDER BY ABS(EXTRACT(EPOCH FROM (lr.hora_inicio - NOW()::TIME)))
+               LIMIT 1`,
+              [cabine_id, tenant_id]
             )
+            if (lrQ.rows[0]) {
+              resolvedClienteId = lrQ.rows[0].cliente_id
+            }
+          }
+
+          if (resolvedClienteId) {
+            const ctLrQ = await db.query(
+              `SELECT id FROM contratos
+               WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativo'
+               ORDER BY ativado_em DESC NULLS LAST, criado_em DESC
+               LIMIT 1`,
+              [resolvedClienteId, tenant_id]
+            )
+            resolvedContratoId = ctLrQ.rows[0]?.id ?? null
+            if (resolvedContratoId) {
+              await db.query(
+                `UPDATE cabines SET status = 'reservada', contrato_id = $1 WHERE id = $2`,
+                [resolvedContratoId, cabine_id]
+              )
+            }
           }
         }
 
@@ -186,9 +193,12 @@ export async function livesRoutes(app) {
           }
         }
 
-        if (!resolvedClienteId) {
+        if (!resolvedClienteId && tipo === 'cliente') {
           await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Informe cliente_id ou aprove uma solicitação para iniciar live sem contrato', code: 'CLIENTE_REQUIRED' })
+          return reply.code(409).send({
+            error: 'Live de tipo "cliente" requer cliente_id ou solicitação aprovada',
+            code: 'CLIENTE_REQUIRED'
+          })
         }
 
         if (tiktokUsername && resolvedContratoId) {
@@ -199,10 +209,10 @@ export async function livesRoutes(app) {
         }
 
         const liveQ = await db.query(
-          `INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, cabine_id, iniciado_em, cliente_id, apresentador_id`,
-          [tenant_id, cabine_id, resolvedClienteId, sub]
+          `INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo, status_publicacao, origem_dados)
+           VALUES ($1, $2, $3, $4, $5, 'rascunho', 'manual')
+           RETURNING id, cabine_id, iniciado_em, cliente_id, apresentador_id, tipo, status_publicacao, origem_dados`,
+          [tenant_id, cabine_id, resolvedClienteId, sub, tipo]
         )
         const live = liveQ.rows[0]
 
@@ -258,6 +268,15 @@ export async function livesRoutes(app) {
     const d = parsed.data
     const { tenant_id, sub } = request.user
     const gestorId = d.gestor_id ?? sub
+
+    // Para live manual: tipo 'cliente' exige cliente_id
+    if (d.tipo === 'cliente' && !d.cliente_id) {
+      return reply.code(400).send({
+        error: 'Live de tipo "cliente" requer cliente_id',
+        code: 'CLIENTE_REQUIRED'
+      })
+    }
+
     return app.withTenant(tenant_id, async (db) => {
       try {
         await db.query('BEGIN')
@@ -300,15 +319,17 @@ export async function livesRoutes(app) {
               status, iniciado_em, encerrado_em, fat_gerado, comissao_calculada,
               final_orders_count, resumo,
               manual_views, manual_likes, manual_comments, manual_shares, manual_diamonds,
-              manual_orders, manual_gmv)
-           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+              manual_orders, manual_gmv,
+              tipo, status_publicacao, origem_dados)
+           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
            RETURNING id`,
           [
-            tenant_id, d.cabine_id, d.cliente_id, apresentadorUserId, gestorId,
+            tenant_id, d.cabine_id, d.cliente_id ?? null, apresentadorUserId, gestorId,
             iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
             d.manual_views ?? null, d.manual_likes ?? null,
             d.manual_comments ?? null, d.manual_shares ?? null, d.manual_diamonds ?? null,
             d.manual_orders ?? null, d.manual_gmv ?? null,
+            d.tipo, d.status_publicacao, d.origem_dados,
           ]
         )
         const liveId = ins.rows[0].id
@@ -321,28 +342,30 @@ export async function livesRoutes(app) {
           )
         }
 
-        const marcaQ = await db.query(
-          `SELECT id
-           FROM marcas
-           WHERE tenant_id = $1::uuid
-             AND cliente_id = $2::uuid
-             AND status = 'ativa'
-           ORDER BY criado_em ASC
-           LIMIT 1`,
-          [tenant_id, d.cliente_id],
-        )
-        if (marcaQ.rows[0]) {
-          await upsertVendaAtribuida(db, {
-            tenantId: tenant_id,
-            origem: 'live',
-            origemId: liveId,
-            marcaId: marcaQ.rows[0].id,
-            apresentadoraId: d.apresentador_id ?? null,
-            data: d.data,
-            gmv: d.fat_gerado,
-            pedidos: d.qtd_pedidos,
-            comissaoApresentadora: comissao,
-          })
+        if (d.cliente_id) {
+          const marcaQ = await db.query(
+            `SELECT id
+             FROM marcas
+             WHERE tenant_id = $1::uuid
+               AND cliente_id = $2::uuid
+               AND status = 'ativa'
+             ORDER BY criado_em ASC
+             LIMIT 1`,
+            [tenant_id, d.cliente_id],
+          )
+          if (marcaQ.rows[0]) {
+            await upsertVendaAtribuida(db, {
+              tenantId: tenant_id,
+              origem: 'live',
+              origemId: liveId,
+              marcaId: marcaQ.rows[0].id,
+              apresentadoraId: d.apresentador_id ?? null,
+              data: d.data,
+              gmv: d.fat_gerado,
+              pedidos: d.qtd_pedidos,
+              comissaoApresentadora: comissao,
+            })
+          }
         }
 
         await db.query('COMMIT')
@@ -465,7 +488,7 @@ export async function livesRoutes(app) {
 
   // GET /v1/lives
   app.get('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request) => {
-    const { tenant_id } = request.user
+    const { tenant_id, papel, sub } = request.user
     const statusFilter = request.query?.status // 'em_andamento' | 'encerrada' | undefined
     return app.withTenant(tenant_id, async (db) => {
       const params = [tenant_id]
@@ -474,12 +497,27 @@ export async function livesRoutes(app) {
         params.push(statusFilter)
         where += ` AND l.status = $${params.length}`
       }
+      // cliente_parceiro só enxerga lives publicadas e do seu próprio cliente
+      if (papel === 'cliente_parceiro') {
+        params.push(tenant_id)
+        const clienteSubIdx = params.length
+        params.push(sub)
+        where += ` AND l.status_publicacao = 'publicado'`
+        where += ` AND l.cliente_id = (SELECT id FROM clientes WHERE user_id = $${clienteSubIdx + 1} AND tenant_id = $${clienteSubIdx}::uuid LIMIT 1)`
+      }
       const result = await db.query(
-        `SELECT l.*, c.numero AS cabine_numero, c.contrato_id, cl.nome AS cliente_nome,
+        `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
+                l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
+                l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
+                l.final_orders_count, l.resumo,
+                l.manual_views, l.manual_likes, l.manual_comments, l.manual_shares,
+                l.manual_diamonds, l.manual_orders, l.manual_gmv,
+                c.numero AS cabine_numero, c.contrato_id,
+                cl.nome AS cliente_nome,
                 u.nome AS apresentador_nome, ap.id AS apresentadora_id
          FROM lives l
          JOIN cabines c ON c.id = l.cabine_id
-         JOIN clientes cl ON cl.id = l.cliente_id
+         LEFT JOIN clientes cl ON cl.id = l.cliente_id
          LEFT JOIN users u ON u.id = l.apresentador_id
          LEFT JOIN apresentadoras ap ON ap.user_id = l.apresentador_id
          ${where}
@@ -568,10 +606,12 @@ export async function livesRoutes(app) {
                fat_gerado = $1, comissao_calculada = $2,
                final_orders_count = COALESCE($3, final_orders_count),
                resumo = COALESCE($4, resumo),
-               manual_likes  = COALESCE($6, manual_likes),
-               manual_views  = COALESCE($7, manual_views),
-               manual_orders = COALESCE($8, manual_orders),
-               manual_gmv    = COALESCE($9, manual_gmv)
+               manual_likes       = COALESCE($6, manual_likes),
+               manual_views       = COALESCE($7, manual_views),
+               manual_orders      = COALESCE($8, manual_orders),
+               manual_gmv         = COALESCE($9, manual_gmv),
+               status_publicacao  = $10,
+               origem_dados       = $11
            WHERE id = $5`,
           [
             parsed.data.fat_gerado,
@@ -579,10 +619,12 @@ export async function livesRoutes(app) {
             parsed.data.qtd_pedidos ?? null,
             parsed.data.resumo ?? null,
             request.params.id,
-            parsed.data.manual_likes  ?? null,
-            parsed.data.manual_views  ?? null,
-            parsed.data.manual_orders ?? null,
-            parsed.data.manual_gmv    ?? null,
+            parsed.data.manual_likes       ?? null,
+            parsed.data.manual_views       ?? null,
+            parsed.data.manual_orders      ?? null,
+            parsed.data.manual_gmv         ?? null,
+            parsed.data.status_publicacao,
+            parsed.data.origem_dados,
           ]
         )
 
@@ -629,7 +671,8 @@ export async function livesRoutes(app) {
           )
         }
 
-        const proximoStatus = contrato?.status === 'ativo' ? 'ativa' : 'disponivel'
+        // Migration 081 removeu status 'ativa' das cabines — cabine sempre volta para 'disponivel'
+        const proximoStatus = 'disponivel'
         const proximoContratoId = contrato?.status === 'ativo' ? contrato.id : null
 
         await db.query(

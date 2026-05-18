@@ -95,6 +95,13 @@ async function getAppliedMigrations(client) {
   return new Set(rows.map((r) => r.version))
 }
 
+function splitSqlStatements(sql) {
+  return sql
+    .split(/;\s*(?:\r?\n|$)/)
+    .map((statement) => statement.trim())
+    .filter(Boolean)
+}
+
 export async function applyMigration(client, fileName) {
   const filePath = path.join(process.cwd(), 'migrations', fileName)
   if (!fs.existsSync(filePath)) {
@@ -103,17 +110,17 @@ export async function applyMigration(client, fileName) {
   }
 
   const sql = fs.readFileSync(filePath, 'utf8')
-  const requiresNoTransaction = /\bCONCURRENTLY\b/i.test(sql)
-  console.log(`[migrations] Aplicando: ${fileName}`)
-
   // CREATE INDEX CONCURRENTLY não pode rodar dentro de transação
   // Usa regex para detectar a palavra exata e evitar falsos positivos
   const needsNoTransaction = /\bCONCURRENTLY\b/i.test(sql)
+  console.log(`[migrations] Aplicando: ${fileName}`)
 
   try {
     if (needsNoTransaction) {
-      // Executar migration sem transação
-      await client.query(sql)
+      // Executar migration sem transação, statement a statement
+      for (const statement of splitSqlStatements(sql)) {
+        await client.query(statement)
+      }
       await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
     } else {
       // Executar migration com BEGIN/COMMIT (transacional)

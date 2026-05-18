@@ -10,28 +10,22 @@
 -- 1. CABINES: Remover status 'ativa' e migrar para 'disponivel'
 -- ============================================================================
 
-DO $$ BEGIN
-  -- Migração de dados: cabines com status 'ativa' → 'disponivel'
-  UPDATE cabines
-  SET status = 'disponivel'
-  WHERE status = 'ativa';
+-- Migração de dados: cabines com status 'ativa' → 'disponivel'
+-- contrato_id é zerado pois 'ativa' era o estado "reservada + contrato vinculado"
+UPDATE cabines
+SET status = 'disponivel',
+    contrato_id = NULL
+WHERE status = 'ativa';
 
-  -- Recriar constraint sem 'ativa'
-  ALTER TABLE cabines DROP CONSTRAINT IF EXISTS cabines_status_check;
-  ALTER TABLE cabines
-    ADD CONSTRAINT cabines_status_check
-    CHECK (status IN ('disponivel', 'reservada', 'ao_vivo', 'manutencao'));
+-- Recriar constraint sem 'ativa'
+ALTER TABLE cabines DROP CONSTRAINT IF EXISTS cabines_status_check;
+ALTER TABLE cabines
+  ADD CONSTRAINT cabines_status_check
+  CHECK (status IN ('disponivel', 'reservada', 'ao_vivo', 'manutencao'));
 
-EXCEPTION WHEN others THEN
-  -- Se constraint não existir, criar apenas
-  ALTER TABLE cabines DROP CONSTRAINT IF EXISTS cabines_status_check;
-  ALTER TABLE cabines
-    ADD CONSTRAINT cabines_status_check
-    CHECK (status IN ('disponivel', 'reservada', 'ao_vivo', 'manutencao'));
-END $$;
-
--- Remove contrato_id se existir (compatibilidade com migration 080)
-ALTER TABLE cabines DROP COLUMN IF EXISTS contrato_id;
+-- NOTA: contrato_id permanece na tabela para compatibilidade histórica.
+-- O vínculo contrato→cabine não é mais obrigatório; a coluna existe apenas
+-- para manter referência em cabine_eventos e dados legados.
 
 -- ============================================================================
 -- 2. LIVES: Tornar cliente_id nullable

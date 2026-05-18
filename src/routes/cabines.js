@@ -14,7 +14,9 @@ const cabineWriteAccess = (app) => [
 ]
 
 const reservarCabineSchema = z.object({
-  contrato_id: z.string().uuid(),
+  contrato_id: z.string().uuid().optional().nullable(),
+  cliente_id: z.string().uuid().optional().nullable(),
+  observacao: z.string().max(500).optional(),
 })
 
 const atualizarStatusSchema = z.object({
@@ -247,7 +249,7 @@ export async function cabinesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
-    const { contrato_id } = parsed.data
+    const { contrato_id, cliente_id, observacao } = parsed.data
     const ip = getRequestIp(request)
     return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
@@ -272,65 +274,119 @@ export async function cabinesRoutes(app) {
           return reply.code(409).send({ error: 'Cabine em manutenção não pode ser reservada' })
         }
 
-        if (cabine.status !== 'disponivel' || cabine.contrato_id || cabine.live_atual_id) {
+        if (cabine.status !== 'disponivel') {
           await db.query('ROLLBACK')
           return reply.code(409).send({ error: 'Cabine não está disponível para reserva' })
         }
 
-        const contratoQ = await db.query(
-          `SELECT id, cliente_id, status
-           FROM contratos
-           WHERE id = $1
-           FOR UPDATE`,
-          [contrato_id]
-        )
-        const contrato = contratoQ.rows[0]
-
-        if (!contrato) {
+        if (cabine.live_atual_id) {
           await db.query('ROLLBACK')
-          return reply.code(404).send({ error: 'Contrato não encontrado para este tenant' })
+          return reply.code(409).send({ error: 'Cabine possui live ativa e não pode ser reservada' })
         }
 
-        if (contrato.status !== 'ativo') {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Apenas contratos ativos podem reservar cabines' })
+        // Aviso não-bloqueante: cabine já tem contrato vinculado (dado histórico)
+        const avisoContratoExistente = cabine.contrato_id
+          ? `Cabine possuía contrato_id ${cabine.contrato_id} que será substituído`
+          : null
+
+        // Resolução do contrato a vincular:
+        // 1) contrato_id explícito no body → valida e vincula
+        // 2) cliente_id no body → busca contrato ativo do cliente
+        // 3) nenhum → reserva sem vínculo contratual
+        let contratoResolvido = null
+
+        if (contrato_id) {
+          const contratoQ = await db.query(
+            `SELECT id, cliente_id, status
+             FROM contratos
+             WHERE id = $1
+             FOR UPDATE`,
+            [contrato_id]
+          )
+          const contrato = contratoQ.rows[0]
+
+          if (!contrato) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Contrato não encontrado para este tenant' })
+          }
+
+          if (contrato.status !== 'ativo') {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: 'Apenas contratos ativos podem reservar cabines' })
+          }
+
+          const vinculoExistenteQ = await db.query(
+            `SELECT id, numero
+             FROM cabines
+             WHERE contrato_id = $1 AND id != $2
+             LIMIT 1`,
+            [contrato_id, request.params.id]
+          )
+
+          if (vinculoExistenteQ.rows[0]) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: 'Contrato já está vinculado a outra cabine' })
+          }
+
+          contratoResolvido = contrato
+        } else if (cliente_id) {
+          const contratoQ = await db.query(
+            `SELECT id, cliente_id, status
+             FROM contratos
+             WHERE cliente_id = $1 AND status = 'ativo'
+             ORDER BY ativado_em DESC NULLS LAST, criado_em DESC
+             LIMIT 1
+             FOR UPDATE`,
+            [cliente_id]
+          )
+          const contrato = contratoQ.rows[0]
+
+          if (contrato) {
+            const vinculoExistenteQ = await db.query(
+              `SELECT id, numero
+               FROM cabines
+               WHERE contrato_id = $1 AND id != $2
+               LIMIT 1`,
+              [contrato.id, request.params.id]
+            )
+            // Se o contrato encontrado já está em outra cabine, ignora vínculo mas ainda reserva
+            if (!vinculoExistenteQ.rows[0]) {
+              contratoResolvido = contrato
+            }
+          }
+          // Se não encontrou contrato ativo para o cliente, segue sem vínculo
         }
 
-        const vinculoExistenteQ = await db.query(
-          `SELECT id, numero
-           FROM cabines
-           WHERE contrato_id = $1
-           LIMIT 1`,
-          [contrato_id]
-        )
-
-        if (vinculoExistenteQ.rows[0]) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Contrato já está vinculado a outra cabine' })
-        }
+        const resolvedContratoId = contratoResolvido?.id ?? null
+        const resolvedClienteId = contratoResolvido?.cliente_id ?? cliente_id ?? null
 
         const result = await db.query(
           `UPDATE cabines
            SET status = 'reservada', contrato_id = $1, live_atual_id = NULL
            WHERE id = $2
            RETURNING id, numero, status, contrato_id`,
-          [contrato_id, request.params.id]
+          [resolvedContratoId, request.params.id]
         )
 
         await logCabineEvent(db, {
           tenantId: tenant_id,
           cabineId: request.params.id,
-          contratoId: contrato_id,
+          contratoId: resolvedContratoId,
           tipoEvento: 'cabine_reservada',
           actorUserId: sub,
           actorPapel: papel,
           ip,
-          payload: { cliente_id: contrato.cliente_id },
+          payload: { cliente_id: resolvedClienteId, observacao: observacao ?? null, sem_contrato: !resolvedContratoId },
         })
 
         await db.query('COMMIT')
-        app.audit?.log?.(request, { action: 'cabines.reserve', entity_type: 'cabine', entity_id: request.params.id, metadata: { contrato_id, cliente_id: contrato.cliente_id } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-        return result.rows[0]
+        app.audit?.log?.(request, { action: 'cabines.reserve', entity_type: 'cabine', entity_id: request.params.id, metadata: { contrato_id: resolvedContratoId, cliente_id: resolvedClienteId } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+        const response = result.rows[0]
+        if (avisoContratoExistente) {
+          return { ...response, aviso: avisoContratoExistente }
+        }
+        return response
       } catch (error) {
         await db.query('ROLLBACK')
         throw error
@@ -360,10 +416,10 @@ export async function cabinesRoutes(app) {
           return reply.code(404).send({ error: 'Cabine não encontrada' })
         }
 
-        if (cabine.status === 'ao_vivo' || cabine.live_atual_id) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Encerre a live antes de liberar a cabine' })
-        }
+        // Aviso não-bloqueante quando há live ativa (não impede a liberação)
+        const avisoLiveAtiva = (cabine.status === 'ao_vivo' || cabine.live_atual_id)
+          ? 'Cabine estava ao vivo no momento da liberação — verifique se a live foi encerrada corretamente'
+          : null
 
         const result = await db.query(
           `UPDATE cabines
@@ -382,12 +438,16 @@ export async function cabinesRoutes(app) {
             actorUserId: sub,
             actorPapel: papel,
             ip,
-            payload: { previous_status: cabine.status },
+            payload: { previous_status: cabine.status, tinha_live_ativa: !!avisoLiveAtiva },
           })
         }
 
         await db.query('COMMIT')
-        return result.rows[0]
+        const response = result.rows[0]
+        if (avisoLiveAtiva) {
+          return { ...response, aviso: avisoLiveAtiva }
+        }
+        return response
       } catch (error) {
         await db.query('ROLLBACK')
         throw error
@@ -774,16 +834,6 @@ export async function cabinesRoutes(app) {
         if (cabine.live_atual_id || cabine.status === 'ao_vivo') {
           await db.query('ROLLBACK')
           return reply.code(409).send({ error: 'Cabine ao vivo não pode ter o status alterado manualmente' })
-        }
-
-        if (status === 'disponivel' && cabine.contrato_id) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Use liberar para remover o vínculo contratual da cabine' })
-        }
-
-        if (status === 'manutencao' && cabine.contrato_id) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Libere a cabine antes de colocá-la em manutenção' })
         }
 
         const result = await db.query(

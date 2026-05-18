@@ -74,6 +74,11 @@ const liveManualEditSchema = z.object({
   manual_gmv:       z.number().min(0).optional(),
 })
 
+const publicarSchema = z.object({
+  status_publicacao: z.enum(['revisado', 'publicado']),
+  motivo: z.string().max(500).optional(),
+})
+
 export async function livesRoutes(app) {
 
   const cabineRoleAccess = (app) => [
@@ -520,13 +525,13 @@ export async function livesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const d = parsed.data
-    const { tenant_id } = request.user
+    const { tenant_id, sub } = request.user
     return app.withTenant(tenant_id, async (db) => {
       try {
         await db.query('BEGIN')
 
         const liveQ = await db.query(
-          `SELECT id, cabine_id, fat_gerado, iniciado_em, encerrado_em
+          `SELECT id, cabine_id, fat_gerado, manual_gmv, iniciado_em, encerrado_em
              FROM lives WHERE id = $1 AND status = 'encerrada' FOR UPDATE`,
           [request.params.id]
         )
@@ -598,6 +603,22 @@ export async function livesRoutes(app) {
         if (updates.length > 0) {
           values.push(request.params.id)
           await db.query(`UPDATE lives SET ${updates.join(', ')} WHERE id = $${idx}`, values)
+        }
+
+        // Rastreia mudanças em fat_gerado e manual_gmv na tabela live_metric_revisions
+        if (d.fat_gerado !== undefined && d.fat_gerado !== live.fat_gerado) {
+          await db.query(
+            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em)
+             VALUES ($1, $2, 'fat_gerado', $3, $4, $5, NOW())`,
+            [tenant_id, request.params.id, live.fat_gerado?.toString() ?? null, d.fat_gerado.toString(), sub]
+          )
+        }
+        if (d.manual_gmv !== undefined && d.manual_gmv !== live.manual_gmv) {
+          await db.query(
+            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em)
+             VALUES ($1, $2, 'manual_gmv', $3, $4, $5, NOW())`,
+            [tenant_id, request.params.id, live.manual_gmv?.toString() ?? null, d.manual_gmv.toString(), sub]
+          )
         }
 
         if ('apresentador2_id' in d) {
@@ -931,6 +952,57 @@ export async function livesRoutes(app) {
         await db.query('ROLLBACK')
         throw error
       }
+    })
+  })
+
+  // PATCH /v1/lives/:id/publicar — altera status_publicacao de live
+  app.patch('/v1/lives/:id/publicar', { preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'operacional'])] }, async (request, reply) => {
+    const parsed = publicarSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id, sub, papel } = request.user
+    const { status_publicacao, motivo } = parsed.data
+
+    return app.withTenant(tenant_id, async (db) => {
+      const liveQ = await db.query(
+        `SELECT id, status_publicacao FROM lives WHERE id = $1`,
+        [request.params.id]
+      )
+      const live = liveQ.rows[0]
+      if (!live) return reply.code(404).send({ error: 'Live não encontrada' })
+
+      const resultado = await db.query(
+        `UPDATE lives SET status_publicacao = $1 WHERE id = $2
+         RETURNING id, status_publicacao`,
+        [status_publicacao, request.params.id]
+      )
+
+      // Registra na auditoria se existir
+      app.audit?.log?.(request, {
+        action: 'lives.publicar',
+        entity_type: 'live',
+        entity_id: request.params.id,
+        metadata: { status_publicacao, motivo, alterado_por: sub, papel }
+      })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+      return resultado.rows[0]
+    })
+  })
+
+  // GET /v1/lives/:id/historico-gmv — retorna histórico de alterações de GMV
+  app.get('/v1/lives/:id/historico-gmv', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT campo, valor_anterior, valor_novo, motivo, alterado_em,
+                u.nome AS alterado_por_nome
+         FROM live_metric_revisions r
+         LEFT JOIN users u ON u.id = r.alterado_por
+         WHERE r.live_id = $1 AND r.tenant_id = $2
+         ORDER BY r.alterado_em DESC`,
+        [request.params.id, tenant_id]
+      )
+      return { historico: result.rows }
     })
   })
 }

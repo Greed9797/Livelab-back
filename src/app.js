@@ -209,16 +209,27 @@ export async function buildApp(opts = {}) {
     const status = isAppError ? error.statusCode : (error.statusCode ?? 500)
     const shouldReport = status >= 500 || (isAppError && error.reportable === true)
 
+    // Contexto estruturado com tenant, request.id, papel
+    const errorContext = {
+      err: error,
+      request_id: request.id,
+      tenant_id: request.user?.tenant_id,
+      papel: request.user?.papel,
+      sentryTag: isAppError ? error.sentryTag : undefined,
+    }
+
     if (status >= 500) {
-      request.log.error({ err: error }, 'Unhandled error')
+      request.log.error(errorContext, 'Unhandled error')
     } else if (isAppError && error.reportable) {
-      request.log.warn({ err: error, sentryTag: error.sentryTag }, 'Reportable AppError')
+      request.log.warn(errorContext, 'Reportable AppError')
     }
 
     if (shouldReport && process.env.SENTRY_DSN) {
       Sentry.withScope((scope) => {
         scope.setTag('route', request.routeOptions?.url ?? request.url)
         scope.setTag('method', request.method)
+        scope.setTag('request_id', request.id)
+        if (request.user?.tenant_id) scope.setTag('tenant_id', String(request.user.tenant_id))
         if (isAppError) scope.setTag('error_class', error.sentryTag)
         scope.setUser(request.user ? { id: request.user.sub, papel: request.user.papel } : undefined)
         Sentry.captureException(error)

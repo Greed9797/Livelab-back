@@ -106,25 +106,27 @@ export async function applyMigration(client, fileName) {
   const requiresNoTransaction = /\bCONCURRENTLY\b/i.test(sql)
   console.log(`[migrations] Aplicando: ${fileName}`)
 
-  if (requiresNoTransaction) {
-    try {
+  // CREATE INDEX CONCURRENTLY não pode rodar dentro de transação
+  // Usa regex para detectar a palavra exata e evitar falsos positivos
+  const needsNoTransaction = /\bCONCURRENTLY\b/i.test(sql)
+
+  try {
+    if (needsNoTransaction) {
+      // Executar migration sem transação
       await client.query(sql)
       await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
-      console.log(`[migrations] ✅ ${fileName}`)
-      return
-    } catch (err) {
-      throw new Error(`[migrations] ❌ Falha em ${fileName}: ${err.message}`)
+    } else {
+      // Executar migration com BEGIN/COMMIT (transacional)
+      await client.query('BEGIN')
+      await client.query(sql)
+      await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
+      await client.query('COMMIT')
     }
-  }
-
-  await client.query('BEGIN')
-  try {
-    await client.query(sql)
-    await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
-    await client.query('COMMIT')
     console.log(`[migrations] ✅ ${fileName}`)
   } catch (err) {
-    await client.query('ROLLBACK')
+    if (!needsNoTransaction) {
+      await client.query('ROLLBACK')
+    }
     throw new Error(`[migrations] ❌ Falha em ${fileName}: ${err.message}`)
   }
 }

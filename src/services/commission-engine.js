@@ -138,42 +138,50 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
       comissao_apresentadora = gmvNum * (faixaPct / 100)
     }
 
-    // 6. Upsert idempotente em vendas_atribuidas
-    const existing = await db.query(
-      `SELECT id, status_aprovacao FROM vendas_atribuidas
-       WHERE tenant_id = $1::uuid AND origem = 'live' AND origem_id = $2::uuid
-         AND COALESCE(apresentadora_id, $3::uuid) = COALESCE($4::uuid, $3::uuid)
-       LIMIT 1`,
-      [tenantId, liveId, NIL_UUID, apresentadoraId],
+    // 6. Upsert atômico em vendas_atribuidas — evita race condition entre processos paralelos.
+    //    ON CONFLICT usa idx_vendas_atribuidas_origem_unique (tenant_id, origem, origem_id,
+    //    COALESCE(apresentadora_id, NIL_UUID)). Registros já aprovados não são recalculados.
+    const upsert = await db.query(
+      `INSERT INTO vendas_atribuidas
+         (tenant_id, origem, origem_id, marca_id, apresentadora_id, data,
+          gmv, pedidos, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
+          status_aprovacao)
+       VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,$9,$10,'pendente_aprovacao')
+       ON CONFLICT ON CONSTRAINT idx_vendas_atribuidas_origem_unique
+       DO UPDATE SET
+           marca_id               = EXCLUDED.marca_id,
+           data                   = EXCLUDED.data,
+           gmv                    = EXCLUDED.gmv,
+           comissao_apresentadora = EXCLUDED.comissao_apresentadora,
+           comissao_franquia      = EXCLUDED.comissao_franquia,
+           comissao_franqueadora  = EXCLUDED.comissao_franqueadora,
+           status_aprovacao       = 'pendente_aprovacao',
+           status_motivo          = NULL,
+           atualizado_em          = NOW()
+       WHERE vendas_atribuidas.status_aprovacao != 'aprovada'
+       RETURNING *`,
+      [
+        tenantId, liveId, live.marca_id, apresentadoraId, dataLive,
+        gmvNum, 0, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
+      ],
     )
 
+    // Se o UPDATE foi suprimido (registro já aprovado), a query retorna 0 linhas.
+    // Nesse caso buscamos o registro existente para retornar ao chamador.
     let row
-    if (existing.rows[0]) {
-      if (existing.rows[0].status_aprovacao === 'aprovada') {
-        resultados.push(existing.rows[0])
-        continue
-      }
-      const upd = await db.query(
-        `UPDATE vendas_atribuidas
-         SET marca_id = $1, apresentadora_id = $2, data = $3, gmv = $4,
-             comissao_apresentadora = $5, comissao_franquia = $6, comissao_franqueadora = $7,
-             status_aprovacao = 'pendente_aprovacao', status_motivo = NULL, atualizado_em = NOW()
-         WHERE id = $8 AND tenant_id = $9::uuid RETURNING *`,
-        [live.marca_id, apresentadoraId, dataLive, gmvNum,
-         comissao_apresentadora, comissao_franquia, comissao_franqueadora,
-         existing.rows[0].id, tenantId],
-      )
-      row = upd.rows[0]
+    if (upsert.rows[0]) {
+      row = upsert.rows[0]
     } else {
-      const ins = await db.query(
-        `INSERT INTO vendas_atribuidas
-           (tenant_id, origem, origem_id, marca_id, apresentadora_id, data, gmv, pedidos,
-            comissao_apresentadora, comissao_franquia, comissao_franqueadora, status_aprovacao)
-         VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,$9,$10,'pendente_aprovacao') RETURNING *`,
-        [tenantId, liveId, live.marca_id, apresentadoraId, dataLive,
-         gmvNum, 0, comissao_apresentadora, comissao_franquia, comissao_franqueadora],
+      const existingQ = await db.query(
+        `SELECT * FROM vendas_atribuidas
+         WHERE tenant_id = $1::uuid
+           AND origem = 'live'
+           AND origem_id = $2::uuid
+           AND COALESCE(apresentadora_id, $3::uuid) = COALESCE($4::uuid, $3::uuid)
+         LIMIT 1`,
+        [tenantId, liveId, NIL_UUID, apresentadoraId],
       )
-      row = ins.rows[0]
+      row = existingQ.rows[0]
     }
     resultados.push(row)
   }

@@ -135,14 +135,16 @@ export async function cabinesRoutes(app) {
                 ct.ativado_em,
                 ct.criado_em
          FROM contratos ct
-         JOIN clientes cl ON cl.id = ct.cliente_id
-         WHERE ct.status = 'ativo'
+         JOIN clientes cl ON cl.id = ct.cliente_id AND cl.tenant_id = ct.tenant_id
+         WHERE ct.tenant_id = $1::uuid
+           AND ct.status = 'ativo'
            AND NOT EXISTS (
              SELECT 1
              FROM cabines cb
              WHERE cb.contrato_id = ct.id
            )
-         ORDER BY ct.ativado_em DESC NULLS LAST, ct.criado_em DESC`
+         ORDER BY ct.ativado_em DESC NULLS LAST, ct.criado_em DESC`,
+        [tenant_id]
       )
 
       return result.rows.map(r => ({
@@ -185,8 +187,8 @@ export async function cabinesRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const cabineResult = await db.query(
-        `SELECT id, status, live_atual_id, contrato_id FROM cabines WHERE id = $1`,
-        [request.params.id]
+        `SELECT id, status, live_atual_id, contrato_id FROM cabines WHERE id = $1 AND tenant_id = $2`,
+        [request.params.id, tenant_id]
       )
       const cabine = cabineResult.rows[0]
 
@@ -230,11 +232,11 @@ export async function cabinesRoutes(app) {
     if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
     const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(', ')
-    const values = [request.params.id, ...fields.map((f) => f === 'tamanho' ? null : updates[f])]
+    const values = [request.params.id, ...fields.map((f) => f === 'tamanho' ? null : updates[f]), tenant_id]
 
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `UPDATE cabines SET ${setClauses} WHERE id = $1 RETURNING id, nome, tamanho, descricao, numero`,
+        `UPDATE cabines SET ${setClauses} WHERE id = $1 AND tenant_id = $${fields.length + 2} RETURNING id, nome, tamanho, descricao, numero`,
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cabine não encontrada' })
@@ -258,9 +260,9 @@ export async function cabinesRoutes(app) {
         const cabineQ = await db.query(
           `SELECT id, numero, status, contrato_id, live_atual_id
            FROM cabines
-           WHERE id = $1
+           WHERE id = $1 AND tenant_id = $2
            FOR UPDATE`,
-          [request.params.id]
+          [request.params.id, tenant_id]
         )
         const cabine = cabineQ.rows[0]
 
@@ -299,9 +301,9 @@ export async function cabinesRoutes(app) {
           const contratoQ = await db.query(
             `SELECT id, cliente_id, status
              FROM contratos
-             WHERE id = $1
+             WHERE id = $1 AND tenant_id = $2
              FOR UPDATE`,
-            [contrato_id]
+            [contrato_id, tenant_id]
           )
           const contrato = contratoQ.rows[0]
 
@@ -318,9 +320,9 @@ export async function cabinesRoutes(app) {
           const vinculoExistenteQ = await db.query(
             `SELECT id, numero
              FROM cabines
-             WHERE contrato_id = $1 AND id != $2
+             WHERE contrato_id = $1 AND id != $2 AND tenant_id = $3
              LIMIT 1`,
-            [contrato_id, request.params.id]
+            [contrato_id, request.params.id, tenant_id]
           )
 
           if (vinculoExistenteQ.rows[0]) {
@@ -333,11 +335,11 @@ export async function cabinesRoutes(app) {
           const contratoQ = await db.query(
             `SELECT id, cliente_id, status
              FROM contratos
-             WHERE cliente_id = $1 AND status = 'ativo'
+             WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativo'
              ORDER BY ativado_em DESC NULLS LAST, criado_em DESC
              LIMIT 1
              FOR UPDATE`,
-            [cliente_id]
+            [cliente_id, tenant_id]
           )
           const contrato = contratoQ.rows[0]
 
@@ -345,9 +347,9 @@ export async function cabinesRoutes(app) {
             const vinculoExistenteQ = await db.query(
               `SELECT id, numero
                FROM cabines
-               WHERE contrato_id = $1 AND id != $2
+               WHERE contrato_id = $1 AND id != $2 AND tenant_id = $3
                LIMIT 1`,
-              [contrato.id, request.params.id]
+              [contrato.id, request.params.id, tenant_id]
             )
             // Se o contrato encontrado já está em outra cabine, ignora vínculo mas ainda reserva
             if (!vinculoExistenteQ.rows[0]) {
@@ -405,9 +407,9 @@ export async function cabinesRoutes(app) {
         const cabineQ = await db.query(
           `SELECT id, numero, status, contrato_id, live_atual_id
            FROM cabines
-           WHERE id = $1
+           WHERE id = $1 AND tenant_id = $2
            FOR UPDATE`,
-          [request.params.id]
+          [request.params.id, tenant_id]
         )
         const cabine = cabineQ.rows[0]
 
@@ -463,7 +465,7 @@ export async function cabinesRoutes(app) {
     const dias = isNaN(raw) ? 90 : Math.min(Math.max(raw, 1), 365)
 
     return app.withTenant(tenant_id, async (db) => {
-      const cabineResult = await db.query(`SELECT id FROM cabines WHERE id = $1`, [cabineId])
+      const cabineResult = await db.query(`SELECT id FROM cabines WHERE id = $1 AND tenant_id = $2`, [cabineId, tenant_id])
       if (cabineResult.rowCount === 0) {
         return reply.code(404).send({ error: 'Cabine não encontrada' })
       }
@@ -471,14 +473,15 @@ export async function cabinesRoutes(app) {
       const topClientesQ = await db.query(`
         SELECT cl.nome, SUM(l.fat_gerado) as fat_total, COUNT(l.id) as total_lives
         FROM lives l
-        JOIN clientes cl ON cl.id = l.cliente_id
+        JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
         WHERE l.cabine_id = $1
+          AND l.tenant_id = $3::uuid
           AND l.status = 'encerrada'
           AND l.iniciado_em > NOW() - ($2 * interval '1 day')
         GROUP BY cl.id, cl.nome
         ORDER BY fat_total DESC
         LIMIT 5
-      `, [cabineId, dias])
+      `, [cabineId, dias, tenant_id])
 
       const melhoresHorariosQ = await db.query(`
         SELECT
@@ -488,11 +491,12 @@ export async function cabinesRoutes(app) {
           SUM(fat_gerado) AS gmv_total
         FROM lives
         WHERE cabine_id = $1
+          AND tenant_id = $3::uuid
           AND status = 'encerrada'
           AND iniciado_em > NOW() - ($2 * interval '1 day')
         GROUP BY hora
         ORDER BY gmv_medio DESC
-      `, [cabineId, dias])
+      `, [cabineId, dias, tenant_id])
 
       const desempenhoMensalQ = await db.query(`
         SELECT
@@ -501,11 +505,11 @@ export async function cabinesRoutes(app) {
           SUM(fat_gerado) as fat_total,
           COUNT(id) as total_lives
         FROM lives
-        WHERE cabine_id = $1 AND status = 'encerrada'
+        WHERE cabine_id = $1 AND tenant_id = $2::uuid AND status = 'encerrada'
         GROUP BY ano, mes
         ORDER BY ano DESC, mes DESC
         LIMIT 6
-      `, [cabineId])
+      `, [cabineId, tenant_id])
 
       const desempenho = desempenhoMensalQ.rows
       let crescimento_pct = 0
@@ -520,8 +524,8 @@ export async function cabinesRoutes(app) {
 
       const totaisQ = await db.query(`
         SELECT COUNT(id) as total_lives, SUM(fat_gerado) as gmv_total
-        FROM lives WHERE cabine_id = $1 AND status = 'encerrada'
-      `, [cabineId])
+        FROM lives WHERE cabine_id = $1 AND tenant_id = $2::uuid AND status = 'encerrada'
+      `, [cabineId, tenant_id])
 
       const livesRecentesQ = await db.query(`
         SELECT
@@ -537,13 +541,14 @@ export async function cabinesRoutes(app) {
           cl.nome AS cliente_nome,
           EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 60 AS duracao_minutos
         FROM lives l
-        LEFT JOIN clientes cl ON cl.id = l.cliente_id
+        LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
         WHERE l.cabine_id = $1
+          AND l.tenant_id = $3::uuid
           AND l.status = 'encerrada'
           AND l.iniciado_em > NOW() - ($2 * interval '1 day')
         ORDER BY l.iniciado_em DESC
         LIMIT 50
-      `, [cabineId, dias])
+      `, [cabineId, dias, tenant_id])
 
       return {
         top_clientes: topClientesQ.rows.map((r) => ({
@@ -592,7 +597,7 @@ export async function cabinesRoutes(app) {
     const cabineId = request.params.id
 
     return app.withTenant(tenant_id, async (db) => {
-      const cabineQ = await db.query(`SELECT live_atual_id, status FROM cabines WHERE id = $1`, [cabineId])
+      const cabineQ = await db.query(`SELECT live_atual_id, status FROM cabines WHERE id = $1 AND tenant_id = $2`, [cabineId, tenant_id])
       const cabine = cabineQ.rows[0]
 
       if (!cabine) return reply.code(404).send({ error: 'Cabine não encontrada' })
@@ -601,9 +606,9 @@ export async function cabinesRoutes(app) {
       // (não depende de cabine.status nem de cabine.live_atual_id estar setado)
       const liveQSearch = await db.query(`
         SELECT id FROM lives
-        WHERE cabine_id = $1 AND status = 'em_andamento'
+        WHERE cabine_id = $1 AND tenant_id = $2 AND status = 'em_andamento'
         ORDER BY iniciado_em DESC LIMIT 1
-      `, [cabineId])
+      `, [cabineId, tenant_id])
 
       let liveId = liveQSearch.rows[0]?.id
       request.log?.info(
@@ -615,8 +620,8 @@ export async function cabinesRoutes(app) {
         // Nenhuma live em_andamento para essa cabine — auto-corrige status se estava ao_vivo sem live
         if (cabine.status === 'ao_vivo' || cabine.live_atual_id) {
           await db.query(
-            `UPDATE cabines SET status = 'disponivel', live_atual_id = NULL WHERE id = $1`,
-            [cabineId]
+            `UPDATE cabines SET status = 'disponivel', live_atual_id = NULL WHERE id = $1 AND tenant_id = $2`,
+            [cabineId, tenant_id]
           )
           request.log?.warn({ cabineId }, 'live-atual: cabine estava ao_vivo sem live em_andamento → normalizada para disponivel')
         }
@@ -626,8 +631,8 @@ export async function cabinesRoutes(app) {
       // Se achou live mas cabine não estava linkada, sincroniza
       if (cabine.live_atual_id !== liveId || cabine.status !== 'ao_vivo') {
         await db.query(
-          `UPDATE cabines SET live_atual_id = $1, status = 'ao_vivo' WHERE id = $2`,
-          [liveId, cabineId]
+          `UPDATE cabines SET live_atual_id = $1, status = 'ao_vivo' WHERE id = $2 AND tenant_id = $3`,
+          [liveId, cabineId, tenant_id]
         )
         request.log?.info({ cabineId, liveId }, 'live-atual: cabine sincronizada com live em andamento')
       }
@@ -639,12 +644,12 @@ export async function cabinesRoutes(app) {
                cl.nome AS cliente_nome,
                ct.tiktok_username
         FROM lives l
-        LEFT JOIN cabines c ON c.id = l.cabine_id
-        LEFT JOIN users u ON u.id = l.apresentador_id
-        LEFT JOIN clientes cl ON cl.id = l.cliente_id
-        LEFT JOIN contratos ct ON ct.id = c.contrato_id
-        WHERE l.id = $1
-      `, [liveId])
+        LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+        LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
+        LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
+        LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
+        WHERE l.id = $1 AND l.tenant_id = $2
+      `, [liveId, tenant_id])
       const liveData = liveQ.rows[0]
 
       // Defesa: se por algum motivo a live sumiu entre o SELECT anterior e este,
@@ -658,9 +663,9 @@ export async function cabinesRoutes(app) {
         SELECT viewer_count, total_viewers, total_orders, gmv,
                likes_count, comments_count, gifts_diamonds, shares_count, captured_at
         FROM live_snapshots
-        WHERE live_id = $1
+        WHERE live_id = $1 AND tenant_id = $2
         ORDER BY captured_at DESC LIMIT 1
-      `, [liveId])
+      `, [liveId, tenant_id])
       const snapshot = snapshotQ.rows[0] || {
         viewer_count: 0, total_viewers: 0, total_orders: 0, gmv: 0,
         likes_count: 0, comments_count: 0, gifts_diamonds: 0, shares_count: 0,
@@ -669,9 +674,9 @@ export async function cabinesRoutes(app) {
       const topProdutoQ = await db.query(`
         SELECT produto_nome, quantidade, valor_total
         FROM live_products
-        WHERE live_id = $1
+        WHERE live_id = $1 AND tenant_id = $2
         ORDER BY quantidade DESC LIMIT 1
-      `, [liveId])
+      `, [liveId, tenant_id])
       const topProduto = topProdutoQ.rows[0]
 
       const iniciadoEm = new Date(liveData.iniciado_em)
@@ -726,9 +731,9 @@ export async function cabinesRoutes(app) {
       const { rows } = await db.query(
         `SELECT c.live_atual_id, l.apresentador_id
          FROM cabines c
-         LEFT JOIN lives l ON l.id = c.live_atual_id
-         WHERE c.id = $1`,
-        [cabineId]
+         LEFT JOIN lives l ON l.id = c.live_atual_id AND l.tenant_id = c.tenant_id
+         WHERE c.id = $1 AND c.tenant_id = $2`,
+        [cabineId, tenant_id]
       )
       if (rows.length === 0) {
         return reply.code(404).send({ error: 'Cabine não encontrada' })
@@ -820,9 +825,9 @@ export async function cabinesRoutes(app) {
         const cabineQ = await db.query(
           `SELECT id, numero, status, contrato_id, live_atual_id
            FROM cabines
-           WHERE id = $1
+           WHERE id = $1 AND tenant_id = $2
            FOR UPDATE`,
-          [request.params.id]
+          [request.params.id, tenant_id]
         )
         const cabine = cabineQ.rows[0]
 

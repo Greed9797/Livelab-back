@@ -109,7 +109,7 @@ export async function comissoesRoutes(app) {
   })
 
   // GET /v1/comissoes/pendentes — lista comissões aguardando aprovação
-  app.get('/v1/comissoes/pendentes', { preHandler: readAccess }, async (request) => {
+  app.get('/v1/comissoes/pendentes', { preHandler: writeAccess }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const { values, where } = buildComissaoFilters(request.query, tenant_id)

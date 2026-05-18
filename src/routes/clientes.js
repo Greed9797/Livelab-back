@@ -312,8 +312,8 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE clientes SET ${set}, atualizado_em = NOW()
-         WHERE id = $${keys.length + 1} RETURNING id, nome, status, onboarding_step, tiktok_username`,
-        [...vals, request.params.id]
+         WHERE id = $${keys.length + 1} AND tenant_id = $${keys.length + 2} RETURNING id, nome, status, onboarding_step, tiktok_username`,
+        [...vals, request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       // Log status change separately if applicable

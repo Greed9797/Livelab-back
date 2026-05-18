@@ -3,6 +3,13 @@ import { READ_AGENDA, WRITE_AGENDA } from '../config/role_groups.js'
 
 const activeAgendaStatuses = ['planejado', 'confirmado', 'ao_vivo']
 
+const recorrenciaSchema = z.object({
+  frequencia: z.enum(['diaria', 'semanal', 'quinzenal', 'mensal']),
+  dias_semana: z.array(z.number().int().min(0).max(6)).optional(),
+  ate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  total_ocorrencias: z.number().int().min(1).max(52).optional(),
+}).optional()
+
 const agendaBaseSchema = z.object({
   tipo: z.enum(['live', 'gravacao_video']),
   marca_id: z.string().uuid(),
@@ -13,16 +20,23 @@ const agendaBaseSchema = z.object({
   recorrencia_rule: z.string().nullable().optional(),
   recorrencia_origem_id: z.string().uuid().nullable().optional(),
   observacoes: z.string().nullable().optional(),
+  recorrencia: recorrenciaSchema,
 })
 
 const agendaSchema = agendaBaseSchema.refine((data) => new Date(data.data_fim) > new Date(data.data_inicio), {
   message: 'data_fim deve ser maior que data_inicio',
 })
 
-const agendaPatchSchema = agendaBaseSchema.partial().refine((data) => {
+const agendaPatchSchema = agendaBaseSchema.partial().extend({
+  modo_recorrencia: z.enum(['apenas_este', 'este_e_proximos', 'todos']).optional().default('apenas_este'),
+}).refine((data) => {
   if (!data.data_inicio || !data.data_fim) return true
   return new Date(data.data_fim) > new Date(data.data_inicio)
 }, { message: 'data_fim deve ser maior que data_inicio' })
+
+const agendaDeleteQuerySchema = z.object({
+  modo_recorrencia: z.enum(['apenas_este', 'este_e_proximos', 'todos']).optional().default('apenas_este'),
+})
 
 async function ensureAgendaRefs(db, reply, { tenantId, marcaId, cabineId }) {
   if (marcaId) {
@@ -44,8 +58,8 @@ async function ensureAgendaRefs(db, reply, { tenantId, marcaId, cabineId }) {
   return true
 }
 
-async function hasAgendaOverlap(db, { tenantId, cabineId, dataInicio, dataFim, excludeId }) {
-  if (!cabineId) return false
+async function getConflictingEvents(db, { tenantId, cabineId, dataInicio, dataFim, excludeId }) {
+  if (!cabineId) return []
 
   const values = [tenantId, cabineId, dataInicio, dataFim, activeAgendaStatuses]
   let extra = ''
@@ -55,18 +69,105 @@ async function hasAgendaOverlap(db, { tenantId, cabineId, dataInicio, dataFim, e
   }
 
   const result = await db.query(
-    `SELECT id
+    `SELECT id, tipo, marca_id, data_inicio, data_fim, status
      FROM agenda_eventos
      WHERE tenant_id = $1::uuid
        AND cabine_id = $2::uuid
        AND status = ANY($5::text[])
        AND data_inicio < $4::timestamptz
        AND data_fim > $3::timestamptz
-       ${extra}
-     LIMIT 1`,
+       ${extra}`,
     values,
   )
-  return result.rowCount > 0
+  return result.rows
+}
+
+async function hasAgendaOverlap(db, params) {
+  const rows = await getConflictingEvents(db, params)
+  return rows.length > 0
+}
+
+/**
+ * Calcula datas de ocorrências recorrentes a partir do evento original.
+ * Retorna array de objetos { data_inicio, data_fim } para cada ocorrência futura
+ * (exclui a data do evento principal).
+ */
+function calcularRecorrencias(dataInicio, dataFim, recorrencia) {
+  const { frequencia, dias_semana, ate, total_ocorrencias } = recorrencia
+
+  const inicio = new Date(dataInicio)
+  const fim = new Date(dataFim)
+  const duracao = fim.getTime() - inicio.getTime()
+
+  // Data limite: ate fornecido, ou 90 dias a partir da data início
+  const dataLimite = ate
+    ? new Date(ate + 'T23:59:59Z')
+    : new Date(inicio.getTime() + 90 * 24 * 60 * 60 * 1000)
+
+  const maxOcorrencias = total_ocorrencias ?? 52
+
+  const ocorrencias = []
+  let cursor = new Date(inicio)
+
+  // Avança cursor para a próxima ocorrência sem incluir a data original
+  function proximaData(d) {
+    const next = new Date(d)
+    switch (frequencia) {
+      case 'diaria':
+        next.setDate(next.getDate() + 1)
+        break
+      case 'semanal':
+        next.setDate(next.getDate() + 7)
+        break
+      case 'quinzenal':
+        next.setDate(next.getDate() + 14)
+        break
+      case 'mensal':
+        next.setMonth(next.getMonth() + 1)
+        break
+    }
+    return next
+  }
+
+  cursor = proximaData(cursor)
+
+  while (cursor <= dataLimite && ocorrencias.length < maxOcorrencias) {
+    // Para semanal/quinzenal com dias_semana, gera todas as ocorrências nos dias especificados dentro da semana
+    if ((frequencia === 'semanal' || frequencia === 'quinzenal') && dias_semana && dias_semana.length > 0) {
+      // Encontra a segunda-feira da semana atual do cursor
+      const semanaBase = new Date(cursor)
+      // Gera ocorrências para cada dia da semana especificado
+      const diasOrdenados = [...dias_semana].sort((a, b) => a - b)
+      for (const dia of diasOrdenados) {
+        // Calcula a data do dia da semana dentro da semana do cursor
+        const diff = dia - semanaBase.getDay()
+        const dataDia = new Date(semanaBase)
+        dataDia.setDate(semanaBase.getDate() + diff)
+        // Mantém o horário original
+        dataDia.setHours(inicio.getHours(), inicio.getMinutes(), inicio.getSeconds(), 0)
+
+        if (dataDia > inicio && dataDia <= dataLimite && ocorrencias.length < maxOcorrencias) {
+          const novoInicio = new Date(dataDia)
+          const novoFim = new Date(novoInicio.getTime() + duracao)
+          ocorrencias.push({
+            data_inicio: novoInicio.toISOString(),
+            data_fim: novoFim.toISOString(),
+          })
+        }
+      }
+      cursor = proximaData(cursor)
+    } else {
+      const novoInicio = new Date(cursor)
+      const novoFim = new Date(novoInicio.getTime() + duracao)
+      ocorrencias.push({
+        data_inicio: novoInicio.toISOString(),
+        data_fim: novoFim.toISOString(),
+      })
+      cursor = proximaData(cursor)
+    }
+  }
+
+  return ocorrencias
 }
 
 export async function agendaRoutes(app) {
@@ -109,26 +210,56 @@ export async function agendaRoutes(app) {
     })
   })
 
+  // GET /v1/agenda/conflitos — verifica conflitos para um intervalo/cabine
+  app.get('/v1/agenda/conflitos', { preHandler: readAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { cabine_id, data_inicio, data_fim, exclude_id } = request.query ?? {}
+
+    if (!cabine_id || !data_inicio || !data_fim) {
+      return reply.code(400).send({ error: 'cabine_id, data_inicio e data_fim são obrigatórios' })
+    }
+
+    return app.withTenant(tenant_id, async (db) => {
+      const conflitos = await getConflictingEvents(db, {
+        tenantId: tenant_id,
+        cabineId: cabine_id,
+        dataInicio: data_inicio,
+        dataFim: data_fim,
+        excludeId: exclude_id,
+      })
+      return { conflitos, total: conflitos.length }
+    })
+  })
+
   app.post('/v1/agenda', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = agendaSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub } = request.user
-    const d = parsed.data
+    const { recorrencia, ...d } = parsed.data
+
     return app.withTenant(tenant_id, async (db) => {
       const refsOk = await ensureAgendaRefs(db, reply, { tenantId: tenant_id, marcaId: d.marca_id, cabineId: d.cabine_id })
       if (!refsOk) return reply
 
+      // Verifica conflito — cria mesmo assim, retorna aviso
+      let conflito = null
       if (d.cabine_id && activeAgendaStatuses.includes(d.status)) {
-        const overlap = await hasAgendaOverlap(db, {
+        const eventosConflitantes = await getConflictingEvents(db, {
           tenantId: tenant_id,
           cabineId: d.cabine_id,
           dataInicio: d.data_inicio,
           dataFim: d.data_fim,
         })
-        if (overlap) return reply.code(409).send({ error: 'Já existe evento ativo nesta cabine no horário informado' })
+        if (eventosConflitantes.length > 0) {
+          conflito = {
+            descricao: `Existe(m) ${eventosConflitantes.length} evento(s) ativo(s) nesta cabine no mesmo horário`,
+            eventos_conflitantes: eventosConflitantes,
+          }
+        }
       }
 
+      // Cria o evento principal
       const result = await db.query(
         `INSERT INTO agenda_eventos (
            tenant_id, tipo, marca_id, cabine_id, data_inicio, data_fim,
@@ -142,14 +273,48 @@ export async function agendaRoutes(app) {
           d.recorrencia_origem_id ?? null, d.observacoes ?? null, sub ?? null,
         ],
       )
-      return reply.code(201).send(result.rows[0])
+      const evento = result.rows[0]
+
+      // Processa recorrência se fornecida
+      let recorrentes = 0
+      if (recorrencia) {
+        const ocorrencias = calcularRecorrencias(d.data_inicio, d.data_fim, recorrencia)
+        const ruleJson = JSON.stringify({
+          frequencia: recorrencia.frequencia,
+          dias_semana: recorrencia.dias_semana,
+          ate: recorrencia.ate,
+        })
+
+        for (const ocorrencia of ocorrencias) {
+          await db.query(
+            `INSERT INTO agenda_eventos (
+               tenant_id, tipo, marca_id, cabine_id, data_inicio, data_fim,
+               status, recorrencia_rule, recorrencia_origem_id, observacoes, criado_por
+             )
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            [
+              tenant_id, d.tipo, d.marca_id, d.cabine_id ?? null,
+              ocorrencia.data_inicio, ocorrencia.data_fim,
+              d.status, ruleJson, evento.id,
+              d.observacoes ?? null, sub ?? null,
+            ],
+          )
+          recorrentes++
+        }
+      }
+
+      const response = { evento, recorrentes }
+      if (conflito) response.conflito = conflito
+
+      return reply.code(201).send(response)
     })
   })
 
   app.patch('/v1/agenda/:id', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = agendaPatchSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
-    const updates = parsed.data
+
+    const { modo_recorrencia = 'apenas_este', recorrencia: _recorrencia, ...updates } = parsed.data
     const fields = Object.keys(updates)
     if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
@@ -170,39 +335,118 @@ export async function agendaRoutes(app) {
       const refsOk = await ensureAgendaRefs(db, reply, { tenantId: tenant_id, marcaId: updates.marca_id, cabineId: updates.cabine_id })
       if (!refsOk) return reply
 
+      // Verifica conflito — retorna aviso, não bloqueia
+      let conflito = null
       if (next.cabine_id && activeAgendaStatuses.includes(next.status)) {
-        const overlap = await hasAgendaOverlap(db, {
+        const eventosConflitantes = await getConflictingEvents(db, {
           tenantId: tenant_id,
           cabineId: next.cabine_id,
           dataInicio: next.data_inicio,
           dataFim: next.data_fim,
           excludeId: request.params.id,
         })
-        if (overlap) return reply.code(409).send({ error: 'Já existe evento ativo nesta cabine no horário informado' })
+        if (eventosConflitantes.length > 0) {
+          conflito = {
+            descricao: `Existe(m) ${eventosConflitantes.length} evento(s) ativo(s) nesta cabine no mesmo horário`,
+            eventos_conflitantes: eventosConflitantes,
+          }
+        }
       }
 
-      const values = [request.params.id, tenant_id, ...fields.map((field) => updates[field])]
       const set = fields.map((field, index) => `${field} = $${index + 3}`).concat('atualizado_em = NOW()').join(', ')
+
+      // Atualiza o evento principal
+      const mainValues = [request.params.id, tenant_id, ...fields.map((field) => updates[field])]
       const result = await db.query(
         `UPDATE agenda_eventos SET ${set}
          WHERE id = $1 AND tenant_id = $2::uuid
          RETURNING *`,
-        values,
+        mainValues,
       )
-      return result.rows[0]
+      const evento = result.rows[0]
+
+      // Atualiza recorrentes conforme modo_recorrencia
+      let recurrentesAtualizados = 0
+      if (modo_recorrencia !== 'apenas_este') {
+        // Determina o recorrencia_origem_id para filtrar a série
+        const origemId = current.recorrencia_origem_id ?? current.id
+
+        // Monta: $1=tenant, $2=origemId, $3..$N=campos, $N+1=excludeId [, $N+2=data_inicio se este_e_proximos]
+        const recValues = [tenant_id, origemId, ...fields.map((field) => updates[field]), request.params.id]
+        const excludeIdx = recValues.length // posição do excludeId já inserido acima
+        const setRecorrentes = fields.map((field, index) => `${field} = $${index + 3}`).concat('atualizado_em = NOW()').join(', ')
+
+        let extraFilter = ''
+        if (modo_recorrencia === 'este_e_proximos') {
+          recValues.push(current.data_inicio)
+          extraFilter = `AND data_inicio >= $${recValues.length}::timestamptz`
+        }
+
+        const recResult = await db.query(
+          `UPDATE agenda_eventos SET ${setRecorrentes}
+           WHERE tenant_id = $1::uuid
+             AND recorrencia_origem_id = $2::uuid
+             AND id <> $${excludeIdx}::uuid
+             ${extraFilter}
+           RETURNING id`,
+          recValues,
+        )
+        recurrentesAtualizados = recResult.rowCount ?? 0
+      }
+
+      const response = { evento, recorrentes_atualizados: recurrentesAtualizados }
+      if (conflito) response.conflito = conflito
+
+      return response
     })
   })
 
   app.delete('/v1/agenda/:id', { preHandler: writeAccess }, async (request, reply) => {
+    const parsedQuery = agendaDeleteQuerySchema.safeParse(request.query ?? {})
+    const modo_recorrencia = parsedQuery.success ? parsedQuery.data.modo_recorrencia : 'apenas_este'
+
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `UPDATE agenda_eventos SET status = 'cancelado', atualizado_em = NOW()
-         WHERE id = $1 AND tenant_id = $2::uuid
-         RETURNING id`,
+      const currentQ = await db.query(
+        `SELECT * FROM agenda_eventos WHERE id = $1 AND tenant_id = $2::uuid`,
         [request.params.id, tenant_id],
       )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Evento não encontrado' })
+      const current = currentQ.rows[0]
+      if (!current) return reply.code(404).send({ error: 'Evento não encontrado' })
+
+      // Cancela o evento principal
+      await db.query(
+        `UPDATE agenda_eventos SET status = 'cancelado', atualizado_em = NOW()
+         WHERE id = $1 AND tenant_id = $2::uuid`,
+        [request.params.id, tenant_id],
+      )
+
+      // Cancela recorrentes conforme modo_recorrencia
+      let recurrentesCancelados = 0
+      if (modo_recorrencia !== 'apenas_este') {
+        const origemId = current.recorrencia_origem_id ?? current.id
+
+        // $1=tenant, $2=origemId, $3=excludeId [, $4=data_inicio se este_e_proximos]
+        const delValues = [tenant_id, origemId, request.params.id]
+        let extraFilter = ''
+
+        if (modo_recorrencia === 'este_e_proximos') {
+          delValues.push(current.data_inicio)
+          extraFilter = `AND data_inicio >= $4::timestamptz`
+        }
+
+        const recResult = await db.query(
+          `UPDATE agenda_eventos SET status = 'cancelado', atualizado_em = NOW()
+           WHERE tenant_id = $1::uuid
+             AND recorrencia_origem_id = $2::uuid
+             AND id <> $3::uuid
+             AND status <> 'cancelado'
+             ${extraFilter}`,
+          delValues,
+        )
+        recurrentesCancelados = recResult.rowCount ?? 0
+      }
+
       return reply.code(204).send()
     })
   })

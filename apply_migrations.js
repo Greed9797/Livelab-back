@@ -3,6 +3,8 @@ import fs from 'fs'
 import path from 'path'
 import 'dotenv/config'
 
+import { resolveDbSslConfig } from './src/utils/db-ssl.js'
+
 // Lista parte da 016 — migrations 001-015 foram aplicadas no banco original
 // e existem em migrations/ apenas como histórico. Para banco novo (fresh setup
 // dev/staging/restore), aplicar 001-015 manualmente antes deste script ou
@@ -120,7 +122,7 @@ export async function runMigrations(externalPool) {
     externalPool ??
     new pg.Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' },
+      ssl: resolveDbSslConfig(process.env.DATABASE_URL),
       max: 2,
     })
 

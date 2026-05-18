@@ -33,11 +33,11 @@ function createHomeQueryMock() {
     if (sql.includes('FROM live_requests lr')) {
       return { rows: [{ id: 'lr-1', data_solicitada: '2026-05-18', hora_inicio: '14:00', hora_fim: '16:00', cabine_numero: 2, cliente_nome: 'Marca B' }] }
     }
+    if (sql.includes('apresentadora_base.apresentadora_nome')) {
+      return { rows: [{ id: 'ap-1', apresentadora_nome: 'Edja', gmv: '800', lives: '1' }] }
+    }
     if (sql.includes('FROM agenda_eventos ae')) {
       return { rows: [{ id: 'ag-1', tipo: 'live', status: 'confirmado', data_inicio: '2026-05-18T14:00:00.000Z', data_fim: '2026-05-18T16:00:00.000Z', cabine_numero: 2, cabine_nome: 'Cabine 02', marca_nome: 'Marca B', cliente_nome: 'Cliente B', apresentadora_nome: 'Ana' }] }
-    }
-    if (sql.includes('u.nome AS apresentadora_nome')) {
-      return { rows: [{ id: 'user-1', apresentadora_nome: 'Ana', gmv: '800', lives: '1' }] }
     }
     if (sql.includes('SUM(valor_fixo)')) return { rows: [{ valor: '1000' }] }
     if (sql.includes('SUM(l.fat_gerado *')) return { rows: [{ valor: '100' }] }
@@ -109,7 +109,7 @@ describe('home dashboard', () => {
     expect(payload.ticket_medio_live_mes).toBe(600.25)
     expect(payload.variacao_gmv_mes_anterior_pct).toBe(20.1)
     expect(payload.agenda_hoje).toHaveLength(1)
-    expect(payload.ranking_apresentadoras_hoje[0]).toMatchObject({ nome: 'Ana', gmv: 800, lives: 1 })
+    expect(payload.ranking_apresentadoras_hoje[0]).toMatchObject({ nome: 'Edja', gmv: 800, lives: 1 })
 
     const sqls = queryMock.mock.calls.map(([sql]) => sql)
     const ocupacaoSql = sqls.find((sql) => sql.includes('COUNT(*) FILTER') && sql.includes('FROM cabines'))
@@ -121,6 +121,11 @@ describe('home dashboard', () => {
 
     const proximasSql = sqls.find((sql) => sql.includes('SELECT lr.id, lr.data_solicitada') && sql.includes('FROM live_requests lr'))
     expect(proximasSql).toContain('lr.tenant_id = current_setting')
+    const agendaSql = sqls.find((sql) => sql.includes('SELECT ae.id, ae.tipo') && sql.includes('FROM agenda_eventos ae'))
+    expect(agendaSql).toContain('a_evento.id = ae.apresentadora_id')
+    const rankingApSql = sqls.find((sql) => sql.includes('apresentadora_base.apresentadora_nome'))
+    expect(rankingApSql).toContain('live_apresentadoras_v2')
+    expect(rankingApSql).toContain('u.papel IN')
     expect(queryMock.mock.calls.some(([, params]) => Array.isArray(params) && params.includes('tenant-a'))).toBe(true)
 
     await app.close()

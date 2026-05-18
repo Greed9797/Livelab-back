@@ -76,6 +76,33 @@ describe('POST /v1/cabines', () => {
   })
 })
 
+describe('DELETE /v1/cabines/:id', () => {
+  it('soft-deletes a cabine with history only after CABINE confirmation', async () => {
+    const cabineId = '11111111-1111-4111-8111-111111111111'
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('SELECT id, status')) {
+        return { rows: [{ id: cabineId, status: 'disponivel', live_atual_id: null, contrato_id: null }] }
+      }
+      if (sql.includes('FROM lives')) return { rows: [{ id: 'live-1' }], rowCount: 1 }
+      if (sql.includes('FROM live_requests')) return { rows: [], rowCount: 0 }
+      if (sql.includes('FROM agenda_eventos')) return { rows: [], rowCount: 0 }
+      if (sql.includes('UPDATE cabines')) return { rows: [{ id: cabineId }], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+
+    const { app } = buildApp({ queryMock })
+    await app.register(cabinesRoutes)
+
+    const blocked = await app.inject({ method: 'DELETE', url: `/v1/cabines/${cabineId}` })
+    expect(blocked.statusCode).toBe(409)
+
+    const confirmed = await app.inject({ method: 'DELETE', url: `/v1/cabines/${cabineId}?confirmacao=CABINE` })
+    expect(confirmed.statusCode).toBe(200)
+    expect(confirmed.json()).toMatchObject({ ok: true, soft_deleted: true })
+    expect(queryMock.mock.calls.some(([sql]) => sql.includes('ativo = false'))).toBe(true)
+  })
+})
+
 describe('POST /v1/lives/manual', () => {
   it('creates a closed live and returns 201 with id', async () => {
     const liveId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
@@ -127,6 +154,53 @@ describe('POST /v1/lives/manual', () => {
     expect(insertArgs[8]).toBeCloseTo(200)
   })
 
+  it('allows manual affiliate live using marca_id without cliente_id', async () => {
+    const marcaId = '55555555-5555-4555-8555-555555555555'
+    let insertArgs = null
+    let vendaArgs = null
+    const queryMock = vi.fn(async (sql, args = []) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (sql.includes('FROM marcas') && sql.includes('WHERE id = $1')) {
+        return { rows: [{ id: marcaId, cliente_id: null, tipo: 'afiliada' }] }
+      }
+      if (sql.includes('FROM cabines')) return { rows: [{ comissao_pct: '0' }] }
+      if (sql.includes('SELECT user_id FROM apresentadoras')) return { rows: [{ user_id: null }] }
+      if (sql.includes('SELECT id FROM lives')) return { rows: [] }
+      if (sql.includes('INSERT INTO lives')) {
+        insertArgs = args
+        return { rows: [{ id: 'live-afiliada' }] }
+      }
+      if (sql.includes('INSERT INTO live_apresentadoras_v2')) return { rows: [] }
+      if (sql.includes('FROM vendas_atribuidas')) return { rows: [] }
+      if (sql.includes('SELECT comissao_live_pct')) {
+        return { rows: [{ comissao_live_pct: '0', comissao_franquia_pct: '0', comissao_franqueadora_pct: '0' }] }
+      }
+      if (sql.includes('INSERT INTO vendas_atribuidas')) {
+        vendaArgs = args
+        return { rows: [{ id: 'venda-1' }] }
+      }
+      return { rows: [] }
+    })
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/lives/manual',
+      payload: {
+        ...basePayload,
+        tipo: 'afiliado',
+        cliente_id: undefined,
+        marca_id: marcaId,
+      },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(insertArgs[2]).toBeNull()
+    expect(vendaArgs).toContain(marcaId)
+  })
+
   it('inserts apresentador2 into live_apresentadores junction', async () => {
     const junctionCalls = []
     const ap2UserId = '66666666-6666-4666-8666-666666666666'
@@ -138,6 +212,7 @@ describe('POST /v1/lives/manual', () => {
       .mockResolvedValueOnce({ rows: [{ user_id: ap2UserId }] })         // ap2 lookup
       .mockResolvedValueOnce({ rows: [] })                               // overlap check
       .mockResolvedValueOnce({ rows: [{ id: 'live-2' }] })
+      .mockResolvedValueOnce({ rows: [] })                               // live_apresentadoras_v2 ap1
       .mockImplementationOnce((sql, args) => { junctionCalls.push({ sql, args }); return { rows: [] } })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })

@@ -22,7 +22,7 @@ const updateSchema = createSchema.partial().extend({
   ativo: z.boolean().optional(),
 })
 
-const COLS = `id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
+const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
 
 export async function apresentadorasRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_APRESENTADORAS)]

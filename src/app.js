@@ -72,6 +72,10 @@ export async function buildApp(opts = {}) {
     ...opts,
   })
 
+  // LGPD/S-06: Em produção, CORS nunca usa wildcard ('*').
+  // A allowlist abaixo é a fonte da verdade para origens permitidas.
+  // Para adicionar uma origem nova, atualize tanto este array quanto o
+  // env var CORS_ORIGIN no painel de deploy — nunca use '*'.
   const corsAllowedOrigins = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
     : (process.env.NODE_ENV === 'production'
@@ -209,7 +213,8 @@ export async function buildApp(opts = {}) {
     const status = isAppError ? error.statusCode : (error.statusCode ?? 500)
     const shouldReport = status >= 500 || (isAppError && error.reportable === true)
 
-    // Contexto estruturado com tenant, request.id, papel
+    // LGPD: errorContext inclui APENAS metadados não-sensíveis (tenant, papel, request_id).
+    // request.body NUNCA é logado — pode conter password, token, cpf, dados pessoais.
     const errorContext = {
       err: error,
       request_id: request.id,

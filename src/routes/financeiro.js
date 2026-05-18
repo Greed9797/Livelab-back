@@ -44,9 +44,15 @@ function resolveRange({ inicio, fim, mes, ano }) {
 
 export async function financeiroRoutes(app) {
   // GET /v1/financeiro/resumo?mes=&ano=  OR  ?inicio=YYYY-MM&fim=YYYY-MM
+  // Query param opcional: ?scope=unidade|franqueadora  (só franqueador_master pode usar franqueadora)
   app.get('/v1/financeiro/resumo', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
-    const { tenant_id } = request.user
+    const { tenant_id, papel } = request.user
     const { startDate, endDate } = resolveRange(request.query)
+
+    // PR 13: determina visão baseada no papel e scope solicitado
+    const scopeParam = request.query.scope
+    const isMaster = papel === 'franqueador_master'
+    const visao = (isMaster && scopeParam === 'franqueadora') ? 'franqueadora' : 'unidade'
 
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(`
@@ -87,6 +93,7 @@ export async function financeiroRoutes(app) {
       const fat_bruto  = toNum(r.fat_bruto_fixo) + toNum(r.fat_bruto_comissao)
       const fat_liquido = Math.max(0, fat_bruto - toNum(r.total_custos))
       return {
+        visao,
         fat_bruto,
         fat_liquido,
         total_custos: toNum(r.total_custos),
@@ -95,6 +102,39 @@ export async function financeiroRoutes(app) {
         fim: endDate,
       }
     })
+  })
+
+  // GET /v1/financeiro/franqueadora — apenas franqueador_master
+  // Retorna visão consolidada: GMV, royalties e taxa de marketing por franqueado
+  // PR 13: schema real de tenants não tem coluna "tipo"; identifica franqueados
+  // pelo papel do usuário dono do tenant (papel = 'franqueado').
+  app.get('/v1/financeiro/franqueadora', {
+    preHandler: app.requirePapel(['franqueador_master']),
+  }, async (request, reply) => {
+    const result = await app.db.query(`
+      SELECT
+        t.id                                                    AS tenant_id,
+        t.nome                                                  AS franqueado_nome,
+        t.cidade,
+        t.uf,
+        t.plano,
+        COALESCE(SUM(l.fat_gerado), 0)::float                  AS gmv_total,
+        COALESCE(COUNT(l.id), 0)::int                          AS total_lives,
+        COALESCE(SUM(l.fat_gerado) * 0.05, 0)::float           AS royalties_estimados,
+        COALESCE(SUM(l.fat_gerado) * 0.02, 0)::float           AS taxa_marketing_estimada
+      FROM tenants t
+      -- Filtra apenas tenants cujo dono tem papel 'franqueado' (não franqueador_master)
+      INNER JOIN users u ON u.tenant_id = t.id AND u.papel = 'franqueado'
+      LEFT JOIN lives l ON l.tenant_id = t.id
+        AND l.status = 'encerrada'
+        AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
+      GROUP BY t.id, t.nome, t.cidade, t.uf, t.plano
+      ORDER BY gmv_total DESC
+    `)
+    return {
+      franqueados: result.rows,
+      periodo: new Date().toISOString().slice(0, 7),
+    }
   })
 
   // GET /v1/financeiro/faturamento?periodo=YYYY-MM  OR  ?inicio=YYYY-MM&fim=YYYY-MM

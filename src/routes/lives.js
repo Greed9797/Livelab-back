@@ -456,6 +456,20 @@ export async function livesRoutes(app) {
         const iniciado = `${d.data} ${d.hora_inicio}:00`
         const encerrado = `${d.data} ${d.hora_fim}:00`
 
+        // Verificação de overlap: não permite criar live manual em período já ocupado na mesma cabine
+        const overlapQ = await db.query(
+          `SELECT id FROM lives
+           WHERE cabine_id = $1
+             AND status NOT IN ('cancelada', 'encerrada')
+             AND (iniciado_em, encerrado_em) OVERLAPS ($2::timestamptz, $3::timestamptz)
+           LIMIT 1`,
+          [d.cabine_id, iniciado, encerrado]
+        )
+        if (overlapQ.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'Já existe uma live neste período para esta cabine' })
+        }
+
         const ins = await db.query(
           `INSERT INTO lives
              (tenant_id, cabine_id, cliente_id, apresentador_id, gestor_id,
@@ -1000,21 +1014,51 @@ export async function livesRoutes(app) {
       const live = liveQ.rows[0]
       if (!live) return reply.code(404).send({ error: 'Live não encontrada' })
 
-      const resultado = await db.query(
-        `UPDATE lives SET status_publicacao = $1 WHERE id = $2
-         RETURNING id, status_publicacao`,
-        [status_publicacao, request.params.id]
-      )
+      // Validação de state machine: únicas transições permitidas são
+      //   rascunho → revisado  e  revisado → publicado
+      const transicoesValidas = {
+        rascunho: 'revisado',
+        revisado:  'publicado',
+      }
+      const statusAtual = live.status_publicacao
+      if (transicoesValidas[statusAtual] !== status_publicacao) {
+        return reply.code(422).send({
+          error: `Transição inválida: '${statusAtual}' → '${status_publicacao}'. Permitido: rascunho → revisado, revisado → publicado`,
+        })
+      }
 
-      // Registra na auditoria se existir
-      app.audit?.log?.(request, {
-        action: 'lives.publicar',
-        entity_type: 'live',
-        entity_id: request.params.id,
-        metadata: { status_publicacao, motivo, alterado_por: sub, papel }
-      })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      await db.query('BEGIN')
+      try {
+        const resultado = await db.query(
+          `UPDATE lives SET status_publicacao = $1 WHERE id = $2
+           RETURNING id, status_publicacao`,
+          [status_publicacao, request.params.id]
+        )
 
-      return resultado.rows[0]
+        // Persiste motivo em live_metric_revisions, seguindo o mesmo padrão de fat_gerado/manual_gmv
+        if (motivo) {
+          await db.query(
+            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em)
+             VALUES ($1, $2, 'status_publicacao', $3, $4, $5, NOW())`,
+            [tenant_id, request.params.id, statusAtual, status_publicacao, sub]
+          )
+        }
+
+        await db.query('COMMIT')
+
+        // Registra na auditoria se existir
+        app.audit?.log?.(request, {
+          action: 'lives.publicar',
+          entity_type: 'live',
+          entity_id: request.params.id,
+          metadata: { status_publicacao, de: statusAtual, para: status_publicacao, motivo, alterado_por: sub, papel }
+        })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+        return resultado.rows[0]
+      } catch (e) {
+        await db.query('ROLLBACK')
+        throw e
+      }
     })
   })
 

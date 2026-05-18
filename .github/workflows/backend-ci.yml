@@ -46,6 +46,35 @@ jobs:
             node --check "$f" || exit 1
           done
 
+      - name: Apply baseline schema (migrations 001-015)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
+        run: |
+          for f in \
+            migrations/001_create_users.sql \
+            migrations/002_create_refresh_tokens.sql \
+            migrations/003_create_clientes.sql \
+            migrations/004_create_contratos.sql \
+            migrations/005_create_custos.sql \
+            migrations/006_create_cabines.sql \
+            migrations/007_create_lives.sql \
+            migrations/008_create_leads.sql \
+            migrations/009_create_boletos.sql \
+            migrations/010_create_recomendacoes.sql \
+            migrations/011_create_manuais.sql \
+            migrations/012_add_tiktok_tokens_to_tenants.sql \
+            migrations/013_create_live_snapshots.sql \
+            migrations/014_create_live_products.sql \
+            migrations/015_geocoding_contratos.sql ; do
+            psql "$DATABASE_URL" -f "$f"
+          done
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
+          NODE_ENV: test
+        run: node apply_migrations.js
+
       - name: Run tests + coverage threshold
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
@@ -60,12 +89,6 @@ jobs:
           name: coverage-html
           path: coverage/
           retention-days: 14
-
-      - name: Run migrations
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
-          NODE_ENV: test
-        run: node apply_migrations.js
 
       - name: Audit (high severity)
         run: npm audit --omit=dev --audit-level=high || echo "Audit warnings"

@@ -102,14 +102,27 @@ async function applyMigration(client, fileName) {
   const sql = fs.readFileSync(filePath, 'utf8')
   console.log(`[migrations] Aplicando: ${fileName}`)
 
-  await client.query('BEGIN')
+  // CREATE INDEX CONCURRENTLY não pode rodar dentro de transação
+  // Se a migration contém CONCURRENTLY, executar sem BEGIN/COMMIT
+  const needsNoTransaction = sql.includes('CONCURRENTLY')
+
   try {
-    await client.query(sql)
-    await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
-    await client.query('COMMIT')
+    if (needsNoTransaction) {
+      // Executar migration sem transação
+      await client.query(sql)
+      await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
+    } else {
+      // Executar migration com BEGIN/COMMIT (transacional)
+      await client.query('BEGIN')
+      await client.query(sql)
+      await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
+      await client.query('COMMIT')
+    }
     console.log(`[migrations] ✅ ${fileName}`)
   } catch (err) {
-    await client.query('ROLLBACK')
+    if (!needsNoTransaction) {
+      await client.query('ROLLBACK')
+    }
     throw new Error(`[migrations] ❌ Falha em ${fileName}: ${err.message}`)
   }
 }

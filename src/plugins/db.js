@@ -2,14 +2,18 @@ import fp from 'fastify-plugin'
 import pg from 'pg'
 import 'dotenv/config'
 
+import { resolveDbSslConfig } from '../utils/db-ssl.js'
+
 const { Pool } = pg
 
 async function dbPlugin(app) {
-  const sslRejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false'
+  const sslConfig = resolveDbSslConfig(process.env.DATABASE_URL)
+  const sslRejectUnauthorized =
+    sslConfig && typeof sslConfig === 'object' && sslConfig.rejectUnauthorized !== false
 
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: sslRejectUnauthorized },
+    ssl: sslConfig,
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
@@ -19,7 +23,7 @@ async function dbPlugin(app) {
   const client = await pool.connect()
   client.release()
   app.log.info('PostgreSQL conectado')
-  if (!sslRejectUnauthorized) {
+  if (sslConfig && !sslRejectUnauthorized) {
     app.log.warn('DB SSL certificate verification is DISABLED (DB_SSL_REJECT_UNAUTHORIZED=false)')
   }
 

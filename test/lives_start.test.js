@@ -1,7 +1,7 @@
 import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 
-import { cabinesRoutes } from '../src/routes/cabines.js'
+import { livesRoutes } from '../src/routes/lives.js'
 
 function buildApp({ queryMock, papel = 'franqueado' } = {}) {
   const app = Fastify()
@@ -43,14 +43,16 @@ describe('POST /v1/lives', () => {
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })
       .mockResolvedValueOnce({
         rows: [{ id: liveId, cabine_id: cabineId, iniciado_em: '2026-05-15T18:00:00.000Z', cliente_id: clienteId, apresentador_id: userId }],
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
     const { app } = buildApp({ queryMock })
-    await app.register(cabinesRoutes)
+    await app.register(livesRoutes)
 
     const response = await app.inject({
       method: 'POST',
@@ -61,8 +63,42 @@ describe('POST /v1/lives', () => {
     expect(response.statusCode).toBe(201)
     expect(response.json()).toMatchObject({ id: liveId, cabine_id: cabineId, cliente_id: clienteId })
     expect(queryMock).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id)'),
-      ['tenant-1', cabineId, clienteId, userId],
+      expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo'),
+      ['tenant-1', cabineId, clienteId, userId, 'cliente'],
+    )
+  })
+})
+
+describe('GET /v1/lives/:id', () => {
+  it('returns a selected live by id for the current tenant', async () => {
+    const liveId = '33333333-3333-4333-8333-333333333333'
+    const queryMock = vi.fn().mockResolvedValueOnce({
+      rows: [{
+        id: liveId,
+        tenant_id: 'tenant-1',
+        cabine_id: '11111111-1111-4111-8111-111111111111',
+        cliente_id: '22222222-2222-4222-8222-222222222222',
+        status: 'em_andamento',
+        tipo: 'cliente',
+        status_publicacao: 'rascunho',
+        origem_dados: 'api',
+        iniciado_em: '2026-05-15T18:00:00.000Z',
+        cliente_nome: 'Cliente Teste',
+      }],
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v1/lives/${liveId}`,
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ id: liveId, cliente_nome: 'Cliente Teste' })
+    expect(queryMock).toHaveBeenCalledWith(
+      expect.stringContaining('WHERE l.tenant_id = $1::uuid'),
+      ['tenant-1', liveId],
     )
   })
 })

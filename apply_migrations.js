@@ -3,6 +3,8 @@ import fs from 'fs'
 import path from 'path'
 import 'dotenv/config'
 
+import { resolveDbSslConfig } from './src/utils/db-ssl.js'
+
 // Lista parte da 016 — migrations 001-015 foram aplicadas no banco original
 // e existem em migrations/ apenas como histórico. Para banco novo (fresh setup
 // dev/staging/restore), aplicar 001-015 manualmente antes deste script ou
@@ -92,7 +94,7 @@ async function getAppliedMigrations(client) {
   return new Set(rows.map((r) => r.version))
 }
 
-async function applyMigration(client, fileName) {
+export async function applyMigration(client, fileName) {
   const filePath = path.join(process.cwd(), 'migrations', fileName)
   if (!fs.existsSync(filePath)) {
     console.log(`[migrations] Ignorada (arquivo não encontrado): ${fileName}`)
@@ -100,29 +102,28 @@ async function applyMigration(client, fileName) {
   }
 
   const sql = fs.readFileSync(filePath, 'utf8')
+  const requiresNoTransaction = /\bCONCURRENTLY\b/i.test(sql)
   console.log(`[migrations] Aplicando: ${fileName}`)
 
-  // CREATE INDEX CONCURRENTLY não pode rodar dentro de transação
-  // Se a migration contém CONCURRENTLY, executar sem BEGIN/COMMIT
-  const needsNoTransaction = sql.includes('CONCURRENTLY')
-
-  try {
-    if (needsNoTransaction) {
-      // Executar migration sem transação
+  if (requiresNoTransaction) {
+    try {
       await client.query(sql)
       await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
-    } else {
-      // Executar migration com BEGIN/COMMIT (transacional)
-      await client.query('BEGIN')
-      await client.query(sql)
-      await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
-      await client.query('COMMIT')
+      console.log(`[migrations] ✅ ${fileName}`)
+      return
+    } catch (err) {
+      throw new Error(`[migrations] ❌ Falha em ${fileName}: ${err.message}`)
     }
+  }
+
+  await client.query('BEGIN')
+  try {
+    await client.query(sql)
+    await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
+    await client.query('COMMIT')
     console.log(`[migrations] ✅ ${fileName}`)
   } catch (err) {
-    if (!needsNoTransaction) {
-      await client.query('ROLLBACK')
-    }
+    await client.query('ROLLBACK')
     throw new Error(`[migrations] ❌ Falha em ${fileName}: ${err.message}`)
   }
 }
@@ -133,7 +134,7 @@ export async function runMigrations(externalPool) {
     externalPool ??
     new pg.Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' },
+      ssl: resolveDbSslConfig(process.env.DATABASE_URL),
       max: 2,
     })
 

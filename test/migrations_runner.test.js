@@ -15,6 +15,19 @@ describe('applyMigration', () => {
     expect(queries[1]).toContain('INSERT INTO schema_migrations')
   })
 
+  it('splits multi-statement concurrent migrations so PostgreSQL does not wrap them in one transaction block', async () => {
+    const client = { query: vi.fn().mockResolvedValue({ rows: [] }) }
+
+    await applyMigration(client, '084_performance_indexes.sql')
+
+    const queries = client.query.mock.calls.map(([sql]) => sql)
+    const indexQueries = queries.filter((sql) => /CREATE INDEX CONCURRENTLY/i.test(sql))
+    expect(indexQueries).toHaveLength(8)
+    expect(queries).not.toContain('BEGIN')
+    expect(queries).not.toContain('COMMIT')
+    expect(queries.at(-1)).toContain('INSERT INTO schema_migrations')
+  })
+
   it('keeps regular migrations transactional', async () => {
     const client = { query: vi.fn().mockResolvedValue({ rows: [] }) }
 

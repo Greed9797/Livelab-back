@@ -94,6 +94,13 @@ async function getAppliedMigrations(client) {
   return new Set(rows.map((r) => r.version))
 }
 
+function splitSqlStatements(sql) {
+  return sql
+    .split(/;\s*(?:\r?\n|$)/)
+    .map((statement) => statement.trim())
+    .filter(Boolean)
+}
+
 export async function applyMigration(client, fileName) {
   const filePath = path.join(process.cwd(), 'migrations', fileName)
   if (!fs.existsSync(filePath)) {
@@ -107,7 +114,9 @@ export async function applyMigration(client, fileName) {
 
   if (requiresNoTransaction) {
     try {
-      await client.query(sql)
+      for (const statement of splitSqlStatements(sql)) {
+        await client.query(statement)
+      }
       await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
       console.log(`[migrations] ✅ ${fileName}`)
       return

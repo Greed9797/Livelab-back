@@ -9,6 +9,8 @@ import { calcularComissoesDaLive } from '../services/commission-engine.js'
 const iniciarLiveSchema = z.object({
   cabine_id: z.string().uuid(),
   cliente_id: z.string().uuid().optional(),
+  marca_id: z.string().uuid().optional().nullable(),
+  apresentador_id: z.string().uuid().optional().nullable(),
   tiktok_username: z.string().max(100).optional().nullable(),
   tipo: z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
   agenda_evento_id: z.string().uuid().optional().nullable(),
@@ -88,24 +90,32 @@ export async function livesRoutes(app) {
   ]
 
   // POST /v1/lives — inicia live a partir da cabine reservada/ativa
-  app.post('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
+  app.post('/v1/lives', { preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)] }, async (request, reply) => {
     const parsed = iniciarLiveSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
-    const { cabine_id, cliente_id: requestedClienteId, tiktok_username: rawTiktok, tipo, agenda_evento_id } = parsed.data
-    const tiktokUsername = rawTiktok ? rawTiktok.replace(/^@/, '').trim() || null : null
+    const {
+      cabine_id,
+      cliente_id: requestedClienteId,
+      marca_id: requestedMarcaId,
+      apresentador_id: requestedApresentadoraId,
+      tiktok_username: rawTiktok,
+      tipo,
+      agenda_evento_id,
+    } = parsed.data
+    let tiktokUsername = rawTiktok ? rawTiktok.replace(/^@/, '').trim() || null : null
     const ip = getRequestIp(request)
     return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
 
       try {
         const cabineQ = await db.query(
-          `SELECT id, numero, status, contrato_id, live_atual_id
+          `SELECT id, numero, status, contrato_id, live_atual_id, ativo
            FROM cabines
-           WHERE id = $1
+           WHERE id = $1 AND tenant_id = $2::uuid
            FOR UPDATE`,
-          [cabine_id]
+          [cabine_id, tenant_id]
         )
         const cabine = cabineQ.rows[0]
 
@@ -114,11 +124,19 @@ export async function livesRoutes(app) {
           return reply.code(404).send({ error: 'Cabine não encontrada' })
         }
 
+        if (cabine.ativo === false) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'Cabine inativa não pode iniciar live', code: 'CABINE_INATIVA' })
+        }
+
         // ── Resolução via agenda_eventos ─────────────────────────────────────
         // agenda_eventos usa marca_id; marcas tem cliente_id. Nenhuma coluna
         // live_id/cliente_id/titulo existe em agenda_eventos (schema migration 080).
         let resolvedAgendaEventoId = null
         let resolvedAgendaClienteId = null
+        let resolvedMarcaId = requestedMarcaId ?? null
+        let resolvedApresentadoraId = requestedApresentadoraId ?? null
+        let resolvedTipo = tipo
         let agendaWarning = null
 
         try {
@@ -127,8 +145,10 @@ export async function livesRoutes(app) {
           if (agenda_evento_id) {
             // Caminho explícito: evento passado no body
             const evQ = await db.query(
-              `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id,
-                      m.cliente_id AS marca_cliente_id
+              `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id, ae.apresentadora_id,
+                      m.cliente_id AS marca_cliente_id,
+                      m.tipo AS marca_tipo,
+                      m.tiktok_username AS marca_tiktok_username
                FROM agenda_eventos ae
                LEFT JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
                WHERE ae.id = $1 AND ae.tenant_id = $2`,
@@ -139,11 +159,17 @@ export async function livesRoutes(app) {
               return reply.code(404).send({ error: 'Evento de agenda não encontrado', code: 'AGENDA_NOT_FOUND' })
             }
             agendaEvento = evQ.rows[0]
+            if (agendaEvento.cabine_id && agendaEvento.cabine_id !== cabine_id) {
+              await db.query('ROLLBACK')
+              return reply.code(409).send({ error: 'Evento pertence a outra cabine', code: 'AGENDA_CABINE_MISMATCH' })
+            }
           } else {
             // Caminho automático: busca evento de hoje nesta cabine
             const evQ = await db.query(
-              `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id,
-                      m.cliente_id AS marca_cliente_id
+              `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id, ae.apresentadora_id,
+                      m.cliente_id AS marca_cliente_id,
+                      m.tipo AS marca_tipo,
+                      m.tiktok_username AS marca_tiktok_username
                FROM agenda_eventos ae
                LEFT JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
                WHERE ae.cabine_id = $1
@@ -161,6 +187,14 @@ export async function livesRoutes(app) {
           if (agendaEvento) {
             resolvedAgendaEventoId = agendaEvento.id
             resolvedAgendaClienteId = agendaEvento.marca_cliente_id ?? null
+            resolvedMarcaId = agendaEvento.marca_id ?? resolvedMarcaId
+            resolvedApresentadoraId = agendaEvento.apresentadora_id ?? resolvedApresentadoraId
+            if (!tiktokUsername && agendaEvento.marca_tiktok_username) {
+              tiktokUsername = String(agendaEvento.marca_tiktok_username).replace(/^@/, '').trim() || null
+            }
+            if (!requestedClienteId && agendaEvento.marca_tipo && agendaEvento.marca_tipo !== 'cliente') {
+              resolvedTipo = agendaEvento.marca_tipo === 'afiliada' ? 'afiliado' : 'teste'
+            }
             // Marca evento como em_andamento — live_id não existe na tabela
             await db.query(
               `UPDATE agenda_eventos SET status = 'ao_vivo', atualizado_em = NOW()
@@ -180,6 +214,26 @@ export async function livesRoutes(app) {
         let resolvedContratoId = cabine.contrato_id
         // Se agenda resolveu um cliente_id, usa como base; senão usa o do body
         let resolvedClienteId = resolvedAgendaClienteId ?? requestedClienteId ?? null
+        if (!resolvedClienteId && resolvedMarcaId) {
+          const marcaQ = await db.query(
+            `SELECT cliente_id, tipo, tiktok_username
+             FROM marcas
+             WHERE id = $1 AND tenant_id = $2::uuid`,
+            [resolvedMarcaId, tenant_id]
+          )
+          const marca = marcaQ.rows[0]
+          if (!marca) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Marca não encontrada', code: 'MARCA_NOT_FOUND' })
+          }
+          resolvedClienteId = marca.cliente_id ?? null
+          if (!requestedClienteId && marca.tipo && marca.tipo !== 'cliente') {
+            resolvedTipo = marca.tipo === 'afiliada' ? 'afiliado' : 'teste'
+          }
+          if (!tiktokUsername && marca.tiktok_username) {
+            tiktokUsername = String(marca.tiktok_username).replace(/^@/, '').trim() || null
+          }
+        }
         if (!['reservada', 'ativa'].includes(cabine.status) || !cabine.contrato_id) {
           if (!['disponivel', 'ativa', 'reservada'].includes(cabine.status)) {
             await db.query('ROLLBACK')
@@ -187,7 +241,7 @@ export async function livesRoutes(app) {
           }
 
           // Para afiliado/teste: não é necessário live_request nem cliente_id
-          if (tipo === 'cliente' && !resolvedClienteId) {
+          if (resolvedTipo === 'cliente' && !resolvedClienteId) {
             // Busca live_request aprovada para hoje nesta cabine (qualquer horário do dia)
             const lrQ = await db.query(
               `SELECT lr.cliente_id
@@ -216,8 +270,8 @@ export async function livesRoutes(app) {
             resolvedContratoId = ctLrQ.rows[0]?.id ?? null
             if (resolvedContratoId) {
               await db.query(
-                `UPDATE cabines SET status = 'reservada', contrato_id = $1 WHERE id = $2`,
-                [resolvedContratoId, cabine_id]
+                `UPDATE cabines SET status = 'reservada', contrato_id = $1 WHERE id = $2 AND tenant_id = $3::uuid`,
+                [resolvedContratoId, cabine_id, tenant_id]
               )
             }
           }
@@ -232,9 +286,9 @@ export async function livesRoutes(app) {
           ? await db.query(
               `SELECT id, cliente_id, status
                FROM contratos
-               WHERE id = $1
+               WHERE id = $1 AND tenant_id = $2::uuid
                FOR UPDATE`,
-              [resolvedContratoId]
+              [resolvedContratoId, tenant_id]
             )
           : { rows: [] }
         let contrato = contratoQ.rows[0]
@@ -254,7 +308,7 @@ export async function livesRoutes(app) {
             if (activeCtQ.rows[0]) {
               contrato = activeCtQ.rows[0]
               resolvedContratoId = contrato.id
-              await db.query('UPDATE cabines SET contrato_id = $1 WHERE id = $2', [contrato.id, cabine_id])
+              await db.query('UPDATE cabines SET contrato_id = $1 WHERE id = $2 AND tenant_id = $3::uuid', [contrato.id, cabine_id, tenant_id])
             }
           }
           if (contrato && contrato.status !== 'ativo') {
@@ -263,7 +317,7 @@ export async function livesRoutes(app) {
           }
         }
 
-        if (!resolvedClienteId && tipo === 'cliente') {
+        if (!resolvedClienteId && resolvedTipo === 'cliente') {
           await db.query('ROLLBACK')
           return reply.code(409).send({
             error: 'Live de tipo "cliente" requer cliente_id ou solicitação aprovada',
@@ -272,7 +326,7 @@ export async function livesRoutes(app) {
         }
 
         // Bloqueio de inadimplência — apenas para tipo 'cliente'
-        if (tipo === 'cliente' && resolvedClienteId) {
+        if (resolvedTipo === 'cliente' && resolvedClienteId) {
           const clienteQ = await db.query(
             `SELECT status FROM clientes WHERE id = $1 AND tenant_id = $2`,
             [resolvedClienteId, tenant_id]
@@ -288,16 +342,29 @@ export async function livesRoutes(app) {
 
         if (tiktokUsername && resolvedContratoId) {
           await db.query(
-            `UPDATE contratos SET tiktok_username = $1 WHERE id = $2`,
-            [tiktokUsername, resolvedContratoId]
+            `UPDATE contratos SET tiktok_username = $1 WHERE id = $2 AND tenant_id = $3::uuid`,
+            [tiktokUsername, resolvedContratoId, tenant_id]
           )
+        }
+
+        let apresentadorUserId = sub
+        if (resolvedApresentadoraId) {
+          const apRow = await db.query(
+            `SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+            [resolvedApresentadoraId, tenant_id]
+          )
+          if (!apRow.rows[0]) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Apresentador não encontrado', code: 'APRESENTADOR_NOT_FOUND' })
+          }
+          apresentadorUserId = apRow.rows[0].user_id ?? sub
         }
 
         const liveQ = await db.query(
           `INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo, status_publicacao, origem_dados)
            VALUES ($1, $2, $3, $4, $5, 'rascunho', 'manual')
            RETURNING id, cabine_id, iniciado_em, cliente_id, apresentador_id, tipo, status_publicacao, origem_dados`,
-          [tenant_id, cabine_id, resolvedClienteId, sub, tipo]
+          [tenant_id, cabine_id, resolvedClienteId, apresentadorUserId, resolvedTipo]
         )
         const live = liveQ.rows[0]
 
@@ -343,8 +410,8 @@ export async function livesRoutes(app) {
         await db.query(
           `UPDATE cabines
            SET status = 'ao_vivo', live_atual_id = $1
-           WHERE id = $2`,
-          [live.id, cabine_id]
+           WHERE id = $2 AND tenant_id = $3::uuid`,
+          [live.id, cabine_id, tenant_id]
         )
 
         await logCabineEvent(db, {

@@ -1,0 +1,128 @@
+import Fastify from 'fastify'
+import { describe, expect, it, vi } from 'vitest'
+
+import { homeRoutes } from '../src/routes/home.js'
+
+function buildApp(queryMock) {
+  const app = Fastify()
+  const release = vi.fn()
+  const tenantIds = []
+
+  app.decorate('requirePapel', (papeis) => async (request, reply) => {
+    request.user = { tenant_id: 'tenant-a', sub: 'user-1', papel: 'franqueado' }
+    if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+  })
+  app.decorate('dbTenant', async () => ({ query: queryMock, release }))
+  app.decorate('withTenant', async (tenantId, fn) => {
+    tenantIds.push(tenantId)
+    const db = await app.dbTenant(tenantId)
+    try { return await fn(db) } finally { db.release() }
+  })
+
+  return { app, release, tenantIds }
+}
+
+function createHomeQueryMock() {
+  return vi.fn(async (sql, params = []) => {
+    if (sql.includes('COUNT(*) FILTER') && sql.includes('FROM cabines')) {
+      return { rows: [{ ao_vivo: '1', operacionais: '7' }] }
+    }
+    if (sql.includes('SELECT cl.nome') && sql.includes('GROUP BY cl.id, cl.nome')) {
+      return { rows: [{ nome: 'Marca A', gmv: '1200.50', lives: '2' }] }
+    }
+    if (sql.includes('FROM live_requests lr')) {
+      return { rows: [{ id: 'lr-1', data_solicitada: '2026-05-18', hora_inicio: '14:00', hora_fim: '16:00', cabine_numero: 2, cliente_nome: 'Marca B' }] }
+    }
+    if (sql.includes('FROM agenda_eventos ae')) {
+      return { rows: [{ id: 'ag-1', tipo: 'live', status: 'confirmado', data_inicio: '2026-05-18T14:00:00.000Z', data_fim: '2026-05-18T16:00:00.000Z', cabine_numero: 2, cabine_nome: 'Cabine 02', marca_nome: 'Marca B', cliente_nome: 'Cliente B', apresentadora_nome: 'Ana' }] }
+    }
+    if (sql.includes('u.nome AS apresentadora_nome')) {
+      return { rows: [{ id: 'user-1', apresentadora_nome: 'Ana', gmv: '800', lives: '1' }] }
+    }
+    if (sql.includes('SUM(valor_fixo)')) return { rows: [{ valor: '1000' }] }
+    if (sql.includes('SUM(l.fat_gerado *')) return { rows: [{ valor: '100' }] }
+    if (sql.includes('FROM custos')) return { rows: [{ valor: '50' }] }
+    if (sql.includes('FROM cabines c')) {
+      return {
+        rows: [{
+          numero: 1,
+          status: 'ao_vivo',
+          live_atual_id: 'live-1',
+          iniciado_em: new Date(Date.now() - 30 * 60_000).toISOString(),
+          cliente_nome: 'Marca A',
+          apresentador: 'Ana',
+          viewer_count: '42',
+          total_orders: '5',
+          gmv_atual: '350.25',
+          horas_contratadas: '0',
+          horas_realizadas_hoje: '0',
+          apresentadores_extra: [],
+        }],
+      }
+    }
+    if (sql.includes('COUNT(*) AS total FROM clientes') && sql.includes('criado_em')) return { rows: [{ total: '1' }] }
+    if (sql.includes('COUNT(*) AS total FROM clientes')) return { rows: [{ total: '3' }] }
+    if (sql.includes('COUNT(id) AS lives_mes')) return { rows: [{ lives_mes: '2', gmv_lives_mes: '1200.50' }] }
+    if (sql.includes('gmv_lives_mes_anterior')) return { rows: [{ gmv_lives_mes_anterior: '1000.00' }] }
+    if (sql.includes('COUNT(id) AS lives_hoje')) return { rows: [{ lives_hoje: '3' }] }
+    if (sql.includes('AVG(viewer_count)')) return { rows: [{ media: '38' }] }
+    if (sql.includes('pipeline_aberto')) return { rows: [{ pipeline_aberto: '4', valor_pipeline: '5000' }] }
+    if (sql.includes('total_fechados')) return { rows: [{ ganhos: '1', total_fechados: '2' }] }
+    if (sql.includes('lives_sem_snapshot_recente')) {
+      return {
+        rows: [{
+          inadimplentes: '0',
+          contratos_aguardando_assinatura: '0',
+          agendamentos_semana: '2',
+          leads_parados: '1',
+          conflitos_agenda: '0',
+          contratos_analise: '0',
+          boletos_vencidos: '0',
+          leads_disponiveis: '0',
+          cabines_manutencao: '0',
+          lives_sem_apresentador: '0',
+          lives_abertas_mais_4h: '0',
+          lives_sem_snapshot_recente: '0',
+        }],
+      }
+    }
+    return { rows: [] }
+  })
+}
+
+describe('home dashboard', () => {
+  it('scopes operational counts and rankings by tenant and returns live commerce fields', async () => {
+    const queryMock = createHomeQueryMock()
+    const { app, release, tenantIds } = buildApp(queryMock)
+    await app.register(homeRoutes)
+
+    const response = await app.inject({ method: 'GET', url: '/v1/home/dashboard' })
+    const payload = response.json()
+
+    expect(response.statusCode).toBe(200)
+    expect(tenantIds).toEqual(['tenant-a'])
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(payload.ocupacao_cabines_hoje).toEqual({ ao_vivo: 1, operacionais: 7 })
+    expect(payload.gmv_ao_vivo_agora).toBe(350.25)
+    expect(payload.lives_ativas_agora).toBe(1)
+    expect(payload.lives_hoje).toBe(3)
+    expect(payload.ticket_medio_live_mes).toBe(600.25)
+    expect(payload.variacao_gmv_mes_anterior_pct).toBe(20.1)
+    expect(payload.agenda_hoje).toHaveLength(1)
+    expect(payload.ranking_apresentadoras_hoje[0]).toMatchObject({ nome: 'Ana', gmv: 800, lives: 1 })
+
+    const sqls = queryMock.mock.calls.map(([sql]) => sql)
+    const ocupacaoSql = sqls.find((sql) => sql.includes('COUNT(*) FILTER') && sql.includes('FROM cabines'))
+    expect(ocupacaoSql).toContain('WHERE tenant_id = current_setting')
+
+    const rankingSql = sqls.find((sql) => sql.includes('SELECT cl.nome') && sql.includes('GROUP BY cl.id, cl.nome'))
+    expect(rankingSql).toContain('l.tenant_id = current_setting')
+    expect(rankingSql).toContain('cl.tenant_id = l.tenant_id')
+
+    const proximasSql = sqls.find((sql) => sql.includes('SELECT lr.id, lr.data_solicitada') && sql.includes('FROM live_requests lr'))
+    expect(proximasSql).toContain('lr.tenant_id = current_setting')
+    expect(queryMock.mock.calls.some(([, params]) => Array.isArray(params) && params.includes('tenant-a'))).toBe(true)
+
+    await app.close()
+  })
+})

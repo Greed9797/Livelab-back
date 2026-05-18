@@ -46,25 +46,40 @@ export async function usuariosRoutes(app) {
   // GET /v1/usuarios?papel=...&ativo=...
   app.get('/v1/usuarios', { preHandler: rbac }, async (request, reply) => {
     const { papel, ativo } = request.query
-    const conditions = ['tenant_id = $1', 'id != $2']
+    const conditions = ['u.tenant_id = $1', 'u.id != $2']
     const values = [request.user.tenant_id, request.user.sub]
     let idx = 3
 
     if (papel) {
-      conditions.push(`papel = $${idx++}`)
+      conditions.push(`u.papel = $${idx++}`)
       values.push(papel)
     }
     if (ativo !== undefined) {
-      conditions.push(`ativo = $${idx++}`)
+      conditions.push(`u.ativo = $${idx++}`)
       values.push(ativo === 'true')
     }
 
     return app.withTenant(request.user.tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT id, nome, email, papel, ativo, criado_em, criado_por
-         FROM users
+        `SELECT
+           u.id,
+           u.nome,
+           u.email,
+           u.papel,
+           u.ativo,
+           u.criado_em,
+           u.criado_por,
+           a.id AS apresentadora_id,
+           a.telefone,
+           a.cidade,
+           a.fixo,
+           a.comissao_pct,
+           a.meta_diaria_gmv,
+           (a.id IS NOT NULL OR u.papel IN ('apresentador', 'apresentadora')) AS pode_apresentar_live
+         FROM users u
+         LEFT JOIN apresentadoras a ON a.user_id = u.id AND a.tenant_id = u.tenant_id
          WHERE ${conditions.join(' AND ')}
-         ORDER BY criado_em DESC`,
+         ORDER BY u.criado_em DESC`,
         values
       )
       return result.rows

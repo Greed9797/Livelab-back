@@ -20,13 +20,14 @@ const reservarCabineSchema = z.object({
 })
 
 const atualizarStatusSchema = z.object({
-  status: z.enum(['disponivel', 'ativa', 'manutencao']),
+  status: z.enum(['disponivel', 'manutencao']),
 })
 
 const atualizarCabineSchema = z.object({
   nome:      z.string().min(1).optional(),
   tamanho:   z.string().optional().nullable(),
   descricao: z.string().optional(),
+  ativo:     z.boolean().optional(),
 })
 
 const criarCabineSchema = z.object({
@@ -45,7 +46,7 @@ export async function cabinesRoutes(app) {
       // postgres do Supabase tem BYPASSRLS, queries sem WHERE tenant_id
       // retornariam dados de todos os tenants.
       const result = await db.query(
-        `SELECT c.id, c.numero, c.status, c.live_atual_id, c.contrato_id,
+        `SELECT c.id, c.numero, c.nome, c.status, c.ativo, c.descricao, c.live_atual_id, c.contrato_id,
                 ct.status AS contrato_status,
                 ct.tiktok_username,
                 COALESCE(l.cliente_id, ct.cliente_id, lr_next.next_cliente_id) AS cliente_id,
@@ -172,7 +173,7 @@ export async function cabinesRoutes(app) {
          SELECT $1, COALESCE(MAX(numero), 0) + 1, $2, $3, $4, 'disponivel'
          FROM cabines
          WHERE tenant_id = $1
-         RETURNING id, numero, nome, tamanho, descricao, status`,
+         RETURNING id, numero, nome, tamanho, descricao, status, ativo`,
         [tenant_id, nome, null, descricao ?? null]
       )
       app.audit?.log?.(request, { action: 'cabines.create', entity_type: 'cabine', entity_id: result.rows[0].id, metadata: { nome, tamanho: null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
@@ -203,9 +204,10 @@ export async function cabinesRoutes(app) {
       }
 
       // Check FK refs: lives and live_requests (tabela renomeada de solicitacoes)
-      const [livesRef, solRef] = await Promise.all([
-        db.query(`SELECT id FROM lives WHERE cabine_id = $1 LIMIT 1`, [request.params.id]),
-        db.query(`SELECT id FROM live_requests WHERE cabine_id = $1 LIMIT 1`, [request.params.id]),
+      const [livesRef, solRef, agendaRef] = await Promise.all([
+        db.query(`SELECT id FROM lives WHERE cabine_id = $1 AND tenant_id = $2::uuid LIMIT 1`, [request.params.id, tenant_id]),
+        db.query(`SELECT id FROM live_requests WHERE cabine_id = $1 AND tenant_id = $2::uuid LIMIT 1`, [request.params.id, tenant_id]),
+        db.query(`SELECT id FROM agenda_eventos WHERE cabine_id = $1 AND tenant_id = $2::uuid LIMIT 1`, [request.params.id, tenant_id]),
       ])
       if (livesRef.rowCount > 0) {
         return reply.code(409).send({ error: 'Cabine possui histórico de lives. Não pode ser deletada.' })
@@ -213,8 +215,11 @@ export async function cabinesRoutes(app) {
       if (solRef.rowCount > 0) {
         return reply.code(409).send({ error: 'Cabine possui solicitações vinculadas. Remova-as primeiro.' })
       }
+      if (agendaRef.rowCount > 0) {
+        return reply.code(409).send({ error: 'Cabine possui eventos de agenda. Inative a cabine em vez de deletar.' })
+      }
 
-      await db.query(`DELETE FROM cabines WHERE id = $1`, [request.params.id])
+      await db.query(`DELETE FROM cabines WHERE id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])
       app.audit?.log?.(request, { action: 'cabines.delete', entity_type: 'cabine', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { ok: true }
     })
@@ -236,7 +241,7 @@ export async function cabinesRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `UPDATE cabines SET ${setClauses} WHERE id = $1 AND tenant_id = $${fields.length + 2} RETURNING id, nome, tamanho, descricao, numero`,
+        `UPDATE cabines SET ${setClauses} WHERE id = $1 AND tenant_id = $${fields.length + 2} RETURNING id, nome, tamanho, descricao, numero, status, ativo`,
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cabine não encontrada' })
@@ -811,7 +816,7 @@ export async function cabinesRoutes(app) {
   })
 
   // PATCH /v1/cabines/:id/status
-  app.patch('/v1/cabines/:id/status', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
+  app.patch('/v1/cabines/:id/status', { preHandler: cabineWriteAccess(app) }, async (request, reply) => {
     const parsed = atualizarStatusSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -842,8 +847,8 @@ export async function cabinesRoutes(app) {
         }
 
         const result = await db.query(
-          `UPDATE cabines SET status = $1 WHERE id = $2 RETURNING id, numero, status, contrato_id`,
-          [status, request.params.id]
+          `UPDATE cabines SET status = $1 WHERE id = $2 AND tenant_id = $3::uuid RETURNING id, numero, status, contrato_id, ativo`,
+          [status, request.params.id, tenant_id]
         )
 
         if (status !== cabine.status) {
@@ -853,9 +858,7 @@ export async function cabinesRoutes(app) {
             contratoId: cabine.contrato_id,
             tipoEvento: status === 'manutencao'
               ? 'cabine_manutencao'
-              : status === 'ativa'
-                ? 'cabine_ativada'
-                : 'cabine_liberada',
+              : 'cabine_liberada',
             actorUserId: sub,
             actorPapel: papel,
             ip,

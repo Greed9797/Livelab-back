@@ -34,7 +34,7 @@ export const WRITE_CONTRATOS = [...ADMIN]
 // ─── CLIENTES ────────────────────────────────────────────────────────
 export const READ_CLIENTES = [
   ...ADMIN_COMERCIAL,
-  'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
+  'operacional', 'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
 ]
 export const WRITE_CLIENTES = [...ADMIN_COMERCIAL]
 
@@ -47,17 +47,17 @@ export const WRITE_LEADS = [...ADMIN_COMERCIAL, 'marketing']
 
 // ─── CABINES / OPERAÇÃO ──────────────────────────────────────────────
 export const READ_CABINES = [
-  ...ADMIN, 'apresentador', 'apresentadora',
+  ...ADMIN, 'operacional', 'apresentador', 'apresentadora',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
 ]
-export const WRITE_CABINES = [...ADMIN, 'produtor_live']
+export const WRITE_CABINES = [...ADMIN, 'operacional', 'produtor_live']
 
 // ─── LIVES ───────────────────────────────────────────────────────────
 export const READ_LIVES = [
-  ...ADMIN, 'apresentador', 'apresentadora',
+  ...ADMIN, 'operacional', 'apresentador', 'apresentadora',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
 ]
-export const WRITE_LIVES = [...ADMIN, 'apresentador', 'apresentadora', 'produtor_live']
+export const WRITE_LIVES = [...ADMIN, 'operacional', 'apresentador', 'apresentadora', 'produtor_live']
 
 // ─── APRESENTADORAS ──────────────────────────────────────────────────
 export const READ_APRESENTADORAS = [
@@ -84,7 +84,7 @@ export const READ_MARCAS = READ_CLIENTES
 export const WRITE_MARCAS = WRITE_CLIENTES
 
 export const READ_AGENDA = [
-  ...ADMIN, 'apresentador', 'apresentadora',
+  ...ADMIN, 'operacional', 'apresentador', 'apresentadora',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
 ]
 export const WRITE_AGENDA = [...ADMIN, 'operacional', 'produtor_live']

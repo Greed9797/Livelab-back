@@ -13,6 +13,7 @@ const recorrenciaSchema = z.object({
 const agendaBaseSchema = z.object({
   tipo: z.enum(['live', 'gravacao_video', 'bloqueio_manutencao']),
   marca_id: z.string().uuid().nullable().optional(),
+  cliente_id: z.string().uuid().nullable().optional(),
   cabine_id: z.string().uuid().nullable().optional(),
   apresentadora_id: z.string().uuid().nullable().optional(),
   data_inicio: z.string().datetime({ offset: true }),
@@ -27,8 +28,8 @@ const agendaBaseSchema = z.object({
 
 const agendaSchema = agendaBaseSchema.refine((data) => new Date(data.data_fim) > new Date(data.data_inicio), {
   message: 'data_fim deve ser maior que data_inicio',
-}).refine((data) => data.tipo === 'bloqueio_manutencao' || Boolean(data.marca_id), {
-  message: 'marca_id é obrigatório para live e gravação',
+}).refine((data) => data.tipo === 'bloqueio_manutencao' || Boolean(data.marca_id || data.cliente_id), {
+  message: 'Selecione uma marca ou cliente para live e gravação',
 })
 
 const agendaPatchSchema = agendaBaseSchema.partial().extend({
@@ -42,11 +43,19 @@ const agendaDeleteQuerySchema = z.object({
   modo_recorrencia: z.enum(['apenas_este', 'este_e_proximos', 'todos']).optional().default('apenas_este'),
 })
 
-async function ensureAgendaRefs(db, reply, { tenantId, marcaId, cabineId, apresentadoraId }) {
+async function ensureAgendaRefs(db, reply, { tenantId, marcaId, clienteId, cabineId, apresentadoraId }) {
   if (marcaId) {
     const marca = await db.query('SELECT id FROM marcas WHERE id = $1 AND tenant_id = $2::uuid', [marcaId, tenantId])
     if (!marca.rows[0]) {
       reply.code(404).send({ error: 'Marca não encontrada' })
+      return false
+    }
+  }
+
+  if (clienteId) {
+    const cliente = await db.query('SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2::uuid', [clienteId, tenantId])
+    if (!cliente.rows[0]) {
+      reply.code(404).send({ error: 'Cliente não encontrado' })
       return false
     }
   }
@@ -68,6 +77,43 @@ async function ensureAgendaRefs(db, reply, { tenantId, marcaId, cabineId, aprese
   }
 
   return true
+}
+
+async function resolveAgendaMarcaId(db, tenantId, { marcaId, clienteId }) {
+  if (marcaId) return marcaId
+  if (!clienteId) return null
+
+  const existing = await db.query(
+    `SELECT id
+       FROM marcas
+      WHERE tenant_id = $1::uuid
+        AND cliente_id = $2::uuid
+        AND tipo = 'cliente'
+      ORDER BY status = 'ativa' DESC, atualizado_em DESC NULLS LAST
+      LIMIT 1`,
+    [tenantId, clienteId],
+  )
+  if (existing.rows[0]) return existing.rows[0].id
+
+  const cliente = await db.query(
+    `SELECT id, nome, tiktok_username, site
+       FROM clientes
+      WHERE id = $1::uuid
+        AND tenant_id = $2::uuid`,
+    [clienteId, tenantId],
+  )
+  const row = cliente.rows[0]
+  if (!row) return null
+
+  const inserted = await db.query(
+    `INSERT INTO marcas (
+       tenant_id, cliente_id, nome, tipo, status, tiktok_username, site, observacoes
+     )
+     VALUES ($1,$2,$3,'cliente','ativa',$4,$5,'Criada automaticamente ao agendar uma cabine para cliente.')
+     RETURNING id`,
+    [tenantId, row.id, row.nome, row.tiktok_username ?? null, row.site ?? null],
+  )
+  return inserted.rows[0]?.id ?? null
 }
 
 async function getConflictingEvents(db, { tenantId, cabineId, dataInicio, dataFim, excludeId }) {
@@ -188,7 +234,7 @@ export async function agendaRoutes(app) {
 
   app.get('/v1/agenda', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
-    const { status, tipo, cabine_id, marca_id, data_inicio, data_fim } = request.query ?? {}
+    const { status, tipo, cabine_id, marca_id, cliente_id, data_inicio, data_fim } = request.query ?? {}
 
     return app.withTenant(tenant_id, async (db) => {
       const values = [tenant_id]
@@ -202,17 +248,22 @@ export async function agendaRoutes(app) {
       if (tipo && tipo !== 'all') add('ae.tipo = ?', tipo)
       if (cabine_id) add('ae.cabine_id = ?::uuid', cabine_id)
       if (marca_id) add('ae.marca_id = ?::uuid', marca_id)
+      if (cliente_id) add('m.cliente_id = ?::uuid', cliente_id)
       if (data_inicio) add('ae.data_fim >= ?::timestamptz', data_inicio)
       if (data_fim) add('ae.data_inicio <= ?::timestamptz', data_fim)
 
       const result = await db.query(
         `SELECT ae.*,
                 m.nome AS marca_nome,
+                m.cliente_id AS cliente_id,
+                cl.nome AS cliente_nome,
+                COALESCE(m.tiktok_username, cl.tiktok_username) AS tiktok_username,
                 c.numero AS cabine_numero,
                 c.nome AS cabine_nome,
                 a.nome AS apresentadora_nome
          FROM agenda_eventos ae
          LEFT JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
+         LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = ae.tenant_id
          LEFT JOIN cabines c ON c.id = ae.cabine_id AND c.tenant_id = ae.tenant_id
          LEFT JOIN apresentadoras a ON a.id = ae.apresentadora_id AND a.tenant_id = ae.tenant_id
          WHERE ${filters.join(' AND ')}
@@ -250,11 +301,22 @@ export async function agendaRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub } = request.user
-    const { recorrencia, ...d } = parsed.data
+    const { recorrencia, cliente_id: clienteId, ...d } = parsed.data
 
     return app.withTenant(tenant_id, async (db) => {
-      const refsOk = await ensureAgendaRefs(db, reply, { tenantId: tenant_id, marcaId: d.marca_id, cabineId: d.cabine_id, apresentadoraId: d.apresentadora_id })
+      const refsOk = await ensureAgendaRefs(db, reply, {
+        tenantId: tenant_id,
+        marcaId: d.marca_id,
+        clienteId,
+        cabineId: d.cabine_id,
+        apresentadoraId: d.apresentadora_id,
+      })
       if (!refsOk) return reply
+
+      const marcaId = await resolveAgendaMarcaId(db, tenant_id, { marcaId: d.marca_id, clienteId })
+      if (d.tipo !== 'bloqueio_manutencao' && !marcaId) {
+        return reply.code(400).send({ error: 'Selecione uma marca ou cliente para live e gravação' })
+      }
 
       // Verifica conflito — cria mesmo assim, retorna aviso
       let conflito = null
@@ -282,7 +344,7 @@ export async function agendaRoutes(app) {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          RETURNING *`,
         [
-          tenant_id, d.tipo, d.marca_id ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null, d.data_inicio,
+          tenant_id, d.tipo, marcaId ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null, d.data_inicio,
           d.data_fim, d.status, d.recorrencia_rule ?? null,
           d.recorrencia_origem_id ?? null, d.responsavel_marketing ?? null, d.observacoes ?? null, sub ?? null,
         ],
@@ -307,7 +369,7 @@ export async function agendaRoutes(app) {
              )
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
             [
-              tenant_id, d.tipo, d.marca_id ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null,
+              tenant_id, d.tipo, marcaId ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null,
               ocorrencia.data_inicio, ocorrencia.data_fim,
               d.status, ruleJson, evento.id,
               d.responsavel_marketing ?? null, d.observacoes ?? null, sub ?? null,
@@ -328,9 +390,7 @@ export async function agendaRoutes(app) {
     const parsed = agendaPatchSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
-    const { modo_recorrencia = 'apenas_este', recorrencia: _recorrencia, ...updates } = parsed.data
-    const fields = Object.keys(updates)
-    if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
+    const { modo_recorrencia = 'apenas_este', recorrencia: _recorrencia, cliente_id: clienteId, ...updates } = parsed.data
 
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
@@ -341,13 +401,29 @@ export async function agendaRoutes(app) {
       const current = currentQ.rows[0]
       if (!current) return reply.code(404).send({ error: 'Evento não encontrado' })
 
-      const next = { ...current, ...updates }
+      const refsOk = await ensureAgendaRefs(db, reply, {
+        tenantId: tenant_id,
+        marcaId: updates.marca_id,
+        clienteId,
+        cabineId: updates.cabine_id,
+        apresentadoraId: updates.apresentadora_id,
+      })
+      if (!refsOk) return reply
+
+      const patchUpdates = { ...updates }
+      if (clienteId && !patchUpdates.marca_id) {
+        patchUpdates.marca_id = await resolveAgendaMarcaId(db, tenant_id, { marcaId: patchUpdates.marca_id, clienteId })
+      }
+      const fields = Object.keys(patchUpdates)
+      if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
+
+      const next = { ...current, ...patchUpdates }
       if (new Date(next.data_fim) <= new Date(next.data_inicio)) {
         return reply.code(400).send({ error: 'data_fim deve ser maior que data_inicio' })
       }
-
-      const refsOk = await ensureAgendaRefs(db, reply, { tenantId: tenant_id, marcaId: updates.marca_id, cabineId: updates.cabine_id, apresentadoraId: updates.apresentadora_id })
-      if (!refsOk) return reply
+      if (next.tipo !== 'bloqueio_manutencao' && !next.marca_id) {
+        return reply.code(400).send({ error: 'Selecione uma marca ou cliente para live e gravação' })
+      }
 
       // Verifica conflito — retorna aviso, não bloqueia
       let conflito = null
@@ -370,7 +446,7 @@ export async function agendaRoutes(app) {
       const set = fields.map((field, index) => `${field} = $${index + 3}`).concat('atualizado_em = NOW()').join(', ')
 
       // Atualiza o evento principal
-      const mainValues = [request.params.id, tenant_id, ...fields.map((field) => updates[field])]
+      const mainValues = [request.params.id, tenant_id, ...fields.map((field) => patchUpdates[field])]
       const result = await db.query(
         `UPDATE agenda_eventos SET ${set}
          WHERE id = $1 AND tenant_id = $2::uuid
@@ -386,7 +462,7 @@ export async function agendaRoutes(app) {
         const origemId = current.recorrencia_origem_id ?? current.id
 
         // Monta: $1=tenant, $2=origemId, $3..$N=campos, $N+1=excludeId [, $N+2=data_inicio se este_e_proximos]
-        const recValues = [tenant_id, origemId, ...fields.map((field) => updates[field]), request.params.id]
+        const recValues = [tenant_id, origemId, ...fields.map((field) => patchUpdates[field]), request.params.id]
         const excludeIdx = recValues.length // posição do excludeId já inserido acima
         const setRecorrentes = fields.map((field, index) => `${field} = $${index + 3}`).concat('atualizado_em = NOW()').join(', ')
 

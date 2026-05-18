@@ -265,6 +265,21 @@ export async function livesRoutes(app) {
           })
         }
 
+        // Bloqueio de inadimplência — apenas para tipo 'cliente'
+        if (tipo === 'cliente' && resolvedClienteId) {
+          const clienteQ = await db.query(
+            `SELECT status FROM clientes WHERE id = $1 AND tenant_id = $2`,
+            [resolvedClienteId, tenant_id]
+          )
+          if (clienteQ.rows[0]?.status === 'inadimplente') {
+            await db.query('ROLLBACK')
+            return reply.code(403).send({
+              error: 'Cliente inadimplente — não é possível iniciar nova live',
+              code: 'CLIENTE_INADIMPLENTE'
+            })
+          }
+        }
+
         if (tiktokUsername && resolvedContratoId) {
           await db.query(
             `UPDATE contratos SET tiktok_username = $1 WHERE id = $2`,
@@ -387,6 +402,21 @@ export async function livesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       try {
         await db.query('BEGIN')
+
+        // Bloqueio de inadimplência — apenas para tipo 'cliente'
+        if (d.tipo === 'cliente' && d.cliente_id) {
+          const clienteQ = await db.query(
+            `SELECT status FROM clientes WHERE id = $1 AND tenant_id = $2`,
+            [d.cliente_id, tenant_id]
+          )
+          if (clienteQ.rows[0]?.status === 'inadimplente') {
+            await db.query('ROLLBACK')
+            return reply.code(403).send({
+              error: 'Cliente inadimplente — não é possível iniciar nova live',
+              code: 'CLIENTE_INADIMPLENTE'
+            })
+          }
+        }
 
         const cab = await db.query(
           `SELECT c.contrato_id, ct.comissao_pct

@@ -186,6 +186,7 @@ export async function cabinesRoutes(app) {
     preHandler: [app.authenticate, app.requirePapel(WRITE_CABINES)],
   }, async (request, reply) => {
     const { tenant_id } = request.user
+    const confirmacao = request.query?.confirmacao
     return app.withTenant(tenant_id, async (db) => {
       const cabineResult = await db.query(
         `SELECT id, status, live_atual_id, contrato_id FROM cabines WHERE id = $1 AND tenant_id = $2`,
@@ -199,7 +200,7 @@ export async function cabinesRoutes(app) {
         return reply.code(409).send({ error: 'Cabine ao vivo não pode ser deletada' })
       }
 
-      if (cabine.contrato_id) {
+      if (cabine.contrato_id && confirmacao !== 'CABINE') {
         return reply.code(409).send({ error: 'Libere a cabine antes de deletá-la' })
       }
 
@@ -209,14 +210,26 @@ export async function cabinesRoutes(app) {
         db.query(`SELECT id FROM live_requests WHERE cabine_id = $1 AND tenant_id = $2::uuid LIMIT 1`, [request.params.id, tenant_id]),
         db.query(`SELECT id FROM agenda_eventos WHERE cabine_id = $1 AND tenant_id = $2::uuid LIMIT 1`, [request.params.id, tenant_id]),
       ])
-      if (livesRef.rowCount > 0) {
-        return reply.code(409).send({ error: 'Cabine possui histórico de lives. Não pode ser deletada.' })
-      }
-      if (solRef.rowCount > 0) {
-        return reply.code(409).send({ error: 'Cabine possui solicitações vinculadas. Remova-as primeiro.' })
-      }
-      if (agendaRef.rowCount > 0) {
-        return reply.code(409).send({ error: 'Cabine possui eventos de agenda. Inative a cabine em vez de deletar.' })
+      const hasHistory = livesRef.rowCount > 0 || solRef.rowCount > 0 || agendaRef.rowCount > 0
+      if (hasHistory) {
+        if (confirmacao !== 'CABINE') {
+          return reply.code(409).send({
+            error: 'Cabine possui histórico. Digite CABINE para removê-la da operação.',
+            code: 'CABINE_CONFIRMATION_REQUIRED',
+          })
+        }
+
+        await db.query(
+          `UPDATE cabines
+           SET ativo = false,
+               status = 'disponivel',
+               live_atual_id = NULL,
+               contrato_id = NULL
+           WHERE id = $1 AND tenant_id = $2::uuid`,
+          [request.params.id, tenant_id],
+        )
+        app.audit?.log?.(request, { action: 'cabines.soft_delete', entity_type: 'cabine', entity_id: request.params.id, metadata: { confirmacao } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        return { ok: true, soft_deleted: true }
       }
 
       await db.query(`DELETE FROM cabines WHERE id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])

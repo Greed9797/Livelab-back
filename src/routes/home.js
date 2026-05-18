@@ -313,7 +313,7 @@ export async function homeRoutes(app) {
                  c.nome AS cabine_nome,
                  m.nome AS marca_nome,
                  cl.nome AS cliente_nome,
-                 ap.nome AS apresentadora_nome
+                 COALESCE(a_evento.nome, ap_marca.nome) AS apresentadora_nome
           FROM agenda_eventos ae
           JOIN marcas m ON m.id = ae.marca_id
            AND m.tenant_id = ae.tenant_id
@@ -321,6 +321,8 @@ export async function homeRoutes(app) {
            AND cl.tenant_id = ae.tenant_id
           LEFT JOIN cabines c ON c.id = ae.cabine_id
            AND c.tenant_id = ae.tenant_id
+          LEFT JOIN apresentadoras a_evento ON a_evento.id = ae.apresentadora_id
+           AND a_evento.tenant_id = ae.tenant_id
           LEFT JOIN LATERAL (
             SELECT a.nome
             FROM apresentadora_marcas am
@@ -331,7 +333,7 @@ export async function homeRoutes(app) {
               AND am.ativo IS NOT FALSE
             ORDER BY (am.papel = 'principal') DESC, a.nome ASC
             LIMIT 1
-          ) ap ON true
+          ) ap_marca ON true
           WHERE ae.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
           ORDER BY ae.data_inicio ASC
@@ -356,18 +358,48 @@ export async function homeRoutes(app) {
       let rankingApresentadorasHoje = []
       try {
         const rankingApQ = await db.query(`
-          SELECT u.id, u.nome AS apresentadora_nome,
+          SELECT apresentadora_base.apresentadora_id AS id,
+                 apresentadora_base.apresentadora_nome,
                  COALESCE(SUM(l.fat_gerado), 0) AS gmv,
                  COUNT(l.id) AS lives
           FROM lives l
-          JOIN users u ON u.id = l.apresentador_id
+          LEFT JOIN LATERAL (
+            SELECT lav.apresentadora_id, a.nome AS apresentadora_nome
+            FROM live_apresentadoras_v2 lav
+            JOIN apresentadoras a ON a.id = lav.apresentadora_id
+             AND a.tenant_id = lav.tenant_id
+            WHERE lav.live_id = l.id
+              AND lav.tenant_id = l.tenant_id
+            ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+            LIMIT 1
+          ) lav_ap ON true
+          LEFT JOIN LATERAL (
+            SELECT ae.apresentadora_id, a.nome AS apresentadora_nome
+            FROM agenda_eventos ae
+            JOIN apresentadoras a ON a.id = ae.apresentadora_id
+             AND a.tenant_id = ae.tenant_id
+            WHERE ae.tenant_id = l.tenant_id
+              AND ae.cabine_id = l.cabine_id
+              AND ae.tipo = 'live'
+              AND ae.data_inicio::date = l.iniciado_em::date
+            ORDER BY ABS(EXTRACT(EPOCH FROM (ae.data_inicio - l.iniciado_em)))
+            LIMIT 1
+          ) agenda_ap ON true
+          LEFT JOIN apresentadoras user_ap ON user_ap.user_id = l.apresentador_id
+           AND user_ap.tenant_id = l.tenant_id
+          LEFT JOIN users u ON u.id = l.apresentador_id
            AND u.tenant_id = l.tenant_id
+          CROSS JOIN LATERAL (
+            SELECT COALESCE(lav_ap.apresentadora_id, agenda_ap.apresentadora_id, user_ap.id) AS apresentadora_id,
+                   COALESCE(lav_ap.apresentadora_nome, agenda_ap.apresentadora_nome, user_ap.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome
+          ) apresentadora_base
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status = 'encerrada'
+            AND apresentadora_base.apresentadora_nome IS NOT NULL
             AND date_trunc('day', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
                 = date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo')
-          GROUP BY u.id, u.nome
-          ORDER BY gmv DESC, lives DESC, u.nome ASC
+          GROUP BY apresentadora_base.apresentadora_id, apresentadora_base.apresentadora_nome
+          ORDER BY gmv DESC, lives DESC, apresentadora_base.apresentadora_nome ASC
           LIMIT 10
         `)
         rankingApresentadorasHoje = rankingApQ.rows.map(r => {

@@ -73,6 +73,18 @@ if (process.env.SENTRY_DSN) {
   })
 }
 
+export async function healthHandler(request, reply) {
+  const token = process.env.HEALTH_CHECK_TOKEN
+  if (token) {
+    const provided = request.headers['x-health-token'] ?? ''
+    const a = Buffer.from(String(provided))
+    const b = Buffer.from(token)
+    const ok = a.length === b.length && timingSafeEqual(a, b)
+    if (!ok) return reply.code(404).send()
+  }
+  return { ok: true }
+}
+
 export async function buildApp(opts = {}) {
   // S-08: secrets obrigatórios em produção. Falha cedo (boot-time) em vez de
   // descobrir mid-request que o webhook está aceitando payload sem assinatura.
@@ -218,17 +230,8 @@ export async function buildApp(opts = {}) {
 
   // S-11: opcional — se HEALTH_CHECK_TOKEN setado, exige header pra responder.
   // 404 (não 401) pra não confirmar existência do endpoint a scanners.
-  app.get('/health', async (request, reply) => {
-    const token = process.env.HEALTH_CHECK_TOKEN
-    if (token) {
-      const provided = request.headers['x-health-token'] ?? ''
-      const a = Buffer.from(String(provided))
-      const b = Buffer.from(token)
-      const ok = a.length === b.length && timingSafeEqual(a, b)
-      if (!ok) return reply.code(404).send()
-    }
-    return { ok: true }
-  })
+  app.get('/health', healthHandler)
+  app.get('/healthcheck', healthHandler)
 
   app.setErrorHandler((error, request, reply) => {
     // Custom AppError subclasses: usa statusCode/sentryTag/reportable da classe

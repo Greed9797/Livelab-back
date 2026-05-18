@@ -94,7 +94,7 @@ async function getAppliedMigrations(client) {
   return new Set(rows.map((r) => r.version))
 }
 
-async function applyMigration(client, fileName) {
+export async function applyMigration(client, fileName) {
   const filePath = path.join(process.cwd(), 'migrations', fileName)
   if (!fs.existsSync(filePath)) {
     console.log(`[migrations] Ignorada (arquivo não encontrado): ${fileName}`)
@@ -102,7 +102,19 @@ async function applyMigration(client, fileName) {
   }
 
   const sql = fs.readFileSync(filePath, 'utf8')
+  const requiresNoTransaction = /\bCONCURRENTLY\b/i.test(sql)
   console.log(`[migrations] Aplicando: ${fileName}`)
+
+  if (requiresNoTransaction) {
+    try {
+      await client.query(sql)
+      await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
+      console.log(`[migrations] ✅ ${fileName}`)
+      return
+    } catch (err) {
+      throw new Error(`[migrations] ❌ Falha em ${fileName}: ${err.message}`)
+    }
+  }
 
   await client.query('BEGIN')
   try {

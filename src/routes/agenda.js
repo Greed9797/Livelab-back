@@ -11,20 +11,24 @@ const recorrenciaSchema = z.object({
 }).optional()
 
 const agendaBaseSchema = z.object({
-  tipo: z.enum(['live', 'gravacao_video']),
-  marca_id: z.string().uuid(),
+  tipo: z.enum(['live', 'gravacao_video', 'bloqueio_manutencao']),
+  marca_id: z.string().uuid().nullable().optional(),
   cabine_id: z.string().uuid().nullable().optional(),
+  apresentadora_id: z.string().uuid().nullable().optional(),
   data_inicio: z.string().datetime({ offset: true }),
   data_fim: z.string().datetime({ offset: true }),
   status: z.enum(['planejado', 'confirmado', 'ao_vivo', 'concluido', 'cancelado']).default('planejado'),
   recorrencia_rule: z.string().nullable().optional(),
   recorrencia_origem_id: z.string().uuid().nullable().optional(),
+  responsavel_marketing: z.string().nullable().optional(),
   observacoes: z.string().nullable().optional(),
   recorrencia: recorrenciaSchema,
 })
 
 const agendaSchema = agendaBaseSchema.refine((data) => new Date(data.data_fim) > new Date(data.data_inicio), {
   message: 'data_fim deve ser maior que data_inicio',
+}).refine((data) => data.tipo === 'bloqueio_manutencao' || Boolean(data.marca_id), {
+  message: 'marca_id é obrigatório para live e gravação',
 })
 
 const agendaPatchSchema = agendaBaseSchema.partial().extend({
@@ -38,7 +42,7 @@ const agendaDeleteQuerySchema = z.object({
   modo_recorrencia: z.enum(['apenas_este', 'este_e_proximos', 'todos']).optional().default('apenas_este'),
 })
 
-async function ensureAgendaRefs(db, reply, { tenantId, marcaId, cabineId }) {
+async function ensureAgendaRefs(db, reply, { tenantId, marcaId, cabineId, apresentadoraId }) {
   if (marcaId) {
     const marca = await db.query('SELECT id FROM marcas WHERE id = $1 AND tenant_id = $2::uuid', [marcaId, tenantId])
     if (!marca.rows[0]) {
@@ -51,6 +55,14 @@ async function ensureAgendaRefs(db, reply, { tenantId, marcaId, cabineId }) {
     const cabine = await db.query('SELECT id FROM cabines WHERE id = $1 AND tenant_id = $2::uuid', [cabineId, tenantId])
     if (!cabine.rows[0]) {
       reply.code(404).send({ error: 'Cabine não encontrada' })
+      return false
+    }
+  }
+
+  if (apresentadoraId) {
+    const apresentadora = await db.query('SELECT id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid', [apresentadoraId, tenantId])
+    if (!apresentadora.rows[0]) {
+      reply.code(404).send({ error: 'Apresentadora não encontrada' })
       return false
     }
   }
@@ -197,10 +209,12 @@ export async function agendaRoutes(app) {
         `SELECT ae.*,
                 m.nome AS marca_nome,
                 c.numero AS cabine_numero,
-                c.nome AS cabine_nome
+                c.nome AS cabine_nome,
+                a.nome AS apresentadora_nome
          FROM agenda_eventos ae
-         JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
+         LEFT JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
          LEFT JOIN cabines c ON c.id = ae.cabine_id AND c.tenant_id = ae.tenant_id
+         LEFT JOIN apresentadoras a ON a.id = ae.apresentadora_id AND a.tenant_id = ae.tenant_id
          WHERE ${filters.join(' AND ')}
          ORDER BY ae.data_inicio ASC
          LIMIT 500`,
@@ -239,7 +253,7 @@ export async function agendaRoutes(app) {
     const { recorrencia, ...d } = parsed.data
 
     return app.withTenant(tenant_id, async (db) => {
-      const refsOk = await ensureAgendaRefs(db, reply, { tenantId: tenant_id, marcaId: d.marca_id, cabineId: d.cabine_id })
+      const refsOk = await ensureAgendaRefs(db, reply, { tenantId: tenant_id, marcaId: d.marca_id, cabineId: d.cabine_id, apresentadoraId: d.apresentadora_id })
       if (!refsOk) return reply
 
       // Verifica conflito — cria mesmo assim, retorna aviso
@@ -262,15 +276,15 @@ export async function agendaRoutes(app) {
       // Cria o evento principal
       const result = await db.query(
         `INSERT INTO agenda_eventos (
-           tenant_id, tipo, marca_id, cabine_id, data_inicio, data_fim,
-           status, recorrencia_rule, recorrencia_origem_id, observacoes, criado_por
+           tenant_id, tipo, marca_id, cabine_id, apresentadora_id, data_inicio, data_fim,
+           status, recorrencia_rule, recorrencia_origem_id, responsavel_marketing, observacoes, criado_por
          )
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          RETURNING *`,
         [
-          tenant_id, d.tipo, d.marca_id, d.cabine_id ?? null, d.data_inicio,
+          tenant_id, d.tipo, d.marca_id ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null, d.data_inicio,
           d.data_fim, d.status, d.recorrencia_rule ?? null,
-          d.recorrencia_origem_id ?? null, d.observacoes ?? null, sub ?? null,
+          d.recorrencia_origem_id ?? null, d.responsavel_marketing ?? null, d.observacoes ?? null, sub ?? null,
         ],
       )
       const evento = result.rows[0]
@@ -288,15 +302,15 @@ export async function agendaRoutes(app) {
         for (const ocorrencia of ocorrencias) {
           await db.query(
             `INSERT INTO agenda_eventos (
-               tenant_id, tipo, marca_id, cabine_id, data_inicio, data_fim,
-               status, recorrencia_rule, recorrencia_origem_id, observacoes, criado_por
+               tenant_id, tipo, marca_id, cabine_id, apresentadora_id, data_inicio, data_fim,
+               status, recorrencia_rule, recorrencia_origem_id, responsavel_marketing, observacoes, criado_por
              )
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
             [
-              tenant_id, d.tipo, d.marca_id, d.cabine_id ?? null,
+              tenant_id, d.tipo, d.marca_id ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null,
               ocorrencia.data_inicio, ocorrencia.data_fim,
               d.status, ruleJson, evento.id,
-              d.observacoes ?? null, sub ?? null,
+              d.responsavel_marketing ?? null, d.observacoes ?? null, sub ?? null,
             ],
           )
           recorrentes++
@@ -332,7 +346,7 @@ export async function agendaRoutes(app) {
         return reply.code(400).send({ error: 'data_fim deve ser maior que data_inicio' })
       }
 
-      const refsOk = await ensureAgendaRefs(db, reply, { tenantId: tenant_id, marcaId: updates.marca_id, cabineId: updates.cabine_id })
+      const refsOk = await ensureAgendaRefs(db, reply, { tenantId: tenant_id, marcaId: updates.marca_id, cabineId: updates.cabine_id, apresentadoraId: updates.apresentadora_id })
       if (!refsOk) return reply
 
       // Verifica conflito — retorna aviso, não bloqueia

@@ -290,7 +290,40 @@ export async function clientesRoutes(app) {
         [...vals, request.params.id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
-      app.audit?.log?.(request, { action: 'cliente.update', entity_type: 'cliente', entity_id: request.params.id, metadata: { changed_fields: keys, status_change: updates.status ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      // Log status change separately if applicable
+      if (updates.status !== undefined) {
+        app.audit?.log?.(request, { action: 'clientes.status_alterado', entity_type: 'cliente', entity_id: request.params.id, metadata: { new_status: updates.status } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      } else {
+        app.audit?.log?.(request, { action: 'clientes.update', entity_type: 'cliente', entity_id: request.params.id, metadata: { changed_fields: keys } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      }
+      return result.rows[0]
+    })
+  })
+
+  // GET /v1/clientes/:id/exportar-dados — LGPD: exporta dados pessoais do cliente
+  // Apenas franqueado/master do próprio tenant (tenant_id isolado via withTenant).
+  // Retorna JSON com header Content-Disposition para download.
+  app.get('/v1/clientes/:id/exportar-dados', {
+    preHandler: app.requirePapel(['franqueador_master', 'franqueado']),
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT
+          c.nome, c.email, c.telefone, c.celular, c.cnpj, c.cpf, c.razao_social,
+          c.nicho, c.cidade, c.estado, c.criado_em,
+          COUNT(l.id)::int           AS total_lives,
+          MAX(l.iniciado_em)         AS ultima_live,
+          COALESCE(SUM(l.fat_gerado), 0)::float AS gmv_acumulado
+         FROM clientes c
+         LEFT JOIN lives l ON l.cliente_id = c.id AND l.tenant_id = c.tenant_id
+         WHERE c.id = $1 AND c.tenant_id = $2::uuid AND c.deleted_at IS NULL
+         GROUP BY c.id, c.nome, c.email, c.telefone, c.celular, c.cnpj, c.cpf,
+                  c.razao_social, c.nicho, c.cidade, c.estado, c.criado_em`,
+        [request.params.id, tenant_id]
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      reply.header('Content-Disposition', `attachment; filename="dados-cliente-${request.params.id}.json"`)
       return result.rows[0]
     })
   })

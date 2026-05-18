@@ -311,6 +311,7 @@ export async function usuariosRoutes(app) {
         return reply.code(404).send({ error: 'Usuário não encontrado' })
       }
       await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+      app.audit?.log?.(request, { action: 'usuarios.reset_password', entity_type: 'user', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       // S-10: resposta contém senha — proibir cache em proxies/CDN
       reply.header('Cache-Control', 'no-store')
       reply.header('Pragma', 'no-cache')

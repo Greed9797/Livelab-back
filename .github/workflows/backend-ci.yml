@@ -2,15 +2,30 @@ name: Backend CI
 
 on:
   push:
-    branches: [master]
+    branches: [master, stabilization/core-restructure]
   pull_request:
     branches: [master]
 
 jobs:
   test:
-    name: Test + Syntax
+    name: Test + Migrations
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: livelab_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
 
     steps:
       - name: Checkout
@@ -32,11 +47,11 @@ jobs:
           done
 
       - name: Run tests + coverage threshold
-        run: npx vitest run --coverage
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test
-          JWT_SECRET: test-secret-with-at-least-32-chars-required
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
+          JWT_SECRET: test-secret-32-chars-minimum-here
           NODE_ENV: test
+        run: npx vitest run --coverage
 
       - name: Upload coverage report
         if: always()
@@ -45,6 +60,12 @@ jobs:
           name: coverage-html
           path: coverage/
           retention-days: 14
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
+          NODE_ENV: test
+        run: node apply_migrations.js
 
       - name: Audit (high severity)
         run: npm audit --omit=dev --audit-level=high || echo "Audit warnings"

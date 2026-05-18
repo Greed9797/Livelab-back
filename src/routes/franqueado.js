@@ -1336,6 +1336,7 @@ export async function franqueadoRoutes(app) {
   })
 
   // Ranking público cross-tenant com payload sanitizado.
+  // Exclui o master tenant (franqueadora) — ranking só de franqueados.
   app.get('/v1/public/ranking', async (request, reply) => {
     try {
       const periodInfo = parsePeriod(request.query?.periodo)
@@ -1343,9 +1344,12 @@ export async function franqueadoRoutes(app) {
       const limit = Number.isFinite(rawLimit)
         ? Math.min(Math.max(Math.trunc(rawLimit), 1), 20)
         : 10
+      // MASTER_TENANT_ID: defined in migrations/001_create_users.sql
+      const MASTER_TENANT_ID = '00000000-0000-0000-0000-000000000001'
       const result = await fetchNetworkRanking(app, {
         periodInfo,
         limit,
+        excludeTenantId: MASTER_TENANT_ID,
       })
 
       return reply.send(mapNetworkRanking(result.rows, { publicOnly: true }))

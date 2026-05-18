@@ -16,6 +16,7 @@ import { contratosRoutes } from './routes/contratos.js'
 import { financeiroRoutes } from './routes/financeiro.js'
 import { relatoriosRoutes } from './routes/relatorios.js'
 import { cabinesRoutes } from './routes/cabines.js'
+import { livesRoutes } from './routes/lives.js'
 import { clienteDashboardRoutes } from './routes/cliente_dashboard.js'
 import { leadsRoutes } from './routes/leads.js'
 import { boletosRoutes } from './routes/boletos.js'
@@ -49,6 +50,29 @@ import { vendasAtribuidasRoutes } from './routes/vendas_atribuidas.js'
 import { comissoesRoutes } from './routes/comissoes.js'
 import { AppError } from './lib/errors.js'
 
+// S-Sentry: inicializa o SDK uma vez, antes de qualquer handler.
+// SENTRY_DSN ausente → noop silencioso (dev/test sem Sentry).
+// beforeBreadcrumb filtra campos sensíveis para cumprir LGPD.
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV ?? 'development',
+    tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.1 : 0,
+    beforeBreadcrumb(breadcrumb) {
+      // Remove quaisquer dados sensíveis de breadcrumbs antes de enviar ao Sentry
+      if (breadcrumb.data) {
+        const SENSITIVE = ['senha', 'password', 'token', 'secret', 'authorization', 'cpf', 'cnpj']
+        for (const key of Object.keys(breadcrumb.data)) {
+          if (SENSITIVE.some(s => key.toLowerCase().includes(s))) {
+            breadcrumb.data[key] = '[Filtered]'
+          }
+        }
+      }
+      return breadcrumb
+    },
+  })
+}
+
 export async function buildApp(opts = {}) {
   // S-08: secrets obrigatórios em produção. Falha cedo (boot-time) em vez de
   // descobrir mid-request que o webhook está aceitando payload sem assinatura.
@@ -71,6 +95,10 @@ export async function buildApp(opts = {}) {
     ...opts,
   })
 
+  // LGPD/S-06: Em produção, CORS nunca usa wildcard ('*').
+  // A allowlist abaixo é a fonte da verdade para origens permitidas.
+  // Para adicionar uma origem nova, atualize tanto este array quanto o
+  // env var CORS_ORIGIN no painel de deploy — nunca use '*'.
   const corsAllowedOrigins = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
     : (process.env.NODE_ENV === 'production'
@@ -155,6 +183,7 @@ export async function buildApp(opts = {}) {
   await app.register(financeiroRoutes)
   await app.register(relatoriosRoutes)
   await app.register(cabinesRoutes)
+  await app.register(livesRoutes)
   await app.register(clienteDashboardRoutes)
   await app.register(leadsRoutes)
   await app.register(boletosRoutes)
@@ -207,18 +236,37 @@ export async function buildApp(opts = {}) {
     const status = isAppError ? error.statusCode : (error.statusCode ?? 500)
     const shouldReport = status >= 500 || (isAppError && error.reportable === true)
 
+    // LGPD: errorContext inclui APENAS metadados não-sensíveis (tenant, papel, request_id).
+    // request.body NUNCA é logado — pode conter password, token, cpf, dados pessoais.
+    const errorContext = {
+      err: error,
+      request_id: request.id,
+      tenant_id: request.user?.tenant_id,
+      papel: request.user?.papel,
+      sentryTag: isAppError ? error.sentryTag : undefined,
+    }
+
     if (status >= 500) {
-      request.log.error({ err: error }, 'Unhandled error')
+      request.log.error(errorContext, 'Unhandled error')
     } else if (isAppError && error.reportable) {
-      request.log.warn({ err: error, sentryTag: error.sentryTag }, 'Reportable AppError')
+      request.log.warn(errorContext, 'Reportable AppError')
     }
 
     if (shouldReport && process.env.SENTRY_DSN) {
       Sentry.withScope((scope) => {
         scope.setTag('route', request.routeOptions?.url ?? request.url)
         scope.setTag('method', request.method)
+        scope.setTag('request_id', request.id)
+        if (request.user?.tenant_id) scope.setTag('tenant_id', String(request.user.tenant_id))
         if (isAppError) scope.setTag('error_class', error.sentryTag)
-        scope.setUser(request.user ? { id: request.user.sub, papel: request.user.papel } : undefined)
+        // Inclui dados do usuário APENAS se autenticado; email/nome são úteis
+        // para triagem no Sentry mas nunca expostos sem autenticação prévia.
+        scope.setUser(request.user ? {
+          id: request.user.sub,
+          papel: request.user.papel,
+          email: request.user.email,
+          nome: request.user.nome,
+        } : undefined)
         Sentry.captureException(error)
       })
     }

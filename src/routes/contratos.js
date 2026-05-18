@@ -241,6 +241,7 @@ export async function contratosRoutes(app) {
         vals
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou não está em rascunho' })
+      app.audit?.log?.(request, { action: 'contratos.edit', entity_type: 'contrato', entity_id: request.params.id, metadata: { updated_fields: Object.keys({ pacote_id, valor_fixo, comissao_pct }).filter(k => request.body.hasOwnProperty(k)) } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })
@@ -328,6 +329,7 @@ export async function contratosRoutes(app) {
         throw txErr
       }
 
+      app.audit?.log?.(request, { action: 'contratos.sign_digital', entity_type: 'contrato', entity_id: request.params.id, metadata: { aprovado, score, risco, status: novoStatus } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { aprovado, score, risco, status: novoStatus, requer_backoffice: !aprovado }
     })
   })
@@ -373,8 +375,8 @@ export async function contratosRoutes(app) {
 
           // Cliente
           const clQ = await app.db.query(
-            `SELECT nome, email FROM clientes WHERE id = $1`,
-            [contrato.cliente_id],
+            `SELECT nome, email FROM clientes WHERE id = $1 AND tenant_id = $2`,
+            [contrato.cliente_id, tenant_id],
           )
           const cliente = clQ.rows[0]
 
@@ -467,6 +469,7 @@ export async function contratosRoutes(app) {
         await db.query('ROLLBACK')
         throw txErr
       }
+      app.audit?.log?.(request, { action: 'contratos.assume_risk', entity_type: 'contrato', entity_id: request.params.id, metadata: { de_risco: true, is_risco_franqueado: true } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { ok: true, status: 'ativo', de_risco: true }
     })
   })
@@ -488,6 +491,7 @@ export async function contratosRoutes(app) {
         [username, request.params.id, tenant_id]
       )
       if (!rows.length) return reply.code(404).send({ error: 'Contrato não encontrado' })
+      app.audit?.log?.(request, { action: 'contratos.edit_tiktok_username', entity_type: 'contrato', entity_id: request.params.id, metadata: { new_username: username } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.send(rows[0])
     })
   })

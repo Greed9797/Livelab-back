@@ -271,6 +271,39 @@ describe('POST /v1/lives/manual', () => {
 })
 
 describe('PATCH /v1/lives/:id (edição manual)', () => {
+  it('updates publication status through the manual edit endpoint', async () => {
+    const liveId = 'live-edit-status'
+    const updateArgs = []
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({
+        rows: [{
+          id: liveId,
+          cabine_id: basePayload.cabine_id,
+          cliente_id: basePayload.cliente_id,
+          fat_gerado: '1000',
+          manual_gmv: '1000',
+          final_orders_count: 10,
+          iniciado_em: '2026-05-01T18:00:00Z',
+          encerrado_em: '2026-05-01T20:00:00Z',
+        }]
+      })
+      .mockImplementationOnce((sql, args) => { updateArgs.push(args); return { rows: [] } }) // UPDATE lives
+      .mockResolvedValueOnce({ rows: [] }) // COMMIT
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}`,
+      payload: { status_publicacao: 'publicado' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(updateArgs[0]).toContain('publicado')
+  })
+
   it('updates fat_gerado and recalculates comissao', async () => {
     const liveId = 'live-edit-1'
     const updateArgs = []

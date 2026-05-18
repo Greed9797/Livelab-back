@@ -60,6 +60,7 @@ const liveManualSchema = z.object({
 const liveManualEditSchema = z.object({
   cabine_id:        z.string().uuid().optional(),
   cliente_id:       z.string().uuid().optional(),
+  marca_id:         z.string().uuid().optional(),
   apresentador_id:  z.string().uuid().optional(),
   apresentador2_id: z.string().uuid().nullable().optional(),
   gestor_id:        z.string().uuid().optional(),
@@ -76,6 +77,8 @@ const liveManualEditSchema = z.object({
   manual_diamonds:  z.number().int().min(0).optional(),
   manual_orders:    z.number().int().min(0).optional(),
   manual_gmv:       z.number().min(0).optional(),
+  tipo:             z.enum(['cliente', 'afiliado', 'teste']).optional(),
+  status_publicacao: z.enum(['rascunho', 'revisado', 'publicado']).optional(),
 })
 
 const publicarSchema = z.object({
@@ -667,7 +670,7 @@ export async function livesRoutes(app) {
         await db.query('BEGIN')
 
         const liveQ = await db.query(
-          `SELECT id, cabine_id, fat_gerado, manual_gmv, iniciado_em, encerrado_em
+          `SELECT id, cabine_id, cliente_id, fat_gerado, manual_gmv, final_orders_count, iniciado_em, encerrado_em
              FROM lives WHERE id = $1 AND status = 'encerrada' FOR UPDATE`,
           [request.params.id]
         )
@@ -707,10 +710,25 @@ export async function livesRoutes(app) {
           if (apRow.rows[0].user_id) resolvedApresentadorId = apRow.rows[0].user_id
         }
 
+        let resolvedClienteId = d.cliente_id
+        if (d.marca_id !== undefined) {
+          const marcaQ = await db.query(
+            `SELECT id, cliente_id FROM marcas WHERE id = $1 AND tenant_id = $2::uuid`,
+            [d.marca_id, tenant_id]
+          )
+          if (!marcaQ.rows[0]) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Marca não encontrada' })
+          }
+          resolvedClienteId = resolvedClienteId ?? marcaQ.rows[0].cliente_id ?? null
+        }
+
         if (d.cabine_id    !== undefined) addField('cabine_id',    d.cabine_id)
-        if (d.cliente_id   !== undefined) addField('cliente_id',   d.cliente_id)
+        if (resolvedClienteId !== undefined) addField('cliente_id', resolvedClienteId)
         if (resolvedApresentadorId !== undefined) addField('apresentador_id', resolvedApresentadorId)
         if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
+        if (d.tipo         !== undefined) addField('tipo',               d.tipo)
+        if (d.status_publicacao !== undefined) addField('status_publicacao', d.status_publicacao)
         if (d.fat_gerado      !== undefined) { addField('fat_gerado', d.fat_gerado); addField('comissao_calculada', comissao) }
         if (d.qtd_pedidos     !== undefined) addField('final_orders_count', d.qtd_pedidos)
         if (d.resumo          !== undefined) addField('resumo',             d.resumo)
@@ -739,6 +757,31 @@ export async function livesRoutes(app) {
         if (updates.length > 0) {
           values.push(request.params.id)
           await db.query(`UPDATE lives SET ${updates.join(', ')} WHERE id = $${idx}`, values)
+        }
+
+        if (d.apresentador_id !== undefined) {
+          await db.query('DELETE FROM live_apresentadoras_v2 WHERE live_id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
+          if (d.apresentador_id) {
+            await db.query(
+              `INSERT INTO live_apresentadoras_v2 (tenant_id, live_id, apresentadora_id)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (live_id, apresentadora_id) DO NOTHING`,
+              [tenant_id, request.params.id, d.apresentador_id]
+            )
+          }
+        }
+
+        if (d.marca_id !== undefined) {
+          await upsertVendaAtribuida(db, {
+            tenantId: tenant_id,
+            origem: 'live',
+            origemId: request.params.id,
+            marcaId: d.marca_id,
+            apresentadoraId: d.apresentador_id ?? null,
+            data: (d.data ?? new Date(live.iniciado_em).toISOString().slice(0, 10)),
+            gmv: d.manual_gmv ?? d.fat_gerado ?? Number(live.manual_gmv ?? live.fat_gerado ?? 0),
+            pedidos: d.qtd_pedidos ?? Number(live.final_orders_count ?? 0),
+          })
         }
 
         // Rastreia mudanças em fat_gerado e manual_gmv na tabela live_metric_revisions
@@ -824,6 +867,7 @@ export async function livesRoutes(app) {
                 l.manual_diamonds, l.manual_orders, l.manual_gmv,
                 c.numero AS cabine_numero, c.contrato_id,
                 cl.nome AS cliente_nome,
+                va_marca.marca_id AS marca_id,
                 va_marca.marca_nome AS marca_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
@@ -861,7 +905,7 @@ export async function livesRoutes(app) {
            LIMIT 1
          ) ap_v2 ON true
          LEFT JOIN LATERAL (
-           SELECT m.nome AS marca_nome
+           SELECT m.id AS marca_id, m.nome AS marca_nome
            FROM vendas_atribuidas va
            JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
            WHERE va.tenant_id = l.tenant_id
@@ -920,6 +964,7 @@ export async function livesRoutes(app) {
                 l.manual_diamonds, l.manual_orders, l.manual_gmv,
                 c.numero AS cabine_numero, c.contrato_id,
                 cl.nome AS cliente_nome,
+                va_marca.marca_id AS marca_id,
                 va_marca.marca_nome AS marca_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
@@ -954,7 +999,7 @@ export async function livesRoutes(app) {
            LIMIT 1
          ) ap_v2 ON true
          LEFT JOIN LATERAL (
-           SELECT m.nome AS marca_nome
+           SELECT m.id AS marca_id, m.nome AS marca_nome
            FROM vendas_atribuidas va
            JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
            WHERE va.tenant_id = l.tenant_id
@@ -983,6 +1028,8 @@ export async function livesRoutes(app) {
       }
       await db.query('BEGIN')
       try {
+        await db.query(`DELETE FROM vendas_atribuidas WHERE origem = 'live' AND origem_id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])
+        await db.query('DELETE FROM live_apresentadoras_v2 WHERE live_id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
         await db.query('DELETE FROM live_apresentadores WHERE live_id = $1', [request.params.id])
         await db.query('DELETE FROM live_snapshots WHERE live_id = $1', [request.params.id])
         await db.query('DELETE FROM lives WHERE id = $1', [request.params.id])

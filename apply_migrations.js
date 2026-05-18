@@ -75,6 +75,7 @@ const MIGRATIONS_LIST = [
   '081_cabines_lives_restructure.sql',
   '082_live_metric_revisions.sql',
   '083_vendas_atribuidas_aprovacao.sql',
+  '084_performance_indexes.sql',
 ]
 
 async function ensureMigrationsTable(client) {

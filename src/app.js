@@ -50,6 +50,29 @@ import { vendasAtribuidasRoutes } from './routes/vendas_atribuidas.js'
 import { comissoesRoutes } from './routes/comissoes.js'
 import { AppError } from './lib/errors.js'
 
+// S-Sentry: inicializa o SDK uma vez, antes de qualquer handler.
+// SENTRY_DSN ausente → noop silencioso (dev/test sem Sentry).
+// beforeBreadcrumb filtra campos sensíveis para cumprir LGPD.
+if (process.env.SENTRY_DSN) {
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.NODE_ENV ?? 'development',
+    tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.1 : 0,
+    beforeBreadcrumb(breadcrumb) {
+      // Remove quaisquer dados sensíveis de breadcrumbs antes de enviar ao Sentry
+      if (breadcrumb.data) {
+        const SENSITIVE = ['senha', 'password', 'token', 'secret', 'authorization', 'cpf', 'cnpj']
+        for (const key of Object.keys(breadcrumb.data)) {
+          if (SENSITIVE.some(s => key.toLowerCase().includes(s))) {
+            breadcrumb.data[key] = '[Filtered]'
+          }
+        }
+      }
+      return breadcrumb
+    },
+  })
+}
+
 export async function buildApp(opts = {}) {
   // S-08: secrets obrigatórios em produção. Falha cedo (boot-time) em vez de
   // descobrir mid-request que o webhook está aceitando payload sem assinatura.
@@ -236,7 +259,14 @@ export async function buildApp(opts = {}) {
         scope.setTag('request_id', request.id)
         if (request.user?.tenant_id) scope.setTag('tenant_id', String(request.user.tenant_id))
         if (isAppError) scope.setTag('error_class', error.sentryTag)
-        scope.setUser(request.user ? { id: request.user.sub, papel: request.user.papel } : undefined)
+        // Inclui dados do usuário APENAS se autenticado; email/nome são úteis
+        // para triagem no Sentry mas nunca expostos sem autenticação prévia.
+        scope.setUser(request.user ? {
+          id: request.user.sub,
+          papel: request.user.papel,
+          email: request.user.email,
+          nome: request.user.nome,
+        } : undefined)
         Sentry.captureException(error)
       })
     }

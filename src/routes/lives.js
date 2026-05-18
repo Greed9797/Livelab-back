@@ -4,6 +4,7 @@ import { READ_CABINES, WRITE_LIVES } from '../config/role_groups.js'
 import { notify } from '../services/mailer.js'
 import { upsertVendaAtribuida } from './vendas_atribuidas.js'
 import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
+import { calcularComissoesDaLive } from '../services/commission-engine.js'
 
 const iniciarLiveSchema = z.object({
   cabine_id: z.string().uuid(),
@@ -636,6 +637,24 @@ export async function livesRoutes(app) {
         }
 
         await db.query('COMMIT')
+
+        // Recalcula comissões se fat_gerado ou manual_gmv mudou (fire-and-forget)
+        const gmvMudou = d.fat_gerado !== undefined || d.manual_gmv !== undefined
+        if (gmvMudou) {
+          const gmvAtualizado = d.manual_gmv ?? d.fat_gerado
+          app.withTenant(tenant_id, async (db2) => {
+            try {
+              await calcularComissoesDaLive(db2, {
+                liveId: request.params.id,
+                tenantId: tenant_id,
+                gmv: gmvAtualizado,
+              })
+            } catch (commErr) {
+              app.log.warn({ err: commErr, liveId: request.params.id }, 'commission-engine: falha no recálculo pós-edição (soft)')
+            }
+          }).catch(err => app.log.warn({ err, liveId: request.params.id }, 'commission-engine: withTenant falhou'))
+        }
+
         return reply.send({ ok: true })
       } catch (e) {
         await db.query('ROLLBACK')
@@ -892,9 +911,19 @@ export async function livesRoutes(app) {
 
         await db.query('COMMIT')
 
-        // Gerar cobrança automática de royalties (fire-and-forget)
-        if (comissao > 0) {
-        }
+        // Motor de comissões — recalcula com regra MAX(fixo, variável) (fire-and-forget)
+        const gmvFinal = parsed.data.manual_gmv ?? parsed.data.fat_gerado
+        app.withTenant(tenant_id, async (db2) => {
+          try {
+            await calcularComissoesDaLive(db2, {
+              liveId: live.id,
+              tenantId: tenant_id,
+              gmv: gmvFinal,
+            })
+          } catch (commErr) {
+            app.log.warn({ err: commErr, liveId: live.id }, 'commission-engine: falha no cálculo pós-encerramento (soft)')
+          }
+        }).catch(err => app.log.warn({ err, liveId: live.id }, 'commission-engine: withTenant falhou'))
 
         // Parar connector TikTok e fazer flush final do snapshot (fire-and-forget)
         if (managerHas(live.id)) {

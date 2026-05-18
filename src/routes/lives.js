@@ -10,6 +10,7 @@ const iniciarLiveSchema = z.object({
   cliente_id: z.string().uuid().optional(),
   tiktok_username: z.string().max(100).optional().nullable(),
   tipo: z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
+  agenda_evento_id: z.string().uuid().optional().nullable(),
 })
 
 const encerrarSchema = z.object({
@@ -86,7 +87,7 @@ export async function livesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
-    const { cabine_id, cliente_id: requestedClienteId, tiktok_username: rawTiktok, tipo } = parsed.data
+    const { cabine_id, cliente_id: requestedClienteId, tiktok_username: rawTiktok, tipo, agenda_evento_id } = parsed.data
     const tiktokUsername = rawTiktok ? rawTiktok.replace(/^@/, '').trim() || null : null
     const ip = getRequestIp(request)
     return app.withTenant(tenant_id, async (db) => {
@@ -107,9 +108,72 @@ export async function livesRoutes(app) {
           return reply.code(404).send({ error: 'Cabine não encontrada' })
         }
 
+        // ── Resolução via agenda_eventos ─────────────────────────────────────
+        // agenda_eventos usa marca_id; marcas tem cliente_id. Nenhuma coluna
+        // live_id/cliente_id/titulo existe em agenda_eventos (schema migration 080).
+        let resolvedAgendaEventoId = null
+        let resolvedAgendaClienteId = null
+        let agendaWarning = null
+
+        try {
+          let agendaEvento = null
+
+          if (agenda_evento_id) {
+            // Caminho explícito: evento passado no body
+            const evQ = await db.query(
+              `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id,
+                      m.cliente_id AS marca_cliente_id
+               FROM agenda_eventos ae
+               LEFT JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
+               WHERE ae.id = $1 AND ae.tenant_id = $2`,
+              [agenda_evento_id, tenant_id]
+            )
+            if (!evQ.rows[0]) {
+              await db.query('ROLLBACK')
+              return reply.code(404).send({ error: 'Evento de agenda não encontrado', code: 'AGENDA_NOT_FOUND' })
+            }
+            agendaEvento = evQ.rows[0]
+          } else {
+            // Caminho automático: busca evento de hoje nesta cabine
+            const evQ = await db.query(
+              `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id,
+                      m.cliente_id AS marca_cliente_id
+               FROM agenda_eventos ae
+               LEFT JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
+               WHERE ae.cabine_id = $1
+                 AND ae.tenant_id = $2
+                 AND ae.tipo = 'live'
+                 AND ae.data_inicio::date = CURRENT_DATE
+                 AND ae.status IN ('planejado', 'confirmado')
+               ORDER BY ABS(EXTRACT(EPOCH FROM (ae.data_inicio - NOW())))
+               LIMIT 1`,
+              [cabine_id, tenant_id]
+            )
+            agendaEvento = evQ.rows[0] ?? null
+          }
+
+          if (agendaEvento) {
+            resolvedAgendaEventoId = agendaEvento.id
+            resolvedAgendaClienteId = agendaEvento.marca_cliente_id ?? null
+            // Marca evento como em_andamento — live_id não existe na tabela
+            await db.query(
+              `UPDATE agenda_eventos SET status = 'ao_vivo', atualizado_em = NOW()
+               WHERE id = $1 AND tenant_id = $2`,
+              [agendaEvento.id, tenant_id]
+            )
+          }
+          // Se não encontrou evento e agenda_evento_id não foi passado: segue legado e criará evento automático após INSERT
+        } catch (agendaErr) {
+          // Integração com agenda nunca bloqueia a live
+          app.log.warn({ err: agendaErr, cabine_id, agenda_evento_id }, 'agenda: falha ao resolver evento, seguindo fluxo legado')
+          agendaWarning = 'Falha ao verificar agenda — live iniciada sem vínculo de evento'
+        }
+        // ── fim resolução agenda ─────────────────────────────────────────────
+
         // Auto-reserve: se cabine não está reservada/ativa com contrato, busca contrato pelo cliente ou live_request
         let resolvedContratoId = cabine.contrato_id
-        let resolvedClienteId = requestedClienteId ?? null
+        // Se agenda resolveu um cliente_id, usa como base; senão usa o do body
+        let resolvedClienteId = resolvedAgendaClienteId ?? requestedClienteId ?? null
         if (!['reservada', 'ativa'].includes(cabine.status) || !cabine.contrato_id) {
           if (!['disponivel', 'ativa', 'reservada'].includes(cabine.status)) {
             await db.query('ROLLBACK')
@@ -117,7 +181,7 @@ export async function livesRoutes(app) {
           }
 
           // Para afiliado/teste: não é necessário live_request nem cliente_id
-          if (tipo === 'cliente') {
+          if (tipo === 'cliente' && !resolvedClienteId) {
             // Busca live_request aprovada para hoje nesta cabine (qualquer horário do dia)
             const lrQ = await db.query(
               `SELECT lr.cliente_id
@@ -216,6 +280,45 @@ export async function livesRoutes(app) {
         )
         const live = liveQ.rows[0]
 
+        // ── Evento automático de agenda (se nenhum evento foi encontrado/vinculado) ──
+        // Executado dentro da transação; falha é soft (nunca bloqueia a live).
+        let finalAgendaEventoId = resolvedAgendaEventoId
+        if (!resolvedAgendaEventoId && !agendaWarning) {
+          try {
+            // Busca marca_id para o cliente resolvido (necessário pois agenda_eventos.marca_id é NOT NULL)
+            let marcaId = null
+            if (resolvedClienteId) {
+              const marcaQ = await db.query(
+                `SELECT id FROM marcas
+                 WHERE tenant_id = $1::uuid AND cliente_id = $2::uuid AND status = 'ativa'
+                 ORDER BY criado_em ASC LIMIT 1`,
+                [tenant_id, resolvedClienteId]
+              )
+              marcaId = marcaQ.rows[0]?.id ?? null
+            }
+
+            if (marcaId) {
+              const autoEvQ = await db.query(
+                `INSERT INTO agenda_eventos
+                   (tenant_id, cabine_id, tipo, status, marca_id, data_inicio, data_fim, observacoes, criado_por)
+                 VALUES ($1, $2, 'live', 'ao_vivo', $3, NOW(), NOW() + interval '4 hours',
+                         'Live iniciada sem agenda', $4)
+                 RETURNING id`,
+                [tenant_id, cabine_id, marcaId, sub]
+              )
+              finalAgendaEventoId = autoEvQ.rows[0]?.id ?? null
+              app.log.info({ liveId: live.id, agendaEventoId: finalAgendaEventoId }, 'agenda: evento automático criado')
+            } else {
+              app.log.info({ liveId: live.id, resolvedClienteId }, 'agenda: sem marca_id disponível, evento automático omitido')
+            }
+          } catch (autoEvErr) {
+            // Falha no evento automático nunca bloqueia a live
+            app.log.warn({ err: autoEvErr, liveId: live.id }, 'agenda: falha ao criar evento automático (soft)')
+            agendaWarning = agendaWarning ?? 'Falha ao criar evento automático de agenda'
+          }
+        }
+        // ── fim evento automático ────────────────────────────────────────────
+
         await db.query(
           `UPDATE cabines
            SET status = 'ao_vivo', live_atual_id = $1
@@ -235,6 +338,7 @@ export async function livesRoutes(app) {
             live_id: live.id,
             cliente_id: resolvedClienteId,
             previous_status: cabine.status,
+            agenda_evento_id: finalAgendaEventoId,
           },
         })
 
@@ -245,8 +349,11 @@ export async function livesRoutes(app) {
           app.log.warn({ err, liveId: live.id }, 'syncLives pós-iniciar-live falhou')
         )
 
-        app.audit?.log?.(request, { action: 'live.start', entity_type: 'live', entity_id: live.id, metadata: { cabine_id, cliente_id: resolvedClienteId, contrato_id: resolvedContratoId } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-        return reply.code(201).send(live)
+        app.audit?.log?.(request, { action: 'live.start', entity_type: 'live', entity_id: live.id, metadata: { cabine_id, cliente_id: resolvedClienteId, contrato_id: resolvedContratoId, agenda_evento_id: finalAgendaEventoId } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+        const responseBody = { ...live, agenda_evento_id: finalAgendaEventoId }
+        if (agendaWarning) responseBody.agenda_warning = agendaWarning
+        return reply.code(201).send(responseBody)
       } catch (error) {
         await db.query('ROLLBACK')
         throw error
@@ -514,12 +621,26 @@ export async function livesRoutes(app) {
                 l.manual_diamonds, l.manual_orders, l.manual_gmv,
                 c.numero AS cabine_numero, c.contrato_id,
                 cl.nome AS cliente_nome,
-                u.nome AS apresentador_nome, ap.id AS apresentadora_id
+                u.nome AS apresentador_nome, ap.id AS apresentadora_id,
+                ae.id AS agenda_evento_id,
+                ae.data_inicio AS agenda_data_inicio,
+                ae.data_fim AS agenda_data_fim,
+                ae.observacoes AS agenda_titulo
          FROM lives l
          JOIN cabines c ON c.id = l.cabine_id
          LEFT JOIN clientes cl ON cl.id = l.cliente_id
          LEFT JOIN users u ON u.id = l.apresentador_id
          LEFT JOIN apresentadoras ap ON ap.user_id = l.apresentador_id
+         LEFT JOIN LATERAL (
+           SELECT ae2.id, ae2.data_inicio, ae2.data_fim, ae2.observacoes
+           FROM agenda_eventos ae2
+           WHERE ae2.cabine_id = l.cabine_id
+             AND ae2.tenant_id = l.tenant_id
+             AND ae2.tipo = 'live'
+             AND ae2.data_inicio::date = l.iniciado_em::date
+           ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
+           LIMIT 1
+         ) ae ON true
          ${where}
          ORDER BY l.iniciado_em DESC LIMIT 100`,
         params
@@ -670,6 +791,24 @@ export async function livesRoutes(app) {
             [duracaoHoras, contrato.id]
           )
         }
+
+        // ── Encerra evento de agenda vinculado (soft — nunca bloqueia) ─────────
+        // agenda_eventos não tem coluna live_id; identificamos pelo cabine_id + status ao_vivo
+        // e data_inicio no mesmo dia da live, para evitar encerrar eventos de outras lives.
+        try {
+          await db.query(
+            `UPDATE agenda_eventos
+             SET status = 'concluido', atualizado_em = NOW(), data_fim = NOW()
+             WHERE tenant_id = $1
+               AND cabine_id = $2
+               AND status = 'ao_vivo'
+               AND data_inicio::date = $3::date`,
+            [tenant_id, live.cabine_id, live.iniciado_em]
+          )
+        } catch (agendaEncErr) {
+          app.log.warn({ err: agendaEncErr, liveId: live.id }, 'agenda: falha ao encerrar evento vinculado (soft)')
+        }
+        // ── fim encerramento agenda ──────────────────────────────────────────
 
         // Migration 081 removeu status 'ativa' das cabines — cabine sempre volta para 'disponivel'
         const proximoStatus = 'disponivel'

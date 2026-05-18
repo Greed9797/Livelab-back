@@ -14,13 +14,20 @@ const CIRCUIT_BREAKER_THRESHOLD = Number(process.env.TIKTOK_CB_THRESHOLD ?? 5)
 const CIRCUIT_BREAKER_WINDOW_MS = Number(process.env.TIKTOK_CB_WINDOW_MS ?? 5 * 60_000)
 
 let WebcastPushConnectionImpl = null
+let optionalConnectorWarned = false
 
 async function getWebcastPushConnection() {
   if (WebcastPushConnectionImpl) return WebcastPushConnectionImpl
 
   // TikTok Live ainda aguarda aprovação; mantém o pacote fora do boot path e
   // permite remover a dependência vulnerável enquanto a integração está inativa.
-  const mod = await import('tiktok-live-connector')
+  let mod
+  try {
+    mod = await import('tiktok-live-connector')
+  } catch (err) {
+    if (err?.code === 'ERR_MODULE_NOT_FOUND') return null
+    throw err
+  }
   WebcastPushConnectionImpl = mod.WebcastPushConnection ?? mod.default?.WebcastPushConnection
   if (!WebcastPushConnectionImpl) {
     throw new Error('tiktok-live-connector indisponível')
@@ -137,14 +144,27 @@ export function _resetForTests() {
   _liveMap.clear()
   _db = null
   _log = null
+  optionalConnectorWarned = false
   _emitter.removeAllListeners()
 }
 
 // ── Internals ─────────────────────────────────────────────────────────────────
 
-async function startConnector(liveId, tenantId, username) {
+export async function startConnector(liveId, tenantId, username) {
   if (_liveMap.size >= MAX_CONNECTORS) {
     _log?.warn({ liveId, MAX_CONNECTORS }, 'tiktokManager: limite de connectors atingido')
+    return
+  }
+
+  const WebcastPushConnection = await getWebcastPushConnection()
+  if (!WebcastPushConnection) {
+    if (!optionalConnectorWarned) {
+      optionalConnectorWarned = true
+      _log?.warn(
+        { liveId },
+        'tiktokManager: tiktok-live-connector não instalado; sync em tempo real desativado'
+      )
+    }
     return
   }
 
@@ -178,7 +198,6 @@ async function startConnector(liveId, tenantId, username) {
     circuitOpen: false,
   }
 
-  const WebcastPushConnection = await getWebcastPushConnection()
   const connection = new WebcastPushConnection(username)
 
   // ── Event handlers ────────────────────────────────────────────────────────

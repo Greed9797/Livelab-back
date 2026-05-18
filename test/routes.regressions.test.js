@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { authPlugin } from '../src/plugins/auth.js'
 import { analyticsRoutes } from '../src/routes/analytics.js'
 import { cabinesRoutes } from '../src/routes/cabines.js'
+import { livesRoutes } from '../src/routes/lives.js'
 import { contratosRoutes } from '../src/routes/contratos.js'
 import { clienteDashboardRoutes } from '../src/routes/cliente_dashboard.js'
 import { financeiroRoutes } from '../src/routes/financeiro.js'
@@ -479,8 +480,11 @@ describe('Route regressions: SQL and RBAC', () => {
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: cabineId, numero: 1, status: 'reservada', contrato_id: contratoId, live_atual_id: null }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: contratoId, cliente_id: clienteId, status: 'ativo' }] })
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })
       .mockResolvedValueOnce({ rows: [{ id: liveId, iniciado_em: '2026-04-03T21:00:00.000Z', cliente_id: clienteId, apresentador_id: userId }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -500,7 +504,7 @@ describe('Route regressions: SQL and RBAC', () => {
       try { return await fn(db) } finally { db.release() }
     })
 
-    await app.register(cabinesRoutes)
+    await app.register(livesRoutes)
 
     const response = await app.inject({
       method: 'POST',
@@ -510,8 +514,8 @@ describe('Route regressions: SQL and RBAC', () => {
 
     expect(response.statusCode).toBe(201)
     expect(queryMock).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id)'),
-      ['tenant-1', cabineId, clienteId, userId]
+      expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo'),
+      ['tenant-1', cabineId, clienteId, userId, 'cliente']
     )
     expect(releaseMock).toHaveBeenCalledTimes(1)
 
@@ -1403,6 +1407,7 @@ describe('Route regressions: SQL and RBAC', () => {
       .mockResolvedValueOnce({                       // SELECT cabine FOR UPDATE → disponivel
         rows: [{ id: cabineId, numero: 1, status: 'disponivel', contrato_id: null, live_atual_id: null }],
       })
+      .mockResolvedValueOnce({ rows: [] })           // SELECT agenda_eventos
       .mockResolvedValueOnce({                       // SELECT live_requests (auto-reserve)
         rows: [{ cliente_id: clienteId }],
       })
@@ -1413,9 +1418,11 @@ describe('Route regressions: SQL and RBAC', () => {
       .mockResolvedValueOnce({                       // SELECT contratos FOR UPDATE
         rows: [{ id: contratoId, cliente_id: clienteId, status: 'ativo' }],
       })
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] }) // SELECT cliente status
       .mockResolvedValueOnce({                       // INSERT INTO lives
         rows: [{ id: liveId, iniciado_em: new Date().toISOString(), cliente_id: clienteId, apresentador_id: userId }],
       })
+      .mockResolvedValueOnce({ rows: [] })           // SELECT marca ativa
       .mockResolvedValueOnce({ rows: [] })           // UPDATE cabines ao_vivo
       .mockResolvedValueOnce({ rows: [] })           // INSERT cabine_eventos
       .mockResolvedValueOnce({ rows: [] })           // COMMIT
@@ -1432,7 +1439,7 @@ describe('Route regressions: SQL and RBAC', () => {
       const db = await app.dbTenant(tenantId)
       try { return await fn(db) } finally { db.release() }
     })
-    await app.register(cabinesRoutes)
+    await app.register(livesRoutes)
 
     const response = await app.inject({
       method: 'POST',
@@ -1441,9 +1448,9 @@ describe('Route regressions: SQL and RBAC', () => {
     })
 
     expect(response.statusCode).toBe(201)
-    expect(queryMock.mock.calls[2][0]).toContain('FROM live_requests')
-    expect(queryMock.mock.calls[2][1]).toEqual([cabineId, 'tenant-1'])
-    expect(queryMock.mock.calls[4][0]).toContain("SET status = 'reservada', contrato_id")
+    expect(queryMock.mock.calls[3][0]).toContain('FROM live_requests')
+    expect(queryMock.mock.calls[3][1]).toEqual([cabineId, 'tenant-1'])
+    expect(queryMock.mock.calls[5][0]).toContain("SET status = 'reservada', contrato_id")
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO lives'),
       expect.arrayContaining([cabineId, clienteId])

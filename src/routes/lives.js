@@ -663,6 +663,77 @@ export async function livesRoutes(app) {
     })
   })
 
+  // GET /v1/lives/:id — live selecionada pelo Live Toolkit
+  app.get('/v1/lives/:id', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
+    const { tenant_id, papel, sub } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const params = [tenant_id, request.params.id]
+      let visibility = ''
+      if (papel === 'cliente_parceiro') {
+        params.push(sub)
+        visibility = `
+          AND l.status_publicacao = 'publicado'
+          AND l.cliente_id = (
+            SELECT id FROM clientes
+            WHERE user_id = $3 AND tenant_id = $1::uuid
+            LIMIT 1
+          )`
+      }
+
+      const result = await db.query(
+        `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
+                l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
+                l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
+                l.final_orders_count, l.resumo,
+                l.manual_views, l.manual_likes, l.manual_comments, l.manual_shares,
+                l.manual_diamonds, l.manual_orders, l.manual_gmv,
+                c.numero AS cabine_numero, c.contrato_id,
+                cl.nome AS cliente_nome,
+                u.nome AS apresentador_nome, ap.id AS apresentadora_id,
+                ae.id AS agenda_evento_id,
+                ae.data_inicio AS agenda_data_inicio,
+                ae.data_fim AS agenda_data_fim,
+                ae.observacoes AS agenda_titulo,
+                ls.viewer_count, ls.total_viewers, ls.total_orders,
+                ls.gmv AS gmv_atual, ls.likes_count, ls.comments_count,
+                ls.gifts_diamonds, ls.shares_count
+         FROM lives l
+         JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+         LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
+         LEFT JOIN users u ON u.id = l.apresentador_id
+         LEFT JOIN apresentadoras ap ON ap.user_id = l.apresentador_id AND ap.tenant_id = l.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT ae2.id, ae2.data_inicio, ae2.data_fim, ae2.observacoes
+           FROM agenda_eventos ae2
+           WHERE ae2.cabine_id = l.cabine_id
+             AND ae2.tenant_id = l.tenant_id
+             AND ae2.tipo = 'live'
+             AND ae2.data_inicio::date = l.iniciado_em::date
+           ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
+           LIMIT 1
+         ) ae ON true
+         LEFT JOIN LATERAL (
+           SELECT viewer_count, total_viewers, total_orders, gmv,
+                  likes_count, comments_count, gifts_diamonds, shares_count
+           FROM live_snapshots
+           WHERE live_id = l.id
+             AND tenant_id = l.tenant_id
+           ORDER BY captured_at DESC
+           LIMIT 1
+         ) ls ON true
+         WHERE l.tenant_id = $1::uuid
+           AND l.id = $2
+           ${visibility}
+         LIMIT 1`,
+        params
+      )
+
+      const live = result.rows[0]
+      if (!live) return reply.code(404).send({ error: 'Live não encontrada' })
+      return live
+    })
+  })
+
   // GET /v1/lives
   app.get('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request) => {
     const { tenant_id, papel, sub } = request.user

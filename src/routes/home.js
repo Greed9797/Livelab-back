@@ -193,6 +193,7 @@ export async function homeRoutes(app) {
         FROM lives l
         JOIN clientes cl ON cl.id = l.cliente_id
         WHERE l.status = 'encerrada'
+          AND l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND date_trunc('day', l.iniciado_em) = date_trunc('day', NOW())
         GROUP BY cl.id, cl.nome
         ORDER BY gmv DESC

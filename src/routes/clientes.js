@@ -316,7 +316,7 @@ export async function clientesRoutes(app) {
           MAX(l.iniciado_em)         AS ultima_live,
           COALESCE(SUM(l.fat_gerado), 0)::float AS gmv_acumulado
          FROM clientes c
-         LEFT JOIN lives l ON l.cliente_id = c.id AND l.tenant_id = c.tenant_id
+         LEFT JOIN lives l ON l.cliente_id = c.id AND l.tenant_id = c.tenant_id AND l.status = 'encerrada'
          WHERE c.id = $1 AND c.tenant_id = $2::uuid AND c.deleted_at IS NULL
          GROUP BY c.id, c.nome, c.email, c.telefone, c.celular, c.cnpj, c.cpf,
                   c.razao_social, c.nicho, c.cidade, c.estado, c.criado_em`,

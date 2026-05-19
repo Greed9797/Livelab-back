@@ -933,22 +933,18 @@ export async function livesRoutes(app) {
           )
         }
 
-        // ── Encerra evento de agenda vinculado (soft — nunca bloqueia) ─────────
+        // ── Encerra evento de agenda vinculado ──────────────────────────────
         // agenda_eventos não tem coluna live_id; identificamos pelo cabine_id + status ao_vivo
         // e data_inicio no mesmo dia da live, para evitar encerrar eventos de outras lives.
-        try {
-          await db.query(
-            `UPDATE agenda_eventos
-             SET status = 'concluido', atualizado_em = NOW(), data_fim = NOW()
-             WHERE tenant_id = $1
-               AND cabine_id = $2
-               AND status = 'ao_vivo'
-               AND data_inicio::date = $3::date`,
-            [tenant_id, live.cabine_id, live.iniciado_em]
-          )
-        } catch (agendaEncErr) {
-          app.log.warn({ err: agendaEncErr, liveId: live.id }, 'agenda: falha ao encerrar evento vinculado (soft)')
-        }
+        await db.query(
+          `UPDATE agenda_eventos
+           SET status = 'concluido', atualizado_em = NOW(), data_fim = NOW()
+           WHERE tenant_id = $1
+             AND cabine_id = $2
+             AND status = 'ao_vivo'
+             AND data_inicio::date = $3::date`,
+          [tenant_id, live.cabine_id, live.iniciado_em]
+        )
         // ── fim encerramento agenda ──────────────────────────────────────────
 
         // Migration 081 removeu status 'ativa' das cabines — cabine sempre volta para 'disponivel'

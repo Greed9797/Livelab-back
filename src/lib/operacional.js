@@ -58,7 +58,6 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
     [clienteId, tenantId],
   )
 
-  const marcaIds = marcas.rows.map((row) => row.id)
   const metrics = await db.query(
     `WITH marca_scope AS (
        SELECT id FROM marcas WHERE cliente_id = $1 AND tenant_id = $2::uuid
@@ -97,22 +96,34 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
   )
 
   const lives = await db.query(
-    `SELECT l.id, l.cabine_id, l.cliente_id, l.marca_id, l.iniciado_em, l.encerrado_em,
+    `WITH venda_live_marca AS (
+       SELECT DISTINCT ON (va.origem_id)
+              va.origem_id AS live_id,
+              va.marca_id,
+              m.nome AS marca_nome
+       FROM vendas_atribuidas va
+       JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+       WHERE va.tenant_id = $2::uuid
+         AND va.origem = 'live'
+         AND m.cliente_id = $1
+       ORDER BY va.origem_id, va.atualizado_em DESC
+     )
+     SELECT l.id, l.cabine_id, l.cliente_id, vl.marca_id, l.iniciado_em, l.encerrado_em,
             l.status, l.status_publicacao, l.fat_gerado, l.final_orders_count,
             c.numero AS cabine_numero,
-            m.nome AS marca_nome,
+            vl.marca_nome,
             COALESCE(a.nome, u.nome) AS apresentadora_nome
      FROM lives l
      LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
-     LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
+     LEFT JOIN venda_live_marca vl ON vl.live_id = l.id
      LEFT JOIN live_apresentadoras_v2 lav ON lav.live_id = l.id AND lav.tenant_id = l.tenant_id AND lav.papel = 'principal'
      LEFT JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = l.tenant_id
      LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
      WHERE l.tenant_id = $2::uuid
-       AND (l.cliente_id = $1 OR l.marca_id = ANY($3::uuid[]))
+       AND (l.cliente_id = $1 OR vl.live_id IS NOT NULL)
      ORDER BY COALESCE(l.encerrado_em, l.iniciado_em) DESC NULLS LAST
      LIMIT 50`,
-    [clienteId, tenantId, marcaIds],
+    [clienteId, tenantId],
   )
 
   const videos = await db.query(
@@ -164,45 +175,42 @@ export async function getMarcaOperacional(db, { tenantId, marcaId, startDate, en
     `WITH vendas AS (
        SELECT * FROM vendas_atribuidas
        WHERE tenant_id = $2::uuid AND marca_id = $1
-     ),
-     legacy_lives AS (
-       SELECT l.id, l.fat_gerado, l.final_orders_count, l.encerrado_em
-       FROM lives l
-       WHERE l.tenant_id = $2::uuid
-         AND l.marca_id = $1
-         AND l.id NOT IN (
-           SELECT origem_id FROM vendas_atribuidas
-           WHERE tenant_id = $2::uuid AND origem = 'live'
-         )
      )
      SELECT
-       COALESCE(SUM(v.gmv) FILTER (WHERE v.data >= $3::date AND v.data < ($4::date + interval '1 day')), 0)
-         + COALESCE(SUM(ll.fat_gerado) FILTER (WHERE ll.encerrado_em >= $3::date AND ll.encerrado_em < ($4::date + interval '1 day')), 0) AS gmv_mes,
-       COALESCE(SUM(v.gmv), 0) + COALESCE(SUM(ll.fat_gerado), 0) AS gmv_acumulado,
-       COUNT(DISTINCT v.origem_id) FILTER (WHERE v.origem = 'live')::int
-         + COUNT(DISTINCT ll.id)::int AS total_lives,
+       COALESCE(SUM(v.gmv) FILTER (WHERE v.data >= $3::date AND v.data < ($4::date + interval '1 day')), 0) AS gmv_mes,
+       COALESCE(SUM(v.gmv), 0) AS gmv_acumulado,
+       COUNT(DISTINCT v.origem_id) FILTER (WHERE v.origem = 'live')::int AS total_lives,
        COUNT(DISTINCT v.origem_id) FILTER (WHERE v.origem = 'video')::int AS total_videos,
-       COALESCE(SUM(v.pedidos) FILTER (WHERE v.data >= $3::date AND v.data < ($4::date + interval '1 day')), 0)
-         + COALESCE(SUM(ll.final_orders_count) FILTER (WHERE ll.encerrado_em >= $3::date AND ll.encerrado_em < ($4::date + interval '1 day')), 0) AS pedidos_mes,
+       COALESCE(SUM(v.pedidos) FILTER (WHERE v.data >= $3::date AND v.data < ($4::date + interval '1 day')), 0) AS pedidos_mes,
        COALESCE(SUM(v.comissao_franquia), 0) AS comissao_franquia,
        COALESCE(SUM(v.comissao_franqueadora), 0) AS comissao_franqueadora,
        COALESCE(SUM(v.comissao_apresentadora), 0) AS comissao_apresentadora
-     FROM vendas v
-     FULL OUTER JOIN legacy_lives ll ON false`,
+     FROM vendas v`,
     [marcaId, tenantId, startDate, endDate],
   )
 
   const lives = await db.query(
-    `SELECT l.id, l.cabine_id, l.cliente_id, l.marca_id, l.iniciado_em, l.encerrado_em,
+    `WITH venda_live_marca AS (
+       SELECT DISTINCT ON (va.origem_id)
+              va.origem_id AS live_id,
+              va.marca_id
+       FROM vendas_atribuidas va
+       WHERE va.tenant_id = $2::uuid
+         AND va.origem = 'live'
+         AND va.marca_id = $1
+       ORDER BY va.origem_id, va.atualizado_em DESC
+     )
+     SELECT l.id, l.cabine_id, l.cliente_id, vl.marca_id, l.iniciado_em, l.encerrado_em,
             l.status, l.status_publicacao, l.fat_gerado, l.final_orders_count,
             c.numero AS cabine_numero,
             COALESCE(a.nome, u.nome) AS apresentadora_nome
      FROM lives l
+     JOIN venda_live_marca vl ON vl.live_id = l.id
      LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
      LEFT JOIN live_apresentadoras_v2 lav ON lav.live_id = l.id AND lav.tenant_id = l.tenant_id AND lav.papel = 'principal'
      LEFT JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = l.tenant_id
      LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
-     WHERE l.tenant_id = $2::uuid AND l.marca_id = $1
+     WHERE l.tenant_id = $2::uuid
      ORDER BY COALESCE(l.encerrado_em, l.iniciado_em) DESC NULLS LAST
      LIMIT 50`,
     [marcaId, tenantId],

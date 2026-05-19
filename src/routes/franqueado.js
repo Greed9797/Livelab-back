@@ -1182,7 +1182,7 @@ async function fetchNetworkRanking(app, {
         COALESCE(t.ranking_publico_nome, t.nome) AS nome,
         COALESCE(t.ranking_publico_logo_url, t.logo_url) AS logo_url,
         COALESCE(t.ranking_publico_cidade, t.cidade) AS cidade,
-        COALESCE(t.ranking_publico_uf, t.estado) AS uf,
+        COALESCE(t.ranking_publico_uf, t.uf) AS uf,
         t.ranking_publico_meta_gmv,
         COALESCE(la.gmv_mes, 0) AS gmv_mes,
         COALESCE(lp.gmv_mes_anterior, 0) AS gmv_mes_anterior,

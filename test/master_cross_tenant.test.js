@@ -106,6 +106,8 @@ describe('GET /v1/public/ranking', () => {
     })
     expect(body[0]).not.toHaveProperty('tenant_id')
     expect(body[0]).not.toHaveProperty('tenant_nome')
+    expect(queryMock.mock.calls[0][0]).toContain('COALESCE(t.ranking_publico_uf, t.uf) AS uf')
+    expect(queryMock.mock.calls[0][0]).not.toContain('t.estado')
     await app.close()
   })
 })

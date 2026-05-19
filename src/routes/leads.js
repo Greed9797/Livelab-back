@@ -25,20 +25,29 @@ const contatoSchema = z.object({
 })
 
 const tarefaSchema = z.object({
-  titulo:    z.string().min(1),
-  concluida: z.boolean().default(false),
+  titulo:           z.string().min(1),
+  descricao:        z.string().nullable().optional(),
+  responsavel_id:   z.string().uuid().nullable().optional(),
+  responsavel_nome: z.string().nullable().optional(),
+  due_date:         z.string().nullable().optional(),
+  concluida:        z.boolean().default(false),
 })
 
 const createLeadSchema = z.object({
-  nome:               z.string().min(1, 'Nome é obrigatório'),
-  nicho:              z.string().optional(),
-  cidade:             z.string().optional(),
-  estado:             z.string().optional(),
-  fat_estimado:       z.number().min(0).optional(),
-  valor_oportunidade: z.number().min(0).optional(),
-  responsavel_nome:   z.string().optional(),
-  origem:             z.string().optional(),
-  crm_etapa:          z.enum(CRM_ETAPAS).optional(),
+  nome:                 z.string().min(1, 'Nome é obrigatório'),
+  nicho:                z.string().nullable().optional(),
+  cidade:               z.string().nullable().optional(),
+  estado:               z.string().nullable().optional(),
+  fat_estimado:         z.number().min(0).optional(),
+  valor_oportunidade:   z.number().min(0).optional(),
+  responsavel_nome:     z.string().nullable().optional(),
+  origem:               z.string().nullable().optional(),
+  crm_etapa:            z.enum(CRM_ETAPAS).optional(),
+  observacoes_internas: z.string().nullable().optional(),
+  motivo_perda:         z.string().nullable().optional(),
+  contato_email:        z.string().nullable().optional(),
+  contato_whatsapp:     z.string().nullable().optional(),
+  dados_extras:         z.record(z.any()).optional(),
 })
 
 const SELECT_CRM = `
@@ -50,6 +59,33 @@ const SELECT_CRM = `
          motivo_perda, convertido_cliente_id, ganho_em,
          contato_email, contato_whatsapp, payload_externo, dados_extras
   FROM leads`
+
+function leadStageValidationError(updates, current = {}) {
+  const nextStage = updates.crm_etapa ?? current.crm_etapa ?? 'lead_novo'
+  const nextMotivo = updates.motivo_perda ?? current.motivo_perda
+
+  if (nextStage === 'perdido' && !String(nextMotivo ?? '').trim()) {
+    return {
+      status: 400,
+      payload: {
+        error: 'Motivo da perda é obrigatório para lead perdido.',
+        code: 'LEAD_LOSS_REASON_REQUIRED',
+      },
+    }
+  }
+
+  if (nextStage === 'ganho' && String(updates.motivo_perda ?? '').trim()) {
+    return {
+      status: 400,
+      payload: {
+        error: 'Lead ganho não deve ter motivo de perda.',
+        code: 'LEAD_WON_WITH_LOSS_REASON',
+      },
+    }
+  }
+
+  return null
+}
 
 export async function leadsRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_LEADS)]
@@ -91,6 +127,44 @@ export async function leadsRoutes(app) {
     })
   })
 
+  // GET /v1/leads/duplicados — alerta duplicidade sem bloquear criação
+  app.get('/v1/leads/duplicados', { preHandler: readAccess }, async (request) => {
+    const { tenant_id } = request.user
+    const email = String(request.query?.email ?? '').trim()
+    const whatsapp = String(request.query?.whatsapp ?? '').trim()
+    const nome = String(request.query?.nome ?? '').trim()
+
+    if (!email && !whatsapp && !nome) return []
+
+    const conditions = []
+    const values = [tenant_id]
+    if (email) {
+      values.push(email)
+      conditions.push(`LOWER(contato_email) = LOWER($${values.length})`)
+    }
+    if (whatsapp) {
+      values.push(whatsapp)
+      conditions.push(`regexp_replace(COALESCE(contato_whatsapp, ''), '\\D', '', 'g') = regexp_replace($${values.length}, '\\D', '', 'g')`)
+    }
+    if (nome) {
+      values.push(nome)
+      conditions.push(`LOWER(nome) = LOWER($${values.length})`)
+    }
+
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `${SELECT_CRM}
+         WHERE franqueadora_id = $1
+           AND status != 'expirado'
+           AND (${conditions.join(' OR ')})
+         ORDER BY atualizado_em DESC NULLS LAST
+         LIMIT 10`,
+        values,
+      )
+      return result.rows
+    })
+  })
+
   // GET /v1/leads/:id — detalhe do lead
   app.get('/v1/leads/:id', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
@@ -100,7 +174,36 @@ export async function leadsRoutes(app) {
         [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
-      return result.rows[0]
+      const [contatosQ, tarefasQ, etapasQ] = await Promise.all([
+        db.query(
+          `SELECT id, tipo, resumo, autor_id, autor_nome, criado_em
+           FROM lead_contatos
+           WHERE tenant_id = $1::uuid AND lead_id = $2
+           ORDER BY criado_em DESC`,
+          [tenant_id, request.params.id],
+        ),
+        db.query(
+          `SELECT id, titulo, descricao, responsavel_id, responsavel_nome,
+                  due_date, concluida, concluida_em, criado_em, atualizado_em
+           FROM lead_tarefas
+           WHERE tenant_id = $1::uuid AND lead_id = $2
+           ORDER BY concluida ASC, due_date ASC NULLS LAST, criado_em DESC`,
+          [tenant_id, request.params.id],
+        ),
+        db.query(
+          `SELECT id, etapa_anterior, etapa_nova, alterado_por, alterado_por_nome, motivo, criado_em
+           FROM lead_etapa_historico
+           WHERE tenant_id = $1::uuid AND lead_id = $2
+           ORDER BY criado_em DESC`,
+          [tenant_id, request.params.id],
+        ),
+      ])
+      return {
+        ...result.rows[0],
+        contatos_estruturados: contatosQ.rows,
+        tarefas_estruturadas: tarefasQ.rows,
+        etapa_historico: etapasQ.rows,
+      }
     })
   })
 
@@ -114,16 +217,28 @@ export async function leadsRoutes(app) {
     const fields = Object.keys(updates)
     if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
-    const setClauses = fields
-      .map((f, i) => f === 'dados_extras' ? `${f} = $${i + 3}::jsonb` : `${f} = $${i + 3}`)
-      .join(', ')
-    const values = [
-      request.params.id,
-      tenant_id,
-      ...fields.map((f) => f === 'dados_extras' ? JSON.stringify(updates[f]) : updates[f]),
-    ]
-
     return app.withTenant(tenant_id, async (db) => {
+      const currentQ = await db.query(
+        `SELECT id, crm_etapa, motivo_perda
+         FROM leads
+         WHERE id = $1 AND franqueadora_id = $2`,
+        [request.params.id, tenant_id],
+      )
+      const current = currentQ.rows[0]
+      if (!current) return reply.code(404).send({ error: 'Lead não encontrado' })
+
+      const validationError = leadStageValidationError(updates, current)
+      if (validationError) return reply.code(validationError.status).send(validationError.payload)
+
+      const setClauses = fields
+        .map((f, i) => f === 'dados_extras' ? `${f} = $${i + 3}::jsonb` : `${f} = $${i + 3}`)
+        .join(', ')
+      const values = [
+        request.params.id,
+        tenant_id,
+        ...fields.map((f) => f === 'dados_extras' ? JSON.stringify(updates[f]) : updates[f]),
+      ]
+
       const result = await db.query(
         `UPDATE leads SET ${setClauses}, atualizado_em = NOW()
          WHERE id = $1 AND franqueadora_id = $2
@@ -132,7 +247,22 @@ export async function leadsRoutes(app) {
                    contato_email, contato_whatsapp, dados_extras`,
         values
       )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+      if (updates.crm_etapa && updates.crm_etapa !== current.crm_etapa) {
+        await db.query(
+          `INSERT INTO lead_etapa_historico
+             (tenant_id, lead_id, etapa_anterior, etapa_nova, alterado_por, alterado_por_nome, motivo)
+           VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)`,
+          [
+            tenant_id,
+            request.params.id,
+            current.crm_etapa,
+            updates.crm_etapa,
+            request.user.sub ?? null,
+            request.user.nome ?? request.user.email ?? null,
+            updates.motivo_perda ?? null,
+          ],
+        )
+      }
       app.audit?.log?.(request, { action: 'lead.update', entity_type: 'lead', entity_id: request.params.id, metadata: { changed_fields: fields, etapa_to: updates.crm_etapa ?? null, motivo_perda: updates.motivo_perda ?? null } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
@@ -157,9 +287,27 @@ export async function leadsRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id } = request.user
-    const entrada = { ...parsed.data, data: new Date().toISOString() }
+    const entrada = {
+      ...parsed.data,
+      autor_id: request.user.sub ?? null,
+      autor_nome: request.user.nome ?? request.user.email ?? null,
+      data: new Date().toISOString(),
+    }
 
     return app.withTenant(tenant_id, async (db) => {
+      const leadQ = await db.query(
+        `SELECT id FROM leads WHERE id = $1 AND franqueadora_id = $2`,
+        [request.params.id, tenant_id],
+      )
+      if (!leadQ.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+
+      const contatoQ = await db.query(
+        `INSERT INTO lead_contatos (tenant_id, lead_id, tipo, resumo, autor_id, autor_nome)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6)
+         RETURNING id, tipo, resumo, autor_id, autor_nome, criado_em`,
+        [tenant_id, request.params.id, parsed.data.tipo, parsed.data.resumo, request.user.sub ?? null, request.user.nome ?? request.user.email ?? null],
+      )
+
       const result = await db.query(
         `UPDATE leads
          SET historico_contatos = historico_contatos || $3::jsonb,
@@ -169,7 +317,7 @@ export async function leadsRoutes(app) {
         [request.params.id, tenant_id, JSON.stringify(entrada)]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
-      return result.rows[0]
+      return { ...result.rows[0], contato: contatoQ.rows[0] }
     })
   })
 
@@ -179,9 +327,37 @@ export async function leadsRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id } = request.user
-    const tarefa = { ...parsed.data, id: crypto.randomUUID(), criado_em: new Date().toISOString() }
+    const tarefa = {
+      ...parsed.data,
+      id: crypto.randomUUID(),
+      responsavel_nome: parsed.data.responsavel_nome ?? request.user.nome ?? null,
+      criado_em: new Date().toISOString(),
+    }
 
     return app.withTenant(tenant_id, async (db) => {
+      const leadQ = await db.query(
+        `SELECT id FROM leads WHERE id = $1 AND franqueadora_id = $2`,
+        [request.params.id, tenant_id],
+      )
+      if (!leadQ.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
+
+      const tarefaQ = await db.query(
+        `INSERT INTO lead_tarefas
+           (tenant_id, lead_id, titulo, descricao, responsavel_id, responsavel_nome, due_date, concluida, concluida_em)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::date, $8, CASE WHEN $8 THEN NOW() ELSE NULL END)
+         RETURNING id, titulo, descricao, responsavel_id, responsavel_nome, due_date, concluida, concluida_em, criado_em, atualizado_em`,
+        [
+          tenant_id,
+          request.params.id,
+          parsed.data.titulo,
+          parsed.data.descricao ?? null,
+          parsed.data.responsavel_id ?? null,
+          parsed.data.responsavel_nome ?? request.user.nome ?? null,
+          parsed.data.due_date ?? null,
+          parsed.data.concluida ?? false,
+        ],
+      )
+
       const result = await db.query(
         `UPDATE leads
          SET tarefas = tarefas || $3::jsonb,
@@ -191,7 +367,7 @@ export async function leadsRoutes(app) {
         [request.params.id, tenant_id, JSON.stringify(tarefa)]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Lead não encontrado' })
-      return result.rows[0]
+      return { ...result.rows[0], tarefa: tarefaQ.rows[0] }
     })
   })
 
@@ -251,6 +427,14 @@ export async function leadsRoutes(app) {
          WHERE id = $1 AND franqueadora_id = $2`,
         [request.params.id, tenant_id, clienteId]
       )
+      if (lead.crm_etapa !== 'ganho') {
+        await client.query(
+          `INSERT INTO lead_etapa_historico
+             (tenant_id, lead_id, etapa_anterior, etapa_nova, alterado_por, alterado_por_nome, motivo)
+           VALUES ($1::uuid, $2, $3, 'ganho', $4, $5, $6)`,
+          [tenant_id, request.params.id, lead.crm_etapa, userId, request.user.nome ?? request.user.email ?? null, 'Lead convertido em cliente'],
+        )
+      }
 
       await client.query('COMMIT')
       app.audit?.log?.(request, { action: 'lead.converted', entity_type: 'lead', entity_id: request.params.id, metadata: { cliente_id: clienteId, pacote_id: pacote_id ?? null, valor_fixo: valorFixo, comissao_pct: comissaoPct } })?.catch(err => app.log.error({ err }, 'audit log failed'))
@@ -270,16 +454,32 @@ export async function leadsRoutes(app) {
 
     const { tenant_id } = request.user
     const data = parsed.data
+    const validationError = leadStageValidationError(data)
+    if (validationError) return reply.code(validationError.status).send(validationError.payload)
+
     const fields = ['franqueadora_id', 'nome', 'status', 'pego_por', 'pego_em', 'crm_etapa']
     const values = [tenant_id, data.nome, 'pego', tenant_id, new Date(), data.crm_etapa ?? 'lead_novo']
-    const optional = ['nicho', 'cidade', 'estado', 'fat_estimado', 'valor_oportunidade', 'responsavel_nome', 'origem']
+    const optional = [
+      'nicho',
+      'cidade',
+      'estado',
+      'fat_estimado',
+      'valor_oportunidade',
+      'responsavel_nome',
+      'origem',
+      'observacoes_internas',
+      'motivo_perda',
+      'contato_email',
+      'contato_whatsapp',
+      'dados_extras',
+    ]
     for (const f of optional) {
       if (data[f] !== undefined) {
         fields.push(f)
-        values.push(data[f])
+        values.push(f === 'dados_extras' ? JSON.stringify(data[f]) : data[f])
       }
     }
-    const placeholders = values.map((_, i) => `$${i + 1}`).join(', ')
+    const placeholders = fields.map((field, i) => field === 'dados_extras' ? `$${i + 1}::jsonb` : `$${i + 1}`).join(', ')
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `INSERT INTO leads (${fields.join(', ')}, criado_em, atualizado_em)
@@ -287,6 +487,7 @@ export async function leadsRoutes(app) {
          RETURNING id, nome, nicho, cidade, estado, fat_estimado, status, pego_por, pego_em,
                    crm_etapa, valor_oportunidade, responsavel_nome, origem,
                    historico_contatos, observacoes_internas, tarefas, motivo_perda,
+                   contato_email, contato_whatsapp, payload_externo, dados_extras,
                    convertido_cliente_id, ganho_em, criado_em, atualizado_em,
                    (NOW() - criado_em) < interval '24 hours' AS is_novo`,
         values

@@ -77,11 +77,25 @@ describe('POST /v1/cabines', () => {
 })
 
 describe('DELETE /v1/cabines/:id', () => {
+  it('requires explicit CABINE confirmation before deleting or archiving', async () => {
+    const cabineId = '11111111-1111-4111-8111-111111111111'
+    const queryMock = vi.fn()
+
+    const { app } = buildApp({ queryMock })
+    await app.register(cabinesRoutes)
+
+    const blocked = await app.inject({ method: 'DELETE', url: `/v1/cabines/${cabineId}` })
+
+    expect(blocked.statusCode).toBe(400)
+    expect(blocked.json()).toMatchObject({ code: 'CABINE_CONFIRMATION_REQUIRED' })
+    expect(queryMock).not.toHaveBeenCalled()
+  })
+
   it('soft-deletes a cabine with history only after CABINE confirmation', async () => {
     const cabineId = '11111111-1111-4111-8111-111111111111'
     const queryMock = vi.fn(async (sql) => {
-      if (sql.includes('SELECT id, status')) {
-        return { rows: [{ id: cabineId, status: 'disponivel', live_atual_id: null, contrato_id: null }] }
+      if (sql.includes('SELECT id, numero, status')) {
+        return { rows: [{ id: cabineId, numero: 1, status: 'disponivel', live_atual_id: null, contrato_id: null }] }
       }
       if (sql.includes('FROM lives')) return { rows: [{ id: 'live-1' }], rowCount: 1 }
       if (sql.includes('FROM live_requests')) return { rows: [], rowCount: 0 }
@@ -94,7 +108,7 @@ describe('DELETE /v1/cabines/:id', () => {
     await app.register(cabinesRoutes)
 
     const blocked = await app.inject({ method: 'DELETE', url: `/v1/cabines/${cabineId}` })
-    expect(blocked.statusCode).toBe(409)
+    expect(blocked.statusCode).toBe(400)
 
     const confirmed = await app.inject({ method: 'DELETE', url: `/v1/cabines/${cabineId}?confirmacao=CABINE` })
     expect(confirmed.statusCode).toBe(200)

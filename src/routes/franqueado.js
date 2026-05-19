@@ -1786,41 +1786,4 @@ export async function franqueadoRoutes(app) {
     }
   })
 
-  // GET /v1/crm/summary — KPIs CRM acessível por papéis comerciais (master/franqueado/gerente).
-  // Agregação por tenant via RLS implícita (fetchCrmSnapshot usa tenant_id).
-  const commercialAccess = {
-    onRequest: [
-      app.authenticate,
-      app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'gerente_comercial']),
-    ],
-  }
-  app.get('/v1/crm/summary', commercialAccess, async (request, reply) => {
-    try {
-      const isMasterPapel =
-        request.user.papel === 'franqueador_master' ||
-        request.user.papel === 'admin_master'
-      const crmSnapshot = await fetchCrmSnapshot(
-        app,
-        request.user.tenant_id,
-        null,
-        { isMaster: isMasterPapel, allowedTenantIds: null }
-      )
-      let pendingContracts = crmSnapshot.summary?.contratos_pendentes ?? 0
-      // Master agrega contratos pendentes via unidades; demais usam o já calculado.
-      if (isMasterPapel) {
-        const units = await fetchUnitSummaries(app, request.user.tenant_id, parsePeriod(request.query?.periodo))
-        pendingContracts = units.reduce((sum, unit) => sum + unit.pending_contracts, 0)
-      }
-      return reply.send({
-        ...crmSnapshot,
-        summary: {
-          ...crmSnapshot.summary,
-          contratos_pendentes: pendingContracts,
-        },
-      })
-    } catch (err) {
-      request.log.error({ err }, 'crm/summary: erro')
-      throw err
-    }
-  })
 }

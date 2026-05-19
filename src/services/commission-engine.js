@@ -1,25 +1,57 @@
 /**
- * Motor de cálculo de comissões — PR 11
+ * Motor de comissões — v2
  *
- * Regras de negócio:
- *  - comissao_franquia     = MAX(valor_fixo_contrato, gmv * comissao_franquia_pct / 100)
- *  - comissao_franqueadora = MAX(valor_fixo_contrato, gmv * comissao_franqueadora_pct / 100)
- *  - comissao_apresentadora = gmv * comissao_live_pct / 100 (por apresentadora vinculada à marca)
- *  - Cada chamada é idempotente — faz upsert em vendas_atribuidas
- *  - status_aprovacao inicial: 'pendente_aprovacao'
+ * Regras:
+ *  - comissao_franquia     = MAX(valor_fixo_contrato, gmv × comissao_franquia_pct / 100)
+ *  - comissao_franqueadora = MAX(marca.valor_fixo_minimo, gmv × marca.comissao_franqueadora_pct / 100)
+ *  - comissao_apresentadora = gmv_live × faixa_pct / 100
+ *    onde faixa_pct é determinada pelo GMV acumulado da apresentadora no mês
+ *    (busca em apresentadora_faixas_comissao)
+ *  - Se não há faixa cadastrada: comissao_apresentadora = 0
+ *  - Idempotente via upsert em vendas_atribuidas
  */
 
 const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 
 /**
+ * Busca o pct de comissão da apresentadora baseado no GMV acumulado do mês.
+ */
+async function buscarFaixaComissao(db, { tenantId, apresentadoraId, gmvAcumuladoMes }) {
+  if (!apresentadoraId) return 0
+  const result = await db.query(
+    `SELECT pct_comissao FROM apresentadora_faixas_comissao
+     WHERE tenant_id = $1::uuid
+       AND apresentadora_id = $2::uuid
+       AND gmv_min <= $3
+       AND (gmv_max IS NULL OR gmv_max >= $3)
+       AND vigente_desde <= CURRENT_DATE
+     ORDER BY gmv_min DESC
+     LIMIT 1`,
+    [tenantId, apresentadoraId, gmvAcumuladoMes],
+  )
+  return Number(result.rows[0]?.pct_comissao ?? 0)
+}
+
+/**
+ * Busca GMV acumulado da apresentadora no mês corrente (excluindo a live atual).
+ */
+async function gmvAcumuladoMes(db, { tenantId, apresentadoraId, mesInicio, mesFim, liveIdAtual }) {
+  if (!apresentadoraId) return 0
+  const result = await db.query(
+    `SELECT COALESCE(SUM(gmv), 0) AS total
+     FROM vendas_atribuidas
+     WHERE tenant_id = $1::uuid
+       AND apresentadora_id = $2::uuid
+       AND data >= $3::date
+       AND data <= $4::date
+       AND origem_id != $5::uuid`,
+    [tenantId, apresentadoraId, mesInicio, mesFim, liveIdAtual],
+  )
+  return Number(result.rows[0]?.total ?? 0)
+}
+
+/**
  * Calcula e persiste comissões para uma live encerrada.
- *
- * @param {object} db     - conexão pg já configurada com tenant RLS
- * @param {object} opts
- * @param {string} opts.liveId    - UUID da live
- * @param {string} opts.tenantId  - UUID do tenant
- * @param {number} opts.gmv       - GMV final (fat_gerado ou manual_gmv, prioridade de quem chamar)
- * @returns {Promise<Array>}      - array de vendas_atribuidas upsertadas (uma por apresentadora)
  */
 export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
   // 1. Busca dados da live + contrato + marca
@@ -29,12 +61,14 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
        l.cliente_id,
        l.apresentador_id,
        l.iniciado_em,
-       c.id          AS contrato_id,
+       c.id                    AS contrato_id,
        c.comissao_pct,
        c.valor_fixo_comissao,
-       m.id          AS marca_id,
+       m.id                    AS marca_id,
+       m.tipo                  AS marca_tipo,
        m.comissao_franquia_pct,
-       m.comissao_franqueadora_pct
+       m.comissao_franqueadora_pct,
+       m.valor_fixo_minimo
      FROM lives l
      LEFT JOIN cabines cab ON cab.id = l.cabine_id
      LEFT JOIN contratos c  ON c.id = cab.contrato_id AND c.status = 'ativo'
@@ -50,74 +84,64 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
   if (!live || !live.marca_id) return []
 
   const gmvNum = Number(gmv ?? 0)
-  const data = live.iniciado_em
+  const dataLive = live.iniciado_em
     ? new Date(live.iniciado_em).toISOString().slice(0, 10)
     : new Date().toISOString().slice(0, 10)
 
-  // 2. Comissão franquia = MAX(valor_fixo, gmv * pct)
-  const franquiaPct      = Number(live.comissao_franquia_pct ?? 0)
-  const franqueadoraPct  = Number(live.comissao_franqueadora_pct ?? 0)
-  const valorFixo        = Number(live.valor_fixo_comissao ?? 0)
+  const [ano, mes] = dataLive.split('-')
+  const mesInicio = `${ano}-${mes}-01`
+  const mesFim = new Date(Date.UTC(Number(ano), Number(mes), 0)).toISOString().slice(0, 10)
 
-  const comissao_franquia    = Math.max(valorFixo, gmvNum * (franquiaPct / 100))
-  const comissao_franqueadora = Math.max(valorFixo, gmvNum * (franqueadoraPct / 100))
+  // 2. Comissão franquia = MAX(valor_fixo_contrato, gmv * pct)
+  const franquiaPct   = Number(live.comissao_franquia_pct ?? 0)
+  const valorFixoContrato = Number(live.valor_fixo_comissao ?? 0)
+  const comissao_franquia = Math.max(valorFixoContrato, gmvNum * (franquiaPct / 100))
 
-  // 3. Resolve apresentadoras da live (principal + live_apresentadoras)
+  // 3. Comissão franqueadora = MAX(marca.valor_fixo_minimo, gmv * pct)
+  const franqueadoraPct = Number(live.comissao_franqueadora_pct ?? 0)
+  const valorFixoMarca  = Number(live.valor_fixo_minimo ?? 0)
+  const comissao_franqueadora = Math.max(valorFixoMarca, gmvNum * (franqueadoraPct / 100))
+
+  // 4. Resolve apresentadoras da live
   const apresentadorasQ = await db.query(
-    `SELECT DISTINCT ap.id AS apresentadora_id, am.comissao_live_pct, la.percentual_rateio
+    `SELECT DISTINCT ap.id AS apresentadora_id
      FROM (
-       -- apresentadora principal (lives.apresentador_id → apresentadoras.user_id)
-       SELECT ap2.id, ap2.user_id
-       FROM apresentadoras ap2
+       SELECT ap2.id FROM apresentadoras ap2
        WHERE ap2.user_id = $2 AND ap2.tenant_id = $1::uuid
        UNION
-       -- apresentadoras secundárias (live_apresentadores legado)
-       SELECT ap3.id, ap3.user_id
-       FROM live_apresentadores la2
+       SELECT ap3.id FROM live_apresentadores la2
        JOIN apresentadoras ap3 ON ap3.user_id = la2.apresentador_id AND ap3.tenant_id = $1::uuid
        WHERE la2.live_id = $3 AND la2.tenant_id = $1::uuid
        UNION
-       -- apresentadoras v2 (live_apresentadoras_v2)
-       SELECT lav.apresentadora_id AS id, ap4.user_id
-       FROM live_apresentadoras_v2 lav
-       JOIN apresentadoras ap4 ON ap4.id = lav.apresentadora_id AND ap4.tenant_id = $1::uuid
+       SELECT lav.apresentadora_id FROM live_apresentadoras_v2 lav
        WHERE lav.live_id = $3 AND lav.tenant_id = $1::uuid
-     ) ap
-     LEFT JOIN apresentadora_marcas am
-       ON am.apresentadora_id = ap.id
-      AND am.marca_id = $4::uuid
-      AND am.tenant_id = $1::uuid
-      AND am.ativo = true
-     LEFT JOIN live_apresentadoras_v2 la
-       ON la.apresentadora_id = ap.id
-      AND la.live_id = $3
-      AND la.tenant_id = $1::uuid`,
-    [tenantId, live.apresentador_id ?? NIL_UUID, liveId, live.marca_id],
+     ) ap`,
+    [tenantId, live.apresentador_id ?? NIL_UUID, liveId],
   )
 
   const apresentadoras = apresentadorasQ.rows.filter(r => r.apresentadora_id)
-
-  // 4. Se não há apresentadoras vinculadas, cria um registro "sem apresentadora"
   const linhas = apresentadoras.length > 0
     ? apresentadoras
-    : [{ apresentadora_id: null, comissao_live_pct: 0, percentual_rateio: null }]
+    : [{ apresentadora_id: null }]
 
   const resultados = []
 
   for (const ap of linhas) {
-    const apPct       = Number(ap.comissao_live_pct ?? 0)
-    const rateio      = ap.percentual_rateio !== null ? Number(ap.percentual_rateio) / 100 : 1
-    const gmvRateado  = gmvNum * rateio
-    const comissao_apresentadora = gmvRateado * (apPct / 100)
-
-    // 5. Upsert em vendas_atribuidas com status pendente_aprovacao
     const apresentadoraId = ap.apresentadora_id ?? null
+
+    // 5. Faixa progressiva: busca GMV acumulado do mês + pct da faixa
+    let comissao_apresentadora = 0
+    if (apresentadoraId) {
+      const acumulado = await gmvAcumuladoMes(db, { tenantId, apresentadoraId, mesInicio, mesFim, liveIdAtual: liveId })
+      const gmvTotalComEstaLive = acumulado + gmvNum
+      const faixaPct = await buscarFaixaComissao(db, { tenantId, apresentadoraId, gmvAcumuladoMes: gmvTotalComEstaLive })
+      comissao_apresentadora = gmvNum * (faixaPct / 100)
+    }
+
+    // 6. Upsert idempotente em vendas_atribuidas
     const existing = await db.query(
-      `SELECT id, status_aprovacao
-       FROM vendas_atribuidas
-       WHERE tenant_id = $1::uuid
-         AND origem = 'live'
-         AND origem_id = $2::uuid
+      `SELECT id, status_aprovacao FROM vendas_atribuidas
+       WHERE tenant_id = $1::uuid AND origem = 'live' AND origem_id = $2::uuid
          AND COALESCE(apresentadora_id, $3::uuid) = COALESCE($4::uuid, $3::uuid)
        LIMIT 1`,
       [tenantId, liveId, NIL_UUID, apresentadoraId],
@@ -125,50 +149,32 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
 
     let row
     if (existing.rows[0]) {
-      // Não recalcula comissões já aprovadas — apenas atualiza valores pendentes/reprovados
-      const jaAprovada = existing.rows[0].status_aprovacao === 'aprovada'
-      if (jaAprovada) {
+      if (existing.rows[0].status_aprovacao === 'aprovada') {
         resultados.push(existing.rows[0])
         continue
       }
-
       const upd = await db.query(
         `UPDATE vendas_atribuidas
-         SET marca_id              = $1,
-             apresentadora_id      = $2,
-             data                  = $3,
-             gmv                   = $4,
-             comissao_apresentadora = $5,
-             comissao_franquia     = $6,
-             comissao_franqueadora = $7,
-             status_aprovacao      = 'pendente_aprovacao',
-             status_motivo         = NULL,
-             atualizado_em         = NOW()
-         WHERE id = $8 AND tenant_id = $9::uuid
-         RETURNING *`,
-        [
-          live.marca_id, apresentadoraId, data,
-          gmvNum, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
-          existing.rows[0].id, tenantId,
-        ],
+         SET marca_id = $1, apresentadora_id = $2, data = $3, gmv = $4,
+             comissao_apresentadora = $5, comissao_franquia = $6, comissao_franqueadora = $7,
+             status_aprovacao = 'pendente_aprovacao', status_motivo = NULL, atualizado_em = NOW()
+         WHERE id = $8 AND tenant_id = $9::uuid RETURNING *`,
+        [live.marca_id, apresentadoraId, dataLive, gmvNum,
+         comissao_apresentadora, comissao_franquia, comissao_franqueadora,
+         existing.rows[0].id, tenantId],
       )
       row = upd.rows[0]
     } else {
       const ins = await db.query(
         `INSERT INTO vendas_atribuidas
-           (tenant_id, origem, origem_id, marca_id, apresentadora_id, data,
-            gmv, pedidos, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
-            status_aprovacao)
-         VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,$9,$10,'pendente_aprovacao')
-         RETURNING *`,
-        [
-          tenantId, liveId, live.marca_id, apresentadoraId, data,
-          gmvNum, 0, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
-        ],
+           (tenant_id, origem, origem_id, marca_id, apresentadora_id, data, gmv, pedidos,
+            comissao_apresentadora, comissao_franquia, comissao_franqueadora, status_aprovacao)
+         VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,$9,$10,'pendente_aprovacao') RETURNING *`,
+        [tenantId, liveId, live.marca_id, apresentadoraId, dataLive,
+         gmvNum, 0, comissao_apresentadora, comissao_franquia, comissao_franqueadora],
       )
       row = ins.rows[0]
     }
-
     resultados.push(row)
   }
 

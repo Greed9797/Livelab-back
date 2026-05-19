@@ -4,7 +4,7 @@ import { READ_MARCAS, WRITE_MARCAS } from '../config/role_groups.js'
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
   m.tiktok_username, m.site, m.marketplace_url,
-  m.comissao_franquia_pct, m.comissao_franqueadora_pct,
+  m.comissao_franquia_pct, m.comissao_franqueadora_pct, m.valor_fixo_minimo,
   m.observacoes, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
   COALESCE(am_agg.apresentadoras, '[]'::json) AS apresentadoras
@@ -20,6 +20,7 @@ const marcaBaseSchema = z.object({
   marketplace_url: z.string().nullable().optional(),
   comissao_franquia_pct: z.number().min(0).max(100).default(0),
   comissao_franqueadora_pct: z.number().min(0).max(100).default(0),
+  valor_fixo_minimo: z.number().min(0).default(0),
   observacoes: z.string().nullable().optional(),
 })
 
@@ -119,15 +120,15 @@ export async function marcasRoutes(app) {
         `INSERT INTO marcas (
            tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
            marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
-           observacoes
+           valor_fixo_minimo, observacoes
          )
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          RETURNING *`,
         [
           tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
           d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
           d.comissao_franquia_pct, d.comissao_franqueadora_pct,
-          d.observacoes ?? null,
+          d.valor_fixo_minimo, d.observacoes ?? null,
         ],
       )
       app.audit?.log?.(request, { action: 'marca.create', entity_type: 'marca', entity_id: result.rows[0].id, metadata: { nome: d.nome, tipo: d.tipo } })?.catch(err => app.log.error({ err }, 'audit log failed'))

@@ -400,7 +400,7 @@ describe('LIVELAB operational routes', () => {
           nome: 'Livelab Blumenau',
           logo_url: 'https://cdn/logo.png',
           cidade: 'Blumenau',
-          estado: 'SC',
+          uf: 'SC',
           ranking_publico_ativo: true,
           ranking_publico_nome: 'LiveLab Blumenau',
           ranking_publico_logo_url: null,

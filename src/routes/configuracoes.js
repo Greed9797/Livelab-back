@@ -41,7 +41,7 @@ function mapRankingPublico(row) {
     nome_publico: row.ranking_publico_nome ?? row.nome ?? '',
     logo_url: row.ranking_publico_logo_url ?? row.logo_url ?? '',
     cidade: row.ranking_publico_cidade ?? row.cidade ?? '',
-    uf: row.ranking_publico_uf ?? row.estado ?? '',
+    uf: row.ranking_publico_uf ?? row.uf ?? '',
     meta_gmv: row.ranking_publico_meta_gmv == null ? null : Number(row.ranking_publico_meta_gmv),
   }
 }
@@ -160,7 +160,7 @@ export async function configuracoesRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const { rows } = await db.query(`
-        SELECT id, nome, logo_url, cidade, estado,
+        SELECT id, nome, logo_url, cidade, uf,
                ranking_publico_ativo, ranking_publico_nome,
                ranking_publico_logo_url, ranking_publico_cidade,
                ranking_publico_uf, ranking_publico_meta_gmv

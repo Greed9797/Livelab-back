@@ -1,9 +1,12 @@
 import Fastify from 'fastify'
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 
 import { agendaRoutes } from '../src/routes/agenda.js'
 import { comissoesRoutes } from '../src/routes/comissoes.js'
+import { configuracoesRoutes } from '../src/routes/configuracoes.js'
 import { financeiroRoutes } from '../src/routes/financeiro.js'
+import { livesRoutes } from '../src/routes/lives.js'
 import { marcasRoutes } from '../src/routes/marcas.js'
 import { calcularComissoesAtribuidas, vendasAtribuidasRoutes } from '../src/routes/vendas_atribuidas.js'
 import { videosRoutes } from '../src/routes/videos.js'
@@ -78,6 +81,90 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('POST /v1/agenda blocks overlapping cabine events with 409', async () => {
+    const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const cabineId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
+      .mockResolvedValueOnce({ rows: [{ id: cabineId }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'agenda-existente',
+          tipo: 'live',
+          entidade: 'cabine',
+          cabine_id: cabineId,
+          apresentadora_id: null,
+          data_inicio: '2026-05-20T18:30:00Z',
+          data_fim: '2026-05-20T19:30:00Z',
+          status: 'planejado',
+        }],
+      })
+    const { app } = buildApp({ queryMock })
+    await app.register(agendaRoutes)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/agenda',
+      payload: {
+        tipo: 'live',
+        marca_id: marcaId,
+        cabine_id: cabineId,
+        data_inicio: '2026-05-20T18:00:00Z',
+        data_fim: '2026-05-20T19:00:00Z',
+      },
+    })
+
+    expect(res.statusCode).toBe(409)
+    expect(res.json()).toMatchObject({
+      code: 'AGENDA_CONFLICT',
+      conflitos: [{ entidade: 'cabine', evento_id: 'agenda-existente', cabine_id: cabineId }],
+    })
+    expect(queryMock.mock.calls.some(([sql]) => sql.includes('INSERT INTO agenda_eventos'))).toBe(false)
+    await app.close()
+  })
+
+  it('POST /v1/agenda blocks overlapping apresentadora events with 409', async () => {
+    const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const apresentadoraId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
+      .mockResolvedValueOnce({ rows: [{ id: apresentadoraId }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'agenda-apresentadora',
+          tipo: 'live',
+          entidade: 'apresentadora',
+          cabine_id: null,
+          apresentadora_id: apresentadoraId,
+          data_inicio: '2026-05-20T18:30:00Z',
+          data_fim: '2026-05-20T19:30:00Z',
+          status: 'planejado',
+        }],
+      })
+    const { app } = buildApp({ queryMock })
+    await app.register(agendaRoutes)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/agenda',
+      payload: {
+        tipo: 'live',
+        marca_id: marcaId,
+        apresentadora_id: apresentadoraId,
+        data_inicio: '2026-05-20T18:00:00Z',
+        data_fim: '2026-05-20T19:00:00Z',
+      },
+    })
+
+    expect(res.statusCode).toBe(409)
+    expect(res.json()).toMatchObject({
+      code: 'AGENDA_CONFLICT',
+      conflitos: [{ entidade: 'apresentadora', evento_id: 'agenda-apresentadora', apresentadora_id: apresentadoraId }],
+    })
+    expect(queryMock.mock.calls.some(([sql]) => sql.includes('INSERT INTO agenda_eventos'))).toBe(false)
+    await app.close()
+  })
+
   it('POST /v1/videos with GMV upserts vendas_atribuidas origem=video', async () => {
     const queryMock = vi.fn(async (sql) => {
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
@@ -142,10 +229,103 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('DELETE /v1/lives/:id removes an ended live and related attribution rows', async () => {
+    const liveId = '11111111-1111-4111-8111-111111111111'
+    const queryMock = vi.fn(async (sql) => {
+      if (/SELECT id, status/i.test(sql) && /FROM lives/i.test(sql)) {
+        return { rows: [{ id: liveId, status: 'encerrada', cabine_id: 'cabine-1', iniciado_em: '2026-05-19T18:00:00Z' }] }
+      }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
+
+    expect(res.statusCode).toBe(204)
+    expect(queryMock.mock.calls.some(([sql]) => /DELETE FROM vendas_atribuidas/i.test(sql))).toBe(true)
+    expect(queryMock.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(true)
+    await app.close()
+  })
+
+  it('DELETE /v1/lives/:id closes and deletes an in-progress live without leaving cabine locked', async () => {
+    const liveId = '11111111-1111-4111-8111-111111111111'
+    const cabineId = '22222222-2222-4222-8222-222222222222'
+    const queryMock = vi.fn(async (sql) => {
+      if (/SELECT id, status/i.test(sql) && /FROM lives/i.test(sql)) {
+        return { rows: [{ id: liveId, status: 'em_andamento', cabine_id: cabineId, iniciado_em: '2026-05-19T18:00:00Z' }] }
+      }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
+
+    expect(res.statusCode).toBe(204)
+    expect(queryMock.mock.calls.some(([sql, params]) => (
+      /UPDATE cabines/i.test(sql) &&
+      /live_atual_id = NULL/i.test(sql) &&
+      params.includes(cabineId)
+    ))).toBe(true)
+    expect(queryMock.mock.calls.some(([sql]) => /UPDATE agenda_eventos/i.test(sql) && /status = 'cancelado'/i.test(sql))).toBe(true)
+    expect(queryMock.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(true)
+    await app.close()
+  })
+
+  it('DELETE /v1/lives/:id returns 404 when live does not exist', async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({ method: 'DELETE', url: '/v1/lives/11111111-1111-4111-8111-111111111111' })
+
+    expect(res.statusCode).toBe(404)
+    await app.close()
+  })
+
+  it('DELETE /v1/lives/:id returns 409 for unmapped foreign-key dependencies', async () => {
+    const liveId = '11111111-1111-4111-8111-111111111111'
+    const queryMock = vi.fn(async (sql) => {
+      if (/SELECT id, status/i.test(sql) && /FROM lives/i.test(sql)) {
+        return { rows: [{ id: liveId, status: 'encerrada', cabine_id: 'cabine-1', iniciado_em: '2026-05-19T18:00:00Z' }] }
+      }
+      if (/DELETE FROM lives/i.test(sql)) {
+        const error = new Error('fk')
+        error.code = '23503'
+        throw error
+      }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
+
+    expect(res.statusCode).toBe(409)
+    expect(res.json()).toMatchObject({ code: 'LIVE_FOREIGN_KEY_DEPENDENCY' })
+    expect(queryMock.mock.calls.some(([sql]) => sql === 'ROLLBACK')).toBe(true)
+    await app.close()
+  })
+
+  it('migration registry includes commission goals compatibility without duplicate faixa table name', () => {
+    const registry = readFileSync(new URL('../apply_migrations.js', import.meta.url), 'utf8')
+    const migration = readFileSync(new URL('../migrations/090_comissao_metas_compat.sql', import.meta.url), 'utf8')
+
+    expect(registry).toContain('090_comissao_metas_compat.sql')
+    expect(migration).toContain('valor_fixo_minimo')
+    expect(migration).toContain('valor_fixo_mensal')
+    expect(migration).toContain('CREATE TABLE IF NOT EXISTS metas_apresentadora')
+    expect(migration).toContain('CREATE TABLE IF NOT EXISTS metas_supervisor')
+    expect(migration).not.toContain('apresentadora_faixas_comissao')
+  })
+
   it('GET /v1/comissoes/resumo aggregates live and video attribution rows', async () => {
     const queryMock = vi.fn().mockResolvedValueOnce({
       rows: [{
         gmv_total: '2000.00',
+        gmv_lives: '2000.00',
+        gmv_videos: '0',
         pedidos_total: '15',
         registros: '3',
         comissao_apresentadoras: '225.00',
@@ -161,6 +341,8 @@ describe('LIVELAB operational routes', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().totais).toMatchObject({
       gmv: 2000,
+      gmv_lives: 2000,
+      gmv_videos: 0,
       pedidos: 15,
       comissao: 225,
       registros: 3,
@@ -192,6 +374,66 @@ describe('LIVELAB operational routes', () => {
       comissao_faltante_count: 0,
     })
     expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
+    await app.close()
+  })
+
+  it('GET /v1/financeiro/fluxo-caixa uses vendas_atribuidas for entradas', async () => {
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ dia: '2026-05-19', valor: '1142.00' }] })
+      .mockResolvedValueOnce({ rows: [{ dia: '2026-05-19', valor: '100.00' }] })
+    const { app } = buildApp({ queryMock })
+    await app.register(financeiroRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/fluxo-caixa?inicio=2026-05-01&fim=2026-05-31' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().items[0]).toMatchObject({ dia: '2026-05-19', entradas: 1142, saidas: 100 })
+    expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
+    await app.close()
+  })
+
+  it('GET/PATCH /v1/configuracoes/ranking-publico reads and updates public ranking fields', async () => {
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'tenant-1',
+          nome: 'Livelab Blumenau',
+          logo_url: 'https://cdn/logo.png',
+          cidade: 'Blumenau',
+          estado: 'SC',
+          ranking_publico_ativo: true,
+          ranking_publico_nome: 'LiveLab Blumenau',
+          ranking_publico_logo_url: null,
+          ranking_publico_cidade: null,
+          ranking_publico_uf: null,
+          ranking_publico_meta_gmv: '50000.00',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          ranking_publico_ativo: false,
+          ranking_publico_nome: 'Unidade Blumenau',
+          ranking_publico_logo_url: '',
+          ranking_publico_cidade: 'Blumenau',
+          ranking_publico_uf: 'SC',
+          ranking_publico_meta_gmv: '80000.00',
+        }],
+      })
+    const { app } = buildApp({ queryMock })
+    await app.register(configuracoesRoutes)
+
+    const getRes = await app.inject({ method: 'GET', url: '/v1/configuracoes/ranking-publico' })
+    expect(getRes.statusCode).toBe(200)
+    expect(getRes.json()).toMatchObject({ ativo: true, nome_publico: 'LiveLab Blumenau', meta_gmv: 50000 })
+
+    const patchRes = await app.inject({
+      method: 'PATCH',
+      url: '/v1/configuracoes/ranking-publico',
+      payload: { ativo: false, nome_publico: 'Unidade Blumenau', cidade: 'Blumenau', uf: 'SC', meta_gmv: '80.000,00' },
+    })
+    expect(patchRes.statusCode).toBe(200)
+    expect(patchRes.json()).toMatchObject({ ativo: false, nome_publico: 'Unidade Blumenau', meta_gmv: 80000 })
+    expect(queryMock.mock.calls[1][0]).toContain('ranking_publico_ativo')
     await app.close()
   })
 

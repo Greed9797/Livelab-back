@@ -116,33 +116,96 @@ async function resolveAgendaMarcaId(db, tenantId, { marcaId, clienteId }) {
   return inserted.rows[0]?.id ?? null
 }
 
-async function getConflictingEvents(db, { tenantId, cabineId, dataInicio, dataFim, excludeId }) {
-  if (!cabineId) return []
+async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId }) {
+  if (!cabineId && !apresentadoraId) return []
 
-  const values = [tenantId, cabineId, dataInicio, dataFim, activeAgendaStatuses]
+  const values = [tenantId, dataInicio, dataFim, activeAgendaStatuses]
+  const entityFilters = []
+  let cabineParam = null
+  let apresentadoraParam = null
+
+  if (cabineId) {
+    values.push(cabineId)
+    cabineParam = values.length
+    entityFilters.push(`ae.cabine_id = $${cabineParam}::uuid`)
+  }
+
+  if (apresentadoraId) {
+    values.push(apresentadoraId)
+    apresentadoraParam = values.length
+    entityFilters.push(`ae.apresentadora_id = $${apresentadoraParam}::uuid`)
+  }
+
   let extra = ''
   if (excludeId) {
     values.push(excludeId)
-    extra = `AND id <> $${values.length}::uuid`
+    extra = `AND ae.id <> $${values.length}::uuid`
   }
 
   const result = await db.query(
-    `SELECT id, tipo, marca_id, data_inicio, data_fim, status
-     FROM agenda_eventos
-     WHERE tenant_id = $1::uuid
-       AND cabine_id = $2::uuid
-       AND status = ANY($5::text[])
-       AND data_inicio < $4::timestamptz
-       AND data_fim > $3::timestamptz
+    `SELECT ae.id,
+            ae.tipo,
+            ae.marca_id,
+            ae.cabine_id,
+            ae.apresentadora_id,
+            ae.data_inicio,
+            ae.data_fim,
+            ae.status,
+            CASE
+              ${cabineParam ? `WHEN ae.cabine_id = $${cabineParam}::uuid THEN 'cabine'` : ''}
+              ${apresentadoraParam ? `WHEN ae.apresentadora_id = $${apresentadoraParam}::uuid THEN 'apresentadora'` : ''}
+              ELSE 'agenda'
+            END AS entidade
+     FROM agenda_eventos ae
+     WHERE ae.tenant_id = $1::uuid
+       AND ae.status = ANY($4::text[])
+       AND ae.data_inicio < $3::timestamptz
+       AND ae.data_fim > $2::timestamptz
+       AND (${entityFilters.join(' OR ')})
        ${extra}`,
     values,
   )
   return result.rows
 }
 
-async function hasAgendaOverlap(db, params) {
-  const rows = await getConflictingEvents(db, params)
-  return rows.length > 0
+function buildConflictPayload(conflitos) {
+  return {
+    error: 'Conflito de agenda. Ajuste cabine, apresentadora ou horário antes de salvar.',
+    code: 'AGENDA_CONFLICT',
+    conflitos: conflitos.map((item) => ({
+      tipo: item.tipo,
+      entidade: item.entidade,
+      evento_id: item.id,
+      cabine_id: item.cabine_id,
+      apresentadora_id: item.apresentadora_id,
+      data_inicio: item.data_inicio,
+      data_fim: item.data_fim,
+      status: item.status,
+    })),
+  }
+}
+
+async function collectAgendaConflicts(db, { tenantId, cabineId, apresentadoraId, intervals, excludeId }) {
+  const conflitos = []
+  for (const interval of intervals) {
+    const rows = await getConflictingEvents(db, {
+      tenantId,
+      cabineId,
+      apresentadoraId,
+      dataInicio: interval.data_inicio,
+      dataFim: interval.data_fim,
+      excludeId,
+    })
+    conflitos.push(...rows)
+  }
+
+  const seen = new Set()
+  return conflitos.filter((item) => {
+    const key = `${item.entidade}:${item.id}:${item.data_inicio}:${item.data_fim}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 /**
@@ -275,19 +338,20 @@ export async function agendaRoutes(app) {
     })
   })
 
-  // GET /v1/agenda/conflitos — verifica conflitos para um intervalo/cabine
+  // GET /v1/agenda/conflitos — verifica conflitos para um intervalo/cabine/apresentadora
   app.get('/v1/agenda/conflitos', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
-    const { cabine_id, data_inicio, data_fim, exclude_id } = request.query ?? {}
+    const { cabine_id, apresentadora_id, data_inicio, data_fim, exclude_id } = request.query ?? {}
 
-    if (!cabine_id || !data_inicio || !data_fim) {
-      return reply.code(400).send({ error: 'cabine_id, data_inicio e data_fim são obrigatórios' })
+    if ((!cabine_id && !apresentadora_id) || !data_inicio || !data_fim) {
+      return reply.code(400).send({ error: 'cabine_id ou apresentadora_id, data_inicio e data_fim são obrigatórios' })
     }
 
     return app.withTenant(tenant_id, async (db) => {
       const conflitos = await getConflictingEvents(db, {
         tenantId: tenant_id,
         cabineId: cabine_id,
+        apresentadoraId: apresentadora_id,
         dataInicio: data_inicio,
         dataFim: data_fim,
         excludeId: exclude_id,
@@ -318,20 +382,21 @@ export async function agendaRoutes(app) {
         return reply.code(400).send({ error: 'Selecione uma marca ou cliente para live e gravação' })
       }
 
-      // Verifica conflito — cria mesmo assim, retorna aviso
-      let conflito = null
-      if (d.cabine_id && activeAgendaStatuses.includes(d.status)) {
-        const eventosConflitantes = await getConflictingEvents(db, {
+      let ocorrencias = []
+      if (recorrencia) ocorrencias = calcularRecorrencias(d.data_inicio, d.data_fim, recorrencia)
+
+      if (activeAgendaStatuses.includes(d.status)) {
+        const eventosConflitantes = await collectAgendaConflicts(db, {
           tenantId: tenant_id,
           cabineId: d.cabine_id,
-          dataInicio: d.data_inicio,
-          dataFim: d.data_fim,
+          apresentadoraId: d.apresentadora_id,
+          intervals: [
+            { data_inicio: d.data_inicio, data_fim: d.data_fim },
+            ...ocorrencias,
+          ],
         })
         if (eventosConflitantes.length > 0) {
-          conflito = {
-            descricao: `Existe(m) ${eventosConflitantes.length} evento(s) ativo(s) nesta cabine no mesmo horário`,
-            eventos_conflitantes: eventosConflitantes,
-          }
+          return reply.code(409).send(buildConflictPayload(eventosConflitantes))
         }
       }
 
@@ -354,7 +419,6 @@ export async function agendaRoutes(app) {
       // Processa recorrência se fornecida
       let recorrentes = 0
       if (recorrencia) {
-        const ocorrencias = calcularRecorrencias(d.data_inicio, d.data_fim, recorrencia)
         const ruleJson = JSON.stringify({
           frequencia: recorrencia.frequencia,
           dias_semana: recorrencia.dias_semana,
@@ -379,10 +443,7 @@ export async function agendaRoutes(app) {
         }
       }
 
-      const response = { evento, recorrentes }
-      if (conflito) response.conflito = conflito
-
-      return reply.code(201).send(response)
+      return reply.code(201).send({ evento, recorrentes })
     })
   })
 
@@ -425,21 +486,16 @@ export async function agendaRoutes(app) {
         return reply.code(400).send({ error: 'Selecione uma marca ou cliente para live e gravação' })
       }
 
-      // Verifica conflito — retorna aviso, não bloqueia
-      let conflito = null
-      if (next.cabine_id && activeAgendaStatuses.includes(next.status)) {
-        const eventosConflitantes = await getConflictingEvents(db, {
+      if (activeAgendaStatuses.includes(next.status)) {
+        const eventosConflitantes = await collectAgendaConflicts(db, {
           tenantId: tenant_id,
           cabineId: next.cabine_id,
-          dataInicio: next.data_inicio,
-          dataFim: next.data_fim,
+          apresentadoraId: next.apresentadora_id,
+          intervals: [{ data_inicio: next.data_inicio, data_fim: next.data_fim }],
           excludeId: request.params.id,
         })
         if (eventosConflitantes.length > 0) {
-          conflito = {
-            descricao: `Existe(m) ${eventosConflitantes.length} evento(s) ativo(s) nesta cabine no mesmo horário`,
-            eventos_conflitantes: eventosConflitantes,
-          }
+          return reply.code(409).send(buildConflictPayload(eventosConflitantes))
         }
       }
 
@@ -484,10 +540,7 @@ export async function agendaRoutes(app) {
         recurrentesAtualizados = recResult.rowCount ?? 0
       }
 
-      const response = { evento, recorrentes_atualizados: recurrentesAtualizados }
-      if (conflito) response.conflito = conflito
-
-      return response
+      return { evento, recorrentes_atualizados: recurrentesAtualizados }
     })
   })
 

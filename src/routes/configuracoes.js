@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_CONFIGURACOES, WRITE_CONFIGURACOES } from '../config/role_groups.js'
+import { moneySchema } from '../lib/money.js'
 
 const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
 
@@ -24,6 +25,26 @@ const configSchema = z.object({
   notif_lead_novo:      z.boolean().optional(),
   notif_contrato:       z.boolean().optional(),
 })
+
+const rankingPublicoSchema = z.object({
+  ativo: z.boolean().optional(),
+  nome_publico: z.string().max(120).optional().nullable(),
+  logo_url: z.string().url().or(z.literal('')).optional().nullable(),
+  cidade: z.string().max(80).optional().nullable(),
+  uf: z.string().max(2).optional().nullable(),
+  meta_gmv: moneySchema.optional().nullable(),
+})
+
+function mapRankingPublico(row) {
+  return {
+    ativo: row.ranking_publico_ativo ?? true,
+    nome_publico: row.ranking_publico_nome ?? row.nome ?? '',
+    logo_url: row.ranking_publico_logo_url ?? row.logo_url ?? '',
+    cidade: row.ranking_publico_cidade ?? row.cidade ?? '',
+    uf: row.ranking_publico_uf ?? row.estado ?? '',
+    meta_gmv: row.ranking_publico_meta_gmv == null ? null : Number(row.ranking_publico_meta_gmv),
+  }
+}
 
 export async function configuracoesRoutes(app) {
   // POST /v1/configuracoes/logo — upload de imagem para Supabase Storage
@@ -129,6 +150,63 @@ export async function configuracoesRoutes(app) {
         notif_contrato:         conf.notif_contrato ?? true,
         contact_history:        histRows.rows,
       }
+    })
+  })
+
+  // GET /v1/configuracoes/ranking-publico
+  app.get('/v1/configuracoes/ranking-publico', {
+    preHandler: [app.authenticate, app.requirePapel(READ_CONFIGURACOES)],
+  }, async (request) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const { rows } = await db.query(`
+        SELECT id, nome, logo_url, cidade, estado,
+               ranking_publico_ativo, ranking_publico_nome,
+               ranking_publico_logo_url, ranking_publico_cidade,
+               ranking_publico_uf, ranking_publico_meta_gmv
+        FROM tenants
+        WHERE id = $1
+      `, [tenant_id])
+
+      return mapRankingPublico(rows[0] ?? {})
+    })
+  })
+
+  // PATCH /v1/configuracoes/ranking-publico
+  app.patch('/v1/configuracoes/ranking-publico', {
+    preHandler: [app.authenticate, app.requirePapel(WRITE_CONFIGURACOES)],
+  }, async (request, reply) => {
+    const parsed = rankingPublicoSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id } = request.user
+    const data = parsed.data
+
+    return app.withTenant(tenant_id, async (db) => {
+      const { rows } = await db.query(`
+        UPDATE tenants
+           SET ranking_publico_ativo = COALESCE($2, ranking_publico_ativo),
+               ranking_publico_nome = $3,
+               ranking_publico_logo_url = $4,
+               ranking_publico_cidade = $5,
+               ranking_publico_uf = $6,
+               ranking_publico_meta_gmv = $7,
+               atualizado_em = NOW()
+         WHERE id = $1
+         RETURNING ranking_publico_ativo, ranking_publico_nome,
+                   ranking_publico_logo_url, ranking_publico_cidade,
+                   ranking_publico_uf, ranking_publico_meta_gmv
+      `, [
+        tenant_id,
+        data.ativo ?? null,
+        data.nome_publico ?? null,
+        data.logo_url ?? null,
+        data.cidade ?? null,
+        data.uf ?? null,
+        data.meta_gmv ?? null,
+      ])
+
+      return mapRankingPublico(rows[0] ?? {})
     })
   })
 

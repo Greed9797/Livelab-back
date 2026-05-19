@@ -1,9 +1,10 @@
 import { z } from 'zod'
+import { moneySchema } from '../lib/money.js'
 
 const createSchema = z.object({
   nome:            z.string().min(1),
   descricao:       z.string().optional(),
-  valor_fixo:      z.number().min(0),
+  valor_fixo:      moneySchema,
   comissao_pct:    z.number().min(0).max(100).default(0),
   horas_incluidas: z.number().min(0),
 })

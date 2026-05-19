@@ -168,6 +168,40 @@ describe('POST /v1/lives/manual', () => {
     expect(insertArgs[8]).toBeCloseTo(200)
   })
 
+  it('accepts BRL strings and persists manual live times in Sao Paulo timezone', async () => {
+    let insertArgs = null
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })
+      .mockResolvedValueOnce({ rows: [{ comissao_pct: '10' }] })
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockImplementationOnce((sql, args) => { insertArgs = args; return { rows: [{ id: 'id-1' }] } })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/lives/manual',
+      payload: {
+        ...basePayload,
+        hora_inicio: '15:00',
+        hora_fim: '21:00',
+        fat_gerado: '1.142,50',
+        manual_gmv: '1.142,50',
+      },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(insertArgs[5]).toBe('2026-05-01T15:00:00-03:00')
+    expect(insertArgs[6]).toBe('2026-05-01T21:00:00-03:00')
+    expect(insertArgs[7]).toBe(1142.5)
+    expect(insertArgs[17]).toBe(1142.5)
+  })
+
   it('allows manual affiliate live using marca_id without cliente_id', async () => {
     const marcaId = '55555555-5555-4555-8555-555555555555'
     let insertArgs = null
@@ -345,7 +379,7 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
     const res = await app.inject({
       method: 'PATCH',
       url: `/v1/lives/${liveId}`,
-      payload: { fat_gerado: 2000 },
+      payload: { fat_gerado: '2.000,00' },
     })
 
     expect(res.statusCode).toBe(200)

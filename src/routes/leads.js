@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_LEADS, WRITE_LEADS } from '../config/role_groups.js'
+import { moneySchema } from '../lib/money.js'
 
 const CRM_ETAPAS = ['lead_novo','contato_iniciado','reuniao_agendada','proposta_enviada','em_negociacao','aguardando_assinatura','ganho','perdido']
 
@@ -9,7 +10,7 @@ const crmUpdateSchema = z.object({
   cidade:               z.string().nullable().optional(),
   estado:               z.string().nullable().optional(),
   crm_etapa:            z.enum(CRM_ETAPAS).optional(),
-  valor_oportunidade:   z.number().min(0).optional(),
+  valor_oportunidade:   moneySchema.optional(),
   responsavel_nome:     z.string().nullable().optional(),
   origem:               z.string().nullable().optional(),
   observacoes_internas: z.string().nullable().optional(),
@@ -38,8 +39,8 @@ const createLeadSchema = z.object({
   nicho:                z.string().nullable().optional(),
   cidade:               z.string().nullable().optional(),
   estado:               z.string().nullable().optional(),
-  fat_estimado:         z.number().min(0).optional(),
-  valor_oportunidade:   z.number().min(0).optional(),
+  fat_estimado:         moneySchema.optional(),
+  valor_oportunidade:   moneySchema.optional(),
   responsavel_nome:     z.string().nullable().optional(),
   origem:               z.string().nullable().optional(),
   crm_etapa:            z.enum(CRM_ETAPAS).optional(),

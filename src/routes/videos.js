@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { READ_VIDEOS, WRITE_VIDEOS } from '../config/role_groups.js'
 import { upsertVendaAtribuida } from './vendas_atribuidas.js'
+import { moneySchema } from '../lib/money.js'
 
 const videoSchema = z.object({
   marca_id: z.string().uuid(),
@@ -10,7 +11,7 @@ const videoSchema = z.object({
   quantidade: z.coerce.number().int().min(0).default(0),
   plataforma: z.string().default('tiktok'),
   campanha: z.string().nullable().optional(),
-  gmv_atribuido: z.coerce.number().min(0).default(0),
+  gmv_atribuido: moneySchema.default(0),
   pedidos_atribuidos: z.coerce.number().int().min(0).default(0),
   observacoes: z.string().nullable().optional(),
 })

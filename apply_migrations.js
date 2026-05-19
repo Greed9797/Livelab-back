@@ -81,6 +81,7 @@ export const MIGRATIONS_LIST = [
   '085_agenda_operacional_campos.sql',
   '086_leads_crm_structured_history.sql',
   '087_cabines_soft_delete_columns.sql',
+  '088_franqueado_sessao1_operacional.sql',
 ]
 
 async function ensureMigrationsTable(client) {

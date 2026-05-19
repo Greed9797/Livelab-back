@@ -37,6 +37,20 @@ const criarCabineSchema = z.object({
 })
 
 export async function cabinesRoutes(app) {
+  async function countCabineDependency(db, table, cabineId, tenantId) {
+    try {
+      const result = await db.query(
+        `SELECT COUNT(*)::int AS total
+         FROM ${table}
+         WHERE cabine_id = $1 AND tenant_id = $2::uuid`,
+        [cabineId, tenantId],
+      )
+      return Number(result.rows[0]?.total ?? result.rowCount ?? 0)
+    } catch (error) {
+      if (error.code === '42P01') return 0
+      throw error
+    }
+  }
 
   // GET /v1/cabines
   app.get('/v1/cabines', { preHandler: cabineRoleAccess(app) }, async (request) => {
@@ -103,6 +117,8 @@ export async function cabinesRoutes(app) {
              AND lr.data_solicitada >= CURRENT_DATE
          ) lr_agg ON true
          WHERE c.tenant_id = $1::uuid
+           AND c.ativo IS NOT FALSE
+           AND c.deleted_at IS NULL
          ORDER BY c.numero`,
         [tenant_id]
       )
@@ -187,9 +203,19 @@ export async function cabinesRoutes(app) {
   }, async (request, reply) => {
     const { tenant_id } = request.user
     const confirmacao = request.query?.confirmacao
+    if (confirmacao !== 'CABINE') {
+      return reply.code(400).send({
+        error: 'Confirmação obrigatória para excluir cabine.',
+        code: 'CABINE_CONFIRMATION_REQUIRED',
+      })
+    }
+
     return app.withTenant(tenant_id, async (db) => {
       const cabineResult = await db.query(
-        `SELECT id, status, live_atual_id, contrato_id FROM cabines WHERE id = $1 AND tenant_id = $2`,
+        `SELECT id, numero, status, live_atual_id, contrato_id
+         FROM cabines
+         WHERE id = $1 AND tenant_id = $2::uuid
+         FOR UPDATE`,
         [request.params.id, tenant_id]
       )
       const cabine = cabineResult.rows[0]
@@ -197,44 +223,56 @@ export async function cabinesRoutes(app) {
       if (!cabine) return reply.code(404).send({ error: 'Cabine não encontrada' })
 
       if (cabine.status === 'ao_vivo' || cabine.live_atual_id) {
-        return reply.code(409).send({ error: 'Cabine ao vivo não pode ser deletada' })
+        return reply.code(409).send({
+          error: 'Cabine ao vivo não pode ser excluída.',
+          code: 'CABINE_LIVE_ACTIVE',
+        })
       }
 
-      if (cabine.contrato_id && confirmacao !== 'CABINE') {
-        return reply.code(409).send({ error: 'Libere a cabine antes de deletá-la' })
+      if (cabine.contrato_id) {
+        return reply.code(409).send({
+          error: 'Libere a cabine antes de excluir.',
+          code: 'CABINE_HAS_CONTRACT',
+        })
       }
 
-      // Check FK refs: lives and live_requests (tabela renomeada de solicitacoes)
-      const [livesRef, solRef, agendaRef] = await Promise.all([
-        db.query(`SELECT id FROM lives WHERE cabine_id = $1 AND tenant_id = $2::uuid LIMIT 1`, [request.params.id, tenant_id]),
-        db.query(`SELECT id FROM live_requests WHERE cabine_id = $1 AND tenant_id = $2::uuid LIMIT 1`, [request.params.id, tenant_id]),
-        db.query(`SELECT id FROM agenda_eventos WHERE cabine_id = $1 AND tenant_id = $2::uuid LIMIT 1`, [request.params.id, tenant_id]),
-      ])
-      const hasHistory = livesRef.rowCount > 0 || solRef.rowCount > 0 || agendaRef.rowCount > 0
+      const dependencies = {
+        lives: await countCabineDependency(db, 'lives', request.params.id, tenant_id),
+        live_requests: await countCabineDependency(db, 'live_requests', request.params.id, tenant_id),
+        agenda_eventos: await countCabineDependency(db, 'agenda_eventos', request.params.id, tenant_id),
+        cabine_eventos: await countCabineDependency(db, 'cabine_eventos', request.params.id, tenant_id),
+      }
+      const hasHistory = Object.values(dependencies).some((total) => total > 0)
       if (hasHistory) {
-        if (confirmacao !== 'CABINE') {
-          return reply.code(409).send({
-            error: 'Cabine possui histórico. Digite CABINE para removê-la da operação.',
-            code: 'CABINE_CONFIRMATION_REQUIRED',
-          })
-        }
-
-        await db.query(
+        const archived = await db.query(
           `UPDATE cabines
            SET ativo = false,
                status = 'disponivel',
                live_atual_id = NULL,
-               contrato_id = NULL
-           WHERE id = $1 AND tenant_id = $2::uuid`,
-          [request.params.id, tenant_id],
+               contrato_id = NULL,
+               deleted_at = NOW(),
+               deleted_by = $3
+           WHERE id = $1 AND tenant_id = $2::uuid
+           RETURNING id, numero, ativo, deleted_at`,
+          [request.params.id, tenant_id, request.user.sub ?? null],
         )
         app.audit?.log?.(request, { action: 'cabines.soft_delete', entity_type: 'cabine', entity_id: request.params.id, metadata: { confirmacao } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-        return { ok: true, soft_deleted: true }
+        return { ok: true, soft_deleted: true, cabine: archived.rows[0], dependencies }
       }
 
-      await db.query(`DELETE FROM cabines WHERE id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])
-      app.audit?.log?.(request, { action: 'cabines.delete', entity_type: 'cabine', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      return { ok: true }
+      try {
+        await db.query(`DELETE FROM cabines WHERE id = $1 AND tenant_id = $2::uuid RETURNING id`, [request.params.id, tenant_id])
+        app.audit?.log?.(request, { action: 'cabines.delete', entity_type: 'cabine', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        return { ok: true }
+      } catch (error) {
+        if (error.code === '23503') {
+          return reply.code(409).send({
+            error: 'Cabine possui vínculos no banco e não pode ser excluída definitivamente.',
+            code: 'CABINE_FOREIGN_KEY_DEPENDENCY',
+          })
+        }
+        throw error
+      }
     })
   })
 

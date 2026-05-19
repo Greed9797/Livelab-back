@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { READ_CONTRATOS, WRITE_CONTRATOS } from '../config/role_groups.js'
 import { notify } from '../services/mailer.js'
 import { executarAcaoAuditoria } from '../services/contratos_auditoria.js'
+import { moneySchema } from '../lib/money.js'
 
 // Regex sincronizado com clientes_tiktok_username_format / contratos_tiktok_username_format (migration 075).
 const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
@@ -19,7 +20,7 @@ const tiktokUsernameField = z
 
 const createSchema = z.object({
   cliente_id:      z.string().uuid(),
-  valor_fixo:      z.number().min(0),
+  valor_fixo:      moneySchema,
   comissao_pct:    z.number().min(0).max(100),
   pacote_id:       z.string().uuid().optional(),
   tiktok_username: tiktokUsernameField,

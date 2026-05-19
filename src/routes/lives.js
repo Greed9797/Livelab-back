@@ -5,6 +5,8 @@ import { notify } from '../services/mailer.js'
 import { upsertVendaAtribuida } from './vendas_atribuidas.js'
 import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
+import { moneySchema } from '../lib/money.js'
+import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
 
 const iniciarLiveSchema = z.object({
   cabine_id: z.string().uuid(),
@@ -17,13 +19,13 @@ const iniciarLiveSchema = z.object({
 })
 
 const encerrarSchema = z.object({
-  fat_gerado:         z.number().min(0),
+  fat_gerado:         moneySchema,
   qtd_pedidos:        z.number().int().min(0).optional(),
   resumo:             z.string().max(2000).optional(),
   manual_likes:       z.number().int().min(0).optional(),
   manual_views:       z.number().int().min(0).optional(),
   manual_orders:      z.number().int().min(0).optional(),
-  manual_gmv:         z.number().min(0).optional(),
+  manual_gmv:         moneySchema.optional(),
   status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
   origem_dados:       z.enum(['manual', 'api']).optional().default('manual'),
 })
@@ -38,7 +40,7 @@ const liveManualSchema = z.object({
   data:               z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   hora_inicio:        z.string().regex(/^\d{2}:\d{2}$/),
   hora_fim:           z.string().regex(/^\d{2}:\d{2}$/),
-  fat_gerado:         z.number().min(0),
+  fat_gerado:         moneySchema,
   qtd_pedidos:        z.number().int().min(0),
   resumo:             z.string().max(2000).optional(),
   manual_views:       z.number().int().min(0).optional(),
@@ -47,7 +49,7 @@ const liveManualSchema = z.object({
   manual_shares:      z.number().int().min(0).optional(),
   manual_diamonds:    z.number().int().min(0).optional(),
   manual_orders:      z.number().int().min(0).optional(),
-  manual_gmv:         z.number().min(0).optional(),
+  manual_gmv:         moneySchema.optional(),
   tipo:               z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
   status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
   origem_dados:       z.enum(['manual', 'api']).optional().default('manual'),
@@ -67,7 +69,7 @@ const liveManualEditSchema = z.object({
   data:             z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   hora_inicio:      z.string().regex(/^\d{2}:\d{2}$/).optional(),
   hora_fim:         z.string().regex(/^\d{2}:\d{2}$/).optional(),
-  fat_gerado:       z.number().min(0).optional(),
+  fat_gerado:       moneySchema.optional(),
   qtd_pedidos:      z.number().int().min(0).optional(),
   resumo:           z.string().max(2000).optional(),
   manual_views:     z.number().int().min(0).optional(),
@@ -76,7 +78,7 @@ const liveManualEditSchema = z.object({
   manual_shares:    z.number().int().min(0).optional(),
   manual_diamonds:  z.number().int().min(0).optional(),
   manual_orders:    z.number().int().min(0).optional(),
-  manual_gmv:       z.number().min(0).optional(),
+  manual_gmv:       moneySchema.optional(),
   tipo:             z.enum(['cliente', 'afiliado', 'teste']).optional(),
   status_publicacao: z.enum(['rascunho', 'revisado', 'publicado']).optional(),
 })
@@ -566,8 +568,8 @@ export async function livesRoutes(app) {
           apresentador2UserId = ap2Row.rows[0]?.user_id ?? null
         }
 
-        const iniciado = `${d.data} ${d.hora_inicio}:00`
-        const encerrado = `${d.data} ${d.hora_fim}:00`
+        const iniciado = saoPauloTimestamp(d.data, d.hora_inicio)
+        const encerrado = saoPauloTimestamp(d.data, d.hora_fim)
 
         // Verificação de overlap: não permite criar live manual em período já ocupado na mesma cabine
         const overlapQ = await db.query(
@@ -743,15 +745,15 @@ export async function livesRoutes(app) {
         if (d.data !== undefined || d.hora_inicio !== undefined || d.hora_fim !== undefined) {
           const currentInicio = new Date(live.iniciado_em)
           const currentFim    = new Date(live.encerrado_em)
-          const data    = d.data        ?? currentInicio.toISOString().slice(0, 10)
-          const hInicio = d.hora_inicio ?? `${String(currentInicio.getUTCHours()).padStart(2,'0')}:${String(currentInicio.getUTCMinutes()).padStart(2,'0')}`
-          const hFim    = d.hora_fim    ?? `${String(currentFim.getUTCHours()).padStart(2,'0')}:${String(currentFim.getUTCMinutes()).padStart(2,'0')}`
+          const data    = d.data        ?? saoPauloDateInput(currentInicio)
+          const hInicio = d.hora_inicio ?? saoPauloTimeInput(currentInicio)
+          const hFim    = d.hora_fim    ?? saoPauloTimeInput(currentFim)
           if (hFim <= hInicio) {
             await db.query('ROLLBACK')
             return reply.code(400).send({ error: 'hora_fim deve ser maior que hora_inicio' })
           }
-          addField('iniciado_em',  `${data} ${hInicio}:00`)
-          addField('encerrado_em', `${data} ${hFim}:00`)
+          addField('iniciado_em',  saoPauloTimestamp(data, hInicio))
+          addField('encerrado_em', saoPauloTimestamp(data, hFim))
         }
 
         if (updates.length > 0) {

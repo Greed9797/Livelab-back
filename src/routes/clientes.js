@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { resolveCepToGeo } from './cep.js'
 import { READ_CLIENTES, WRITE_CLIENTES } from '../config/role_groups.js'
+import { getClienteOperacional, resolveMonthRange } from '../lib/operacional.js'
 
 // Regex sincronizado com clientes_tiktok_username_format (migration 075).
 const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
@@ -51,6 +52,26 @@ const patchSchema = z.object({
   onboarding_step:  z.number().int().optional(),
   tiktok_username:  tiktokUsernameField,
 }).passthrough()
+
+const mergeSchema = z.object({
+  vencedor_id: z.string().uuid(),
+  duplicado_id: z.string().uuid(),
+})
+
+const onlyDigits = (value) => String(value ?? '').replace(/\D/g, '')
+const normalizedEmail = (value) => String(value ?? '').trim().toLowerCase()
+
+function detectStrongMergeCriterion(a, b) {
+  const cnpjA = onlyDigits(a.cnpj)
+  const cnpjB = onlyDigits(b.cnpj)
+  if (cnpjA && cnpjA === cnpjB) return 'cnpj'
+
+  const emailA = normalizedEmail(a.email)
+  const emailB = normalizedEmail(b.email)
+  if (emailA && emailA === emailB) return 'email'
+
+  return null
+}
 
 export async function clientesRoutes(app) {
   // POST /v1/clientes
@@ -210,6 +231,119 @@ export async function clientesRoutes(app) {
         [tenant_id, mesInicio]
       )
       return result.rows
+    })
+  })
+
+  // POST /v1/clientes/merge-restrito
+  // Mescla somente duplicatas com match forte dentro do mesmo tenant.
+  app.post('/v1/clientes/merge-restrito', {
+    preHandler: app.requirePapel(['franqueador_master', 'franqueado', 'gerente']),
+  }, async (request, reply) => {
+    const parsed = mergeSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { vencedor_id, duplicado_id } = parsed.data
+    if (vencedor_id === duplicado_id) {
+      return reply.code(400).send({ error: 'Clientes devem ser diferentes.' })
+    }
+
+    const { tenant_id, sub: userId } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      await db.query('BEGIN')
+      try {
+        const { rows } = await db.query(
+          `SELECT id, nome, email, cnpj
+           FROM clientes
+           WHERE tenant_id = $1::uuid
+             AND id = ANY($2::uuid[])
+             AND deleted_at IS NULL
+           FOR UPDATE`,
+          [tenant_id, [vencedor_id, duplicado_id]],
+        )
+        const vencedor = rows.find((row) => row.id === vencedor_id)
+        const duplicado = rows.find((row) => row.id === duplicado_id)
+        if (!vencedor || !duplicado) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Cliente vencedor ou duplicado não encontrado.' })
+        }
+
+        const criterio = detectStrongMergeCriterion(vencedor, duplicado)
+        if (!criterio) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({
+            error: 'Merge bloqueado: não há match forte por CNPJ ou e-mail no mesmo tenant.',
+            code: 'MERGE_STRONG_MATCH_REQUIRED',
+          })
+        }
+
+        const migrations = {}
+        for (const [table, column] of [
+          ['lives', 'cliente_id'],
+          ['marcas', 'cliente_id'],
+          ['contratos', 'cliente_id'],
+          ['boletos', 'cliente_id'],
+        ]) {
+          const result = await db.query(
+            `UPDATE ${table}
+             SET ${column} = $1
+             WHERE tenant_id = $2::uuid AND ${column} = $3
+             RETURNING id`,
+            [vencedor_id, tenant_id, duplicado_id],
+          )
+          migrations[table] = result.rowCount
+        }
+
+        const softDelete = await db.query(
+          `UPDATE clientes
+           SET deleted_at = NOW(),
+               mesclado_para_id = $1,
+               mesclado_em = NOW(),
+               mesclado_por = $4
+           WHERE id = $2 AND tenant_id = $3::uuid
+           RETURNING id`,
+          [vencedor_id, duplicado_id, tenant_id, userId ?? null],
+        )
+        if (!softDelete.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Cliente duplicado não encontrado para mesclar.' })
+        }
+
+        await db.query(
+          `INSERT INTO cliente_merge_auditoria (
+             tenant_id, cliente_vencedor_id, cliente_mesclado_id,
+             criterio, migracoes, executado_por
+           )
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [tenant_id, vencedor_id, duplicado_id, criterio, JSON.stringify(migrations), userId ?? null],
+        )
+        await db.query('COMMIT')
+        app.audit?.log?.(request, {
+          action: 'cliente.merge_restrito',
+          entity_type: 'cliente',
+          entity_id: vencedor_id,
+          metadata: { duplicado_id, criterio, migrations },
+        })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        return { success: true, criterio, migracoes: migrations }
+      } catch (error) {
+        await db.query('ROLLBACK').catch(() => {})
+        throw error
+      }
+    })
+  })
+
+  // GET /v1/clientes/:id/operacional
+  app.get('/v1/clientes/:id/operacional', { preHandler: app.requirePapel(READ_CLIENTES) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { startDate, endDate } = resolveMonthRange(request.query)
+    return app.withTenant(tenant_id, async (db) => {
+      const detail = await getClienteOperacional(db, {
+        tenantId: tenant_id,
+        clienteId: request.params.id,
+        startDate,
+        endDate,
+      })
+      if (!detail) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      return { ...detail, periodo: { inicio: startDate, fim: endDate } }
     })
   })
 

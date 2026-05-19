@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_APRESENTADORAS, WRITE_APRESENTADORAS } from '../config/role_groups.js'
+import { moneySchema } from '../lib/money.js'
 
 const createSchema = z.object({
   nome:            z.string().min(1),
@@ -8,9 +9,9 @@ const createSchema = z.object({
   email:           z.string().email().optional(),
   cpf_cnpj:        z.string().optional(),
   cidade:          z.string().optional(),
-  fixo:            z.number().min(0).default(0),
+  fixo:            moneySchema.default(0),
   comissao_pct:    z.number().min(0).max(100).default(0),
-  meta_diaria_gmv: z.number().min(0).default(0),
+  meta_diaria_gmv: moneySchema.default(0),
   valor_fixo_mensal: z.number().min(0).default(0),
   observacoes:     z.string().optional(),
   link_contrato:   z.string().optional(),
@@ -22,6 +23,15 @@ const createSchema = z.object({
 const updateSchema = createSchema.partial().extend({
   ativo: z.boolean().optional(),
 })
+
+const faixaSchema = z.object({
+  gmv_inicio: moneySchema.default(0),
+  gmv_fim: moneySchema.nullable().optional(),
+  comissao_pct: z.coerce.number().min(0).max(100),
+  ativo: z.boolean().default(true),
+})
+
+const faixaPatchSchema = faixaSchema.partial()
 
 const COLS = `a.id, a.nome, a.telefone, a.cargo, a.email, a.cpf_cnpj, a.cidade, a.ativo, a.fixo, a.comissao_pct, a.meta_diaria_gmv, a.valor_fixo_mensal, a.observacoes, a.link_contrato, a.data_aniversario, a.data_inicio, a.data_fim, a.criado_em, a.user_id`
 
@@ -112,6 +122,94 @@ export async function apresentadorasRoutes(app) {
       )
       app.audit?.log?.(request, { action: 'apresentadora.create_from_user', entity_type: 'apresentadora', entity_id: result.rows[0].id, metadata: { user_id: userId, nome: u.nome } })?.catch(() => {})
       return reply.code(201).send(result.rows[0])
+    })
+  })
+
+  // GET /v1/apresentadoras/:id/faixas-comissao
+  app.get('/v1/apresentadoras/:id/faixas-comissao', { preHandler: app.authenticate }, async (request, reply) => {
+    const { tenant_id, papel, sub: userId } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      if (!READ_APRESENTADORAS.includes(papel)) {
+        const own = await db.query(
+          `SELECT id FROM apresentadoras
+           WHERE id = $1 AND tenant_id = $2::uuid AND user_id = $3`,
+          [request.params.id, tenant_id, userId],
+        )
+        if (!own.rows[0]) return reply.code(403).send({ error: 'Acesso negado' })
+      }
+      const result = await db.query(
+        `SELECT id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo, criado_em, atualizado_em
+         FROM apresentadora_comissao_faixas
+         WHERE tenant_id = $1::uuid AND apresentadora_id = $2
+         ORDER BY ativo DESC, gmv_inicio ASC`,
+        [tenant_id, request.params.id],
+      )
+      return result.rows
+    })
+  })
+
+  // POST /v1/apresentadoras/:id/faixas-comissao
+  app.post('/v1/apresentadoras/:id/faixas-comissao', { preHandler: writeAccess }, async (request, reply) => {
+    const parsed = faixaSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id } = request.user
+    const d = parsed.data
+    return app.withTenant(tenant_id, async (db) => {
+      const apresentadora = await db.query(
+        `SELECT id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+        [request.params.id, tenant_id],
+      )
+      if (!apresentadora.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      const result = await db.query(
+        `INSERT INTO apresentadora_comissao_faixas (
+           tenant_id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo
+         )
+         VALUES ($1,$2,$3,$4,$5,$6)
+         RETURNING id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo, criado_em, atualizado_em`,
+        [tenant_id, request.params.id, d.gmv_inicio, d.gmv_fim ?? null, d.comissao_pct, d.ativo],
+      )
+      return reply.code(201).send(result.rows[0])
+    })
+  })
+
+  // PATCH /v1/apresentadoras/:id/faixas-comissao/:faixaId
+  app.patch('/v1/apresentadoras/:id/faixas-comissao/:faixaId', { preHandler: writeAccess }, async (request, reply) => {
+    const parsed = faixaPatchSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const updates = parsed.data
+    const fields = Object.keys(updates)
+    if (!fields.length) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
+
+    const { tenant_id } = request.user
+    const set = fields.map((field, index) => `${field} = $${index + 4}`).concat('atualizado_em = NOW()').join(', ')
+    const values = [request.params.id, request.params.faixaId, tenant_id, ...fields.map((field) => updates[field])]
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `UPDATE apresentadora_comissao_faixas
+         SET ${set}
+         WHERE apresentadora_id = $1 AND id = $2 AND tenant_id = $3::uuid
+         RETURNING id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo, criado_em, atualizado_em`,
+        values,
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Faixa não encontrada' })
+      return result.rows[0]
+    })
+  })
+
+  // DELETE /v1/apresentadoras/:id/faixas-comissao/:faixaId
+  app.delete('/v1/apresentadoras/:id/faixas-comissao/:faixaId', { preHandler: writeAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `UPDATE apresentadora_comissao_faixas
+         SET ativo = false, atualizado_em = NOW()
+         WHERE apresentadora_id = $1 AND id = $2 AND tenant_id = $3::uuid
+         RETURNING id`,
+        [request.params.id, request.params.faixaId, tenant_id],
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Faixa não encontrada' })
+      return reply.code(204).send()
     })
   })
 

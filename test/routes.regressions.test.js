@@ -45,7 +45,13 @@ describe('Route regressions: SQL and RBAC', () => {
   it('financeiro resumo uses CTE aggregation and keeps endpoint healthy', async () => {
     const app = Fastify()
     const queryMock = vi.fn().mockResolvedValue({
-      rows: [{ fat_bruto_fixo: '1200', fat_bruto_comissao: '300', total_custos: '400' }],
+      rows: [{
+        gmv_total: '1500',
+        receita_liquida: '300',
+        comissao_configurada: '1',
+        comissao_faltante_count: '0',
+        total_custos: '400',
+      }],
     })
     const releaseMock = vi.fn()
 
@@ -72,14 +78,17 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(response.statusCode).toBe(200)
     expect(payload).toMatchObject({
       fat_bruto: 1500,
-      fat_liquido: 1100,
+      fat_liquido: 0,
+      gmv_total: 1500,
+      receita_liquida: 300,
       total_custos: 400,
       periodo: '2026-04-01',
     })
     expect(queryMock).toHaveBeenCalledTimes(1)
 
     const sql = queryMock.mock.calls[0][0]
-    expect(sql).toContain('WITH contratos_periodo')
+    expect(sql).toContain('WITH vendas_periodo')
+    expect(sql).toContain('FROM vendas_atribuidas va')
     expect(sql).toContain('custos_periodo')
     expect(sql).toContain('CROSS JOIN custos_periodo')
     expect(sql).not.toContain('COALESCE(cu.total_custos, 0)')

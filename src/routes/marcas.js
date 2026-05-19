@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_MARCAS, WRITE_MARCAS } from '../config/role_groups.js'
+import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
 
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
@@ -226,6 +227,21 @@ export async function marcasRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Vínculo não encontrado' })
       return reply.code(204).send()
+    })
+  })
+
+  app.get('/v1/marcas/:id/operacional', { preHandler: readAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { startDate, endDate } = resolveMonthRange(request.query)
+    return app.withTenant(tenant_id, async (db) => {
+      const detail = await getMarcaOperacional(db, {
+        tenantId: tenant_id,
+        marcaId: request.params.id,
+        startDate,
+        endDate,
+      })
+      if (!detail) return reply.code(404).send({ error: 'Marca não encontrada' })
+      return { ...detail, periodo: { inicio: startDate, fim: endDate } }
     })
   })
 

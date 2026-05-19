@@ -1,9 +1,10 @@
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
+import { moneySchema } from '../lib/money.js'
 
 const custoSchema = z.object({
   descricao:   z.string().min(1),
-  valor:       z.number().positive(),
+  valor:       moneySchema.refine((value) => value > 0, 'Valor deve ser positivo'),
   tipo:        z.enum(['aluguel','salario','energia','internet','outros']),
   competencia: z.string().regex(/^\d{4}-\d{2}(-\d{2})?$/, 'Formato: YYYY-MM ou YYYY-MM-DD'),
 })
@@ -56,20 +57,40 @@ export async function financeiroRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(`
-        WITH contratos_periodo AS (
+        WITH vendas_periodo AS (
           SELECT
-            -- Fixo proporcional ao número de meses no range.
-            -- Mês único (mai-mai) deve dar 1, range mai-jul deve dar 3.
-            -- Fórmula: meses_diff + (1 se dia_fim >= dia_início, senão 0).
-            COALESCE(SUM(c.valor_fixo), 0) *
-              GREATEST(1::numeric,
-                (DATE_PART('year', $2::date) - DATE_PART('year', $1::date)) * 12
-                + DATE_PART('month', $2::date) - DATE_PART('month', $1::date)
-                + CASE WHEN DATE_PART('day', $2::date) >= DATE_PART('day', $1::date) THEN 1 ELSE 0 END
-              )::numeric
-              AS fat_bruto_fixo
-          FROM contratos c
-          WHERE c.status = 'ativo'
+            COALESCE(SUM(va.gmv), 0) AS gmv_total,
+            COALESCE(SUM(
+              CASE
+                WHEN COALESCE(m.comissao_franquia_pct, 0) > 0 THEN va.gmv * m.comissao_franquia_pct / 100.0
+                WHEN COALESCE(ct.comissao_pct, 0) > 0 THEN va.gmv * ct.comissao_pct / 100.0
+                ELSE COALESCE(va.comissao_franquia, 0)
+              END
+            ), 0) AS receita_liquida,
+            COUNT(*) FILTER (
+              WHERE COALESCE(m.comissao_franquia_pct, 0) > 0
+                 OR COALESCE(ct.comissao_pct, 0) > 0
+                 OR COALESCE(va.comissao_franquia, 0) > 0
+            )::int AS comissao_configurada,
+            COUNT(*) FILTER (
+              WHERE COALESCE(m.comissao_franquia_pct, 0) = 0
+                AND COALESCE(ct.comissao_pct, 0) = 0
+                AND COALESCE(va.comissao_franquia, 0) = 0
+            )::int AS comissao_faltante_count
+          FROM vendas_atribuidas va
+          JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+          LEFT JOIN LATERAL (
+            SELECT comissao_pct
+            FROM contratos
+            WHERE tenant_id = va.tenant_id
+              AND cliente_id = m.cliente_id
+              AND status = 'ativo'
+            ORDER BY ativado_em DESC NULLS LAST
+            LIMIT 1
+          ) ct ON true
+          WHERE va.tenant_id = $3::uuid
+            AND va.data >= $1::date
+            AND va.data < ($2::date + interval '1 day')
         ),
         -- Usa o snapshot histórico de comissão gravado em vendas_atribuidas pelo commission-engine,
         -- evitando recalcular com a taxa atual de marcas (o que distorceria relatórios passados).
@@ -83,25 +104,31 @@ export async function financeiroRoutes(app) {
         custos_periodo AS (
           SELECT COALESCE(SUM(valor), 0) AS total_custos
           FROM custos
-          WHERE competencia >= $1::date
+          WHERE tenant_id = $3::uuid
+            AND competencia >= $1::date
             AND competencia <  ($2::date + interval '1 day')
         )
         SELECT
-          cm.fat_bruto_fixo,
-          co.fat_bruto_comissao,
+          vp.gmv_total,
+          vp.receita_liquida,
+          vp.comissao_configurada,
+          vp.comissao_faltante_count,
           cu.total_custos
-        FROM contratos_periodo cm
-        CROSS JOIN comissoes_periodo co
+        FROM vendas_periodo vp
         CROSS JOIN custos_periodo cu
       `, [startDate, endDate, tenant_id])
 
       const r = result.rows[0]
-      const fat_bruto  = toNum(r.fat_bruto_fixo) + toNum(r.fat_bruto_comissao)
-      const fat_liquido = Math.max(0, fat_bruto - toNum(r.total_custos))
+      const fat_bruto = toNum(r.gmv_total)
+      const fat_liquido = Math.max(0, toNum(r.receita_liquida) - toNum(r.total_custos))
       return {
         visao,
         fat_bruto,
         fat_liquido,
+        gmv_total: fat_bruto,
+        receita_liquida: toNum(r.receita_liquida),
+        comissao_configurada: toNum(r.comissao_configurada),
+        comissao_faltante_count: toNum(r.comissao_faltante_count),
         total_custos: toNum(r.total_custos),
         periodo: startDate,
         inicio: startDate,
@@ -156,22 +183,58 @@ export async function financeiroRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       const porCliente = await db.query(`
-        SELECT cl.nome, cl.nicho, COALESCE(SUM(COALESCE(l.manual_gmv, l.fat_gerado)), 0) AS total
-        FROM clientes cl
-        LEFT JOIN lives l ON l.cliente_id = cl.id AND l.tenant_id = cl.tenant_id
-          AND l.encerrado_em >= $1::date
-          AND l.encerrado_em <  ($2::date + interval '1 day')
-        WHERE cl.tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND cl.status = 'ativo'
-        GROUP BY cl.id, cl.nome, cl.nicho
+        WITH vendas AS (
+          SELECT va.*, m.cliente_id, m.nome AS marca_nome, m.tipo AS marca_tipo,
+                 m.comissao_franquia_pct, ct.comissao_pct AS contrato_comissao_pct
+          FROM vendas_atribuidas va
+          JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+          LEFT JOIN LATERAL (
+            SELECT comissao_pct
+            FROM contratos
+            WHERE tenant_id = va.tenant_id
+              AND cliente_id = m.cliente_id
+              AND status = 'ativo'
+            ORDER BY ativado_em DESC NULLS LAST
+            LIMIT 1
+          ) ct ON true
+          WHERE va.tenant_id = $3::uuid
+            AND va.data >= $1::date
+            AND va.data < ($2::date + interval '1 day')
+        )
+        SELECT
+          COALESCE(cl.id, va.marca_id) AS id,
+          COALESCE(cl.nome, va.marca_nome) AS nome,
+          COALESCE(cl.nicho, va.marca_tipo) AS nicho,
+          CASE WHEN cl.id IS NULL THEN va.marca_tipo ELSE 'cliente_ecommerce' END AS tipo_operacional,
+          COALESCE(SUM(va.gmv), 0) AS total,
+          COALESCE(SUM(
+            CASE
+              WHEN COALESCE(va.comissao_franquia_pct, 0) > 0 THEN va.gmv * va.comissao_franquia_pct / 100.0
+              WHEN COALESCE(va.contrato_comissao_pct, 0) > 0 THEN va.gmv * va.contrato_comissao_pct / 100.0
+              ELSE COALESCE(va.comissao_franquia, 0)
+            END
+          ), 0) AS receita_liquida,
+          COUNT(*) FILTER (WHERE va.origem = 'live')::int AS lives_mes,
+          COUNT(*) FILTER (WHERE va.origem = 'video')::int AS videos_mes
+        FROM vendas va
+        LEFT JOIN clientes cl ON cl.id = va.cliente_id AND cl.tenant_id = $3::uuid
+        GROUP BY COALESCE(cl.id, va.marca_id), COALESCE(cl.nome, va.marca_nome),
+                 COALESCE(cl.nicho, va.marca_tipo), CASE WHEN cl.id IS NULL THEN va.marca_tipo ELSE 'cliente_ecommerce' END
         ORDER BY total DESC
-      `, [startDate, endDate])
+      `, [startDate, endDate, tenant_id])
 
       return {
         periodo: startDate,
         inicio: startDate,
         fim: endDate,
-        por_cliente: porCliente.rows.map(r => ({ ...r, total: toNum(r.total) })),
+        por_cliente: porCliente.rows.map(r => ({
+          ...r,
+          total: toNum(r.total),
+          gmv_mes: toNum(r.total),
+          receita_liquida: toNum(r.receita_liquida),
+          lives_mes: toNum(r.lives_mes),
+          videos_mes: toNum(r.videos_mes),
+        })),
       }
     })
   })

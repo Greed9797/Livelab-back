@@ -1,3 +1,5 @@
+import { parseMoneyToDecimal } from '../lib/money.js'
+
 export async function clientePortalRoutes(app) {
   // Helper: resolve cliente_id from authenticated user_id (FK)
   async function getClienteId(db, userId) {
@@ -179,7 +181,7 @@ export async function clientePortalRoutes(app) {
   }, async (request, reply) => {
     const { ano, mes, meta_gmv } = request.body ?? {}
 
-    if (!ano || !mes || mes < 1 || mes > 12 || meta_gmv == null || isNaN(parseFloat(meta_gmv))) {
+    if (!ano || !mes || mes < 1 || mes > 12 || meta_gmv == null || !Number.isFinite(parseMoneyToDecimal(meta_gmv))) {
       return reply.code(400).send({ error: 'Campos obrigatórios: ano, mes (1-12), meta_gmv' })
     }
 
@@ -193,7 +195,7 @@ export async function clientePortalRoutes(app) {
          ON CONFLICT (cliente_id, ano, mes)
          DO UPDATE SET meta_gmv = EXCLUDED.meta_gmv, atualizado_em = NOW()
          RETURNING ano, mes, meta_gmv`,
-        [request.user.tenant_id, clienteId, ano, mes, parseFloat(meta_gmv)]
+        [request.user.tenant_id, clienteId, ano, mes, parseMoneyToDecimal(meta_gmv)]
       )
 
       const row = res.rows[0]

@@ -3,8 +3,9 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { agendaRoutes } from '../src/routes/agenda.js'
 import { comissoesRoutes } from '../src/routes/comissoes.js'
+import { financeiroRoutes } from '../src/routes/financeiro.js'
 import { marcasRoutes } from '../src/routes/marcas.js'
-import { vendasAtribuidasRoutes } from '../src/routes/vendas_atribuidas.js'
+import { calcularComissoesAtribuidas, vendasAtribuidasRoutes } from '../src/routes/vendas_atribuidas.js'
 import { videosRoutes } from '../src/routes/videos.js'
 
 function buildApp({ papel = 'franqueado', queryMock } = {}) {
@@ -166,5 +167,56 @@ describe('LIVELAB operational routes', () => {
     })
     expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
     await app.close()
+  })
+
+  it('GET /v1/financeiro/resumo uses vendas_atribuidas as GMV source', async () => {
+    const queryMock = vi.fn().mockResolvedValueOnce({
+      rows: [{
+        gmv_total: '1142.00',
+        receita_liquida: '114.20',
+        comissao_configurada: '1',
+        comissao_faltante_count: '0',
+        total_custos: '20.00',
+      }],
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(financeiroRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/resumo?inicio=2026-05&fim=2026-05' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({
+      gmv_total: 1142,
+      receita_liquida: 114.2,
+      comissao_configurada: 1,
+      comissao_faltante_count: 0,
+    })
+    expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
+    await app.close()
+  })
+
+  it('calcularComissoesAtribuidas chooses presenter ladder by monthly GMV', async () => {
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '2' }] })
+      .mockResolvedValueOnce({ rows: [{ gmv_mes: '49000.00' }] })
+      .mockResolvedValueOnce({ rows: [{ comissao_pct: '1' }] })
+      .mockResolvedValueOnce({ rows: [{ comissao_live_pct: '0.5', comissao_video_pct: '0.5' }] })
+
+    const result = await calcularComissoesAtribuidas({ query: queryMock }, {
+      tenantId: 'tenant-1',
+      marcaId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      apresentadoraId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      origem: 'live',
+      origemId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      data: '2026-05-19',
+      gmv: 2000,
+    })
+
+    expect(result).toMatchObject({
+      comissao_apresentadora: 20,
+      comissao_franquia: 200,
+      comissao_franqueadora: 40,
+    })
+    expect(queryMock.mock.calls[2][0]).toContain('apresentadora_comissao_faixas')
   })
 })

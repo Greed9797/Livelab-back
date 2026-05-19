@@ -246,11 +246,13 @@ export async function financeiroRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       const entradas = await db.query(`
-        SELECT date_trunc('day', encerrado_em) AS dia, SUM(fat_gerado) AS valor
-        FROM lives
-        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND encerrado_em >= $1::date
-          AND encerrado_em <  ($2::date + interval '1 day')
+        SELECT date_trunc('day', va.data_referencia) AS dia,
+               SUM(va.gmv)::numeric AS valor
+        FROM vendas_atribuidas va
+        WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND va.data_referencia >= $1::date
+          AND va.data_referencia <  ($2::date + interval '1 day')
+          AND COALESCE(va.status, 'aprovada') <> 'cancelada'
         GROUP BY 1 ORDER BY 1
       `, [startDate, endDate])
 
@@ -263,12 +265,27 @@ export async function financeiroRoutes(app) {
         GROUP BY 1 ORDER BY 1
       `, [startDate, endDate])
 
+      const entradasRows = entradas.rows.map(r => ({ ...r, valor: toNum(r.valor) }))
+      const saidasRows = saidas.rows.map(r => ({ ...r, valor: toNum(r.valor) }))
+      const days = new Map()
+      for (const row of entradasRows) {
+        const key = row.dia instanceof Date ? row.dia.toISOString().slice(0, 10) : String(row.dia).slice(0, 10)
+        days.set(key, { dia: key, entradas: row.valor, saidas: 0 })
+      }
+      for (const row of saidasRows) {
+        const key = row.dia instanceof Date ? row.dia.toISOString().slice(0, 10) : String(row.dia).slice(0, 10)
+        const current = days.get(key) ?? { dia: key, entradas: 0, saidas: 0 }
+        current.saidas = row.valor
+        days.set(key, current)
+      }
+
       return {
         periodo: startDate,
         inicio: startDate,
         fim: endDate,
-        entradas: entradas.rows.map(r => ({ ...r, valor: toNum(r.valor) })),
-        saidas:   saidas.rows.map(r => ({ ...r, valor: toNum(r.valor) })),
+        entradas: entradasRows,
+        saidas: saidasRows,
+        items: [...days.values()].sort((a, b) => a.dia.localeCompare(b.dia)),
       }
     })
   })

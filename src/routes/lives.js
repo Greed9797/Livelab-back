@@ -1022,23 +1022,68 @@ export async function livesRoutes(app) {
   app.delete('/v1/lives/:id', { preHandler: gestorRoleAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const liveQ = await db.query(`SELECT id, status FROM lives WHERE id = $1`, [request.params.id])
-      const live = liveQ.rows[0]
-      if (!live) return reply.code(404).send({ error: 'Live não encontrada' })
-      if (live.status === 'em_andamento') {
-        return reply.code(422).send({ error: 'Não é possível excluir uma live em andamento' })
-      }
       await db.query('BEGIN')
       try {
+        const liveQ = await db.query(
+          `SELECT id, status, cabine_id, iniciado_em
+             FROM lives
+            WHERE id = $1
+              AND tenant_id = $2::uuid
+            FOR UPDATE`,
+          [request.params.id, tenant_id],
+        )
+        const live = liveQ.rows[0]
+        if (!live) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Live não encontrada' })
+        }
+
+        if (live.status === 'em_andamento' && live.cabine_id) {
+          await db.query(
+            `UPDATE cabines
+                SET status = 'disponivel',
+                    live_atual_id = NULL
+              WHERE id = $1
+                AND tenant_id = $2::uuid`,
+            [live.cabine_id, tenant_id],
+          )
+
+          await db.query(
+            `UPDATE agenda_eventos
+                SET status = 'cancelado',
+                    atualizado_em = NOW()
+              WHERE tenant_id = $1::uuid
+                AND cabine_id = $2::uuid
+                AND tipo = 'live'
+                AND status = 'ao_vivo'
+                AND (data_inicio AT TIME ZONE 'America/Sao_Paulo')::date =
+                    ($3::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date`,
+            [tenant_id, live.cabine_id, live.iniciado_em],
+          )
+        }
+
         await db.query(`DELETE FROM vendas_atribuidas WHERE origem = 'live' AND origem_id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])
         await db.query('DELETE FROM live_apresentadoras_v2 WHERE live_id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
-        await db.query('DELETE FROM live_apresentadores WHERE live_id = $1', [request.params.id])
-        await db.query('DELETE FROM live_snapshots WHERE live_id = $1', [request.params.id])
-        await db.query('DELETE FROM lives WHERE id = $1', [request.params.id])
+        await db.query('DELETE FROM live_apresentadores WHERE live_id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
+        await db.query('DELETE FROM live_snapshots WHERE live_id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
+        await db.query('DELETE FROM lives WHERE id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
         await db.query('COMMIT')
+
+        if (live.status === 'em_andamento' && managerHas(live.id)) {
+          stopConnector(live.id).catch(err =>
+            app.log.error({ err, liveId: live.id }, 'tiktokManager: falha ao parar connector na exclusão')
+          )
+        }
+
         return reply.code(204).send()
       } catch (e) {
         await db.query('ROLLBACK')
+        if (e.code === '23503') {
+          return reply.code(409).send({
+            error: 'Live possui vínculos no banco e não pode ser excluída definitivamente.',
+            code: 'LIVE_FOREIGN_KEY_DEPENDENCY',
+          })
+        }
         throw e
       }
     })

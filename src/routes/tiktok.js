@@ -310,7 +310,7 @@ export async function tiktokRoutes(app) {
   // com presença em memória (connectorManager.has) pra resolver o status
   // efetivo (connected/connecting/disconnected/error). W3-A.
   app.get('/v1/lives/:liveId/tiktok-status', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente', 'apresentador', 'apresentadora', 'produtor_live'])],
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente', 'operacional', 'apresentador', 'apresentadora', 'produtor_live'])],
   }, async (request, reply) => {
     const { tenant_id } = request.user
     const { liveId } = request.params

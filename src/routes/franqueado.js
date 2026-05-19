@@ -1179,7 +1179,11 @@ async function fetchNetworkRanking(app, {
       )
       SELECT
         t.id,
-        t.nome,
+        COALESCE(t.ranking_publico_nome, t.nome) AS nome,
+        COALESCE(t.ranking_publico_logo_url, t.logo_url) AS logo_url,
+        COALESCE(t.ranking_publico_cidade, t.cidade) AS cidade,
+        COALESCE(t.ranking_publico_uf, t.estado) AS uf,
+        t.ranking_publico_meta_gmv,
         COALESCE(la.gmv_mes, 0) AS gmv_mes,
         COALESCE(lp.gmv_mes_anterior, 0) AS gmv_mes_anterior,
         COALESCE(la.total_lives, 0) AS total_lives,
@@ -1193,6 +1197,7 @@ async function fetchNetworkRanking(app, {
       WHERE ($1::uuid IS NULL OR t.id <> $1::uuid)
         AND ($5::uuid[] IS NULL OR t.id = ANY($5::uuid[]))
         AND t.criado_em < $3::date
+        AND (t.ranking_publico_ativo IS DISTINCT FROM FALSE OR $5::uuid[] IS NOT NULL)
       ORDER BY COALESCE(la.gmv_mes, 0) DESC, t.nome ASC
       LIMIT COALESCE($6::int, 2147483647)
     `,
@@ -1225,6 +1230,10 @@ function mapNetworkRanking(rows, { publicOnly = false } = {}) {
     const base = {
       posicao: index + 1,
       nome: row.nome,
+      logo_url: row.logo_url ?? null,
+      cidade: row.cidade ?? null,
+      uf: row.uf ?? null,
+      meta_gmv: row.ranking_publico_meta_gmv == null ? null : toMoney(row.ranking_publico_meta_gmv),
       gmv_mes: gmvMes,
       crescimento_pct: calculateGrowth(gmvMes, gmvMesAnt),
       total_lives: toInt(row.total_lives),

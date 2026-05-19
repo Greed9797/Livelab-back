@@ -83,6 +83,8 @@ export const MIGRATIONS_LIST = [
   '086_leads_crm_structured_history.sql',
   '087_cabines_soft_delete_columns.sql',
   '088_franqueado_sessao1_operacional.sql',
+  '089_ranking_publico_config.sql',
+  '090_comissao_metas_compat.sql',
 ]
 
 async function ensureMigrationsTable(client) {

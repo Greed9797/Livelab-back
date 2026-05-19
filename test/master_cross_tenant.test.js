@@ -95,6 +95,10 @@ describe('GET /v1/public/ranking', () => {
     expect(body[0]).toEqual({
       posicao: 1,
       nome: 'Unidade A',
+      logo_url: null,
+      cidade: null,
+      uf: null,
+      meta_gmv: null,
       gmv_mes: 5000,
       crescimento_pct: 25,
       total_lives: 10,

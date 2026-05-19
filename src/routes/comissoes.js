@@ -46,6 +46,8 @@ export async function comissoesRoutes(app) {
         ...row,
         totais: {
           gmv: Number(row.gmv_total ?? 0),
+          gmv_lives: Number(row.gmv_lives ?? 0),
+          gmv_videos: Number(row.gmv_videos ?? 0),
           pedidos: Number(row.pedidos_total ?? 0),
           comissao: Number(row.comissao_apresentadoras ?? 0) + Number(row.comissao_franquia ?? 0) + Number(row.comissao_franqueadora ?? 0),
           registros: Number(row.registros ?? 0),

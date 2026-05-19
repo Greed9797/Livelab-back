@@ -1,6 +1,8 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
-import { applyMigration } from '../apply_migrations.js'
+import { MIGRATIONS_LIST, applyMigration } from '../apply_migrations.js'
 
 describe('applyMigration', () => {
   it('runs concurrent index migrations outside a transaction', async () => {
@@ -36,5 +38,15 @@ describe('applyMigration', () => {
     const queries = client.query.mock.calls.map(([sql]) => sql)
     expect(queries[0]).toBe('BEGIN')
     expect(queries.at(-1)).toBe('COMMIT')
+  })
+
+  it('includes every migration file from 016 onward in the boot runner', () => {
+    const migrationDir = path.join(process.cwd(), 'migrations')
+    const filesFrom016 = fs.readdirSync(migrationDir)
+      .filter((file) => /^\d+_.*\.sql$/.test(file))
+      .filter((file) => Number(file.slice(0, 3)) >= 16)
+      .sort()
+
+    expect(MIGRATIONS_LIST).toEqual(filesFrom016)
   })
 })

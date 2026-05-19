@@ -12,7 +12,7 @@ import { resolveDbSslConfig } from './src/utils/db-ssl.js'
 //
 // Gap 027/028: numeros pulados intencionalmente — versionamento descontínuo
 // durante refactor de schema, sem migrations correspondentes.
-const MIGRATIONS_LIST = [
+export const MIGRATIONS_LIST = [
   '016_auditoria_implantacao.sql',
   '017_cabines_reservas_eventos.sql',
   '018_lives_analytics_indexes.sql',
@@ -80,6 +80,8 @@ const MIGRATIONS_LIST = [
   '084_performance_indexes.sql',
   '085_agenda_operacional_campos.sql',
   '085_comissao_faixas_metas.sql',
+  '086_leads_crm_structured_history.sql',
+  '087_cabines_soft_delete_columns.sql',
 ]
 
 async function ensureMigrationsTable(client) {

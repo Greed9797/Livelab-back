@@ -672,14 +672,21 @@ export async function livesRoutes(app) {
         await db.query('BEGIN')
 
         const liveQ = await db.query(
-          `SELECT id, cabine_id, cliente_id, fat_gerado, manual_gmv, final_orders_count, iniciado_em, encerrado_em
-             FROM lives WHERE id = $1 AND status = 'encerrada' FOR UPDATE`,
-          [request.params.id]
+          `SELECT id, cabine_id, cliente_id, status, fat_gerado, manual_gmv, final_orders_count, iniciado_em, encerrado_em
+             FROM lives
+            WHERE id = $1
+              AND tenant_id = $2::uuid
+            FOR UPDATE`,
+          [request.params.id, tenant_id]
         )
         const live = liveQ.rows[0]
         if (!live) {
           await db.query('ROLLBACK')
-          return reply.code(404).send({ error: 'Live não encontrada ou não está encerrada' })
+          return reply.code(404).send({ error: 'Live não encontrada neste tenant' })
+        }
+        if (live.status !== 'encerrada') {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'Live precisa estar encerrada para edição manual' })
         }
 
         const cabineId = d.cabine_id ?? live.cabine_id
@@ -688,8 +695,9 @@ export async function livesRoutes(app) {
           const cab = await db.query(
             `SELECT ct.comissao_pct FROM cabines c
                LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
-              WHERE c.id = $1`,
-            [cabineId]
+              WHERE c.id = $1
+                AND c.tenant_id = $2::uuid`,
+            [cabineId, tenant_id]
           )
           const pct = Number(cab.rows[0]?.comissao_pct ?? 0)
           comissao = d.fat_gerado * (pct / 100)
@@ -703,7 +711,7 @@ export async function livesRoutes(app) {
 
         let resolvedApresentadorId
         if (d.apresentador_id !== undefined) {
-          const apRow = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1', [d.apresentador_id])
+          const apRow = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid', [d.apresentador_id, tenant_id])
           if (!apRow.rows[0]) {
             await db.query('ROLLBACK')
             return reply.code(404).send({ error: 'Apresentadora não encontrada' })
@@ -758,7 +766,8 @@ export async function livesRoutes(app) {
 
         if (updates.length > 0) {
           values.push(request.params.id)
-          await db.query(`UPDATE lives SET ${updates.join(', ')} WHERE id = $${idx}`, values)
+          values.push(tenant_id)
+          await db.query(`UPDATE lives SET ${updates.join(', ')} WHERE id = $${idx} AND tenant_id = $${idx + 1}::uuid`, values)
         }
 
         if (d.apresentador_id !== undefined) {
@@ -803,9 +812,9 @@ export async function livesRoutes(app) {
         }
 
         if ('apresentador2_id' in d) {
-          await db.query(`DELETE FROM live_apresentadores WHERE live_id = $1`, [request.params.id])
+          await db.query(`DELETE FROM live_apresentadores WHERE live_id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])
           if (d.apresentador2_id) {
-            const ap2Row = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1', [d.apresentador2_id])
+            const ap2Row = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid', [d.apresentador2_id, tenant_id])
             const ap2UserId = ap2Row.rows[0]?.user_id
             if (ap2UserId) {
               await db.query(

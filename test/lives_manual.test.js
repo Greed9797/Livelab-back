@@ -327,6 +327,7 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
       .mockResolvedValueOnce({
         rows: [{
           id: liveId,
+          status: 'encerrada',
           cabine_id: basePayload.cabine_id,
           cliente_id: basePayload.cliente_id,
           fat_gerado: '1000',
@@ -360,6 +361,7 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
       .mockResolvedValueOnce({             // SELECT live FOR UPDATE
         rows: [{
           id: liveId,
+          status: 'encerrada',
           cabine_id:    basePayload.cabine_id,
           fat_gerado:   '1000',
           iniciado_em:  '2026-05-01T18:00:00Z',
@@ -381,12 +383,15 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json().ok).toBe(true)
+    expect(queryMock.mock.calls[1][0]).toContain('tenant_id = $2::uuid')
     // comissao = 2000 * 0.10 = 200
     const comissaoIdx = updateArgs[0].indexOf(200)
     expect(comissaoIdx).toBeGreaterThan(-1)
+    const updateSql = queryMock.mock.calls.find(([sql]) => /UPDATE lives SET/i.test(sql))?.[0]
+    expect(updateSql).toContain('AND tenant_id =')
   })
 
-  it('returns 404 for non-existent or non-encerrada live', async () => {
+  it('returns 404 for non-existent live in the current tenant', async () => {
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] }) // BEGIN
       .mockResolvedValueOnce({ rows: [] }) // SELECT live (not found)
@@ -402,5 +407,24 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
     })
 
     expect(res.statusCode).toBe(404)
+  })
+
+  it('returns 409 when live exists but is not encerrada', async () => {
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: 'live-1', status: 'em_andamento' }] }) // SELECT live
+      .mockResolvedValueOnce({ rows: [] }) // ROLLBACK
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/lives/live-1',
+      payload: { fat_gerado: 100 },
+    })
+
+    expect(res.statusCode).toBe(409)
+    expect(res.json()).toMatchObject({ error: 'Live precisa estar encerrada para edição manual' })
   })
 })

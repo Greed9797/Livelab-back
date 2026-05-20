@@ -55,10 +55,10 @@ function normalizeTime(t) {
   return t
 }
 
-async function ensureApresentadoraExists(db, apresentadoraId) {
+async function ensureApresentadoraExists(db, apresentadoraId, tenantId) {
   const r = await db.query(
-    `SELECT id, user_id FROM apresentadoras WHERE id = $1`,
-    [apresentadoraId]
+    `SELECT id, user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+    [apresentadoraId, tenantId]
   )
   return r.rows[0] ?? null
 }
@@ -80,25 +80,25 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
     const dataFim    = parsed.data.data_fim ?? new Date(Date.now() + 28 * 86400_000).toISOString().slice(0, 10)
 
     return app.withTenant(tenant_id, async (db) => {
-      const apr = await ensureApresentadoraExists(db, id)
+      const apr = await ensureApresentadoraExists(db, id, tenant_id)
       if (!apr) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
 
       const grade = await db.query(
         `SELECT id, dia_semana, hora_inicio::text, hora_fim::text
            FROM apresentadora_disponibilidade
-          WHERE apresentadora_id = $1
+          WHERE apresentadora_id = $1 AND tenant_id = $2::uuid
           ORDER BY dia_semana, hora_inicio`,
-        [id]
+        [id, tenant_id]
       )
 
       const bloqueios = await db.query(
         `SELECT id, data_inicio, data_fim, motivo, criado_em
            FROM apresentadora_bloqueios
-          WHERE apresentadora_id = $1
+          WHERE apresentadora_id = $1 AND tenant_id = $4::uuid
             AND data_fim >= $2::date
             AND data_inicio <= ($3::date + interval '1 day')
           ORDER BY data_inicio`,
-        [id, dataInicio, dataFim]
+        [id, dataInicio, dataFim, tenant_id]
       )
 
       // Lives agendadas: titular OU extra, status ativo, no período.
@@ -148,9 +148,10 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
       await client.query('BEGIN')
 
       // Lock na apresentadora pra evitar duas escritas concorrentes
+      // Defesa em profundidade: AND tenant_id evita cross-tenant write quando RLS é decorativa (BYPASSRLS role)
       const apr = await client.query(
-        `SELECT id FROM apresentadoras WHERE id = $1 FOR UPDATE`,
-        [id]
+        `SELECT id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid FOR UPDATE`,
+        [id, tenant_id]
       )
       if (!apr.rows[0]) {
         await client.query('ROLLBACK')
@@ -158,8 +159,8 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
       }
 
       await client.query(
-        `DELETE FROM apresentadora_disponibilidade WHERE apresentadora_id = $1`,
-        [id]
+        `DELETE FROM apresentadora_disponibilidade WHERE apresentadora_id = $1 AND tenant_id = $2::uuid`,
+        [id, tenant_id]
       )
 
       for (const s of slots) {
@@ -200,7 +201,7 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
     }
 
     return app.withTenant(tenant_id, async (db) => {
-      const apr = await ensureApresentadoraExists(db, id)
+      const apr = await ensureApresentadoraExists(db, id, tenant_id)
       if (!apr) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
 
       const r = await db.query(
@@ -222,9 +223,9 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const r = await db.query(
         `DELETE FROM apresentadora_bloqueios
-          WHERE id = $1 AND apresentadora_id = $2
+          WHERE id = $1 AND apresentadora_id = $2 AND tenant_id = $3::uuid
           RETURNING id`,
-        [bloqueioId, id]
+        [bloqueioId, id, tenant_id]
       )
       if (!r.rows[0]) return reply.code(404).send({ error: 'Bloqueio não encontrado' })
       return reply.code(204).send()
@@ -244,7 +245,7 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
     }
 
     return app.withTenant(tenant_id, async (db) => {
-      const apr = await ensureApresentadoraExists(db, apresentadora_id)
+      const apr = await ensureApresentadoraExists(db, apresentadora_id, tenant_id)
       if (!apr) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
 
       // dia_semana: 0=domingo .. 6=sabado (PG: EXTRACT(DOW))
@@ -260,11 +261,12 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
         `SELECT 1
            FROM apresentadora_disponibilidade
           WHERE apresentadora_id = $1
+            AND tenant_id = $5::uuid
             AND dia_semana = $2
             AND hora_inicio <= $3::time
             AND hora_fim   >= $4::time
           LIMIT 1`,
-        [apresentadora_id, dow, normalizeTime(hora_inicio), normalizeTime(hora_fim)]
+        [apresentadora_id, dow, normalizeTime(hora_inicio), normalizeTime(hora_fim), tenant_id]
       )
       if (slotR.rows.length === 0) {
         return {
@@ -278,11 +280,12 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
         `SELECT id, motivo, data_inicio, data_fim
            FROM apresentadora_bloqueios
           WHERE apresentadora_id = $1
+            AND tenant_id = $5::uuid
             AND tstzrange(data_inicio, data_fim, '[)') &&
                 tstzrange(($2::date + $3::time)::timestamptz,
                           ($2::date + $4::time)::timestamptz, '[)')
           LIMIT 1`,
-        [apresentadora_id, data, normalizeTime(hora_inicio), normalizeTime(hora_fim)]
+        [apresentadora_id, data, normalizeTime(hora_inicio), normalizeTime(hora_fim), tenant_id]
       )
       if (blqR.rows.length > 0) {
         return {

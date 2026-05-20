@@ -273,6 +273,48 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('GET /v1/lives applies the completed-status filter used by conteúdo', async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/lives?status=encerrada' })
+
+    expect(res.statusCode).toBe(200)
+    expect(queryMock.mock.calls[0][0]).toContain('AND l.status = $2')
+    expect(queryMock.mock.calls[0][1]).toEqual(['tenant-1', 'encerrada'])
+    await app.close()
+  })
+
+  it('PATCH /v1/lives/:id/encerrar rolls back when agenda sync fails', async () => {
+    const liveId = '11111111-1111-4111-8111-111111111111'
+    const cabineId = '22222222-2222-4222-8222-222222222222'
+    const queryMock = vi.fn(async (sql) => {
+      if (/SELECT id, cabine_id, cliente_id, apresentador_id, status, iniciado_em/i.test(sql)) {
+        return { rows: [{ id: liveId, cabine_id: cabineId, cliente_id: '33333333-3333-4333-8333-333333333333', apresentador_id: null, status: 'em_andamento', iniciado_em: '2026-05-19T18:00:00Z' }] }
+      }
+      if (/SELECT id, contrato_id, status/i.test(sql) && /FROM cabines/i.test(sql)) {
+        return { rows: [{ id: cabineId, contrato_id: null, status: 'ao_vivo' }] }
+      }
+      if (/SELECT id\s+FROM marcas/i.test(sql)) return { rows: [] }
+      if (/UPDATE agenda_eventos/i.test(sql)) throw new Error('agenda update failed')
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}/encerrar`,
+      payload: { fat_gerado: 100, qtd_pedidos: 1 },
+    })
+
+    expect(res.statusCode).toBe(500)
+    expect(queryMock.mock.calls.some(([sql]) => sql === 'ROLLBACK')).toBe(true)
+    expect(queryMock.mock.calls.some(([sql]) => /UPDATE cabines/i.test(sql) && /live_atual_id = NULL/i.test(sql))).toBe(false)
+    await app.close()
+  })
+
   it('DELETE /v1/lives/:id returns 404 when live does not exist', async () => {
     const queryMock = vi.fn().mockResolvedValue({ rows: [] })
     const { app } = buildApp({ queryMock })
@@ -348,6 +390,22 @@ describe('LIVELAB operational routes', () => {
       registros: 3,
     })
     expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
+    await app.close()
+  })
+
+  it('GET /v1/comissoes/apresentadoras ranks only attributed presenters by GMV', async () => {
+    const queryMock = vi.fn().mockResolvedValueOnce({
+      rows: [{ apresentadora_id: 'ap-1', apresentadora_nome: 'Edja', gmv_total: '1142.00', comissao_apresentadora: '11.42' }],
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(comissoesRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/comissoes/apresentadoras' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()[0]).toMatchObject({ apresentadora_nome: 'Edja', gmv_total: '1142.00' })
+    expect(queryMock.mock.calls[0][0]).toContain('va.apresentadora_id IS NOT NULL')
+    expect(queryMock.mock.calls[0][0]).toContain('ORDER BY gmv_total DESC, comissao_apresentadora DESC')
     await app.close()
   })
 

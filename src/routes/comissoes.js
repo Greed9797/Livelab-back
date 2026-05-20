@@ -73,8 +73,9 @@ export async function comissoesRoutes(app) {
          FROM vendas_atribuidas va
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
          WHERE ${where}
+           AND va.apresentadora_id IS NOT NULL
          GROUP BY va.apresentadora_id, a.nome
-         ORDER BY comissao_apresentadora DESC, gmv_total DESC`,
+         ORDER BY gmv_total DESC, comissao_apresentadora DESC`,
         values,
       )
       return result.rows

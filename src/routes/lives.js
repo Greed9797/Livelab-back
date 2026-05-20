@@ -13,9 +13,11 @@ const iniciarLiveSchema = z.object({
   cliente_id: z.string().uuid().optional(),
   marca_id: z.string().uuid().optional().nullable(),
   apresentador_id: z.string().uuid().optional().nullable(),
+  apresentadora_id: z.string().uuid().optional().nullable(),
   tiktok_username: z.string().max(100).optional().nullable(),
   tipo: z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
   agenda_evento_id: z.string().uuid().optional().nullable(),
+  previsto_fim: z.string().datetime({ offset: true }).optional().nullable(),
 })
 
 const encerrarSchema = z.object({
@@ -105,11 +107,15 @@ export async function livesRoutes(app) {
       cabine_id,
       cliente_id: requestedClienteId,
       marca_id: requestedMarcaId,
-      apresentador_id: requestedApresentadoraId,
+      apresentador_id: requestedApresentadoraIdLegacy,
+      apresentadora_id: requestedApresentadoraIdNew,
       tiktok_username: rawTiktok,
       tipo,
       agenda_evento_id,
+      previsto_fim: rawPrevistoFim,
     } = parsed.data
+    const requestedApresentadoraId = requestedApresentadoraIdNew ?? requestedApresentadoraIdLegacy ?? null
+    const previstoFim = rawPrevistoFim ? new Date(rawPrevistoFim) : null
     let tiktokUsername = rawTiktok ? rawTiktok.replace(/^@/, '').trim() || null : null
     const ip = getRequestIp(request)
     return app.withTenant(tenant_id, async (db) => {
@@ -367,10 +373,20 @@ export async function livesRoutes(app) {
         }
 
         const liveQ = await db.query(
-          `INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo, status_publicacao, origem_dados)
-           VALUES ($1, $2, $3, $4, $5, 'rascunho', 'manual')
-           RETURNING id, cabine_id, iniciado_em, cliente_id, apresentador_id, tipo, status_publicacao, origem_dados`,
-          [tenant_id, cabine_id, resolvedClienteId, apresentadorUserId, resolvedTipo]
+          `INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo,
+                              status_publicacao, origem_dados, agenda_evento_id, previsto_fim)
+           VALUES ($1, $2, $3, $4, $5, 'rascunho', 'manual', $6, $7)
+           RETURNING id, cabine_id, iniciado_em, cliente_id, apresentador_id, tipo,
+                     status_publicacao, origem_dados, agenda_evento_id, previsto_fim`,
+          [
+            tenant_id,
+            cabine_id,
+            resolvedClienteId,
+            apresentadorUserId,
+            resolvedTipo,
+            resolvedAgendaEventoId,
+            previstoFim,
+          ]
         )
         const live = liveQ.rows[0]
 
@@ -401,15 +417,27 @@ export async function livesRoutes(app) {
             }
 
             if (marcaId) {
+              // previsto_fim informado pelo operador toma precedência; fallback de 4h só se nada foi enviado.
+              const dataFimSql = previstoFim ? '$5::timestamptz' : "NOW() + interval '4 hours'"
+              const params = previstoFim
+                ? [tenant_id, cabine_id, marcaId, sub, previstoFim]
+                : [tenant_id, cabine_id, marcaId, sub]
               const autoEvQ = await db.query(
                 `INSERT INTO agenda_eventos
                    (tenant_id, cabine_id, tipo, status, marca_id, data_inicio, data_fim, observacoes, criado_por)
-                 VALUES ($1, $2, 'live', 'ao_vivo', $3, NOW(), NOW() + interval '4 hours',
+                 VALUES ($1, $2, 'live', 'ao_vivo', $3, NOW(), ${dataFimSql},
                          'Live iniciada sem agenda', $4)
                  RETURNING id`,
-                [tenant_id, cabine_id, marcaId, sub]
+                params
               )
               finalAgendaEventoId = autoEvQ.rows[0]?.id ?? null
+              // Persiste vínculo na live recém-criada
+              if (finalAgendaEventoId) {
+                await db.query(
+                  `UPDATE lives SET agenda_evento_id = $1 WHERE id = $2 AND tenant_id = $3::uuid`,
+                  [finalAgendaEventoId, live.id, tenant_id]
+                )
+              }
               app.log.info({ liveId: live.id, agendaEventoId: finalAgendaEventoId }, 'agenda: evento automático criado')
             } else {
               app.log.info({ liveId: live.id, resolvedClienteId }, 'agenda: sem marca_id disponível, evento automático omitido')

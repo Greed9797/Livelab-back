@@ -474,9 +474,34 @@ export async function cabinesRoutes(app) {
           return reply.code(404).send({ error: 'Cabine não encontrada' })
         }
 
-        // Aviso não-bloqueante quando há live ativa (não impede a liberação)
-        const avisoLiveAtiva = (cabine.status === 'ao_vivo' || cabine.live_atual_id)
-          ? 'Cabine estava ao vivo no momento da liberação — verifique se a live foi encerrada corretamente'
+        // Bloqueia liberação quando há live formalmente em_andamento.
+        // Aceita ?force=true (admin/franqueado) pra destravar cabine com estado órfão.
+        const forceLiberar = request.query?.force === 'true' || request.query?.force === true
+        const podeForcar = ['franqueador_master', 'franqueado', 'gerente'].includes(papel)
+
+        const liveAtivaQ = await db.query(
+          `SELECT id FROM lives
+           WHERE cabine_id = $1 AND tenant_id = $2::uuid AND status = 'em_andamento'
+           LIMIT 1`,
+          [request.params.id, tenant_id]
+        )
+        const liveAtivaId = liveAtivaQ.rows[0]?.id ?? null
+
+        if (liveAtivaId && !(forceLiberar && podeForcar)) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({
+            error: 'Cabine possui live em andamento — encerre a live antes de liberar',
+            code: 'CABINE_LIVE_ATIVA',
+            live_id: liveAtivaId,
+          })
+        }
+
+        // Estado órfão: cabine marcada ao_vivo mas sem live em_andamento real.
+        // Permite liberar e registra aviso.
+        const avisoLiveAtiva = (cabine.status === 'ao_vivo' || cabine.live_atual_id) && !liveAtivaId
+          ? 'Estado órfão detectado: cabine marcada ao vivo sem live em andamento real. Estado normalizado.'
+          : (liveAtivaId && forceLiberar)
+          ? `Liberação forçada com live ${liveAtivaId} ainda em andamento — verifique encerramento manual.`
           : null
 
         const result = await db.query(

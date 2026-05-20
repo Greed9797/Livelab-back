@@ -524,7 +524,7 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(response.statusCode).toBe(201)
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo'),
-      ['tenant-1', cabineId, clienteId, null, 'cliente']
+      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null]
     )
     expect(releaseMock).toHaveBeenCalledTimes(1)
 

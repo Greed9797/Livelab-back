@@ -84,6 +84,7 @@ export const MIGRATIONS_LIST = [
   '088_franqueado_sessao1_operacional.sql',
   '089_ranking_publico_config.sql',
   '090_comissao_metas_compat.sql',
+  '091_lives_agenda_link.sql',
 ]
 
 async function ensureMigrationsTable(client) {

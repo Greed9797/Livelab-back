@@ -36,6 +36,12 @@
     "tiktok-live-connector": "^2.1.1-beta1",
     "zod": "^4.3.6"
   },
+  "overrides": {
+    "protobufjs": "7.5.8",
+    "minimatch@10.2.4": {
+      "brace-expansion": "5.0.6"
+    }
+  },
   "devDependencies": {
     "@playwright/test": "^1.50.0",
     "@vitest/coverage-v8": "^4.1.5",

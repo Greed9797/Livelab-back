@@ -621,35 +621,6 @@ export async function livesRoutes(app) {
         const iniciado = saoPauloTimestamp(d.data, d.hora_inicio)
         const encerrado = saoPauloTimestamp(d.data, d.hora_fim)
 
-        // Verifica conflito real na cabine usando intervalo semiaberto [inicio, fim).
-        const overlapQ = await db.query(
-          `SELECT id, status, cabine_id, iniciado_em, encerrado_em, previsto_fim
-           FROM lives
-           WHERE cabine_id = $1
-             AND tenant_id = $4::uuid
-             AND status NOT IN ('cancelada', 'encerrada')
-             AND iniciado_em < $3::timestamptz
-             AND COALESCE(encerrado_em, previsto_fim, iniciado_em + interval '4 hours') > $2::timestamptz
-           ORDER BY iniciado_em ASC
-           LIMIT 1`,
-          [d.cabine_id, iniciado, encerrado, tenant_id]
-        )
-        const overlap = overlapQ.rows[0]
-        if (overlap) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({
-            error: 'Já existe uma live neste período para esta cabine. Encerre a live existente ou altere o horário.',
-            code: 'LIVE_MANUAL_OVERLAP',
-            conflito: {
-              id: overlap.id,
-              status: overlap.status,
-              cabine_id: overlap.cabine_id,
-              iniciado_em: overlap.iniciado_em,
-              encerrado_em: overlap.encerrado_em ?? overlap.previsto_fim ?? null,
-            },
-          })
-        }
-
         const ins = await db.query(
           `INSERT INTO lives
              (tenant_id, cabine_id, cliente_id, apresentador_id, gestor_id,

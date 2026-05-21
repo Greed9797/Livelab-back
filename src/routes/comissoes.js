@@ -2,6 +2,22 @@ import { READ_COMISSOES } from '../config/role_groups.js'
 
 const APROVADORES = ['franqueador_master', 'franqueado']
 
+function monthRangeFromQuery(query = {}) {
+  const mes = typeof query.mes === 'string' && /^\d{4}-\d{2}$/.test(query.mes)
+    ? query.mes
+    : new Date().toISOString().slice(0, 7)
+  const start = `${mes}-01`
+  const endDate = new Date(`${start}T00:00:00.000Z`)
+  endDate.setUTCMonth(endDate.getUTCMonth() + 1)
+  return { mes, start, end: endDate.toISOString().slice(0, 10) }
+}
+
+function limitFromQuery(query = {}, fallback = 50) {
+  const raw = Number(query.limit ?? fallback)
+  if (!Number.isFinite(raw)) return fallback
+  return Math.min(Math.max(Math.trunc(raw), 1), 100)
+}
+
 function buildComissaoFilters(query, tenantId) {
   const values = [tenantId]
   const filters = ['va.tenant_id = $1::uuid']
@@ -79,6 +95,67 @@ export async function comissoesRoutes(app) {
         values,
       )
       return result.rows
+    })
+  })
+
+  app.get('/v1/ranking/apresentadoras', { preHandler: readAccess }, async (request) => {
+    const { tenant_id } = request.user
+    const range = monthRangeFromQuery(request.query)
+    const limit = limitFromQuery(request.query, 50)
+
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `WITH ranking_apresentadoras AS (
+           SELECT
+             va.apresentadora_id,
+             COALESCE(a.nome, 'Sem apresentadora') AS nome,
+             COALESCE(a.fixo, 0) AS fixo,
+             COALESCE(SUM(va.gmv), 0) AS gmv,
+             COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
+             COALESCE(SUM(CASE WHEN va.origem = 'video' THEN va.gmv ELSE 0 END), 0) AS gmv_videos,
+             COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
+             COALESCE(SUM(va.pedidos), 0)::int AS pedidos,
+             COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
+           FROM vendas_atribuidas va
+           JOIN apresentadoras a ON a.id = va.apresentadora_id
+            AND a.tenant_id = va.tenant_id
+           WHERE va.tenant_id = $1::uuid
+             AND va.apresentadora_id IS NOT NULL
+             AND va.origem IN ('live', 'video')
+             AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+             AND va.data >= $2::date
+             AND va.data < $3::date
+           GROUP BY va.apresentadora_id, a.nome, a.fixo
+         )
+         SELECT
+           apresentadora_id,
+           nome,
+           gmv,
+           gmv_lives,
+           gmv_videos,
+           lives,
+           pedidos,
+           fixo,
+           comissao_variavel,
+           (fixo + comissao_variavel) AS total_recebido
+         FROM ranking_apresentadoras
+         ORDER BY total_recebido DESC, gmv DESC, nome ASC
+         LIMIT $4::int`,
+        [tenant_id, range.start, range.end, limit],
+      )
+
+      return result.rows.map((row) => ({
+        ...row,
+        mes: range.mes,
+        gmv: Number(row.gmv ?? 0),
+        gmv_lives: Number(row.gmv_lives ?? 0),
+        gmv_videos: Number(row.gmv_videos ?? 0),
+        lives: Number(row.lives ?? 0),
+        pedidos: Number(row.pedidos ?? 0),
+        fixo: Number(row.fixo ?? 0),
+        comissao_variavel: Number(row.comissao_variavel ?? 0),
+        total_recebido: Number(row.total_recebido ?? 0),
+      }))
     })
   })
 

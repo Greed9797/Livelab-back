@@ -1141,6 +1141,7 @@ async function fetchNetworkRanking(app, {
   periodInfo,
   allowedTenantIds = null,
   limit = null,
+  publicOnly = false,
 }) {
   return app.db.query(
     `
@@ -1198,6 +1199,13 @@ async function fetchNetworkRanking(app, {
         AND ($5::uuid[] IS NULL OR t.id = ANY($5::uuid[]))
         AND t.criado_em < $3::date
         AND (t.ranking_publico_ativo IS DISTINCT FROM FALSE OR $5::uuid[] IS NOT NULL)
+        AND (
+          $7::boolean IS FALSE
+          OR (
+            t.ranking_publico_ativo IS TRUE
+            AND COALESCE(t.nome, '') !~* '(teste|test|dev|homolog|staging)'
+          )
+        )
       ORDER BY COALESCE(la.gmv_mes, 0) DESC, t.nome ASC
       LIMIT COALESCE($6::int, 2147483647)
     `,
@@ -1208,6 +1216,7 @@ async function fetchNetworkRanking(app, {
       periodInfo.previousStart,
       allowedTenantIds,
       limit,
+      publicOnly,
     ]
   )
 }
@@ -1359,6 +1368,7 @@ export async function franqueadoRoutes(app) {
         periodInfo,
         limit,
         excludeTenantId: MASTER_TENANT_ID,
+        publicOnly: true,
       })
 
       return reply.send(mapNetworkRanking(result.rows, { publicOnly: true }))

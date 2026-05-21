@@ -28,6 +28,9 @@ const encerrarSchema = z.object({
   encerrado_em:       z.string().datetime({ offset: true }).optional().nullable(),
   manual_likes:       z.number().int().min(0).optional(),
   manual_views:       z.number().int().min(0).optional(),
+  manual_comments:    z.number().int().min(0).optional(),
+  manual_shares:      z.number().int().min(0).optional(),
+  manual_diamonds:    z.number().int().min(0).optional(),
   manual_orders:      z.number().int().min(0).optional(),
   manual_gmv:         moneySchema.optional(),
   status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
@@ -41,6 +44,7 @@ const liveManualSchema = z.object({
   apresentador_id:    z.string().uuid().optional(),
   apresentador2_id:   z.string().uuid().optional(),
   gestor_id:          z.string().uuid().optional(),
+  agenda_evento_id:   z.string().uuid().optional().nullable(),
   data:               z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   hora_inicio:        z.string().regex(/^\d{2}:\d{2}$/),
   hora_fim:           z.string().regex(/^\d{2}:\d{2}$/),
@@ -638,8 +642,8 @@ export async function livesRoutes(app) {
               final_orders_count, resumo,
               manual_views, manual_likes, manual_comments, manual_shares, manual_diamonds,
               manual_orders, manual_gmv,
-              tipo, status_publicacao, origem_dados, marca_id)
-           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+              tipo, status_publicacao, origem_dados, agenda_evento_id, marca_id)
+           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
            RETURNING id`,
           [
             tenant_id, d.cabine_id, resolvedClienteId ?? null, apresentadorUserId, gestorId,
@@ -647,10 +651,22 @@ export async function livesRoutes(app) {
             d.manual_views ?? null, d.manual_likes ?? null,
             d.manual_comments ?? null, d.manual_shares ?? null, d.manual_diamonds ?? null,
             d.manual_orders ?? null, d.manual_gmv ?? null,
-            d.tipo, d.status_publicacao, d.origem_dados, resolvedMarcaId,
+            d.tipo, d.status_publicacao, d.origem_dados, d.agenda_evento_id ?? null, resolvedMarcaId,
           ]
         )
         const liveId = ins.rows[0].id
+
+        if (d.agenda_evento_id) {
+          await db.query(
+            `UPDATE agenda_eventos
+             SET status = 'concluido',
+                 live_id = $3::uuid,
+                 atualizado_em = NOW()
+             WHERE id = $1::uuid
+               AND tenant_id = $2::uuid`,
+            [d.agenda_evento_id, tenant_id, liveId],
+          )
+        }
 
         if (d.apresentador_id) {
           await db.query(
@@ -1246,7 +1262,10 @@ export async function livesRoutes(app) {
                manual_gmv         = COALESCE($9, manual_gmv),
                status_publicacao  = $10,
                origem_dados       = $11,
-               apresentador_id    = COALESCE($14::uuid, apresentador_id)
+               apresentador_id    = COALESCE($14::uuid, apresentador_id),
+               manual_comments    = COALESCE($15, manual_comments),
+               manual_shares      = COALESCE($16, manual_shares),
+               manual_diamonds    = COALESCE($17, manual_diamonds)
            WHERE id = $5 AND tenant_id = $12::uuid`,
           [
             parsed.data.fat_gerado,
@@ -1263,6 +1282,9 @@ export async function livesRoutes(app) {
             tenant_id,
             encerradoEm,
             encerramentoApresentadorUserId,
+            parsed.data.manual_comments ?? null,
+            parsed.data.manual_shares ?? null,
+            parsed.data.manual_diamonds ?? null,
           ]
         )
 
@@ -1417,7 +1439,7 @@ export async function livesRoutes(app) {
 
         await db.query('COMMIT')
 
-        // Motor de comissões — recalcula com regra MAX(fixo, variável) (fire-and-forget)
+        // Motor de comissões — recalcula variável da apresentadora; fixo entra no ranking consolidado.
         const gmvFinal = parsed.data.manual_gmv ?? parsed.data.fat_gerado
         app.withTenant(tenant_id, async (db2) => {
           try {

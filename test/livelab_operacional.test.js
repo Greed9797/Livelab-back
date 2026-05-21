@@ -465,6 +465,40 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('GET /v1/ranking/apresentadoras returns fixed plus variable totals by month', async () => {
+    const queryMock = vi.fn().mockResolvedValueOnce({
+      rows: [{
+        apresentadora_id: 'ap-1',
+        nome: 'Edja',
+        gmv: '1142.00',
+        gmv_lives: '1142.00',
+        gmv_videos: '0.00',
+        lives: '1',
+        pedidos: '15',
+        fixo: '2700.00',
+        comissao_variavel: '22.84',
+        total_recebido: '2722.84',
+      }],
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(comissoesRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/ranking/apresentadoras?mes=2026-05' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()[0]).toMatchObject({
+      nome: 'Edja',
+      mes: '2026-05',
+      gmv: 1142,
+      fixo: 2700,
+      comissao_variavel: 22.84,
+      total_recebido: 2722.84,
+    })
+    expect(queryMock.mock.calls[0][0]).toContain('fixo + comissao_variavel')
+    expect(queryMock.mock.calls[0][0]).toContain("va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'")
+    await app.close()
+  })
+
   it('GET /v1/comissoes/pendentes includes operational diagnosis', async () => {
     const queryMock = vi.fn().mockResolvedValueOnce({
       rows: [{

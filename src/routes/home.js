@@ -37,7 +37,12 @@ export async function homeRoutes(app) {
       `),
         db.query(`
         SELECT
-            c.numero, c.status, c.live_atual_id,
+            c.numero,
+            CASE WHEN l.id IS NOT NULL THEN 'ao_vivo'
+                 WHEN c.status = 'ao_vivo' THEN 'disponivel'
+                 ELSE c.status
+            END AS status,
+            l.id AS live_atual_id,
             l.iniciado_em,
             cl.nome AS cliente_nome,
             u.nome AS apresentador,
@@ -49,16 +54,24 @@ export async function homeRoutes(app) {
             (SELECT JSON_AGG(u2.nome ORDER BY la.criado_em)
              FROM live_apresentadores la
              JOIN users u2 ON u2.id = la.apresentador_id
-             WHERE la.live_id = c.live_atual_id) AS apresentadores_extra
+             WHERE la.live_id = l.id) AS apresentadores_extra
         FROM cabines c
-        LEFT JOIN lives l ON l.id = c.live_atual_id AND l.tenant_id = c.tenant_id
+        LEFT JOIN LATERAL (
+            SELECT l.*
+            FROM lives l
+            WHERE l.cabine_id = c.id
+              AND l.tenant_id = c.tenant_id
+              AND l.status = 'em_andamento'
+            ORDER BY (l.id = c.live_atual_id) DESC, l.iniciado_em DESC
+            LIMIT 1
+        ) l ON true
         LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = c.tenant_id
         LEFT JOIN users u ON u.id = l.apresentador_id
         LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = c.tenant_id
         LEFT JOIN LATERAL (
             SELECT viewer_count, total_orders, gmv
             FROM live_snapshots
-            WHERE live_id = c.live_atual_id
+            WHERE live_id = l.id
               AND tenant_id = c.tenant_id
             ORDER BY captured_at DESC LIMIT 1
         ) ls ON true
@@ -111,7 +124,7 @@ export async function homeRoutes(app) {
         clientesQ,
         novosClientesQ,
         livesMesQ,
-        livesMesAnteriorQ,
+        gmvOperacionalQ,
         livesHojeQ,
         mediaViewersQ,
         pipelineQ,
@@ -131,7 +144,7 @@ export async function homeRoutes(app) {
           AND status = 'ativo'
       `),
         db.query(`
-        SELECT COUNT(id) AS lives_mes, COALESCE(SUM(fat_gerado), 0) AS gmv_lives_mes
+        SELECT COUNT(id) AS lives_mes
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND status = 'encerrada'
@@ -139,12 +152,30 @@ export async function homeRoutes(app) {
               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
       `),
         db.query(`
-        SELECT COALESCE(SUM(fat_gerado), 0) AS gmv_lives_mes_anterior
-        FROM lives
-        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND status = 'encerrada'
-          AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-              = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
+        WITH home_gmv_operacional AS (
+          SELECT
+            COALESCE(SUM(va.gmv) FILTER (
+              WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            ), 0) AS gmv_mes,
+            COALESCE(SUM(va.gmv) FILTER (
+              WHERE va.origem = 'live'
+                AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            ), 0) AS gmv_lives_mes,
+            COALESCE(SUM(va.gmv) FILTER (
+              WHERE va.origem = 'video'
+                AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            ), 0) AS gmv_videos_mes,
+            COALESCE(SUM(va.gmv) FILTER (
+              WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
+            ), 0) AS gmv_mes_anterior
+          FROM vendas_atribuidas va
+          WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+        )
+        SELECT * FROM home_gmv_operacional
       `),
         db.query(`
         SELECT COUNT(id) AS lives_hoje
@@ -181,29 +212,29 @@ export async function homeRoutes(app) {
           (SELECT COUNT(*) FROM contratos
            WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
              AND status IN ('rascunho','em_analise')) AS contratos_aguardando_assinatura,
-          (SELECT COUNT(*) FROM live_requests
-           WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-             AND data_solicitada >= DATE_TRUNC('week', CURRENT_DATE)
-             AND data_solicitada < DATE_TRUNC('week', CURRENT_DATE) + INTERVAL '7 days'
-             AND status IN ('aprovada','pendente')) AS agendamentos_semana,
+          (SELECT COUNT(*) FROM agenda_eventos ae
+           WHERE ae.tenant_id = current_setting('app.tenant_id', true)::uuid
+             AND ae.tipo = 'live'
+             AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date >= DATE_TRUNC('week', CURRENT_DATE)::date
+             AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date < (DATE_TRUNC('week', CURRENT_DATE) + INTERVAL '7 days')::date
+             AND ae.status IN ('planejado','confirmado','ao_vivo')) AS agendamentos_semana,
           (SELECT COUNT(*) FROM leads
            WHERE franqueadora_id = $1
              AND crm_etapa NOT IN ('ganho','perdido')
              AND status != 'expirado'
              AND COALESCE(atualizado_em, criado_em) < NOW() - INTERVAL '7 days') AS leads_parados,
           (SELECT COUNT(*) FROM (
-            SELECT lr1.id
-            FROM live_requests lr1
-            JOIN live_requests lr2
-              ON lr1.cabine_id = lr2.cabine_id
-             AND lr1.data_solicitada = lr2.data_solicitada
-             AND lr1.id < lr2.id
-             AND lr1.hora_inicio < lr2.hora_fim
-             AND lr1.hora_fim > lr2.hora_inicio
-             AND lr1.status = 'aprovada'
-             AND lr2.status = 'aprovada'
-             AND lr1.tenant_id = current_setting('app.tenant_id', true)::uuid
-             AND lr2.tenant_id = current_setting('app.tenant_id', true)::uuid
+            SELECT ae1.id
+            FROM agenda_eventos ae1
+            JOIN agenda_eventos ae2
+              ON ae1.cabine_id = ae2.cabine_id
+             AND ae1.id < ae2.id
+             AND ae1.data_inicio < ae2.data_fim
+             AND ae1.data_fim > ae2.data_inicio
+             AND ae1.status IN ('planejado','confirmado','ao_vivo')
+             AND ae2.status IN ('planejado','confirmado','ao_vivo')
+             AND ae1.tenant_id = current_setting('app.tenant_id', true)::uuid
+             AND ae2.tenant_id = current_setting('app.tenant_id', true)::uuid
           ) t) AS conflitos_agenda,
           (SELECT COUNT(*) FROM contratos
            WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
@@ -244,10 +275,19 @@ export async function homeRoutes(app) {
       `, [tenant_id]),
         db.query(`
         SELECT
-          COUNT(*) FILTER (WHERE status = 'ao_vivo') AS ao_vivo,
-          COUNT(*) FILTER (WHERE ativo IS NOT FALSE) AS operacionais
-        FROM cabines
-        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          COUNT(*) FILTER (WHERE l.status = 'em_andamento') AS ao_vivo,
+          COUNT(*) FILTER (WHERE c.ativo IS NOT FALSE) AS operacionais
+        FROM cabines c
+        LEFT JOIN LATERAL (
+          SELECT l.*
+          FROM lives l
+          WHERE l.cabine_id = c.id
+            AND l.tenant_id = c.tenant_id
+            AND l.status = 'em_andamento'
+          ORDER BY (l.id = c.live_atual_id) DESC, l.iniciado_em DESC
+          LIMIT 1
+        ) l ON true
+        WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
       `),
         db.query(`
         SELECT cl.nome, COALESCE(SUM(l.fat_gerado), 0) AS gmv, COUNT(l.id) AS lives
@@ -275,22 +315,33 @@ export async function homeRoutes(app) {
         operacionais: Number(ocupacaoQ.rows[0].operacionais)
       }
 
-      // 8. Próximas lives do dia (agendamentos aprovados com hora futura)
+      // 8. Próximas lives do dia (agenda operacional)
       let proximasLives = []
       try {
         const proximasQ = await db.query(`
-          SELECT lr.id, lr.data_solicitada, lr.hora_inicio, lr.hora_fim,
-                 c.numero AS cabine_numero, cl.nome AS cliente_nome
-          FROM live_requests lr
-          JOIN cabines c ON c.id = lr.cabine_id
-           AND c.tenant_id = lr.tenant_id
-          JOIN clientes cl ON cl.id = lr.cliente_id
-           AND cl.tenant_id = lr.tenant_id
-          WHERE lr.tenant_id = current_setting('app.tenant_id', true)::uuid
-            AND lr.data_solicitada = CURRENT_DATE
-            AND lr.hora_inicio > (CURRENT_TIME AT TIME ZONE 'America/Sao_Paulo')::time
-            AND lr.status = 'aprovada'
-          ORDER BY lr.hora_inicio
+          WITH proximas_lives_operacionais AS (
+            SELECT ae.id,
+                   (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date AS data_solicitada,
+                   (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::time AS hora_inicio,
+                   (ae.data_fim AT TIME ZONE 'America/Sao_Paulo')::time AS hora_fim,
+                   c.numero AS cabine_numero,
+                   COALESCE(cl.nome, m.nome) AS cliente_nome
+            FROM agenda_eventos ae
+            JOIN marcas m ON m.id = ae.marca_id
+             AND m.tenant_id = ae.tenant_id
+            LEFT JOIN clientes cl ON cl.id = m.cliente_id
+             AND cl.tenant_id = ae.tenant_id
+            LEFT JOIN cabines c ON c.id = ae.cabine_id
+             AND c.tenant_id = ae.tenant_id
+            WHERE ae.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND ae.tipo = 'live'
+              AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date = CURRENT_DATE
+              AND ae.data_inicio > NOW()
+              AND ae.status IN ('planejado','confirmado')
+          )
+          SELECT *
+          FROM proximas_lives_operacionais
+          ORDER BY hora_inicio
           LIMIT 5
         `)
         proximasLives = proximasQ.rows.map(r => ({
@@ -425,9 +476,12 @@ export async function homeRoutes(app) {
         lives: Number(r.lives)
       }))
 
-      const gmvMes = round2(livesMesQ.rows[0].gmv_lives_mes)
+      const gmvOperacional = gmvOperacionalQ.rows[0] ?? {}
+      const gmvMes = round2(gmvOperacional.gmv_mes)
+      const gmvLivesMes = round2(gmvOperacional.gmv_lives_mes)
+      const gmvVideosMes = round2(gmvOperacional.gmv_videos_mes)
       const livesMes = Number(livesMesQ.rows[0].lives_mes)
-      const gmvMesAnterior = round2(livesMesAnteriorQ.rows[0].gmv_lives_mes_anterior)
+      const gmvMesAnterior = round2(gmvOperacional.gmv_mes_anterior)
       const liveCabinesAtivas = cabinesFormatadas.filter(c => c.status === 'ao_vivo')
       const gmvAoVivoAgora = round2(liveCabinesAtivas.reduce((acc, c) => acc + Number(c.gmv_atual ?? 0), 0))
       const alertasOperacionais = [
@@ -461,14 +515,15 @@ export async function homeRoutes(app) {
         clientes_ativos:  Number(clientesQ.rows[0].total),
         novos_clientes:   Number(novosClientesQ.rows[0].total),
         lives_mes:        livesMes,
-        gmv_lives_mes:    gmvMes,
+        gmv_lives_mes:    gmvLivesMes,
+        gmv_videos_mes:   gmvVideosMes,
         media_viewers:    Math.round(Number(mediaViewersQ.rows[0].media)),
 
         // Operação live commerce
         gmv_ao_vivo_agora: gmvAoVivoAgora,
         lives_ativas_agora: liveCabinesAtivas.length,
         lives_hoje: Number(livesHojeQ.rows[0].lives_hoje),
-        ticket_medio_live_mes: livesMes > 0 ? round2(gmvMes / livesMes) : 0,
+        ticket_medio_live_mes: livesMes > 0 ? round2(gmvLivesMes / livesMes) : 0,
         variacao_gmv_mes_anterior_pct: growthPct(gmvMes, gmvMesAnterior),
         gmv_lives_mes_anterior: gmvMesAnterior,
         alertas_operacionais: alertasOperacionais,

@@ -60,12 +60,32 @@ export async function cabinesRoutes(app) {
       // postgres do Supabase tem BYPASSRLS, queries sem WHERE tenant_id
       // retornariam dados de todos os tenants.
       const result = await db.query(
-        `SELECT c.id, c.numero, c.nome, c.status, c.ativo, c.descricao, c.live_atual_id, c.contrato_id,
+        `SELECT c.id, c.numero, c.nome,
+                CASE WHEN l.id IS NOT NULL THEN 'ao_vivo'
+                     WHEN c.status = 'ao_vivo' THEN 'disponivel'
+                     ELSE c.status
+                END AS status,
+                c.status AS status_fisico,
+                c.ativo, c.descricao, l.id AS live_real_id, c.live_atual_id AS live_atual_id_legado, c.contrato_id,
                 ct.status AS contrato_status,
                 ct.tiktok_username,
-                COALESCE(l.cliente_id, ct.cliente_id, lr_next.next_cliente_id) AS cliente_id,
+                l.cliente_id AS cliente_id,
+                l.cliente_id AS cliente_em_live_id,
+                cl_live.nome AS cliente_em_live,
+                ct.cliente_id AS cliente_reservado_id,
+                cl_reserva.nome AS cliente_reservado,
+                agenda_next.cliente_id AS proxima_cliente_id,
+                agenda_next.cliente_nome AS proxima_cliente_nome,
+                agenda_next.id AS proxima_agenda_id,
+                agenda_next.data_inicio AS proxima_agenda_inicio,
+                agenda_next.data_fim AS proxima_agenda_fim,
+                m_live.id AS marca_id,
+                m_live.nome AS marca_nome,
+                COALESCE(m_live.logo_url, agenda_next.marca_logo_url) AS marca_logo_url,
+                agenda_next.marca_id AS proxima_marca_id,
+                agenda_next.marca_nome AS proxima_marca_nome,
                 u.nome AS apresentador_nome,
-                COALESCE(cl.nome, lr_next.next_cliente_nome) AS cliente_nome,
+                cl_live.nome AS cliente_nome,
                 l.iniciado_em,
                 COALESCE(ls.viewer_count, 0) AS viewer_count,
                 COALESCE(ls.gmv, 0) AS gmv_atual,
@@ -77,44 +97,71 @@ export async function cabinesRoutes(app) {
                 COALESCE(lr_agg.agenda, '[]'::json) AS agenda
          FROM cabines c
          LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = c.tenant_id
-         LEFT JOIN lives l ON l.id = c.live_atual_id AND l.tenant_id = c.tenant_id
+         LEFT JOIN clientes cl_reserva ON cl_reserva.id = ct.cliente_id AND cl_reserva.tenant_id = c.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT l2.*
+           FROM lives l2
+           WHERE l2.cabine_id = c.id
+             AND l2.tenant_id = c.tenant_id
+             AND l2.status = 'em_andamento'
+           ORDER BY (l2.id = c.live_atual_id) DESC, l2.iniciado_em DESC
+           LIMIT 1
+         ) l ON true
          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = c.tenant_id
-         LEFT JOIN clientes cl ON cl.id = COALESCE(l.cliente_id, ct.cliente_id) AND cl.tenant_id = c.tenant_id
+         LEFT JOIN clientes cl_live ON cl_live.id = l.cliente_id AND cl_live.tenant_id = c.tenant_id
+         LEFT JOIN marcas m_live ON m_live.id = l.marca_id AND m_live.tenant_id = c.tenant_id
          LEFT JOIN LATERAL (
            SELECT viewer_count, gmv, likes_count, comments_count,
                   shares_count, gifts_diamonds, total_orders
            FROM live_snapshots
-           WHERE live_id = c.live_atual_id
+           WHERE live_id = l.id
              AND tenant_id = c.tenant_id
            ORDER BY captured_at DESC
            LIMIT 1
          ) ls ON true
          LEFT JOIN LATERAL (
-           SELECT lr.cliente_id AS next_cliente_id, cl2.nome AS next_cliente_nome
-           FROM live_requests lr
-           JOIN clientes cl2 ON cl2.id = lr.cliente_id AND cl2.tenant_id = c.tenant_id
-           WHERE lr.cabine_id = c.id
-             AND lr.tenant_id = c.tenant_id
-             AND lr.status = 'aprovada'
-             AND lr.data_solicitada >= CURRENT_DATE
-           ORDER BY lr.data_solicitada, lr.hora_inicio
+           SELECT ae.id,
+                  ae.data_inicio,
+                  ae.data_fim,
+                  ae.marca_id,
+                  m.nome AS marca_nome,
+                  m.logo_url AS marca_logo_url,
+                  m.cliente_id,
+                  cl2.nome AS cliente_nome
+           FROM agenda_eventos ae
+           JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
+           LEFT JOIN clientes cl2 ON cl2.id = m.cliente_id AND cl2.tenant_id = ae.tenant_id
+           WHERE ae.cabine_id = c.id
+             AND ae.tenant_id = c.tenant_id
+             AND ae.tipo = 'live'
+             AND ae.status IN ('planejado', 'confirmado', 'ao_vivo')
+             AND ae.data_fim >= NOW()
+           ORDER BY ae.data_inicio
            LIMIT 1
-         ) lr_next ON true
+         ) agenda_next ON true
          LEFT JOIN LATERAL (
            SELECT COALESCE(json_agg(json_build_object(
-             'id', lr.id,
-             'data', lr.data_solicitada,
-             'hora_inicio', lr.hora_inicio::text,
-             'hora_fim', lr.hora_fim::text,
+             'id', ae.id,
+             'data', (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date,
+             'hora_inicio', (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::time::text,
+             'hora_fim', (ae.data_fim AT TIME ZONE 'America/Sao_Paulo')::time::text,
+             'data_inicio', ae.data_inicio,
+             'data_fim', ae.data_fim,
              'cliente_nome', cl2.nome,
-             'cliente_id', lr.cliente_id
-           ) ORDER BY lr.data_solicitada, lr.hora_inicio), '[]'::json) AS agenda
-           FROM live_requests lr
-           JOIN clientes cl2 ON cl2.id = lr.cliente_id AND cl2.tenant_id = c.tenant_id
-           WHERE lr.cabine_id = c.id
-             AND lr.tenant_id = c.tenant_id
-             AND lr.status = 'aprovada'
-             AND lr.data_solicitada >= CURRENT_DATE
+             'cliente_id', m.cliente_id,
+             'marca_id', ae.marca_id,
+             'marca_nome', m.nome,
+             'marca_logo_url', m.logo_url,
+             'status', ae.status
+           ) ORDER BY ae.data_inicio), '[]'::json) AS agenda
+           FROM agenda_eventos ae
+           JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
+           LEFT JOIN clientes cl2 ON cl2.id = m.cliente_id AND cl2.tenant_id = ae.tenant_id
+           WHERE ae.cabine_id = c.id
+             AND ae.tenant_id = c.tenant_id
+             AND ae.tipo = 'live'
+             AND ae.status IN ('planejado', 'confirmado', 'ao_vivo')
+             AND ae.data_fim >= NOW()
          ) lr_agg ON true
          WHERE c.tenant_id = $1::uuid
            AND c.ativo IS NOT FALSE
@@ -125,6 +172,25 @@ export async function cabinesRoutes(app) {
 
       return result.rows.map(c => ({
         ...c,
+        live_atual_id: c.live_real_id ?? null,
+        cliente_em_live: c.cliente_em_live
+          ? { id: c.cliente_em_live_id, nome: c.cliente_em_live }
+          : null,
+        cliente_reservado: c.cliente_reservado
+          ? { id: c.cliente_reservado_id, nome: c.cliente_reservado }
+          : null,
+        proxima_agenda: c.proxima_agenda_id
+          ? {
+              id: c.proxima_agenda_id,
+              data_inicio: c.proxima_agenda_inicio,
+              data_fim: c.proxima_agenda_fim,
+              cliente_id: c.proxima_cliente_id,
+              cliente_nome: c.proxima_cliente_nome,
+              marca_id: c.proxima_marca_id,
+              marca_nome: c.proxima_marca_nome,
+              marca_logo_url: c.marca_logo_url,
+            }
+          : null,
         viewer_count: Number(c.viewer_count ?? 0),
         gmv_atual: Number(c.gmv_atual ?? 0),
         likes_count: Number(c.likes_count ?? 0),

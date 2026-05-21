@@ -356,7 +356,11 @@ describe('Route regressions: SQL and RBAC', () => {
 
     const sql = queryMock.mock.calls[0][0]
     expect(sql).toContain('c.contrato_id')
-    expect(sql).toContain('COALESCE(l.cliente_id, ct.cliente_id, lr_next.next_cliente_id) AS cliente_id')
+    expect(sql).toContain('l.cliente_id AS cliente_em_live_id')
+    expect(sql).toContain('ct.cliente_id AS cliente_reservado_id')
+    expect(sql).toContain('agenda_next.id AS proxima_agenda_id')
+    expect(sql).toContain('FROM agenda_eventos ae')
+    expect(sql).not.toContain('FROM live_requests')
     expect(sql).toContain('COALESCE(ls.viewer_count, 0) AS viewer_count')
     expect(sql).toContain('COALESCE(ls.gmv, 0) AS gmv_atual')
     expect(releaseMock).toHaveBeenCalledTimes(1)
@@ -524,7 +528,7 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(response.statusCode).toBe(201)
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo'),
-      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null]
+      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null, null]
     )
     expect(releaseMock).toHaveBeenCalledTimes(1)
 

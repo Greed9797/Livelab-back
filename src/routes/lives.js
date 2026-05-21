@@ -24,6 +24,8 @@ const encerrarSchema = z.object({
   fat_gerado:         moneySchema,
   qtd_pedidos:        z.number().int().min(0).optional(),
   resumo:             z.string().max(2000).optional(),
+  apresentadora_id:   z.string().uuid().optional().nullable(),
+  encerrado_em:       z.string().datetime({ offset: true }).optional().nullable(),
   manual_likes:       z.number().int().min(0).optional(),
   manual_views:       z.number().int().min(0).optional(),
   manual_orders:      z.number().int().min(0).optional(),
@@ -148,6 +150,7 @@ export async function livesRoutes(app) {
         let resolvedAgendaClienteId = null
         let resolvedMarcaId = requestedMarcaId ?? null
         let resolvedApresentadoraId = requestedApresentadoraId ?? null
+        let resolvedPrevistoFim = previstoFim
         let resolvedTipo = tipo
         let agendaWarning = null
 
@@ -158,6 +161,7 @@ export async function livesRoutes(app) {
             // Caminho explícito: evento passado no body
             const evQ = await db.query(
               `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id, ae.apresentadora_id,
+                      ae.data_fim, ae.live_id,
                       m.cliente_id AS marca_cliente_id,
                       m.tipo AS marca_tipo,
                       m.tiktok_username AS marca_tiktok_username
@@ -179,6 +183,7 @@ export async function livesRoutes(app) {
             // Caminho automático: busca evento de hoje nesta cabine
             const evQ = await db.query(
               `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id, ae.apresentadora_id,
+                      ae.data_fim, ae.live_id,
                       m.cliente_id AS marca_cliente_id,
                       m.tipo AS marca_tipo,
                       m.tiktok_username AS marca_tiktok_username
@@ -201,18 +206,17 @@ export async function livesRoutes(app) {
             resolvedAgendaClienteId = agendaEvento.marca_cliente_id ?? null
             resolvedMarcaId = agendaEvento.marca_id ?? resolvedMarcaId
             resolvedApresentadoraId = agendaEvento.apresentadora_id ?? resolvedApresentadoraId
+            resolvedPrevistoFim = resolvedPrevistoFim ?? (agendaEvento.data_fim ? new Date(agendaEvento.data_fim) : null)
             if (!tiktokUsername && agendaEvento.marca_tiktok_username) {
               tiktokUsername = String(agendaEvento.marca_tiktok_username).replace(/^@/, '').trim() || null
             }
             if (!requestedClienteId && agendaEvento.marca_tipo && agendaEvento.marca_tipo !== 'cliente') {
               resolvedTipo = agendaEvento.marca_tipo === 'afiliada' ? 'afiliado' : 'teste'
             }
-            // Marca evento como em_andamento — live_id não existe na tabela
-            await db.query(
-              `UPDATE agenda_eventos SET status = 'ao_vivo', atualizado_em = NOW()
-               WHERE id = $1 AND tenant_id = $2`,
-              [agendaEvento.id, tenant_id]
-            )
+            if (agendaEvento.live_id) {
+              await db.query('ROLLBACK')
+              return reply.code(409).send({ error: 'Evento de agenda já está vinculado a uma live', code: 'AGENDA_ALREADY_LINKED' })
+            }
           }
           // Se não encontrou evento e agenda_evento_id não foi passado: segue legado e criará evento automático após INSERT
         } catch (agendaErr) {
@@ -374,10 +378,10 @@ export async function livesRoutes(app) {
 
         const liveQ = await db.query(
           `INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo,
-                              status_publicacao, origem_dados, agenda_evento_id, previsto_fim)
-           VALUES ($1, $2, $3, $4, $5, 'rascunho', 'manual', $6, $7)
+                              status_publicacao, origem_dados, agenda_evento_id, previsto_fim, marca_id)
+           VALUES ($1, $2, $3, $4, $5, 'rascunho', 'manual', $6, $7, $8)
            RETURNING id, cabine_id, iniciado_em, cliente_id, apresentador_id, tipo,
-                     status_publicacao, origem_dados, agenda_evento_id, previsto_fim`,
+                     status_publicacao, origem_dados, agenda_evento_id, previsto_fim, marca_id`,
           [
             tenant_id,
             cabine_id,
@@ -385,10 +389,21 @@ export async function livesRoutes(app) {
             apresentadorUserId,
             resolvedTipo,
             resolvedAgendaEventoId,
-            previstoFim,
+            resolvedPrevistoFim,
+            resolvedMarcaId,
           ]
         )
         const live = liveQ.rows[0]
+
+        if (resolvedAgendaEventoId) {
+          await db.query(
+            `UPDATE agenda_eventos SET status = 'ao_vivo',
+                 live_id = $3,
+                 atualizado_em = NOW()
+             WHERE id = $1 AND tenant_id = $2::uuid`,
+            [resolvedAgendaEventoId, tenant_id, live.id]
+          )
+        }
 
         if (resolvedApresentadoraId) {
           await db.query(
@@ -418,15 +433,15 @@ export async function livesRoutes(app) {
 
             if (marcaId) {
               // previsto_fim informado pelo operador toma precedência; fallback de 4h só se nada foi enviado.
-              const dataFimSql = previstoFim ? '$5::timestamptz' : "NOW() + interval '4 hours'"
-              const params = previstoFim
-                ? [tenant_id, cabine_id, marcaId, sub, previstoFim]
-                : [tenant_id, cabine_id, marcaId, sub]
+              const dataFimSql = resolvedPrevistoFim ? '$6::timestamptz' : "NOW() + interval '4 hours'"
+              const params = resolvedPrevistoFim
+                ? [tenant_id, cabine_id, marcaId, sub, live.id, resolvedPrevistoFim]
+                : [tenant_id, cabine_id, marcaId, sub, live.id]
               const autoEvQ = await db.query(
                 `INSERT INTO agenda_eventos
-                   (tenant_id, cabine_id, tipo, status, marca_id, data_inicio, data_fim, observacoes, criado_por)
+                   (tenant_id, cabine_id, tipo, status, marca_id, data_inicio, data_fim, observacoes, criado_por, live_id)
                  VALUES ($1, $2, 'live', 'ao_vivo', $3, NOW(), ${dataFimSql},
-                         'Live iniciada sem agenda', $4)
+                         'Live iniciada sem agenda', $4, $5)
                  RETURNING id`,
                 params
               )
@@ -434,8 +449,11 @@ export async function livesRoutes(app) {
               // Persiste vínculo na live recém-criada
               if (finalAgendaEventoId) {
                 await db.query(
-                  `UPDATE lives SET agenda_evento_id = $1 WHERE id = $2 AND tenant_id = $3::uuid`,
-                  [finalAgendaEventoId, live.id, tenant_id]
+                  `UPDATE lives
+                   SET agenda_evento_id = $1,
+                       marca_id = COALESCE(marca_id, $4::uuid)
+                   WHERE id = $2 AND tenant_id = $3::uuid`,
+                  [finalAgendaEventoId, live.id, tenant_id, marcaId]
                 )
               }
               app.log.info({ liveId: live.id, agendaEventoId: finalAgendaEventoId }, 'agenda: evento automático criado')
@@ -620,8 +638,8 @@ export async function livesRoutes(app) {
               final_orders_count, resumo,
               manual_views, manual_likes, manual_comments, manual_shares, manual_diamonds,
               manual_orders, manual_gmv,
-              tipo, status_publicacao, origem_dados)
-           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+              tipo, status_publicacao, origem_dados, marca_id)
+           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
            RETURNING id`,
           [
             tenant_id, d.cabine_id, resolvedClienteId ?? null, apresentadorUserId, gestorId,
@@ -629,7 +647,7 @@ export async function livesRoutes(app) {
             d.manual_views ?? null, d.manual_likes ?? null,
             d.manual_comments ?? null, d.manual_shares ?? null, d.manual_diamonds ?? null,
             d.manual_orders ?? null, d.manual_gmv ?? null,
-            d.tipo, d.status_publicacao, d.origem_dados,
+            d.tipo, d.status_publicacao, d.origem_dados, resolvedMarcaId,
           ]
         )
         const liveId = ins.rows[0].id
@@ -663,6 +681,14 @@ export async function livesRoutes(app) {
             [tenant_id, resolvedClienteId],
           )
           resolvedMarcaId = marcaQ.rows[0]?.id ?? null
+          if (resolvedMarcaId) {
+            await db.query(
+              `UPDATE lives
+               SET marca_id = $1
+               WHERE id = $2 AND tenant_id = $3::uuid AND marca_id IS NULL`,
+              [resolvedMarcaId, liveId, tenant_id],
+            )
+          }
         }
 
         if (resolvedMarcaId) {
@@ -700,7 +726,7 @@ export async function livesRoutes(app) {
         await db.query('BEGIN')
 
         const liveQ = await db.query(
-          `SELECT id, cabine_id, cliente_id, status, fat_gerado, manual_gmv, final_orders_count, iniciado_em, encerrado_em
+          `SELECT id, cabine_id, cliente_id, marca_id, status, fat_gerado, manual_gmv, final_orders_count, iniciado_em, encerrado_em
              FROM lives
             WHERE id = $1
               AND tenant_id = $2::uuid
@@ -763,6 +789,7 @@ export async function livesRoutes(app) {
 
         if (d.cabine_id    !== undefined) addField('cabine_id',    d.cabine_id)
         if (resolvedClienteId !== undefined) addField('cliente_id', resolvedClienteId)
+        if (d.marca_id !== undefined) addField('marca_id', d.marca_id)
         if (resolvedApresentadorId !== undefined) addField('apresentador_id', resolvedApresentadorId)
         if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
         if (d.tipo         !== undefined) addField('tipo',               d.tipo)
@@ -906,7 +933,7 @@ export async function livesRoutes(app) {
                 l.manual_diamonds, l.manual_orders, l.manual_gmv,
                 c.numero AS cabine_numero, c.contrato_id,
                 cl.nome AS cliente_nome,
-                va_marca.marca_id AS marca_id,
+                COALESCE(l.marca_id, va_marca.marca_id) AS marca_id,
                 va_marca.marca_nome AS marca_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
@@ -926,10 +953,10 @@ export async function livesRoutes(app) {
          LEFT JOIN LATERAL (
            SELECT ae2.id, ae2.data_inicio, ae2.data_fim, ae2.observacoes, ae2.apresentadora_id
            FROM agenda_eventos ae2
-           WHERE ae2.cabine_id = l.cabine_id
+           WHERE (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.cabine_id = l.cabine_id)
              AND ae2.tenant_id = l.tenant_id
              AND ae2.tipo = 'live'
-             AND ae2.data_inicio::date = l.iniciado_em::date
+             AND (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.data_inicio::date = l.iniciado_em::date)
            ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
            LIMIT 1
          ) ae ON true
@@ -945,12 +972,14 @@ export async function livesRoutes(app) {
          ) ap_v2 ON true
          LEFT JOIN LATERAL (
            SELECT m.id AS marca_id, m.nome AS marca_nome
-           FROM vendas_atribuidas va
-           JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
-           WHERE va.tenant_id = l.tenant_id
-             AND va.origem = 'live'
-             AND va.origem_id = l.id
-           ORDER BY va.criado_em DESC
+           FROM marcas m
+           LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id
+            AND va.tenant_id = m.tenant_id
+            AND va.origem = 'live'
+            AND va.origem_id = l.id
+           WHERE m.tenant_id = l.tenant_id
+             AND (m.id = l.marca_id OR va.id IS NOT NULL)
+           ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
            LIMIT 1
          ) va_marca ON true
          LEFT JOIN LATERAL (
@@ -1003,7 +1032,7 @@ export async function livesRoutes(app) {
                 l.manual_diamonds, l.manual_orders, l.manual_gmv,
                 c.numero AS cabine_numero, c.contrato_id,
                 cl.nome AS cliente_nome,
-                va_marca.marca_id AS marca_id,
+                COALESCE(l.marca_id, va_marca.marca_id) AS marca_id,
                 va_marca.marca_nome AS marca_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
@@ -1020,10 +1049,10 @@ export async function livesRoutes(app) {
          LEFT JOIN LATERAL (
            SELECT ae2.id, ae2.data_inicio, ae2.data_fim, ae2.observacoes, ae2.apresentadora_id
            FROM agenda_eventos ae2
-           WHERE ae2.cabine_id = l.cabine_id
+           WHERE (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.cabine_id = l.cabine_id)
              AND ae2.tenant_id = l.tenant_id
              AND ae2.tipo = 'live'
-             AND ae2.data_inicio::date = l.iniciado_em::date
+             AND (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.data_inicio::date = l.iniciado_em::date)
            ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
            LIMIT 1
          ) ae ON true
@@ -1039,12 +1068,14 @@ export async function livesRoutes(app) {
          ) ap_v2 ON true
          LEFT JOIN LATERAL (
            SELECT m.id AS marca_id, m.nome AS marca_nome
-           FROM vendas_atribuidas va
-           JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
-           WHERE va.tenant_id = l.tenant_id
-             AND va.origem = 'live'
-             AND va.origem_id = l.id
-           ORDER BY va.criado_em DESC
+           FROM marcas m
+           LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id
+            AND va.tenant_id = m.tenant_id
+            AND va.origem = 'live'
+            AND va.origem_id = l.id
+           WHERE m.tenant_id = l.tenant_id
+             AND (m.id = l.marca_id OR va.id IS NOT NULL)
+           ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
            LIMIT 1
          ) va_marca ON true
          ${where}
@@ -1062,7 +1093,7 @@ export async function livesRoutes(app) {
       await db.query('BEGIN')
       try {
         const liveQ = await db.query(
-          `SELECT id, status, cabine_id, iniciado_em
+          `SELECT id, status, cabine_id, iniciado_em, agenda_evento_id
              FROM lives
             WHERE id = $1
               AND tenant_id = $2::uuid
@@ -1085,18 +1116,33 @@ export async function livesRoutes(app) {
             [live.cabine_id, tenant_id],
           )
 
-          await db.query(
+          const agendaCanceladaQ = await db.query(
             `UPDATE agenda_eventos
                 SET status = 'cancelado',
                     atualizado_em = NOW()
               WHERE tenant_id = $1::uuid
-                AND cabine_id = $2::uuid
-                AND tipo = 'live'
                 AND status = 'ao_vivo'
-                AND (data_inicio AT TIME ZONE 'America/Sao_Paulo')::date =
-                    ($3::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date`,
-            [tenant_id, live.cabine_id, live.iniciado_em],
+                AND (
+                  live_id = $2::uuid
+                  OR ($3::uuid IS NOT NULL AND id = $3::uuid)
+                )
+              RETURNING id`,
+            [tenant_id, live.id, live.agenda_evento_id ?? null],
           )
+          if ((agendaCanceladaQ.rows?.length ?? 0) === 0) {
+            await db.query(
+              `UPDATE agenda_eventos
+                  SET status = 'cancelado',
+                      atualizado_em = NOW()
+                WHERE tenant_id = $1::uuid
+                  AND cabine_id = $2::uuid
+                  AND tipo = 'live'
+                  AND status = 'ao_vivo'
+                  AND (data_inicio AT TIME ZONE 'America/Sao_Paulo')::date =
+                      ($3::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date`,
+              [tenant_id, live.cabine_id, live.iniciado_em],
+            )
+          }
         }
 
         await db.query(`DELETE FROM vendas_atribuidas WHERE origem = 'live' AND origem_id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])
@@ -1138,11 +1184,11 @@ export async function livesRoutes(app) {
 
       try {
         const liveQ = await db.query(
-          `SELECT id, cabine_id, cliente_id, apresentador_id, status, iniciado_em
+          `SELECT id, cabine_id, cliente_id, apresentador_id, status, iniciado_em, marca_id, agenda_evento_id
            FROM lives
-           WHERE id = $1 AND status = 'em_andamento'
+           WHERE id = $1 AND tenant_id = $2::uuid AND status = 'em_andamento'
            FOR UPDATE`,
-          [request.params.id]
+          [request.params.id, tenant_id]
         )
         const live = liveQ.rows[0]
 
@@ -1173,10 +1219,24 @@ export async function livesRoutes(app) {
 
         const comissaoPct = Number(contrato?.comissao_pct ?? 0)
         const comissao = parsed.data.fat_gerado * (comissaoPct / 100)
+        const encerradoEm = parsed.data.encerrado_em ? new Date(parsed.data.encerrado_em) : null
+        let encerramentoApresentadorUserId = null
+        if (parsed.data.apresentadora_id) {
+          const apRow = await db.query(
+            `SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+            [parsed.data.apresentadora_id, tenant_id]
+          )
+          if (!apRow.rows[0]) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Apresentadora não encontrada', code: 'APRESENTADORA_NOT_FOUND' })
+          }
+          encerramentoApresentadorUserId = apRow.rows[0].user_id ?? null
+        }
 
         await db.query(
           `UPDATE lives
-           SET status = 'encerrada', encerrado_em = NOW(),
+           SET status = 'encerrada',
+               encerrado_em = COALESCE($13::timestamptz, NOW()),
                fat_gerado = $1, comissao_calculada = $2,
                final_orders_count = COALESCE($3, final_orders_count),
                resumo = COALESCE($4, resumo),
@@ -1185,8 +1245,9 @@ export async function livesRoutes(app) {
                manual_orders      = COALESCE($8, manual_orders),
                manual_gmv         = COALESCE($9, manual_gmv),
                status_publicacao  = $10,
-               origem_dados       = $11
-           WHERE id = $5`,
+               origem_dados       = $11,
+               apresentador_id    = COALESCE($14::uuid, apresentador_id)
+           WHERE id = $5 AND tenant_id = $12::uuid`,
           [
             parsed.data.fat_gerado,
             comissao,
@@ -1199,19 +1260,33 @@ export async function livesRoutes(app) {
             parsed.data.manual_gmv         ?? null,
             parsed.data.status_publicacao,
             parsed.data.origem_dados,
+            tenant_id,
+            encerradoEm,
+            encerramentoApresentadorUserId,
           ]
         )
 
-        const marcaQ = await db.query(
-          `SELECT id
-           FROM marcas
-           WHERE tenant_id = $1::uuid
-             AND cliente_id = $2::uuid
-             AND status = 'ativa'
-           ORDER BY criado_em ASC
-           LIMIT 1`,
-          [tenant_id, live.cliente_id],
-        )
+        if (parsed.data.apresentadora_id) {
+          await db.query(
+            `INSERT INTO live_apresentadoras_v2 (tenant_id, live_id, apresentadora_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (live_id, apresentadora_id) DO NOTHING`,
+            [tenant_id, live.id, parsed.data.apresentadora_id],
+          )
+        }
+
+        const marcaQ = live.marca_id
+          ? { rows: [{ id: live.marca_id }] }
+          : await db.query(
+              `SELECT id
+               FROM marcas
+               WHERE tenant_id = $1::uuid
+                 AND cliente_id = $2::uuid
+                 AND status = 'ativa'
+               ORDER BY criado_em ASC
+               LIMIT 1`,
+              [tenant_id, live.cliente_id],
+            )
         if (marcaQ.rows[0]) {
           const apresentadoraQ = await db.query(
             `SELECT COALESCE(v2.apresentadora_id, agenda.apresentadora_id, user_ap.id) AS id
@@ -1228,9 +1303,15 @@ export async function livesRoutes(app) {
                SELECT ae.apresentadora_id
                FROM agenda_eventos ae
                WHERE ae.tenant_id = $1::uuid
-                 AND ae.cabine_id = $4
-                 AND ae.tipo = 'live'
-                 AND ae.data_inicio::date = $5::date
+                 AND (
+                   ae.live_id = $2::uuid
+                   OR ($6::uuid IS NOT NULL AND ae.id = $6::uuid)
+                   OR (
+                     ae.cabine_id = $4
+                     AND ae.tipo = 'live'
+                     AND ae.data_inicio::date = $5::date
+                   )
+                 )
                ORDER BY ABS(EXTRACT(EPOCH FROM (ae.data_inicio - $5::timestamptz)))
                LIMIT 1
              ) agenda ON true
@@ -1241,15 +1322,15 @@ export async function livesRoutes(app) {
                  AND a.tenant_id = $1::uuid
                LIMIT 1
              ) user_ap ON true`,
-            [tenant_id, live.id, live.apresentador_id, live.cabine_id, live.iniciado_em],
+            [tenant_id, live.id, live.apresentador_id, live.cabine_id, live.iniciado_em, live.agenda_evento_id ?? null],
           )
           await upsertVendaAtribuida(db, {
             tenantId: tenant_id,
             origem: 'live',
             origemId: live.id,
             marcaId: marcaQ.rows[0].id,
-            apresentadoraId: apresentadoraQ.rows[0]?.id ?? null,
-            data: new Date().toISOString().slice(0, 10),
+            apresentadoraId: parsed.data.apresentadora_id ?? apresentadoraQ.rows[0]?.id ?? null,
+            data: (encerradoEm ?? new Date()).toISOString().slice(0, 10),
             gmv: parsed.data.fat_gerado,
             pedidos: parsed.data.qtd_pedidos ?? 0,
             comissaoApresentadora: comissao,
@@ -1258,7 +1339,7 @@ export async function livesRoutes(app) {
 
         // Deduct live duration from contrato's horas_consumidas
         if (contrato && live.iniciado_em) {
-          const duracaoHoras = (Date.now() - new Date(live.iniciado_em).getTime()) / 3_600_000
+          const duracaoHoras = ((encerradoEm?.getTime() ?? Date.now()) - new Date(live.iniciado_em).getTime()) / 3_600_000
           await db.query(
             `UPDATE contratos
              SET horas_consumidas = horas_consumidas + $1
@@ -1268,18 +1349,38 @@ export async function livesRoutes(app) {
         }
 
         // ── Encerra evento de agenda vinculado ──────────────────────────────
-        // agenda_eventos não tem coluna live_id; identificamos pelo cabine_id + status ao_vivo
-        // e data_inicio no mesmo dia da live, para evitar encerrar eventos de outras lives.
+        // Tenta primeiro por live_id/agenda_evento_id (preciso), depois por cabine+data (fallback).
         try {
-          await db.query(
+          const agendaEncerradaQ = await db.query(
             `UPDATE agenda_eventos
-             SET status = 'concluido', atualizado_em = NOW(), data_fim = NOW()
-             WHERE tenant_id = $1
-               AND cabine_id = $2
+             SET status = 'concluido',
+                 live_id = COALESCE(live_id, $2::uuid),
+                 data_fim = NOW(),
+                 atualizado_em = NOW()
+             WHERE tenant_id = $1::uuid
                AND status = 'ao_vivo'
-               AND data_inicio::date = $3::date`,
-            [tenant_id, live.cabine_id, live.iniciado_em]
+               AND (
+                 live_id = $2::uuid
+                 OR ($3::uuid IS NOT NULL AND id = $3::uuid)
+               )
+             RETURNING id`,
+            [tenant_id, live.id, live.agenda_evento_id ?? null]
           )
+          if ((agendaEncerradaQ.rows?.length ?? 0) === 0) {
+            await db.query(
+              `UPDATE agenda_eventos
+               SET status = 'concluido',
+                   live_id = COALESCE(live_id, $4::uuid),
+                   data_fim = NOW(),
+                   atualizado_em = NOW()
+               WHERE tenant_id = $1::uuid
+                 AND cabine_id = $2::uuid
+                 AND tipo = 'live'
+                 AND status = 'ao_vivo'
+                 AND data_inicio::date = $3::date`,
+              [tenant_id, live.cabine_id, live.iniciado_em, live.id]
+            )
+          }
         } catch (agendaEncErr) {
           app.log.warn({ err: agendaEncErr, liveId: live.id }, 'agenda: falha ao encerrar evento vinculado (soft)')
         }

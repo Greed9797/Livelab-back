@@ -131,7 +131,7 @@ export async function homeRoutes(app) {
         taxaConversaoQ,
         alertasOpsQ,
         ocupacaoQ,
-        rankingResult,
+          rankingMarcasQ,
       ] = await Promise.all([
         db.query(`SELECT COUNT(*) AS total FROM clientes
                   WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
@@ -154,12 +154,16 @@ export async function homeRoutes(app) {
         db.query(`
         WITH home_gmv_operacional AS (
           SELECT
-            COALESCE(SUM(va.gmv) FILTER (
-              WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-            ), 0) AS gmv_mes,
-            COALESCE(SUM(va.gmv) FILTER (
-              WHERE va.origem = 'live'
+              COALESCE(SUM(va.gmv) FILTER (
+                WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                      = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+              ), 0) AS gmv_total_mes,
+              COALESCE(SUM(va.gmv) FILTER (
+                WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                      = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+              ), 0) AS gmv_mes,
+              COALESCE(SUM(va.gmv) FILTER (
+                WHERE va.origem = 'live'
                 AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
                     = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
             ), 0) AS gmv_lives_mes,
@@ -168,11 +172,18 @@ export async function homeRoutes(app) {
                 AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
                     = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
             ), 0) AS gmv_videos_mes,
-            COALESCE(SUM(va.gmv) FILTER (
-              WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                    = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
-            ), 0) AS gmv_mes_anterior
-          FROM vendas_atribuidas va
+              COALESCE(SUM(va.gmv) FILTER (
+                WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                      = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
+              ), 0) AS gmv_mes_anterior,
+              (
+                SELECT COUNT(*)::int
+                FROM video_registros vr
+                WHERE vr.tenant_id = current_setting('app.tenant_id', true)::uuid
+                  AND date_trunc('month', vr.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                      = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+              ) AS videos_mes
+            FROM vendas_atribuidas va
           WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
         )
         SELECT * FROM home_gmv_operacional
@@ -290,17 +301,28 @@ export async function homeRoutes(app) {
         WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
       `),
         db.query(`
-        SELECT cl.nome, COALESCE(SUM(l.fat_gerado), 0) AS gmv, COUNT(l.id) AS lives
-        FROM lives l
-        JOIN clientes cl ON cl.id = l.cliente_id
-         AND cl.tenant_id = l.tenant_id
-        WHERE l.status = 'encerrada'
-          AND l.tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND date_trunc('day', l.iniciado_em) = date_trunc('day', NOW())
-        GROUP BY cl.id, cl.nome
-        ORDER BY gmv DESC
-        LIMIT 5
-      `),
+          WITH ranking_marcas_mes AS (
+            SELECT
+              va.marca_id,
+              m.nome,
+              COALESCE(SUM(va.gmv), 0) AS gmv,
+              COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives
+            FROM vendas_atribuidas va
+            JOIN marcas m ON m.id = va.marca_id
+             AND m.tenant_id = va.tenant_id
+            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND va.marca_id IS NOT NULL
+              AND va.origem IN ('live', 'video')
+              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+              AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            GROUP BY va.marca_id, m.nome
+          )
+          SELECT marca_id, nome, gmv, lives
+          FROM ranking_marcas_mes
+          ORDER BY gmv DESC, nome ASC
+          LIMIT 10
+        `),
       ])
 
       const ganhos = Number(taxaConversaoQ.rows[0].ganhos)
@@ -407,62 +429,48 @@ export async function homeRoutes(app) {
         request.log?.warn?.({ err: error }, 'home/dashboard: agenda_eventos indisponível')
       }
 
-      let rankingApresentadorasHoje = []
+      let rankingApresentadorasMes = []
       try {
         const rankingApQ = await db.query(`
-          SELECT apresentadora_base.apresentadora_id AS id,
-                 apresentadora_base.apresentadora_nome,
-                 COALESCE(SUM(l.fat_gerado), 0) AS gmv,
-                 COUNT(l.id) AS lives
-          FROM lives l
-          LEFT JOIN LATERAL (
-            SELECT lav.apresentadora_id, a.nome AS apresentadora_nome
-            FROM live_apresentadoras_v2 lav
-            JOIN apresentadoras a ON a.id = lav.apresentadora_id
-             AND a.tenant_id = lav.tenant_id
-            WHERE lav.live_id = l.id
-              AND lav.tenant_id = l.tenant_id
-            ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
-            LIMIT 1
-          ) lav_ap ON true
-          LEFT JOIN LATERAL (
-            SELECT ae.apresentadora_id, a.nome AS apresentadora_nome
-            FROM agenda_eventos ae
-            JOIN apresentadoras a ON a.id = ae.apresentadora_id
-             AND a.tenant_id = ae.tenant_id
-            WHERE ae.tenant_id = l.tenant_id
-              AND ae.cabine_id = l.cabine_id
-              AND ae.tipo = 'live'
-              AND ae.data_inicio::date = l.iniciado_em::date
-            ORDER BY ABS(EXTRACT(EPOCH FROM (ae.data_inicio - l.iniciado_em)))
-            LIMIT 1
-          ) agenda_ap ON true
-          LEFT JOIN apresentadoras user_ap ON user_ap.user_id = l.apresentador_id
-           AND user_ap.tenant_id = l.tenant_id
-          LEFT JOIN users u ON u.id = l.apresentador_id
-           AND u.tenant_id = l.tenant_id
-          CROSS JOIN LATERAL (
-            SELECT COALESCE(lav_ap.apresentadora_id, agenda_ap.apresentadora_id, user_ap.id) AS apresentadora_id,
-                   COALESCE(lav_ap.apresentadora_nome, agenda_ap.apresentadora_nome, user_ap.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome
-          ) apresentadora_base
-          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
-            AND l.status = 'encerrada'
-            AND apresentadora_base.apresentadora_nome IS NOT NULL
-            AND date_trunc('day', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-                = date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo')
-          GROUP BY apresentadora_base.apresentadora_id, apresentadora_base.apresentadora_nome
-          ORDER BY gmv DESC, lives DESC, apresentadora_base.apresentadora_nome ASC
+          WITH ranking_apresentadoras_mes AS (
+            SELECT
+              va.apresentadora_id AS id,
+              a.nome AS apresentadora_nome,
+              COALESCE(a.fixo, 0) AS fixo,
+              COALESCE(SUM(va.gmv), 0) AS gmv,
+              COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
+              COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
+            FROM vendas_atribuidas va
+            JOIN apresentadoras a ON a.id = va.apresentadora_id
+             AND a.tenant_id = va.tenant_id
+            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND va.apresentadora_id IS NOT NULL
+              AND va.origem IN ('live', 'video')
+              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+              AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            GROUP BY va.apresentadora_id, a.nome, a.fixo
+          )
+          SELECT id, apresentadora_nome, fixo, gmv, lives, comissao_variavel,
+                 (fixo + comissao_variavel) AS total_recebido
+          FROM ranking_apresentadoras_mes
+          ORDER BY total_recebido DESC, gmv DESC, apresentadora_nome ASC
           LIMIT 10
         `)
-        rankingApresentadorasHoje = rankingApQ.rows.map(r => {
+        rankingApresentadorasMes = rankingApQ.rows.map(r => {
           const lives = Number(r.lives)
           const gmv = round2(r.gmv)
+          const fixo = round2(r.fixo)
+          const comissaoVariavel = round2(r.comissao_variavel)
           return {
             id: r.id,
             nome: r.apresentadora_nome,
             apresentadora_nome: r.apresentadora_nome,
             gmv,
             lives,
+            fixo,
+            comissao_variavel: comissaoVariavel,
+            total_recebido: round2(r.total_recebido),
             gmv_medio_live: lives > 0 ? round2(gmv / lives) : 0
           }
         })
@@ -470,17 +478,18 @@ export async function homeRoutes(app) {
         request.log?.warn?.({ err: error }, 'home/dashboard: ranking de apresentadoras indisponível')
       }
 
-      // 9. Ranking do Dia (já paralelizado no Grupo 2)
-      const rankingDia = rankingResult.rows.map(r => ({
+      const rankingMarcasMes = rankingMarcasQ.rows.map(r => ({
+        marca_id: r.marca_id,
         nome: r.nome,
         gmv: parseFloat(Number(r.gmv).toFixed(2)),
         lives: Number(r.lives)
       }))
 
       const gmvOperacional = gmvOperacionalQ.rows[0] ?? {}
-      const gmvMes = round2(gmvOperacional.gmv_mes)
+      const gmvMes = round2(gmvOperacional.gmv_total_mes ?? gmvOperacional.gmv_mes)
       const gmvLivesMes = round2(gmvOperacional.gmv_lives_mes)
       const gmvVideosMes = round2(gmvOperacional.gmv_videos_mes)
+      const videosMes = Number(gmvOperacional.videos_mes ?? 0)
       const livesMes = Number(livesMesQ.rows[0].lives_mes)
       const gmvMesAnterior = round2(gmvOperacional.gmv_mes_anterior)
       const liveCabinesAtivas = cabinesFormatadas.filter(c => c.status === 'ao_vivo')
@@ -495,6 +504,7 @@ export async function homeRoutes(app) {
 
       return {
         // Financeiro
+        gmv_total_mes: gmvMes,
         gmv_mes:     gmvMes,
         fat_total:   parseFloat(fatBruto.toFixed(2)),
         fat_bruto:   parseFloat(fatBruto.toFixed(2)),
@@ -516,6 +526,7 @@ export async function homeRoutes(app) {
         clientes_ativos:  Number(clientesQ.rows[0].total),
         novos_clientes:   Number(novosClientesQ.rows[0].total),
         lives_mes:        livesMes,
+        videos_mes:       videosMes,
         gmv_lives_mes:    gmvLivesMes,
         gmv_videos_mes:   gmvVideosMes,
         media_viewers:    Math.round(Number(mediaViewersQ.rows[0].media)),
@@ -528,7 +539,8 @@ export async function homeRoutes(app) {
         variacao_gmv_mes_anterior_pct: growthPct(gmvMes, gmvMesAnterior),
         gmv_lives_mes_anterior: gmvMesAnterior,
         alertas_operacionais: alertasOperacionais,
-        ranking_apresentadoras_hoje: rankingApresentadorasHoje,
+        ranking_apresentadoras_mes: rankingApresentadorasMes,
+        ranking_apresentadoras_hoje: rankingApresentadorasMes,
         agenda_hoje: agendaHoje,
 
         // Alertas operacionais
@@ -547,8 +559,8 @@ export async function homeRoutes(app) {
         boletos_vencidos:  Number(alertas.boletos_vencidos),
         leads_disponiveis: Number(alertas.leads_disponiveis),
 
-        // Ranking do dia
-        ranking_dia: rankingDia
+        // Ranking comercial mensal
+        ranking_marcas_mes: rankingMarcasMes
       }
       } catch (error) {
         app.log.error({ err: error }, 'ERRO NA ROTA /v1/home/dashboard')

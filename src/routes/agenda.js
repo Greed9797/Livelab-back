@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_AGENDA, WRITE_AGENDA } from '../config/role_groups.js'
+import { saoPauloDateInput } from '../lib/timezone.js'
 
 const activeAgendaStatuses = ['planejado', 'confirmado', 'ao_vivo']
 
@@ -26,10 +27,18 @@ const agendaBaseSchema = z.object({
   recorrencia: recorrenciaSchema,
 })
 
+function recorrenciaAteIsValid(data) {
+  if (!data.recorrencia?.ate) return true
+  const dataInicial = saoPauloDateInput(data.data_inicio)
+  return !dataInicial || data.recorrencia.ate >= dataInicial
+}
+
 const agendaSchema = agendaBaseSchema.refine((data) => new Date(data.data_fim) > new Date(data.data_inicio), {
   message: 'data_fim deve ser maior que data_inicio',
 }).refine((data) => data.tipo === 'bloqueio_manutencao' || Boolean(data.marca_id || data.cliente_id), {
   message: 'Selecione uma marca ou cliente para live e gravação',
+}).refine(recorrenciaAteIsValid, {
+  message: 'Repetir até deve ser igual ou posterior à data inicial',
 })
 
 const agendaPatchSchema = agendaBaseSchema.partial().extend({
@@ -151,12 +160,17 @@ async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, d
             ae.data_inicio,
             ae.data_fim,
             ae.status,
+            c.numero AS cabine_numero,
+            c.nome AS cabine_nome,
+            a.nome AS apresentadora_nome,
             CASE
               ${cabineParam ? `WHEN ae.cabine_id = $${cabineParam}::uuid THEN 'cabine'` : ''}
               ${apresentadoraParam ? `WHEN ae.apresentadora_id = $${apresentadoraParam}::uuid THEN 'apresentadora'` : ''}
               ELSE 'agenda'
             END AS entidade
      FROM agenda_eventos ae
+     LEFT JOIN cabines c ON c.id = ae.cabine_id AND c.tenant_id = ae.tenant_id
+     LEFT JOIN apresentadoras a ON a.id = ae.apresentadora_id AND a.tenant_id = ae.tenant_id
      WHERE ae.tenant_id = $1::uuid
        AND ae.status = ANY($4::text[])
        AND ae.data_inicio < $3::timestamptz
@@ -177,9 +191,16 @@ function buildConflictPayload(conflitos) {
       entidade: item.entidade,
       evento_id: item.id,
       cabine_id: item.cabine_id,
+      cabine_numero: item.cabine_numero,
+      cabine_nome: item.cabine_nome,
       apresentadora_id: item.apresentadora_id,
+      apresentadora_nome: item.apresentadora_nome,
       data_inicio: item.data_inicio,
       data_fim: item.data_fim,
+      horario_conflitante: {
+        data_inicio: item.data_inicio,
+        data_fim: item.data_fim,
+      },
       status: item.status,
     })),
   }

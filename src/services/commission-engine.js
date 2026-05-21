@@ -4,12 +4,13 @@
  * Regras de negócio:
  *  - comissao_franquia     = MAX(valor_fixo_contrato, gmv * comissao_franquia_pct / 100)
  *  - comissao_franqueadora = MAX(valor_fixo_contrato, gmv * comissao_franqueadora_pct / 100)
- *  - comissao_apresentadora = gmv * comissao_live_pct / 100 (por apresentadora vinculada à marca)
+ *  - comissao_apresentadora = gmv rateado * percentual da apresentadora
  *  - Cada chamada é idempotente — faz upsert em vendas_atribuidas
  *  - status_aprovacao inicial: 'pendente_aprovacao'
  */
 
-const NIL_UUID = '00000000-0000-0000-0000-000000000000'
+import { saoPauloDateInput } from '../lib/timezone.js'
+import { NIL_UUID, resolvePresenterCommissionPct } from './presenter-commission.js'
 
 /**
  * Calcula e persiste comissões para uma live encerrada.
@@ -50,17 +51,15 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
   if (!live || !live.marca_id) return []
 
   const gmvNum = Number(gmv ?? 0)
-  const data = live.iniciado_em
-    ? new Date(live.iniciado_em).toISOString().slice(0, 10)
-    : new Date().toISOString().slice(0, 10)
+  const data = saoPauloDateInput(live.iniciado_em ?? new Date())
 
   // 2. Comissão franquia = MAX(valor_fixo, gmv * pct)
   const franquiaPct      = Number(live.comissao_franquia_pct ?? 0)
   const franqueadoraPct  = Number(live.comissao_franqueadora_pct ?? 0)
   const valorFixo        = Number(live.valor_fixo_comissao ?? 0)
 
-  const comissao_franquia    = Math.max(valorFixo, gmvNum * (franquiaPct / 100))
-  const comissao_franqueadora = Math.max(valorFixo, gmvNum * (franqueadoraPct / 100))
+  const comissaoFranquiaTotal    = Math.max(valorFixo, gmvNum * (franquiaPct / 100))
+  const comissaoFranqueadoraTotal = Math.max(valorFixo, gmvNum * (franqueadoraPct / 100))
 
   // 3. Resolve apresentadoras da live (principal + live_apresentadoras)
   const apresentadorasQ = await db.query(
@@ -101,19 +100,42 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
   const linhas = apresentadoras.length > 0
     ? apresentadoras
     : [{ apresentadora_id: null, comissao_live_pct: 0, percentual_rateio: null }]
+  const rateiosExplicitados = linhas
+    .map((ap) => ap.percentual_rateio)
+    .filter((value) => value !== null && value !== undefined && value !== '')
+    .map((value) => Number(value) / 100)
+    .filter(Number.isFinite)
+  const rateioExplicitoTotal = rateiosExplicitados.reduce((sum, value) => sum + value, 0)
+  const semRateioExplicito = linhas.filter((ap) => ap.percentual_rateio === null || ap.percentual_rateio === undefined || ap.percentual_rateio === '')
+  const rateioPadrao = rateiosExplicitados.length === 0
+    ? 1 / Math.max(linhas.length, 1)
+    : Math.max(0, 1 - rateioExplicitoTotal) / Math.max(semRateioExplicito.length, 1)
 
   const resultados = []
 
   for (const ap of linhas) {
-    const apPct       = Number(ap.comissao_live_pct ?? 0)
-    const rateio      = ap.percentual_rateio !== null ? Number(ap.percentual_rateio) / 100 : 1
-    const gmvRateado  = gmvNum * rateio
+    const apresentadoraId = ap.apresentadora_id ?? null
+    const rateio      = ap.percentual_rateio !== null && ap.percentual_rateio !== undefined && ap.percentual_rateio !== ''
+      ? Number(ap.percentual_rateio) / 100
+      : rateioPadrao
+    const gmvRateado  = gmvNum * (Number.isFinite(rateio) ? rateio : 0)
+    const apPct       = await resolvePresenterCommissionPct(db, {
+      tenantId,
+      marcaId: live.marca_id,
+      apresentadoraId,
+      origem: 'live',
+      origemId: liveId,
+      data: live.iniciado_em ?? data,
+      gmv: gmvRateado,
+      fallbackLivePct: ap.comissao_live_pct,
+    })
     const comissao_apresentadora = gmvRateado * (apPct / 100)
+    const comissao_franquia = comissaoFranquiaTotal * (Number.isFinite(rateio) ? rateio : 0)
+    const comissao_franqueadora = comissaoFranqueadoraTotal * (Number.isFinite(rateio) ? rateio : 0)
 
     // 5. Upsert atômico em vendas_atribuidas — evita race condition entre processos paralelos.
     //    ON CONFLICT usa idx_vendas_atribuidas_origem_unique (tenant_id, origem, origem_id,
     //    COALESCE(apresentadora_id, NIL_UUID)). Registros já aprovados não são recalculados.
-    const apresentadoraId = ap.apresentadora_id ?? null
     const upsert = await db.query(
       `INSERT INTO vendas_atribuidas
          (tenant_id, origem, origem_id, marca_id, apresentadora_id, data,
@@ -135,7 +157,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
        RETURNING *`,
       [
         tenantId, liveId, live.marca_id, apresentadoraId, data,
-        gmvNum, 0, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
+        gmvRateado, 0, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
       ],
     )
 

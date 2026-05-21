@@ -1,7 +1,6 @@
 import { z } from 'zod'
 import { READ_VENDAS_ATRIBUIDAS, WRITE_VENDAS_ATRIBUIDAS } from '../config/role_groups.js'
-
-const NIL_UUID = '00000000-0000-0000-0000-000000000000'
+import { NIL_UUID, resolvePresenterCommissionPct } from '../services/presenter-commission.js'
 
 const vendaSchema = z.object({
   origem: z.enum(['live', 'video']),
@@ -40,46 +39,15 @@ export async function calcularComissoesAtribuidas(db, {
 
   let apresentadoraPct = 0
   if (apresentadoraId) {
-    const baseGmvQ = data ? await db.query(
-      `SELECT COALESCE(SUM(gmv), 0) AS gmv_mes
-       FROM vendas_atribuidas
-       WHERE tenant_id = $1::uuid
-         AND apresentadora_id = $2::uuid
-         AND date_trunc('month', data::timestamp) = date_trunc('month', $3::date::timestamp)
-         AND NOT (origem = $4 AND origem_id = $5::uuid)`,
-      [tenantId, apresentadoraId, data, origem, origemId ?? NIL_UUID],
-    ) : { rows: [{ gmv_mes: 0 }] }
-    const baseGmv = Number(baseGmvQ.rows[0]?.gmv_mes ?? 0) + Number(gmv ?? 0)
-    const faixaQ = await db.query(
-      `SELECT comissao_pct
-       FROM apresentadora_comissao_faixas
-       WHERE tenant_id = $1::uuid
-         AND apresentadora_id = $2::uuid
-         AND ativo = true
-         AND gmv_inicio <= $3::numeric
-         AND (gmv_fim IS NULL OR gmv_fim >= $3::numeric)
-       ORDER BY gmv_inicio DESC
-       LIMIT 1`,
-      [tenantId, apresentadoraId, baseGmv],
-    )
-    if (faixaQ.rows[0]) {
-      apresentadoraPct = Number(faixaQ.rows[0].comissao_pct) || 0
-    }
-
-    const vinculoQ = await db.query(
-      `SELECT comissao_live_pct, comissao_video_pct
-       FROM apresentadora_marcas
-       WHERE tenant_id = $1::uuid
-         AND marca_id = $2::uuid
-         AND apresentadora_id = $3::uuid
-         AND ativo = true
-       LIMIT 1`,
-      [tenantId, marcaId, apresentadoraId],
-    )
-    const vinculo = vinculoQ.rows[0]
-    if (!faixaQ.rows[0]) {
-      apresentadoraPct = Number(origem === 'video' ? vinculo?.comissao_video_pct : vinculo?.comissao_live_pct) || 0
-    }
+    apresentadoraPct = await resolvePresenterCommissionPct(db, {
+      tenantId,
+      marcaId,
+      apresentadoraId,
+      origem,
+      origemId,
+      data,
+      gmv,
+    })
   }
 
   const valor = Number(gmv ?? 0)
@@ -96,7 +64,7 @@ export async function upsertVendaAtribuida(db, payload) {
 
   const apresentadoraId = payload.apresentadoraId ?? null
   const current = await db.query(
-    `SELECT id
+    `SELECT *
      FROM vendas_atribuidas
      WHERE tenant_id = $1::uuid
        AND origem = $2
@@ -107,6 +75,8 @@ export async function upsertVendaAtribuida(db, payload) {
   )
 
   if (current.rows[0]) {
+    if (current.rows[0].status_aprovacao === 'aprovada') return current.rows[0]
+
     const updated = await db.query(
       `UPDATE vendas_atribuidas
        SET marca_id = $1,

@@ -199,6 +199,41 @@ describe('POST /v1/lives/manual', () => {
     expect(insertArgs[17]).toBe(1142.5)
   })
 
+  it('accepts formatted counter strings in manual live payloads', async () => {
+    let insertArgs = null
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })
+      .mockResolvedValueOnce({ rows: [{ comissao_pct: '0' }] })
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })
+      .mockImplementationOnce((sql, args) => { insertArgs = args; return { rows: [{ id: 'id-counters' }] } })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/lives/manual',
+      payload: {
+        ...basePayload,
+        qtd_pedidos: '1.234,00',
+        manual_views: '3,466',
+        manual_likes: '10.500',
+        manual_comments: '1,250.00',
+        manual_orders: '1.234,00',
+      },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(insertArgs[9]).toBe(1234)
+    expect(insertArgs[11]).toBe(3466)
+    expect(insertArgs[12]).toBe(10500)
+    expect(insertArgs[13]).toBe(1250)
+    expect(insertArgs[16]).toBe(1234)
+  })
+
   it('allows manual affiliate live using marca_id without cliente_id', async () => {
     const marcaId = '55555555-5555-4555-8555-555555555555'
     let insertArgs = null

@@ -8,6 +8,40 @@ import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { moneySchema } from '../lib/money.js'
 import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
 
+function parseIntegerMetric(value) {
+  if (typeof value === 'number') return value
+  if (value == null) return value
+  if (typeof value !== 'string') return value
+
+  const cleaned = value.trim().replace(/\s/g, '').replace(/[^\d,.-]/g, '')
+  if (!cleaned || cleaned === '-' || cleaned === ',' || cleaned === '.') return undefined
+
+  const separators = [...cleaned.matchAll(/[,.]/g)]
+  if (separators.length === 0) return Number(cleaned)
+
+  const lastSeparator = separators.at(-1)?.[0] ?? ''
+  const lastIndex = Math.max(cleaned.lastIndexOf(','), cleaned.lastIndexOf('.'))
+  const integerPart = cleaned.slice(0, lastIndex)
+  const tail = cleaned.slice(lastIndex + 1)
+
+  if (separators.length > 1 && tail.length <= 2 && /^0+$/.test(tail)) {
+    return Number(integerPart.replace(/[,.]/g, ''))
+  }
+
+  const parts = cleaned.split(lastSeparator)
+  const thousands = parts.length > 1 && parts.slice(1).every((part) => /^\d{3}$/.test(part))
+  if (thousands) return Number(parts.join(''))
+
+  const normalized = lastSeparator === ',' ? cleaned.replace(/\./g, '').replace(',', '.') : cleaned.replace(/,/g, '')
+  const parsed = Number(normalized)
+  return parsed
+}
+
+const integerMetricSchema = z.preprocess(
+  parseIntegerMetric,
+  z.number().int().min(0),
+)
+
 const iniciarLiveSchema = z.object({
   cabine_id: z.string().uuid(),
   cliente_id: z.string().uuid().optional(),
@@ -22,16 +56,16 @@ const iniciarLiveSchema = z.object({
 
 const encerrarSchema = z.object({
   fat_gerado:         moneySchema,
-  qtd_pedidos:        z.number().int().min(0).optional(),
+  qtd_pedidos:        integerMetricSchema.optional(),
   resumo:             z.string().max(2000).optional(),
   apresentadora_id:   z.string().uuid().optional().nullable(),
   encerrado_em:       z.string().datetime({ offset: true }).optional().nullable(),
-  manual_likes:       z.number().int().min(0).optional(),
-  manual_views:       z.number().int().min(0).optional(),
-  manual_comments:    z.number().int().min(0).optional(),
-  manual_shares:      z.number().int().min(0).optional(),
-  manual_diamonds:    z.number().int().min(0).optional(),
-  manual_orders:      z.number().int().min(0).optional(),
+  manual_likes:       integerMetricSchema.optional(),
+  manual_views:       integerMetricSchema.optional(),
+  manual_comments:    integerMetricSchema.optional(),
+  manual_shares:      integerMetricSchema.optional(),
+  manual_diamonds:    integerMetricSchema.optional(),
+  manual_orders:      integerMetricSchema.optional(),
   manual_gmv:         moneySchema.optional(),
   status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
   origem_dados:       z.enum(['manual', 'api']).optional().default('manual'),
@@ -49,14 +83,14 @@ const liveManualSchema = z.object({
   hora_inicio:        z.string().regex(/^\d{2}:\d{2}$/),
   hora_fim:           z.string().regex(/^\d{2}:\d{2}$/),
   fat_gerado:         moneySchema,
-  qtd_pedidos:        z.number().int().min(0),
+  qtd_pedidos:        integerMetricSchema,
   resumo:             z.string().max(2000).optional(),
-  manual_views:       z.number().int().min(0).optional(),
-  manual_likes:       z.number().int().min(0).optional(),
-  manual_comments:    z.number().int().min(0).optional(),
-  manual_shares:      z.number().int().min(0).optional(),
-  manual_diamonds:    z.number().int().min(0).optional(),
-  manual_orders:      z.number().int().min(0).optional(),
+  manual_views:       integerMetricSchema.optional(),
+  manual_likes:       integerMetricSchema.optional(),
+  manual_comments:    integerMetricSchema.optional(),
+  manual_shares:      integerMetricSchema.optional(),
+  manual_diamonds:    integerMetricSchema.optional(),
+  manual_orders:      integerMetricSchema.optional(),
   manual_gmv:         moneySchema.optional(),
   tipo:               z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
   status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
@@ -78,14 +112,14 @@ const liveManualEditSchema = z.object({
   hora_inicio:      z.string().regex(/^\d{2}:\d{2}$/).optional(),
   hora_fim:         z.string().regex(/^\d{2}:\d{2}$/).optional(),
   fat_gerado:       moneySchema.optional(),
-  qtd_pedidos:      z.number().int().min(0).optional(),
+  qtd_pedidos:      integerMetricSchema.optional(),
   resumo:           z.string().max(2000).optional(),
-  manual_views:     z.number().int().min(0).optional(),
-  manual_likes:     z.number().int().min(0).optional(),
-  manual_comments:  z.number().int().min(0).optional(),
-  manual_shares:    z.number().int().min(0).optional(),
-  manual_diamonds:  z.number().int().min(0).optional(),
-  manual_orders:    z.number().int().min(0).optional(),
+  manual_views:     integerMetricSchema.optional(),
+  manual_likes:     integerMetricSchema.optional(),
+  manual_comments:  integerMetricSchema.optional(),
+  manual_shares:    integerMetricSchema.optional(),
+  manual_diamonds:  integerMetricSchema.optional(),
+  manual_orders:    integerMetricSchema.optional(),
   manual_gmv:       moneySchema.optional(),
   tipo:             z.enum(['cliente', 'afiliado', 'teste']).optional(),
   status_publicacao: z.enum(['rascunho', 'revisado', 'publicado']).optional(),

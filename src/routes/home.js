@@ -352,8 +352,9 @@ export async function homeRoutes(app) {
           cabine_numero: Number(r.cabine_numero),
           cliente_nome: r.cliente_nome
         }))
-      } catch (_) {
-        // live_requests pode não existir em ambientes sem a migration 025
+      } catch (error) {
+        request.log?.warn?.({ err: error }, 'home/dashboard: próximas lives (agenda_eventos) indisponível')
+        proximasLives = []
       }
 
       let agendaHoje = []

@@ -5,12 +5,29 @@
  *  - comissao_franquia     = MAX(valor_fixo_contrato, gmv * comissao_franquia_pct / 100)
  *  - comissao_franqueadora = MAX(valor_fixo_contrato, gmv * comissao_franqueadora_pct / 100)
  *  - comissao_apresentadora = gmv rateado * percentual da apresentadora
+ *  - **Override fim-de-semana:** se `iniciado_em` cai em sábado ou domingo no
+ *    timezone America/Sao_Paulo, `pctApresentadora` é fixado em 2% — ignora
+ *    vínculo de marca (apresentadora_marcas) e faixas (apresentadora_faixas_comissao).
+ *    Aplicado por linha de rateio (mantém divisão proporcional entre apresentadoras).
  *  - Cada chamada é idempotente — faz upsert em vendas_atribuidas
  *  - status_aprovacao inicial: 'pendente_aprovacao'
  */
 
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { NIL_UUID, resolvePresenterCommissionPct } from './presenter-commission.js'
+
+const WEEKEND_PRESENTER_PCT = 2
+
+function isWeekendSaoPaulo(date) {
+  if (!date) return false
+  const d = date instanceof Date ? date : new Date(date)
+  if (Number.isNaN(d.getTime())) return false
+  const weekday = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Sao_Paulo',
+    weekday: 'short',
+  }).format(d)
+  return weekday === 'Sat' || weekday === 'Sun'
+}
 
 /**
  * Calcula e persiste comissões para uma live encerrada.
@@ -45,6 +62,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
 
   const gmvNum = Number(gmv ?? 0)
   const data = saoPauloDateInput(live.iniciado_em ?? new Date())
+  const weekendOverride = isWeekendSaoPaulo(live.iniciado_em ?? new Date())
 
   const [ano, mes] = data.split('-')
   const mesInicio = `${ano}-${mes}-01`
@@ -100,16 +118,18 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
       ? Number(ap.percentual_rateio) / 100
       : rateioPadrao
     const gmvRateado  = gmvNum * (Number.isFinite(rateio) ? rateio : 0)
-    const apPct       = await resolvePresenterCommissionPct(db, {
-      tenantId,
-      marcaId: live.marca_id,
-      apresentadoraId,
-      origem: 'live',
-      origemId: liveId,
-      data: live.iniciado_em ?? data,
-      gmv: gmvRateado,
-      fallbackLivePct: ap.comissao_live_pct,
-    })
+    const apPct       = weekendOverride
+      ? WEEKEND_PRESENTER_PCT
+      : await resolvePresenterCommissionPct(db, {
+          tenantId,
+          marcaId: live.marca_id,
+          apresentadoraId,
+          origem: 'live',
+          origemId: liveId,
+          data: live.iniciado_em ?? data,
+          gmv: gmvRateado,
+          fallbackLivePct: ap.comissao_live_pct,
+        })
     const comissao_apresentadora = gmvRateado * (apPct / 100)
     const comissao_franquia = comissaoFranquiaTotal * (Number.isFinite(rateio) ? rateio : 0)
     const comissao_franqueadora = comissaoFranqueadoraTotal * (Number.isFinite(rateio) ? rateio : 0)

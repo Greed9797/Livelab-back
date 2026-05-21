@@ -1,8 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 
 import { calcularComissoesDaLive } from '../src/services/commission-engine.js'
 
 describe('commission engine', () => {
+  it('delegates presenter percentage rules to the central presenter commission helper', () => {
+    const source = readFileSync(new URL('../src/services/commission-engine.js', import.meta.url), 'utf8')
+
+    expect(source).toContain("resolvePresenterCommissionPct")
+    expect(source).not.toContain('WEEKEND_PRESENTER_PCT')
+    expect(source).not.toContain('function isWeekendSaoPaulo')
+  })
+
   it('uses the 0.5% minimum live commission when weekday presenter has no configured tier', async () => {
     const insertedRows = []
     const queryMock = vi.fn(async (sql, values) => {

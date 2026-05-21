@@ -130,10 +130,49 @@ export async function comissoesRoutes(app) {
            va.criado_em,
            va.atualizado_em,
            m.nome AS marca_nome,
-           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome
+           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
+           CASE
+             WHEN va.apresentadora_id IS NULL THEN 'sem_apresentadora'
+             WHEN va.marca_id IS NULL OR m.id IS NULL THEN 'sem_marca'
+             WHEN va.origem = 'live' AND faixa.id IS NULL AND EXTRACT(ISODOW FROM va.data::date) NOT IN (6, 7) THEN 'sem_faixa_comissao'
+             WHEN va.origem = 'video' AND am.id IS NULL THEN 'sem_vinculo_marca'
+             WHEN COALESCE(va.comissao_apresentadora, 0) = 0 THEN 'comissao_zero'
+             ELSE 'pronta_para_aprovar'
+           END AS diagnostico_operacional,
+           CASE
+             WHEN va.apresentadora_id IS NULL THEN 'Sem apresentadora vinculada'
+             WHEN va.marca_id IS NULL OR m.id IS NULL THEN 'Sem marca vinculada'
+             WHEN va.origem = 'live' AND faixa.id IS NULL AND EXTRACT(ISODOW FROM va.data::date) NOT IN (6, 7) THEN 'Sem faixa de comissão'
+             WHEN va.origem = 'video' AND am.id IS NULL THEN 'Sem vínculo apresentadora-marca'
+             WHEN COALESCE(va.comissao_apresentadora, 0) = 0 THEN 'Comissão zerada'
+             ELSE 'Pronta para aprovar'
+           END AS diagnostico_label
          FROM vendas_atribuidas va
-         JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+         LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(SUM(va_mes.gmv), 0) + COALESCE(va.gmv, 0) AS gmv_mes
+           FROM vendas_atribuidas va_mes
+           WHERE va_mes.tenant_id = va.tenant_id
+             AND va_mes.apresentadora_id = va.apresentadora_id
+             AND date_trunc('month', va_mes.data::timestamp) = date_trunc('month', va.data::timestamp)
+             AND va_mes.id <> va.id
+         ) month_gmv ON true
+         LEFT JOIN LATERAL (
+           SELECT f.id, f.comissao_pct
+           FROM apresentadora_comissao_faixas f
+           WHERE f.tenant_id = va.tenant_id
+             AND f.apresentadora_id = va.apresentadora_id
+             AND f.ativo = true
+             AND f.gmv_inicio <= COALESCE(month_gmv.gmv_mes, va.gmv, 0)
+             AND (f.gmv_fim IS NULL OR f.gmv_fim >= COALESCE(month_gmv.gmv_mes, va.gmv, 0))
+           ORDER BY f.gmv_inicio DESC
+           LIMIT 1
+         ) faixa ON true
+         LEFT JOIN apresentadora_marcas am ON am.tenant_id = va.tenant_id
+          AND am.marca_id = va.marca_id
+          AND am.apresentadora_id = va.apresentadora_id
+          AND am.ativo IS NOT FALSE
          WHERE ${where} AND va.status_aprovacao = 'pendente_aprovacao'
          ORDER BY va.data DESC, va.criado_em DESC
          LIMIT 500`,

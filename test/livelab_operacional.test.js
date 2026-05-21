@@ -465,6 +465,40 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('GET /v1/comissoes/pendentes includes operational diagnosis', async () => {
+    const queryMock = vi.fn().mockResolvedValueOnce({
+      rows: [{
+        id: 'venda-1',
+        origem: 'live',
+        origem_id: 'live-1',
+        data: '2026-05-20',
+        gmv: '1000.00',
+        comissao_apresentadora: '0.00',
+        comissao_franquia: '100.00',
+        comissao_franqueadora: '20.00',
+        status_aprovacao: 'pendente_aprovacao',
+        marca_nome: 'Marca A',
+        apresentadora_nome: 'Sem apresentadora',
+        diagnostico_operacional: 'sem_apresentadora',
+        diagnostico_label: 'Sem apresentadora vinculada',
+      }],
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(comissoesRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/comissoes/pendentes' })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()[0]).toMatchObject({
+      diagnostico_operacional: 'sem_apresentadora',
+      diagnostico_label: 'Sem apresentadora vinculada',
+    })
+    expect(queryMock.mock.calls[0][0]).toContain('diagnostico_operacional')
+    expect(queryMock.mock.calls[0][0]).toContain('sem_faixa_comissao')
+    expect(queryMock.mock.calls[0][0]).toContain('sem_vinculo_marca')
+    await app.close()
+  })
+
   it('GET /v1/financeiro/resumo uses vendas_atribuidas as GMV source', async () => {
     const queryMock = vi.fn().mockResolvedValueOnce({
       rows: [{

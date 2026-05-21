@@ -86,6 +86,7 @@ export const MIGRATIONS_LIST = [
   '090_comissao_metas_compat.sql',
   '091_lives_agenda_link.sql',
   '092_tenants_atualizado_em.sql',
+  '093_operational_source_unification.sql',
 ]
 
 async function ensureMigrationsTable(client) {

@@ -84,6 +84,70 @@ describe('POST /v1/lives — agenda link unificada', () => {
     expect(response.json()).toMatchObject({ id: liveId, agenda_evento_id: agendaId })
   })
 
+  it('usa data_fim da agenda como previsto_fim e grava live_id no evento', async () => {
+    const cabineId = '11111111-1111-4111-8111-111111111111'
+    const clienteId = '22222222-2222-4222-8222-222222222222'
+    const liveId = '33333333-3333-4333-8333-333333333333'
+    const agendaId = '44444444-4444-4444-8444-444444444444'
+    const agendaFim = '2026-05-20T22:00:00.000Z'
+    let liveInsertArgs = null
+    let agendaUpdateArgs = null
+
+    const queryMock = vi.fn(async (sql, args = []) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('FROM cabines') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: cabineId, numero: 1, status: 'disponivel', contrato_id: null, live_atual_id: null, ativo: true }] }
+      }
+      if (sql.includes('FROM agenda_eventos ae') && sql.includes('WHERE ae.id')) {
+        return {
+          rows: [{
+            id: agendaId,
+            status: 'planejado',
+            marca_id: '55555555-5555-4555-8555-555555555555',
+            cabine_id: cabineId,
+            apresentadora_id: null,
+            marca_cliente_id: clienteId,
+            marca_tipo: 'cliente',
+            marca_tiktok_username: null,
+            data_fim: agendaFim,
+          }],
+        }
+      }
+      if (sql.includes('UPDATE agenda_eventos SET status')) {
+        agendaUpdateArgs = args
+        return { rows: [] }
+      }
+      if (sql.includes('FROM contratos')) return { rows: [{ id: 'ct-1', cliente_id: clienteId, status: 'ativo' }] }
+      if (sql.includes('SELECT status FROM clientes')) return { rows: [{ status: 'ativo' }] }
+      if (sql.includes('INSERT INTO lives')) {
+        liveInsertArgs = args
+        return { rows: [{ id: liveId, cabine_id: cabineId, iniciado_em: '2026-05-20T18:00:00.000Z', cliente_id: clienteId, apresentador_id: null, tipo: 'cliente', status_publicacao: 'rascunho', origem_dados: 'manual', agenda_evento_id: agendaId, previsto_fim: agendaFim }] }
+      }
+      if (sql.includes('INSERT INTO live_apresentadoras_v2')) return { rows: [] }
+      if (sql.includes('UPDATE cabines')) return { rows: [] }
+      if (sql.includes('INSERT INTO cabine_eventos')) return { rows: [] }
+      return { rows: [] }
+    })
+
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/lives',
+      payload: { cabine_id: cabineId, agenda_evento_id: agendaId },
+    })
+
+    expect(response.statusCode).toBe(201)
+    expect(liveInsertArgs[5]).toBe(agendaId)
+    expect(liveInsertArgs[6]).toBeInstanceOf(Date)
+    expect(liveInsertArgs[6].toISOString()).toBe(agendaFim)
+    expect(agendaUpdateArgs).toEqual([agendaId, 'tenant-1', liveId])
+
+    const agendaUpdateSql = queryMock.mock.calls.find(([sql]) => sql.includes('UPDATE agenda_eventos SET status'))?.[0]
+    expect(agendaUpdateSql).toContain('live_id = $3')
+  })
+
   it('aceita apresentadora_id (novo alias) e mapeia pra apresentador_id', async () => {
     const cabineId = '11111111-1111-4111-8111-111111111111'
     const apresentadoraId = '66666666-6666-4666-8666-666666666666'

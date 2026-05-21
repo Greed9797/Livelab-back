@@ -4,7 +4,7 @@ import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
 
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
-  m.tiktok_username, m.site, m.marketplace_url,
+  m.tiktok_username, m.site, m.marketplace_url, m.logo_url,
   m.comissao_franquia_pct, m.comissao_franqueadora_pct,
   m.observacoes, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
@@ -19,6 +19,7 @@ const marcaBaseSchema = z.object({
   tiktok_username: z.string().trim().transform((value) => value.replace(/^@/, '')).nullable().optional(),
   site: z.string().nullable().optional(),
   marketplace_url: z.string().nullable().optional(),
+  logo_url: z.string().url().nullable().optional(),
   comissao_franquia_pct: z.number().min(0).max(100).default(0),
   comissao_franqueadora_pct: z.number().min(0).max(100).default(0),
   observacoes: z.string().nullable().optional(),
@@ -120,15 +121,15 @@ export async function marcasRoutes(app) {
         `INSERT INTO marcas (
            tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
            marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
-           observacoes
+           observacoes, logo_url
          )
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          RETURNING *`,
         [
           tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
           d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
           d.comissao_franquia_pct, d.comissao_franqueadora_pct,
-          d.observacoes ?? null,
+          d.observacoes ?? null, d.logo_url ?? null,
         ],
       )
       app.audit?.log?.(request, { action: 'marca.create', entity_type: 'marca', entity_id: result.rows[0].id, metadata: { nome: d.nome, tipo: d.tipo } })?.catch(err => app.log.error({ err }, 'audit log failed'))

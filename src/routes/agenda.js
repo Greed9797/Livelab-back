@@ -341,6 +341,7 @@ export async function agendaRoutes(app) {
                 m.nome AS marca_nome,
                 m.cliente_id AS cliente_id,
                 m.logo_url AS marca_logo_url,
+                m.site AS marca_site,
                 cl.nome AS cliente_nome,
                 COALESCE(m.tiktok_username, cl.tiktok_username) AS tiktok_username,
                 c.numero AS cabine_numero,

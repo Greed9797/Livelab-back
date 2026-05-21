@@ -2,6 +2,16 @@ import { z } from 'zod'
 import { READ_APRESENTADORAS, WRITE_APRESENTADORAS } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
 
+const APRESENTADORA_FIXO_MAX = 1_000_000 // R$ 1 milhão — sanity cap
+const APRESENTADORA_META_MAX = 100_000_000 // R$ 100 milhões — sanity cap pra meta diária
+
+const fixoSchema = moneySchema.refine((v) => v <= APRESENTADORA_FIXO_MAX, {
+  message: `Fixo não pode ultrapassar R$ ${APRESENTADORA_FIXO_MAX.toLocaleString('pt-BR')}`,
+})
+const metaDiariaSchema = moneySchema.refine((v) => v <= APRESENTADORA_META_MAX, {
+  message: `Meta diária não pode ultrapassar R$ ${APRESENTADORA_META_MAX.toLocaleString('pt-BR')}`,
+})
+
 const createSchema = z.object({
   nome:            z.string().min(1),
   telefone:        z.string().optional(),
@@ -9,9 +19,9 @@ const createSchema = z.object({
   email:           z.string().email().optional(),
   cpf_cnpj:        z.string().optional(),
   cidade:          z.string().optional(),
-  fixo:            moneySchema.default(0),
+  fixo:            fixoSchema.default(0),
   comissao_pct:    z.number().min(0).max(100).default(0),
-  meta_diaria_gmv: moneySchema.default(0),
+  meta_diaria_gmv: metaDiariaSchema.default(0),
   valor_fixo_mensal: z.number().min(0).default(0),
   observacoes:     z.string().optional(),
   link_contrato:   z.string().optional(),

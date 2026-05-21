@@ -8,7 +8,7 @@ import { configuracoesRoutes } from '../src/routes/configuracoes.js'
 import { financeiroRoutes } from '../src/routes/financeiro.js'
 import { livesRoutes } from '../src/routes/lives.js'
 import { marcasRoutes } from '../src/routes/marcas.js'
-import { calcularComissoesAtribuidas, vendasAtribuidasRoutes } from '../src/routes/vendas_atribuidas.js'
+import { calcularComissoesAtribuidas, upsertVendaAtribuida, vendasAtribuidasRoutes } from '../src/routes/vendas_atribuidas.js'
 import { videosRoutes } from '../src/routes/videos.js'
 
 function buildApp({ papel = 'franqueado', queryMock } = {}) {
@@ -78,6 +78,62 @@ describe('LIVELAB operational routes', () => {
     const insertCall = queryMock.mock.calls.find(([sql]) => sql.includes('INSERT INTO agenda_eventos'))
     expect(insertCall).toBeTruthy()
     expect(insertCall[1][0]).toBe('tenant-1')
+    await app.close()
+  })
+
+  it('POST /v1/agenda allows adjacent events in the same cabine', async () => {
+    const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const cabineId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
+      .mockResolvedValueOnce({ rows: [{ id: cabineId }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{ id: 'agenda-adjacente', marca_id: marcaId, cabine_id: cabineId, status: 'planejado' }],
+      })
+    const { app } = buildApp({ queryMock })
+    await app.register(agendaRoutes)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/agenda',
+      payload: {
+        tipo: 'live',
+        marca_id: marcaId,
+        cabine_id: cabineId,
+        data_inicio: '2026-05-20T13:00:00Z',
+        data_fim: '2026-05-20T14:00:00Z',
+      },
+    })
+
+    expect(res.statusCode).toBe(201)
+    const conflictSql = queryMock.mock.calls.find(([sql]) => sql.includes('FROM agenda_eventos ae'))?.[0]
+    expect(conflictSql).toContain('ae.data_inicio < $3::timestamptz')
+    expect(conflictSql).toContain('ae.data_fim > $2::timestamptz')
+    await app.close()
+  })
+
+  it('POST /v1/agenda rejects recurrence ending before the first event date', async () => {
+    const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const queryMock = vi.fn().mockResolvedValue({ rows: [{ id: marcaId }] })
+    const { app } = buildApp({ queryMock })
+    await app.register(agendaRoutes)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/agenda',
+      payload: {
+        tipo: 'live',
+        marca_id: marcaId,
+        data_inicio: '2026-05-21T18:00:00Z',
+        data_fim: '2026-05-21T19:00:00Z',
+        recorrencia: { frequencia: 'diaria', ate: '2026-05-20' },
+      },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toMatchObject({ error: expect.stringContaining('Repetir até') })
+    expect(queryMock).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -518,5 +574,63 @@ describe('LIVELAB operational routes', () => {
       comissao_franqueadora: 40,
     })
     expect(queryMock.mock.calls[2][0]).toContain('apresentadora_comissao_faixas')
+  })
+
+  it('calcularComissoesAtribuidas applies 2 percent for weekend live', async () => {
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('FROM marcas')) return { rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '2' }] }
+      if (sql.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: '0.00' }] }
+      if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [{ comissao_pct: '0.5' }] }
+      if (sql.includes('FROM apresentadora_marcas')) return { rows: [{ comissao_live_pct: '0.5', comissao_video_pct: '0.5' }] }
+      return { rows: [] }
+    })
+
+    const result = await calcularComissoesAtribuidas({ query: queryMock }, {
+      tenantId: 'tenant-1',
+      marcaId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      apresentadoraId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      origem: 'live',
+      origemId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      data: '2026-05-23',
+      gmv: 2000,
+    })
+
+    expect(result).toMatchObject({
+      comissao_apresentadora: 40,
+      comissao_franquia: 200,
+      comissao_franqueadora: 40,
+    })
+  })
+
+  it('upsertVendaAtribuida does not overwrite approved sales', async () => {
+    const approved = {
+      id: 'venda-aprovada',
+      status_aprovacao: 'aprovada',
+      gmv: '1000.00',
+      comissao_apresentadora: '10.00',
+    }
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('FROM marcas')) return { rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '2' }] }
+      if (sql.includes('FROM vendas_atribuidas') && sql.includes('COALESCE(SUM(gmv)')) return { rows: [{ gmv_mes: '0.00' }] }
+      if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [{ comissao_pct: '1' }] }
+      if (sql.includes('FROM apresentadora_marcas')) return { rows: [{ comissao_live_pct: '1', comissao_video_pct: '1' }] }
+      if (sql.includes('FROM vendas_atribuidas') && sql.includes('origem_id = $3::uuid')) return { rows: [approved] }
+      if (sql.includes('UPDATE vendas_atribuidas')) throw new Error('approved sale should not be updated')
+      return { rows: [] }
+    })
+
+    const result = await upsertVendaAtribuida({ query: queryMock }, {
+      tenantId: 'tenant-1',
+      marcaId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      apresentadoraId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      origem: 'live',
+      origemId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      data: '2026-05-19',
+      gmv: 2000,
+      pedidos: 5,
+    })
+
+    expect(result).toBe(approved)
+    expect(queryMock.mock.calls.some(([sql]) => sql.includes('UPDATE vendas_atribuidas'))).toBe(false)
   })
 })

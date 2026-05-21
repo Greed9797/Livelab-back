@@ -1,55 +1,16 @@
 /**
  * Motor de comissões — v2
  *
- * Regras:
- *  - comissao_franquia     = MAX(marca.valor_fixo_minimo, gmv × marca.comissao_franquia_pct / 100)
- *    Fonte única de verdade: marcas. contratos.valor_fixo é EXCLUSIVAMENTE mensalidade (billing_engine).
- *  - comissao_franqueadora = MAX(marca.valor_fixo_minimo, gmv × marca.comissao_franqueadora_pct / 100)
- *  - comissao_apresentadora = gmv_live × faixa_pct / 100
- *    onde faixa_pct é determinada pelo GMV acumulado da apresentadora no mês
- *    (busca em apresentadora_faixas_comissao)
- *  - Se não há faixa cadastrada: comissao_apresentadora = 0
- *  - Idempotente via upsert em vendas_atribuidas
+ * Regras de negócio:
+ *  - comissao_franquia     = MAX(valor_fixo_contrato, gmv * comissao_franquia_pct / 100)
+ *  - comissao_franqueadora = MAX(valor_fixo_contrato, gmv * comissao_franqueadora_pct / 100)
+ *  - comissao_apresentadora = gmv rateado * percentual da apresentadora
+ *  - Cada chamada é idempotente — faz upsert em vendas_atribuidas
+ *  - status_aprovacao inicial: 'pendente_aprovacao'
  */
 
-const NIL_UUID = '00000000-0000-0000-0000-000000000000'
-
-/**
- * Busca o pct de comissão da apresentadora baseado no GMV acumulado do mês.
- */
-async function buscarFaixaComissao(db, { tenantId, apresentadoraId, gmvAcumuladoMes }) {
-  if (!apresentadoraId) return 0
-  const result = await db.query(
-    `SELECT pct_comissao FROM apresentadora_faixas_comissao
-     WHERE tenant_id = $1::uuid
-       AND apresentadora_id = $2::uuid
-       AND gmv_min <= $3
-       AND (gmv_max IS NULL OR gmv_max >= $3)
-       AND vigente_desde <= CURRENT_DATE
-     ORDER BY gmv_min DESC
-     LIMIT 1`,
-    [tenantId, apresentadoraId, gmvAcumuladoMes],
-  )
-  return Number(result.rows[0]?.pct_comissao ?? 0)
-}
-
-/**
- * Busca GMV acumulado da apresentadora no mês corrente (excluindo a live atual).
- */
-async function gmvAcumuladoMes(db, { tenantId, apresentadoraId, mesInicio, mesFim, liveIdAtual }) {
-  if (!apresentadoraId) return 0
-  const result = await db.query(
-    `SELECT COALESCE(SUM(gmv), 0) AS total
-     FROM vendas_atribuidas
-     WHERE tenant_id = $1::uuid
-       AND apresentadora_id = $2::uuid
-       AND data >= $3::date
-       AND data <= $4::date
-       AND origem_id != $5::uuid`,
-    [tenantId, apresentadoraId, mesInicio, mesFim, liveIdAtual],
-  )
-  return Number(result.rows[0]?.total ?? 0)
-}
+import { saoPauloDateInput } from '../lib/timezone.js'
+import { NIL_UUID, resolvePresenterCommissionPct } from './presenter-commission.js'
 
 /**
  * Calcula e persiste comissões para uma live encerrada.
@@ -83,24 +44,20 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
   if (!live || !live.marca_id) return []
 
   const gmvNum = Number(gmv ?? 0)
-  const dataLive = live.iniciado_em
-    ? new Date(live.iniciado_em).toISOString().slice(0, 10)
-    : new Date().toISOString().slice(0, 10)
+  const data = saoPauloDateInput(live.iniciado_em ?? new Date())
 
-  const [ano, mes] = dataLive.split('-')
+  const [ano, mes] = data.split('-')
   const mesInicio = `${ano}-${mes}-01`
   const mesFim = new Date(Date.UTC(Number(ano), Number(mes), 0)).toISOString().slice(0, 10)
 
   // 2. Comissão franquia = MAX(marca.valor_fixo_minimo, gmv * pct)
   // Fonte única de verdade: marcas.comissao_franquia_pct e marcas.valor_fixo_minimo.
   // contratos.valor_fixo é usado exclusivamente pelo billing_engine para mensalidade fixa.
-  const franquiaPct   = Number(live.comissao_franquia_pct ?? 0)
-  const valorFixoMarca = Number(live.valor_fixo_minimo ?? 0)
-  const comissao_franquia = Math.max(valorFixoMarca, gmvNum * (franquiaPct / 100))
-
-  // 3. Comissão franqueadora = MAX(marca.valor_fixo_minimo, gmv * pct)
+  const franquiaPct    = Number(live.comissao_franquia_pct ?? 0)
   const franqueadoraPct = Number(live.comissao_franqueadora_pct ?? 0)
-  const comissao_franqueadora = Math.max(valorFixoMarca, gmvNum * (franqueadoraPct / 100))
+  const valorFixo       = Number(live.valor_fixo_minimo ?? 0)
+  const comissaoFranquiaTotal    = Math.max(valorFixo, gmvNum * (franquiaPct / 100))
+  const comissaoFranqueadoraTotal = Math.max(valorFixo, gmvNum * (franqueadoraPct / 100))
 
   // 4. Resolve apresentadoras da live
   const apresentadorasQ = await db.query(
@@ -122,21 +79,40 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
   const apresentadoras = apresentadorasQ.rows.filter(r => r.apresentadora_id)
   const linhas = apresentadoras.length > 0
     ? apresentadoras
-    : [{ apresentadora_id: null }]
+    : [{ apresentadora_id: null, comissao_live_pct: 0, percentual_rateio: null }]
+
+  const rateiosExplicitados = linhas
+    .map((ap) => ap.percentual_rateio)
+    .filter((value) => value !== null && value !== undefined && value !== '')
+    .map((value) => Number(value) / 100)
+    .filter(Number.isFinite)
+  const rateioExplicitoTotal = rateiosExplicitados.reduce((sum, value) => sum + value, 0)
+  const semRateioExplicito = linhas.filter((ap) => ap.percentual_rateio === null || ap.percentual_rateio === undefined || ap.percentual_rateio === '')
+  const rateioPadrao = rateiosExplicitados.length === 0
+    ? 1 / Math.max(linhas.length, 1)
+    : Math.max(0, 1 - rateioExplicitoTotal) / Math.max(semRateioExplicito.length, 1)
 
   const resultados = []
 
   for (const ap of linhas) {
     const apresentadoraId = ap.apresentadora_id ?? null
-
-    // 5. Faixa progressiva: busca GMV acumulado do mês + pct da faixa
-    let comissao_apresentadora = 0
-    if (apresentadoraId) {
-      const acumulado = await gmvAcumuladoMes(db, { tenantId, apresentadoraId, mesInicio, mesFim, liveIdAtual: liveId })
-      const gmvTotalComEstaLive = acumulado + gmvNum
-      const faixaPct = await buscarFaixaComissao(db, { tenantId, apresentadoraId, gmvAcumuladoMes: gmvTotalComEstaLive })
-      comissao_apresentadora = gmvNum * (faixaPct / 100)
-    }
+    const rateio      = ap.percentual_rateio !== null && ap.percentual_rateio !== undefined && ap.percentual_rateio !== ''
+      ? Number(ap.percentual_rateio) / 100
+      : rateioPadrao
+    const gmvRateado  = gmvNum * (Number.isFinite(rateio) ? rateio : 0)
+    const apPct       = await resolvePresenterCommissionPct(db, {
+      tenantId,
+      marcaId: live.marca_id,
+      apresentadoraId,
+      origem: 'live',
+      origemId: liveId,
+      data: live.iniciado_em ?? data,
+      gmv: gmvRateado,
+      fallbackLivePct: ap.comissao_live_pct,
+    })
+    const comissao_apresentadora = gmvRateado * (apPct / 100)
+    const comissao_franquia = comissaoFranquiaTotal * (Number.isFinite(rateio) ? rateio : 0)
+    const comissao_franqueadora = comissaoFranqueadoraTotal * (Number.isFinite(rateio) ? rateio : 0)
 
     // 6. Upsert atômico em vendas_atribuidas — evita race condition entre processos paralelos.
     //    ON CONFLICT usa idx_vendas_atribuidas_origem_unique (tenant_id, origem, origem_id,
@@ -161,8 +137,8 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
        WHERE vendas_atribuidas.status_aprovacao != 'aprovada'
        RETURNING *`,
       [
-        tenantId, liveId, live.marca_id, apresentadoraId, dataLive,
-        gmvNum, 0, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
+        tenantId, liveId, live.marca_id, apresentadoraId, data,
+        gmvRateado, 0, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
       ],
     )
 

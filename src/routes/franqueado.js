@@ -1203,7 +1203,8 @@ async function fetchNetworkRanking(app, {
           $7::boolean IS FALSE
           OR (
             t.ranking_publico_ativo IS TRUE
-            AND CONCAT_WS(' ', t.nome, t.ranking_publico_nome) !~* '(teste|test|dev|homolog|staging|t[e3][^[:alpha:]]*st[e3])'
+            AND NULLIF(TRIM(t.ranking_publico_nome), '') IS NOT NULL
+            AND CONCAT_WS(' ', t.nome, t.ranking_publico_nome) !~* '(teste|test|dev|homolog|staging|qa[_ -]?release|release[_ -]?react|teseste|t[e3][^[:alpha:]]*st[e3])'
           )
         )
       ORDER BY COALESCE(la.gmv_mes, 0) DESC, t.nome ASC

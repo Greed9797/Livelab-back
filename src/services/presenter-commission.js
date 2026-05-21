@@ -2,10 +2,16 @@ import { isWeekendInSaoPaulo } from '../lib/timezone.js'
 
 export const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 export const WEEKEND_LIVE_PRESENTER_COMMISSION_PCT = 2
+export const MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT = 0.5
 
 function toNumber(value, fallback = 0) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function livePctWithMinimum(origem, pct) {
+  if (origem !== 'live') return pct
+  return Math.max(MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT, toNumber(pct))
 }
 
 export async function resolvePresenterCommissionPct(db, {
@@ -48,13 +54,14 @@ export async function resolvePresenterCommissionPct(db, {
      LIMIT 1`,
     [tenantId, apresentadoraId, baseGmv],
   )
-  if (faixaQ.rows[0]) return toNumber(faixaQ.rows[0].comissao_pct)
+  if (faixaQ.rows[0]) return livePctWithMinimum(origem, faixaQ.rows[0].comissao_pct)
 
-  if (fallbackLivePct !== undefined || fallbackVideoPct !== undefined) {
-    return toNumber(origem === 'video' ? fallbackVideoPct : fallbackLivePct)
+  const fallbackPct = origem === 'video' ? fallbackVideoPct : fallbackLivePct
+  if (fallbackPct !== undefined && fallbackPct !== null) {
+    return livePctWithMinimum(origem, fallbackPct)
   }
 
-  if (!marcaId) return 0
+  if (!marcaId) return origem === 'live' ? MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT : 0
 
   const vinculoQ = await db.query(
     `SELECT comissao_live_pct, comissao_video_pct
@@ -67,5 +74,7 @@ export async function resolvePresenterCommissionPct(db, {
     [tenantId, marcaId, apresentadoraId],
   )
   const vinculo = vinculoQ.rows[0]
-  return toNumber(origem === 'video' ? vinculo?.comissao_video_pct : vinculo?.comissao_live_pct)
+  const vinculoPct = origem === 'video' ? vinculo?.comissao_video_pct : vinculo?.comissao_live_pct
+  if (vinculoPct !== undefined && vinculoPct !== null) return livePctWithMinimum(origem, vinculoPct)
+  return origem === 'live' ? MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT : 0
 }

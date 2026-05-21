@@ -478,10 +478,35 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
     expect(res.statusCode).toBe(404)
   })
 
-  it('returns 409 when live exists but is not encerrada', async () => {
+  it('allows edit of live em_andamento with new fields', async () => {
+    const liveId = '11111111-1111-1111-1111-111111111111'
+    const tiktokU = 'loja_x'
+    let updateSql = ''
+    let updateArgs = []
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] }) // BEGIN
-      .mockResolvedValueOnce({ rows: [{ id: 'live-1', status: 'em_andamento' }] }) // SELECT live
+      .mockResolvedValueOnce({ rows: [{ id: liveId, status: 'em_andamento', cabine_id: 'cab-1', tiktok_username: null, marca_id: null }] }) // SELECT live
+      .mockImplementationOnce((sql, args) => { updateSql = sql; updateArgs = args; return { rows: [] } }) // UPDATE lives
+      .mockResolvedValueOnce({ rows: [] }) // COMMIT
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}`,
+      payload: { tiktok_username: tiktokU },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(updateSql).toContain('tiktok_username')
+    expect(updateArgs).toContain(tiktokU)
+  })
+
+  it('returns 409 when live is cancelada', async () => {
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: 'live-1', status: 'cancelada' }] }) // SELECT live
       .mockResolvedValueOnce({ rows: [] }) // ROLLBACK
 
     const { app } = buildApp({ queryMock })
@@ -494,6 +519,6 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
     })
 
     expect(res.statusCode).toBe(409)
-    expect(res.json()).toMatchObject({ error: 'Live precisa estar encerrada para edição manual' })
+    expect(res.json()).toMatchObject({ error: 'Live cancelada não pode ser editada' })
   })
 })

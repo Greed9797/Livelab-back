@@ -123,6 +123,11 @@ const liveManualEditSchema = z.object({
   manual_gmv:       moneySchema.optional(),
   tipo:             z.enum(['cliente', 'afiliado', 'teste']).optional(),
   status_publicacao: z.enum(['rascunho', 'revisado', 'publicado']).optional(),
+  agenda_evento_id: z.string().uuid().nullable().optional(),
+  tiktok_username:  z.string().trim().max(80).nullable().optional(),
+  previsto_fim:     z.string().datetime({ offset: true }).nullable().optional(),
+  status:           z.enum(['em_andamento', 'encerrada', 'cancelada']).optional(),
+  origem_dados:     z.enum(['manual', 'api']).optional(),
 })
 
 const publicarSchema = z.object({
@@ -762,7 +767,9 @@ export async function livesRoutes(app) {
         await db.query('BEGIN')
 
         const liveQ = await db.query(
-          `SELECT id, cabine_id, cliente_id, marca_id, status, fat_gerado, manual_gmv, final_orders_count, iniciado_em, encerrado_em
+          `SELECT id, cabine_id, cliente_id, marca_id, apresentador_id, gestor_id, agenda_evento_id, tiktok_username,
+                  previsto_fim, tipo, status_publicacao, origem_dados,
+                  status, fat_gerado, manual_gmv, final_orders_count, iniciado_em, encerrado_em
              FROM lives
             WHERE id = $1
               AND tenant_id = $2::uuid
@@ -774,9 +781,9 @@ export async function livesRoutes(app) {
           await db.query('ROLLBACK')
           return reply.code(404).send({ error: 'Live não encontrada neste tenant' })
         }
-        if (live.status !== 'encerrada') {
+        if (live.status === 'cancelada') {
           await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Live precisa estar encerrada para edição manual' })
+          return reply.code(409).send({ error: 'Live cancelada não pode ser editada' })
         }
 
         const cabineId = d.cabine_id ?? live.cabine_id
@@ -840,6 +847,16 @@ export async function livesRoutes(app) {
         if (d.manual_diamonds !== undefined) addField('manual_diamonds', d.manual_diamonds)
         if (d.manual_orders   !== undefined) addField('manual_orders',   d.manual_orders)
         if (d.manual_gmv      !== undefined) addField('manual_gmv',      d.manual_gmv)
+        if (d.agenda_evento_id !== undefined) addField('agenda_evento_id', d.agenda_evento_id)
+        if (d.tiktok_username !== undefined) addField('tiktok_username', d.tiktok_username)
+        if (d.previsto_fim    !== undefined) addField('previsto_fim',   d.previsto_fim)
+        if (d.origem_dados    !== undefined) addField('origem_dados',   d.origem_dados)
+        if (d.status          !== undefined) {
+          addField('status', d.status)
+          if (d.status === 'encerrada' && !live.encerrado_em) {
+            addField('encerrado_em', new Date().toISOString())
+          }
+        }
 
         if (d.data !== undefined || d.hora_inicio !== undefined || d.hora_fim !== undefined) {
           const currentInicio = new Date(live.iniciado_em)
@@ -914,6 +931,29 @@ export async function livesRoutes(app) {
               )
             }
           }
+        }
+
+        // Audit log — diff de campos efetivamente alterados
+        const auditFields = [
+          'cabine_id', 'cliente_id', 'marca_id', 'apresentador_id', 'gestor_id',
+          'agenda_evento_id', 'tiktok_username', 'previsto_fim', 'tipo',
+          'status', 'status_publicacao', 'origem_dados',
+          'fat_gerado', 'manual_gmv', 'final_orders_count',
+        ]
+        const diff = {}
+        for (const f of auditFields) {
+          const dKey = f === 'final_orders_count' ? 'qtd_pedidos' : f
+          if (d[dKey] !== undefined && String(d[dKey] ?? '') !== String(live[f] ?? '')) {
+            diff[f] = { before: live[f] ?? null, after: d[dKey] ?? null }
+          }
+        }
+        if (Object.keys(diff).length > 0) {
+          app.audit?.log?.(request, {
+            action: 'live.update',
+            entity_type: 'live',
+            entity_id: request.params.id,
+            metadata: { diff },
+          })?.catch?.(err => app.log.warn({ err }, 'audit log live.update falhou'))
         }
 
         await db.query('COMMIT')

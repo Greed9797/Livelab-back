@@ -211,7 +211,7 @@ describe('POST /v1/lives/manual', () => {
       }
       if (sql.includes('FROM cabines')) return { rows: [{ comissao_pct: '0' }] }
       if (sql.includes('SELECT user_id FROM apresentadoras')) return { rows: [{ user_id: null }] }
-      if (sql.includes('SELECT id FROM lives')) return { rows: [] }
+      if (sql.includes('FROM lives') && sql.includes('status NOT IN')) return { rows: [] }
       if (sql.includes('INSERT INTO lives')) {
         insertArgs = args
         return { rows: [{ id: 'live-afiliada' }] }
@@ -274,6 +274,60 @@ describe('POST /v1/lives/manual', () => {
 
     expect(junctionCalls).toHaveLength(1)
     expect(junctionCalls[0].args[2]).toBe(ap2UserId)
+  })
+
+  it('checks manual live conflicts with tenant scope, semi-open intervals and diagnostic response', async () => {
+    let overlapSql = ''
+    let overlapArgs = []
+    const conflict = {
+      id: 'live-overlap',
+      status: 'em_andamento',
+      cabine_id: basePayload.cabine_id,
+      iniciado_em: '2026-05-01T17:00:00-03:00',
+      encerrado_em: null,
+      previsto_fim: '2026-05-01T21:00:00-03:00',
+    }
+    const queryMock = vi.fn(async (sql, args = []) => {
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('FROM clientes')) return { rows: [{ status: 'ativo' }] }
+      if (sql.includes('FROM cabines')) return { rows: [{ comissao_pct: '0' }] }
+      if (sql.includes('SELECT user_id FROM apresentadoras')) return { rows: [{ user_id: 'user-ap-1' }] }
+      if (sql.includes('FROM lives') && sql.includes('status NOT IN')) {
+        overlapSql = sql
+        overlapArgs = args
+        return { rows: [conflict] }
+      }
+      return { rows: [] }
+    })
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/lives/manual',
+      payload: basePayload,
+    })
+
+    expect(res.statusCode).toBe(409)
+    expect(overlapSql).toContain('tenant_id = $4::uuid')
+    expect(overlapSql).toContain('iniciado_em < $3::timestamptz')
+    expect(overlapSql).toContain("COALESCE(encerrado_em, previsto_fim, iniciado_em + interval '4 hours') > $2::timestamptz")
+    expect(overlapArgs).toEqual([
+      basePayload.cabine_id,
+      '2026-05-01T18:00:00-03:00',
+      '2026-05-01T20:00:00-03:00',
+      'tenant-1',
+    ])
+    expect(res.json()).toMatchObject({
+      code: 'LIVE_MANUAL_OVERLAP',
+      conflito: {
+        id: conflict.id,
+        status: conflict.status,
+        cabine_id: conflict.cabine_id,
+      },
+    })
+    expect(res.json().error).toContain('Encerre a live existente ou altere o horário')
   })
 
   it('returns 400 when hora_fim <= hora_inicio', async () => {

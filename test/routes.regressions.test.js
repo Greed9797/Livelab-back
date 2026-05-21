@@ -1008,7 +1008,7 @@ describe('Route regressions: SQL and RBAC', () => {
     await app.close()
   })
 
-  it('live-atual retorna live_id no payload', async () => {
+  it('live-atual retorna live_id e dados da marca no payload', async () => {
     const app = Fastify()
     const liveId = 'live-uuid-123'
     const cabineId = 'cabine-uuid-456'
@@ -1016,7 +1016,7 @@ describe('Route regressions: SQL and RBAC', () => {
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [{ live_atual_id: liveId, status: 'ao_vivo' }] })  // cabine query
       .mockResolvedValueOnce({ rows: [{ id: liveId }] })  // lives em_andamento search
-      .mockResolvedValueOnce({ rows: [{ iniciado_em: new Date().toISOString(), fat_gerado: 0, contrato_id: null, apresentador_nome: 'Closer', cliente_nome: 'Parceiro', tiktok_username: null }] })  // live full data
+      .mockResolvedValueOnce({ rows: [{ iniciado_em: new Date().toISOString(), fat_gerado: 0, contrato_id: null, apresentador_nome: 'Closer', cliente_nome: 'Parceiro', tiktok_username: null, marca_id: 'marca-1', marca_nome: 'Marca Parceira', marca_logo_url: 'https://cdn.example.com/logo.png' }] })  // live full data
       .mockResolvedValueOnce({ rows: [{ viewer_count: 10, total_viewers: 0, total_orders: 2, gmv: 500, likes_count: 50, comments_count: 30, gifts_diamonds: 0, shares_count: 0 }] })  // snapshot
       .mockResolvedValueOnce({ rows: [] })  // top produto
     const releaseMock = vi.fn()
@@ -1043,7 +1043,12 @@ describe('Route regressions: SQL and RBAC', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(response.json()).toMatchObject({ live_id: liveId })
+    expect(response.json()).toMatchObject({
+      live_id: liveId,
+      marca_id: 'marca-1',
+      marca_nome: 'Marca Parceira',
+      marca_logo_url: 'https://cdn.example.com/logo.png',
+    })
 
     await app.close()
   })

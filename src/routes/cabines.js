@@ -786,15 +786,33 @@ export async function cabinesRoutes(app) {
 
       const liveQ = await db.query(`
         SELECT l.iniciado_em, l.fat_gerado,
+               l.marca_id,
                c.contrato_id,
                u.nome AS apresentador_nome,
                cl.nome AS cliente_nome,
-               ct.tiktok_username
+               m.nome AS marca_nome,
+               m.logo_url AS marca_logo_url,
+               COALESCE(m.tiktok_username, ct.tiktok_username) AS tiktok_username
         FROM lives l
         LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
         LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
         LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
         LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
+        LEFT JOIN LATERAL (
+          SELECT m2.id, m2.nome, m2.logo_url, m2.tiktok_username
+          FROM marcas m2
+          WHERE m2.tenant_id = l.tenant_id
+            AND (
+              m2.id = l.marca_id
+              OR (
+                l.marca_id IS NULL
+                AND m2.cliente_id = l.cliente_id
+                AND m2.status = 'ativa'
+              )
+            )
+          ORDER BY CASE WHEN m2.id = l.marca_id THEN 0 ELSE 1 END, m2.criado_em ASC
+          LIMIT 1
+        ) m ON true
         WHERE l.id = $1 AND l.tenant_id = $2
       `, [liveId, tenant_id])
       const liveData = liveQ.rows[0]
@@ -845,6 +863,9 @@ export async function cabinesRoutes(app) {
         shares_count: Number(snapshot.shares_count ?? 0),
         duracao_minutos: duracaoMinutos,
         cliente_nome: liveData.cliente_nome ?? '',
+        marca_id: liveData.marca_id ?? null,
+        marca_nome: liveData.marca_nome ?? '',
+        marca_logo_url: liveData.marca_logo_url ?? null,
         apresentador_nome: liveData.apresentador_nome ?? '',
         iniciado_em: liveData.iniciado_em,
         top_produto: topProduto ? {

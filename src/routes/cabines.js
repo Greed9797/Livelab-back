@@ -82,6 +82,7 @@ export async function cabinesRoutes(app) {
                 m_live.id AS marca_id,
                 m_live.nome AS marca_nome,
                 COALESCE(m_live.logo_url, agenda_next.marca_logo_url) AS marca_logo_url,
+                COALESCE(m_live.site, agenda_next.marca_site) AS marca_site,
                 agenda_next.marca_id AS proxima_marca_id,
                 agenda_next.marca_nome AS proxima_marca_nome,
                 u.nome AS apresentador_nome,
@@ -126,6 +127,7 @@ export async function cabinesRoutes(app) {
                   ae.marca_id,
                   m.nome AS marca_nome,
                   m.logo_url AS marca_logo_url,
+                  m.site AS marca_site,
                   m.cliente_id,
                   cl2.nome AS cliente_nome
            FROM agenda_eventos ae

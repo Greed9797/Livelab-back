@@ -163,12 +163,19 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       // Defesa em profundidade: WHERE cl.tenant_id explícito porque role
       // postgres do Supabase tem rolbypassrls=true (ADR 0003).
+      const mesInicio = (() => {
+        const n = new Date()
+        return `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-01`
+      })()
       const result = await db.query(
         `SELECT cl.id, cl.nome, cl.celular, cl.email, cl.status, cl.lat, cl.lng,
                 cl.fat_anual, cl.nicho, cl.score, cl.cep, cl.cidade, cl.estado,
                 cl.siga, cl.criado_em, cl.meta_diaria_gmv, cl.logo_url, cl.tiktok_username,
                 c.horas_contratadas, c.horas_consumidas,
-                (c.horas_contratadas - c.horas_consumidas) AS horas_restantes
+                (c.horas_contratadas - c.horas_consumidas) AS horas_restantes,
+                COALESCE(lm.gmv_mes, 0)::float AS gmv_mes,
+                COALESCE(lm.total_lives_mes, 0)::int AS total_lives_mes,
+                COALESCE(ap.apresentadoras_nomes, '[]'::json) AS apresentadoras_nomes
          FROM clientes cl
          LEFT JOIN LATERAL (
            SELECT horas_contratadas, horas_consumidas
@@ -177,11 +184,30 @@ export async function clientesRoutes(app) {
            ORDER BY ativado_em DESC NULLS LAST
            LIMIT 1
          ) c ON true
+         LEFT JOIN LATERAL (
+           SELECT
+             COALESCE(SUM(l.fat_gerado), 0) AS gmv_mes,
+             COUNT(l.id)::int AS total_lives_mes
+           FROM lives l
+           WHERE l.cliente_id = cl.id
+             AND l.tenant_id = $1::uuid
+             AND l.status = 'encerrada'
+             AND l.iniciado_em >= $2::date
+         ) lm ON true
+         LEFT JOIN LATERAL (
+           SELECT json_agg(DISTINCT u.nome ORDER BY u.nome) AS apresentadoras_nomes
+           FROM lives l
+           JOIN users u ON u.id = l.apresentador_id
+           WHERE l.cliente_id = cl.id
+             AND l.tenant_id = $1::uuid
+             AND l.status = 'encerrada'
+             AND u.nome IS NOT NULL
+         ) ap ON true
          WHERE cl.tenant_id = $1::uuid
            AND cl.status IN ('ativo', 'inadimplente', 'cancelado')
            AND cl.deleted_at IS NULL
          ORDER BY cl.criado_em DESC`,
-        [tenant_id]
+        [tenant_id, mesInicio]
       )
       return result.rows
     })

@@ -23,7 +23,24 @@ const updateSchema = createSchema.partial().extend({
   ativo: z.boolean().optional(),
 })
 
-const COLS = `id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, valor_fixo_mensal, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
+const COLS = `a.id, a.nome, a.telefone, a.cargo, a.email, a.cpf_cnpj, a.cidade, a.ativo, a.fixo, a.comissao_pct, a.meta_diaria_gmv, a.valor_fixo_mensal, a.observacoes, a.link_contrato, a.data_aniversario, a.data_inicio, a.data_fim, a.criado_em, a.user_id`
+
+const STATS = `
+  COALESCE(stats.total_lives, 0)::int AS total_lives,
+  COALESCE(stats.total_faturamento, 0)::float AS total_faturamento
+`
+
+const STATS_JOIN = `
+  LEFT JOIN LATERAL (
+    SELECT
+      COUNT(DISTINCT l.id)::int AS total_lives,
+      COALESCE(SUM(l.fat_gerado), 0) AS total_faturamento
+    FROM lives l
+    WHERE l.tenant_id = a.tenant_id
+      AND l.apresentador_id = a.user_id
+      AND l.status = 'encerrada'
+  ) stats ON true
+`
 
 export async function apresentadorasRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_APRESENTADORAS)]
@@ -34,7 +51,9 @@ export async function apresentadorasRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT ${COLS} FROM apresentadoras a
+        `SELECT ${COLS}, ${STATS}
+         FROM apresentadoras a
+         ${STATS_JOIN}
          WHERE a.tenant_id = $1::uuid
          ORDER BY a.ativo DESC, a.nome ASC`,
         [tenant_id]
@@ -43,12 +62,68 @@ export async function apresentadorasRoutes(app) {
     })
   })
 
+  // GET /v1/apresentadoras/sem-usuario — usuários com papel apresentadora/apresentador
+  // que não têm registro correspondente em apresentadoras (diagnóstico)
+  app.get('/v1/apresentadoras/sem-usuario', { preHandler: readAccess }, async (request) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT u.id, u.nome, u.email, u.papel, u.criado_em
+         FROM users u
+         WHERE u.tenant_id = $1::uuid
+           AND u.papel IN ('apresentador', 'apresentadora')
+           AND u.ativo = true
+           AND NOT EXISTS (
+             SELECT 1 FROM apresentadoras a
+             WHERE a.user_id = u.id AND a.tenant_id = $1::uuid
+           )
+         ORDER BY u.criado_em DESC`,
+        [tenant_id]
+      )
+      return result.rows
+    })
+  })
+
+  // POST /v1/apresentadoras/do-usuario/:userId — cria registro em apresentadoras
+  // para um usuário com papel apresentadora/apresentador que não tem registro
+  app.post('/v1/apresentadoras/do-usuario/:userId', { preHandler: writeAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { userId } = request.params
+    return app.withTenant(tenant_id, async (db) => {
+      const userRow = await db.query(
+        `SELECT id, nome, email, papel FROM users
+         WHERE id = $1 AND tenant_id = $2::uuid AND papel IN ('apresentador','apresentadora')`,
+        [userId, tenant_id]
+      )
+      if (!userRow.rows[0]) return reply.code(404).send({ error: 'Usuário não encontrado ou papel incompatível' })
+      const u = userRow.rows[0]
+
+      const existing = await db.query(
+        `SELECT id FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid`,
+        [userId, tenant_id]
+      )
+      if (existing.rows[0]) return reply.code(409).send({ error: 'Usuário já vinculado a uma apresentadora', apresentadora_id: existing.rows[0].id })
+
+      const result = await db.query(
+        `INSERT INTO apresentadoras (tenant_id, nome, email, user_id, fixo, comissao_pct, meta_diaria_gmv, valor_fixo_mensal)
+         VALUES ($1, $2, $3, $4, 0, 0, 0, 0)
+         RETURNING id, nome, email, user_id`,
+        [tenant_id, u.nome, u.email ?? null, userId]
+      )
+      app.audit?.log?.(request, { action: 'apresentadora.create_from_user', entity_type: 'apresentadora', entity_id: result.rows[0].id, metadata: { user_id: userId, nome: u.nome } })?.catch(() => {})
+      return reply.code(201).send(result.rows[0])
+    })
+  })
+
   // GET /v1/apresentadoras/:id
   app.get('/v1/apresentadoras/:id', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT ${COLS} FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+        `SELECT ${COLS}, ${STATS}
+         FROM apresentadoras a
+         ${STATS_JOIN}
+         WHERE a.id = $1 AND a.tenant_id = $2::uuid`,
         [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
@@ -67,7 +142,7 @@ export async function apresentadorasRoutes(app) {
       const result = await db.query(
         `INSERT INTO apresentadoras (tenant_id, nome, telefone, cargo, email, cpf_cnpj, cidade, fixo, comissao_pct, meta_diaria_gmv, valor_fixo_mensal, observacoes, link_contrato, data_aniversario, data_inicio, data_fim)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-         RETURNING ${COLS}`,
+         RETURNING id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, valor_fixo_mensal, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em, user_id`,
         [tenant_id, d.nome, d.telefone ?? null, d.cargo ?? null, d.email ?? null,
          d.cpf_cnpj ?? null, d.cidade ?? null, d.fixo, d.comissao_pct, d.meta_diaria_gmv, d.valor_fixo_mensal,
          d.observacoes ?? null, d.link_contrato ?? null, d.data_aniversario ?? null, d.data_inicio ?? null, d.data_fim ?? null]
@@ -94,7 +169,7 @@ export async function apresentadorasRoutes(app) {
       const result = await db.query(
         `UPDATE apresentadoras SET ${setClauses}
          WHERE id = $1 AND tenant_id = $2::uuid
-         RETURNING ${COLS}`,
+         RETURNING id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, valor_fixo_mensal, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em, user_id`,
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })

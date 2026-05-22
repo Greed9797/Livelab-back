@@ -809,10 +809,7 @@ export async function livesRoutes(app) {
         let resolvedApresentadorId
         if (d.apresentador_id !== undefined) {
           if (d.apresentador_id === null) {
-<<<<<<< HEAD
             // Desvincula apresentadora principal.
-=======
->>>>>>> af38243 (fix: liveManualEditSchema — campos UUID nullable + guard null em apresentador_id/marca_id)
             resolvedApresentadorId = null
           } else {
             const apRow = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid', [d.apresentador_id, tenant_id])

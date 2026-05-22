@@ -1014,6 +1014,9 @@ export async function livesRoutes(app) {
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
                 COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
+                ap_extra.apresentadora_id AS apresentadora2_id,
+                ap_extra.apresentadora_id AS apresentador2_id,
+                ap_extra.nome AS apresentadora2_nome,
                 COALESCE(l.agenda_evento_id, ae.id) AS agenda_evento_id,
                 ae.data_inicio AS agenda_data_inicio,
                 ae.data_fim AS agenda_data_fim,
@@ -1046,6 +1049,21 @@ export async function livesRoutes(app) {
            ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
            LIMIT 1
          ) ap_v2 ON true
+         LEFT JOIN LATERAL (
+           SELECT ap_extra_profile.id AS apresentadora_id,
+                  COALESCE(ap_extra_profile.nome, u_extra.nome) AS nome
+           FROM live_apresentadores la_extra
+           LEFT JOIN users u_extra
+             ON u_extra.id = la_extra.apresentador_id
+            AND u_extra.tenant_id = la_extra.tenant_id
+           LEFT JOIN apresentadoras ap_extra_profile
+             ON ap_extra_profile.user_id = la_extra.apresentador_id
+            AND ap_extra_profile.tenant_id = la_extra.tenant_id
+           WHERE la_extra.live_id = l.id
+             AND la_extra.tenant_id = l.tenant_id
+           ORDER BY la_extra.criado_em ASC
+           LIMIT 1
+         ) ap_extra ON true
          LEFT JOIN LATERAL (
            SELECT m.id AS marca_id, m.nome AS marca_nome
            FROM marcas m
@@ -1113,6 +1131,9 @@ export async function livesRoutes(app) {
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
                 COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
+                ap_extra.apresentadora_id AS apresentadora2_id,
+                ap_extra.apresentadora_id AS apresentador2_id,
+                ap_extra.nome AS apresentadora2_nome,
                 COALESCE(l.agenda_evento_id, ae.id) AS agenda_evento_id,
                 ae.data_inicio AS agenda_data_inicio,
                 ae.data_fim AS agenda_data_fim,
@@ -1142,6 +1163,21 @@ export async function livesRoutes(app) {
            ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
            LIMIT 1
          ) ap_v2 ON true
+         LEFT JOIN LATERAL (
+           SELECT ap_extra_profile.id AS apresentadora_id,
+                  COALESCE(ap_extra_profile.nome, u_extra.nome) AS nome
+           FROM live_apresentadores la_extra
+           LEFT JOIN users u_extra
+             ON u_extra.id = la_extra.apresentador_id
+            AND u_extra.tenant_id = la_extra.tenant_id
+           LEFT JOIN apresentadoras ap_extra_profile
+             ON ap_extra_profile.user_id = la_extra.apresentador_id
+            AND ap_extra_profile.tenant_id = la_extra.tenant_id
+           WHERE la_extra.live_id = l.id
+             AND la_extra.tenant_id = l.tenant_id
+           ORDER BY la_extra.criado_em ASC
+           LIMIT 1
+         ) ap_extra ON true
          LEFT JOIN LATERAL (
            SELECT m.id AS marca_id, m.nome AS marca_nome
            FROM marcas m

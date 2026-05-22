@@ -120,11 +120,7 @@ export async function apresentadorasRoutes(app) {
     const { tenant_id, papel, sub: userId } = request.user
     return app.withTenant(tenant_id, async (db) => {
       // Resolve id real da apresentadora (aceita user_id de usuário apresentador).
-      const apresentadoraQ = await db.query(
-        `SELECT id FROM apresentadoras WHERE (id = $1 OR user_id = $1) AND tenant_id = $2::uuid LIMIT 1`,
-        [request.params.id, tenant_id],
-      )
-      const apresentadoraId = apresentadoraQ.rows[0]?.id
+      const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
       if (!apresentadoraId) return [] // sem perfil ainda → sem faixas
 
       if (!READ_APRESENTADORAS.includes(papel)) {
@@ -135,6 +131,7 @@ export async function apresentadorasRoutes(app) {
         )
         if (!own.rows[0]) return reply.code(403).send({ error: 'Acesso negado' })
       }
+
       const result = await db.query(
         `SELECT id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo, criado_em, atualizado_em
          FROM apresentadora_comissao_faixas
@@ -178,11 +175,7 @@ export async function apresentadorasRoutes(app) {
 
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const apQ = await db.query(
-        `SELECT id FROM apresentadoras WHERE (id = $1 OR user_id = $1) AND tenant_id = $2::uuid LIMIT 1`,
-        [request.params.id, tenant_id],
-      )
-      const apresentadoraId = apQ.rows[0]?.id
+      const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
       if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
 
       const set = fields.map((field, index) => `${field} = $${index + 4}`).concat('atualizado_em = NOW()').join(', ')
@@ -203,12 +196,9 @@ export async function apresentadorasRoutes(app) {
   app.delete('/v1/apresentadoras/:id/faixas-comissao/:faixaId', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const apQ = await db.query(
-        `SELECT id FROM apresentadoras WHERE (id = $1 OR user_id = $1) AND tenant_id = $2::uuid LIMIT 1`,
-        [request.params.id, tenant_id],
-      )
-      const apresentadoraId = apQ.rows[0]?.id
+      const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
       if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+
       const result = await db.query(
         `UPDATE apresentadora_comissao_faixas
          SET ativo = false, atualizado_em = NOW()
@@ -225,9 +215,12 @@ export async function apresentadorasRoutes(app) {
   app.get('/v1/apresentadoras/:id', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
+      if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+
       const result = await db.query(
         `SELECT ${COLS} FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
-        [request.params.id, tenant_id]
+        [apresentadoraId, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
       return result.rows[0]
@@ -236,22 +229,9 @@ export async function apresentadorasRoutes(app) {
 
   // POST /v1/apresentadoras
   app.post('/v1/apresentadoras', { preHandler: writeAccess }, async (request, reply) => {
-    const parsed = createSchema.safeParse(request.body)
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
-
-    const { tenant_id } = request.user
-    const d = parsed.data
-    return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `INSERT INTO apresentadoras (tenant_id, nome, telefone, cargo, email, cpf_cnpj, cidade, fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-         RETURNING ${COLS}`,
-        [tenant_id, d.nome, d.telefone ?? null, d.cargo ?? null, d.email ?? null,
-         d.cpf_cnpj ?? null, d.cidade ?? null, d.fixo, d.comissao_pct, d.meta_diaria_gmv, d.observacoes ?? null,
-         d.link_contrato ?? null, d.data_aniversario ?? null, d.data_inicio ?? null, d.data_fim ?? null]
-      )
-      app.audit?.log?.(request, { action: 'apresentadora.create', entity_type: 'apresentadora', entity_id: result.rows[0].id, metadata: { nome: d.nome, cargo: d.cargo ?? null, fixo: d.fixo, comissao_pct: d.comissao_pct } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      return reply.code(201).send(result.rows[0])
+    return reply.code(410).send({
+      error: 'Cadastro direto de apresentadora foi desativado. Crie ou vincule apresentadoras em Configurações > Usuários.',
+      flow: 'usuarios.convidar',
     })
   })
 
@@ -287,14 +267,17 @@ export async function apresentadorasRoutes(app) {
   app.delete('/v1/apresentadoras/:id', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
+      if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+
       const result = await db.query(
         `UPDATE apresentadoras SET ativo = false
          WHERE id = $1 AND tenant_id = $2::uuid
          RETURNING id`,
-        [request.params.id, tenant_id]
+        [apresentadoraId, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
-      app.audit?.log?.(request, { action: 'apresentadora.delete', entity_type: 'apresentadora', entity_id: request.params.id, metadata: { soft_delete: true } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      app.audit?.log?.(request, { action: 'apresentadora.delete', entity_type: 'apresentadora', entity_id: apresentadoraId, metadata: { soft_delete: true } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(204).send()
     })
   })

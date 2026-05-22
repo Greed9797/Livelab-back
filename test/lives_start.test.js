@@ -43,6 +43,7 @@ describe('POST /v1/lives', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
           rows: [{ id: liveId, cabine_id: cabineId, iniciado_em: '2026-05-15T18:00:00.000Z', cliente_id: clienteId, apresentador_id: null }],
       })
@@ -96,7 +97,7 @@ describe('POST /v1/lives', () => {
         }
       }
       if (sql.includes('UPDATE agenda_eventos SET status')) return { rows: [] }
-      if (sql.includes('SELECT cliente_id, tipo, tiktok_username') && sql.includes('FROM marcas')) {
+      if (sql.includes('SELECT m.cliente_id, m.tipo') && sql.includes('FROM marcas m')) {
         return { rows: [{ cliente_id: null, tipo: 'afiliada', tiktok_username: 'haag_live' }] }
       }
       if (sql.includes('SELECT user_id FROM apresentadoras')) {

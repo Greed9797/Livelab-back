@@ -505,8 +505,8 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
     let updateArgs = []
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] }) // BEGIN
-      .mockResolvedValueOnce({ rows: [{ id: liveId, status: 'em_andamento', cabine_id: 'cab-1', tiktok_username: null, marca_id: null }] }) // SELECT live
-      .mockImplementationOnce((sql, args) => { updateSql = sql; updateArgs = args; return { rows: [] } }) // UPDATE lives
+      .mockResolvedValueOnce({ rows: [{ id: liveId, status: 'em_andamento', cabine_id: 'cab-1', cliente_id: 'cliente-1', tiktok_username: null, marca_id: null }] }) // SELECT live
+      .mockImplementationOnce((sql, args) => { updateSql = sql; updateArgs = args; return { rows: [] } }) // UPDATE cliente canonical TikTok
       .mockResolvedValueOnce({ rows: [] }) // COMMIT
 
     const { app } = buildApp({ queryMock })
@@ -519,6 +519,7 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
     })
 
     expect(res.statusCode).toBe(200)
+    expect(updateSql).toContain('UPDATE clientes')
     expect(updateSql).toContain('tiktok_username')
     expect(updateArgs).toContain(tiktokU)
   })

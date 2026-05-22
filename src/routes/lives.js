@@ -7,6 +7,7 @@ import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { moneySchema } from '../lib/money.js'
 import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
+import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 
 function parseIntegerMetric(value) {
   if (typeof value === 'number') return value
@@ -48,7 +49,7 @@ const iniciarLiveSchema = z.object({
   marca_id: z.string().uuid().optional().nullable(),
   apresentador_id: z.string().uuid().optional().nullable(),
   apresentadora_id: z.string().uuid().optional().nullable(),
-  tiktok_username: z.string().max(100).optional().nullable(),
+  tiktok_username: tiktokUsernameField,
   tipo: z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
   agenda_evento_id: z.string().uuid().optional().nullable(),
   previsto_fim: z.string().datetime({ offset: true }).optional().nullable(),
@@ -124,7 +125,7 @@ const liveManualEditSchema = z.object({
   tipo:             z.enum(['cliente', 'afiliado', 'teste']).optional(),
   status_publicacao: z.enum(['rascunho', 'revisado', 'publicado']).optional(),
   agenda_evento_id: z.string().uuid().nullable().optional(),
-  tiktok_username:  z.string().trim().max(80).nullable().optional(),
+  tiktok_username:  tiktokUsernameField,
   previsto_fim:     z.string().datetime({ offset: true }).nullable().optional(),
   status:           z.enum(['em_andamento', 'encerrada', 'cancelada']).optional(),
   origem_dados:     z.enum(['manual', 'api']).optional(),
@@ -161,7 +162,8 @@ export async function livesRoutes(app) {
     } = parsed.data
     const requestedApresentadoraId = requestedApresentadoraIdNew ?? requestedApresentadoraIdLegacy ?? null
     const previstoFim = rawPrevistoFim ? new Date(rawPrevistoFim) : null
-    let tiktokUsername = rawTiktok ? rawTiktok.replace(/^@/, '').trim() || null : null
+    const hasTikTokUpdate = rawTiktok !== undefined
+    let tiktokUsername = rawTiktok ?? null
     const ip = getRequestIp(request)
     return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
@@ -207,9 +209,10 @@ export async function livesRoutes(app) {
                       ae.data_fim, ae.live_id,
                       m.cliente_id AS marca_cliente_id,
                       m.tipo AS marca_tipo,
-                      m.tiktok_username AS marca_tiktok_username
+                      ${tiktokUsernameSql({ marca: 'm', cliente: 'cl_marca' })} AS marca_tiktok_username
                FROM agenda_eventos ae
                LEFT JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
+               LEFT JOIN clientes cl_marca ON cl_marca.id = m.cliente_id AND cl_marca.tenant_id = ae.tenant_id
                WHERE ae.id = $1 AND ae.tenant_id = $2`,
               [agenda_evento_id, tenant_id]
             )
@@ -229,9 +232,10 @@ export async function livesRoutes(app) {
                       ae.data_fim, ae.live_id,
                       m.cliente_id AS marca_cliente_id,
                       m.tipo AS marca_tipo,
-                      m.tiktok_username AS marca_tiktok_username
+                      ${tiktokUsernameSql({ marca: 'm', cliente: 'cl_marca' })} AS marca_tiktok_username
                FROM agenda_eventos ae
                LEFT JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
+               LEFT JOIN clientes cl_marca ON cl_marca.id = m.cliente_id AND cl_marca.tenant_id = ae.tenant_id
                WHERE ae.cabine_id = $1
                  AND ae.tenant_id = $2
                  AND ae.tipo = 'live'
@@ -250,9 +254,7 @@ export async function livesRoutes(app) {
             resolvedMarcaId = agendaEvento.marca_id ?? resolvedMarcaId
             resolvedApresentadoraId = agendaEvento.apresentadora_id ?? resolvedApresentadoraId
             resolvedPrevistoFim = resolvedPrevistoFim ?? (agendaEvento.data_fim ? new Date(agendaEvento.data_fim) : null)
-            if (!tiktokUsername && agendaEvento.marca_tiktok_username) {
-              tiktokUsername = String(agendaEvento.marca_tiktok_username).replace(/^@/, '').trim() || null
-            }
+            if (!tiktokUsername && agendaEvento.marca_tiktok_username) tiktokUsername = agendaEvento.marca_tiktok_username
             if (!requestedClienteId && agendaEvento.marca_tipo && agendaEvento.marca_tipo !== 'cliente') {
               resolvedTipo = agendaEvento.marca_tipo === 'afiliada' ? 'afiliado' : 'teste'
             }
@@ -275,9 +277,10 @@ export async function livesRoutes(app) {
         let resolvedClienteId = resolvedAgendaClienteId ?? requestedClienteId ?? null
         if (!resolvedClienteId && resolvedMarcaId) {
           const marcaQ = await db.query(
-            `SELECT cliente_id, tipo, tiktok_username
-             FROM marcas
-             WHERE id = $1 AND tenant_id = $2::uuid`,
+            `SELECT m.cliente_id, m.tipo, ${tiktokUsernameSql({ marca: 'm', cliente: 'cl_marca' })} AS tiktok_username
+             FROM marcas m
+             LEFT JOIN clientes cl_marca ON cl_marca.id = m.cliente_id AND cl_marca.tenant_id = m.tenant_id
+             WHERE m.id = $1 AND m.tenant_id = $2::uuid`,
             [resolvedMarcaId, tenant_id]
           )
           const marca = marcaQ.rows[0]
@@ -289,9 +292,7 @@ export async function livesRoutes(app) {
           if (!requestedClienteId && marca.tipo && marca.tipo !== 'cliente') {
             resolvedTipo = marca.tipo === 'afiliada' ? 'afiliado' : 'teste'
           }
-          if (!tiktokUsername && marca.tiktok_username) {
-            tiktokUsername = String(marca.tiktok_username).replace(/^@/, '').trim() || null
-          }
+          if (!tiktokUsername && marca.tiktok_username) tiktokUsername = marca.tiktok_username
         }
         if (!['reservada', 'ativa'].includes(cabine.status) || !cabine.contrato_id) {
           if (!['disponivel', 'ativa', 'reservada'].includes(cabine.status)) {
@@ -399,11 +400,14 @@ export async function livesRoutes(app) {
           }
         }
 
-        if (tiktokUsername && resolvedContratoId) {
-          await db.query(
-            `UPDATE contratos SET tiktok_username = $1 WHERE id = $2 AND tenant_id = $3::uuid`,
-            [tiktokUsername, resolvedContratoId, tenant_id]
-          )
+        if (hasTikTokUpdate) {
+          await updateCanonicalTikTokUsername(db, {
+            tenantId: tenant_id,
+            username: tiktokUsername,
+            marcaId: resolvedMarcaId,
+            clienteId: resolvedClienteId,
+            contratoId: resolvedContratoId,
+          })
         }
 
         let apresentadorUserId = null
@@ -767,13 +771,19 @@ export async function livesRoutes(app) {
         await db.query('BEGIN')
 
         const liveQ = await db.query(
-          `SELECT id, cabine_id, cliente_id, marca_id, apresentador_id, gestor_id, agenda_evento_id, tiktok_username,
-                  previsto_fim, tipo, status_publicacao, origem_dados,
-                  status, fat_gerado, manual_gmv, final_orders_count, iniciado_em, encerrado_em
-             FROM lives
-            WHERE id = $1
-              AND tenant_id = $2::uuid
-            FOR UPDATE`,
+          `SELECT l.id, l.cabine_id, l.cliente_id, l.marca_id, l.apresentador_id, l.gestor_id, l.agenda_evento_id,
+                  ${tiktokUsernameSql({ marca: 'm_current', cliente: 'cl_tiktok', contrato: 'ct' })} AS tiktok_username,
+                  l.previsto_fim, l.tipo, l.status_publicacao, l.origem_dados,
+                  l.status, l.fat_gerado, l.manual_gmv, l.final_orders_count, l.iniciado_em, l.encerrado_em,
+                  c.contrato_id
+             FROM lives l
+             LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+             LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
+             LEFT JOIN marcas m_current ON m_current.id = l.marca_id AND m_current.tenant_id = l.tenant_id
+             LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(m_current.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id
+            WHERE l.id = $1
+              AND l.tenant_id = $2::uuid
+            FOR UPDATE OF l`,
           [request.params.id, tenant_id]
         )
         const live = liveQ.rows[0]
@@ -854,7 +864,6 @@ export async function livesRoutes(app) {
         if (d.manual_orders   !== undefined) addField('manual_orders',   d.manual_orders)
         if (d.manual_gmv      !== undefined) addField('manual_gmv',      d.manual_gmv)
         if (d.agenda_evento_id !== undefined) addField('agenda_evento_id', d.agenda_evento_id)
-        if (d.tiktok_username !== undefined) addField('tiktok_username', d.tiktok_username)
         if (d.previsto_fim    !== undefined) addField('previsto_fim',   d.previsto_fim)
         if (d.origem_dados    !== undefined) addField('origem_dados',   d.origem_dados)
         if (d.status          !== undefined) {
@@ -882,6 +891,16 @@ export async function livesRoutes(app) {
           values.push(request.params.id)
           values.push(tenant_id)
           await db.query(`UPDATE lives SET ${updates.join(', ')} WHERE id = $${idx} AND tenant_id = $${idx + 1}::uuid`, values)
+        }
+
+        if (d.tiktok_username !== undefined) {
+          await updateCanonicalTikTokUsername(db, {
+            tenantId: tenant_id,
+            username: d.tiktok_username,
+            marcaId: d.marca_id !== undefined ? d.marca_id : live.marca_id,
+            clienteId: resolvedClienteId !== undefined ? resolvedClienteId : live.cliente_id,
+            contratoId: live.contrato_id,
+          })
         }
 
         if (d.apresentador_id !== undefined) {
@@ -1017,6 +1036,7 @@ export async function livesRoutes(app) {
                 cl.nome AS cliente_nome,
                 COALESCE(l.marca_id, va_marca.marca_id) AS marca_id,
                 va_marca.marca_nome AS marca_nome,
+                ${tiktokUsernameSql({ marca: 'va_marca', cliente: 'cl_tiktok', contrato: 'ct' })} AS tiktok_username,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
                 COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
@@ -1032,6 +1052,7 @@ export async function livesRoutes(app) {
                 ls.gifts_diamonds, ls.shares_count
          FROM lives l
          JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+         LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
          LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
          LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
@@ -1071,7 +1092,7 @@ export async function livesRoutes(app) {
            LIMIT 1
          ) ap_extra ON true
          LEFT JOIN LATERAL (
-           SELECT m.id AS marca_id, m.nome AS marca_nome
+           SELECT m.id, m.id AS marca_id, m.nome AS marca_nome, m.tipo, m.cliente_id, m.tiktok_username
            FROM marcas m
            LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id
             AND va.tenant_id = m.tenant_id
@@ -1082,6 +1103,7 @@ export async function livesRoutes(app) {
            ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
            LIMIT 1
          ) va_marca ON true
+         LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id
          LEFT JOIN LATERAL (
            SELECT viewer_count, total_viewers, total_orders, gmv,
                   likes_count, comments_count, gifts_diamonds, shares_count
@@ -1134,6 +1156,7 @@ export async function livesRoutes(app) {
                 cl.nome AS cliente_nome,
                 COALESCE(l.marca_id, va_marca.marca_id) AS marca_id,
                 va_marca.marca_nome AS marca_nome,
+                ${tiktokUsernameSql({ marca: 'va_marca', cliente: 'cl_tiktok', contrato: 'ct' })} AS tiktok_username,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
                 COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
@@ -1146,6 +1169,7 @@ export async function livesRoutes(app) {
                 ae.observacoes AS agenda_titulo
          FROM lives l
          JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+         LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
          LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
          LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
@@ -1185,7 +1209,7 @@ export async function livesRoutes(app) {
            LIMIT 1
          ) ap_extra ON true
          LEFT JOIN LATERAL (
-           SELECT m.id AS marca_id, m.nome AS marca_nome
+           SELECT m.id, m.id AS marca_id, m.nome AS marca_nome, m.tipo, m.cliente_id, m.tiktok_username
            FROM marcas m
            LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id
             AND va.tenant_id = m.tenant_id
@@ -1196,6 +1220,7 @@ export async function livesRoutes(app) {
            ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
            LIMIT 1
          ) va_marca ON true
+         LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id
          ${where}
          ORDER BY l.iniciado_em DESC LIMIT 100`,
         params

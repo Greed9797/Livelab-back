@@ -1,5 +1,6 @@
 // src/services/tiktok-connector-manager.js
 import EventEmitter from 'node:events'
+import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 
 // ── Singleton state ───────────────────────────────────────────────────────────
 let _db = null
@@ -58,17 +59,17 @@ export function has(liveId) {
 export async function syncLives() {
   if (!_db) return
 
-  // W3-A: fallback do @ — usa o do contrato; se ausente, cai pro do cliente.
-  // Lives sem @ em nenhum dos dois são puladas (não erro — apenas não viram connector).
+  const usernameSql = tiktokUsernameSql({ marca: 'm', cliente: 'cl', contrato: 'ct' })
   const { rows: activeLives } = await _db.query(`
     SELECT l.id, l.tenant_id,
-           COALESCE(ct.tiktok_username, cl.tiktok_username) AS tiktok_username
+           ${usernameSql} AS tiktok_username
     FROM lives l
-    JOIN cabines c ON c.live_atual_id = l.id
-    LEFT JOIN contratos ct ON ct.id = c.contrato_id
-    LEFT JOIN clientes cl ON cl.id = COALESCE(ct.cliente_id, l.cliente_id)
+    JOIN cabines c ON c.live_atual_id = l.id AND c.tenant_id = l.tenant_id
+    LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
+    LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
+    LEFT JOIN clientes cl ON cl.id = COALESCE(m.cliente_id, l.cliente_id, ct.cliente_id) AND cl.tenant_id = l.tenant_id
     WHERE l.status = 'em_andamento'
-      AND COALESCE(ct.tiktok_username, cl.tiktok_username) IS NOT NULL
+      AND ${usernameSql} IS NOT NULL
   `)
 
   const activeIds = new Set(activeLives.map(r => r.id))

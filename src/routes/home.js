@@ -474,7 +474,7 @@ export async function homeRoutes(app) {
           SELECT id, apresentadora_nome, foto_url, fixo, gmv, lives, comissao_variavel,
                  (fixo + comissao_variavel) AS total_recebido
           FROM ranking_apresentadoras_mes
-          ORDER BY total_recebido DESC, gmv DESC, apresentadora_nome ASC
+          ORDER BY gmv DESC, total_recebido DESC, apresentadora_nome ASC
           LIMIT 10
         `, [DEFAULT_APRESENTADORA_FIXO])
         rankingApresentadorasMes = rankingApQ.rows.map(r => {

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_APRESENTADORAS, WRITE_APRESENTADORAS } from '../config/role_groups.js'
+import { DEFAULT_APRESENTADORA_FIXO, ensureDefaultPresenterCommissionTiers } from '../config/presenter_defaults.js'
 import { moneySchema } from '../lib/money.js'
 import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
 
@@ -20,7 +21,7 @@ const createSchema = z.object({
   email:           z.string().email().optional(),
   cpf_cnpj:        z.string().optional(),
   cidade:          z.string().optional(),
-  fixo:            fixoSchema.default(0),
+  fixo:            fixoSchema.default(DEFAULT_APRESENTADORA_FIXO),
   comissao_pct:    z.number().min(0).max(100).default(0),
   meta_diaria_gmv: metaDiariaSchema.default(0),
   observacoes:     z.string().optional(),
@@ -43,7 +44,7 @@ const faixaSchema = z.object({
 
 const faixaPatchSchema = faixaSchema.partial()
 
-const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
+const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, COALESCE(NULLIF(fixo, 0), ${DEFAULT_APRESENTADORA_FIXO}) AS fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
 
 // Resolve o id de apresentadora a partir de :id que pode ser:
 //  - id real da tabela apresentadoras, OU
@@ -81,18 +82,22 @@ async function resolveApresentadoraId(db, tenantId, rawId) {
   try {
     const created = await db.query(
       `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, ativo)
-       VALUES ($1, $2, $3, $4, 0, 0, 0, true)
+       VALUES ($1, $2, $3, $4, $5, 0, 0, true)
        RETURNING id`,
-      [tenantId, u.id, u.nome ?? 'Apresentadora', u.email ?? null],
+      [tenantId, u.id, u.nome ?? 'Apresentadora', u.email ?? null, DEFAULT_APRESENTADORA_FIXO],
     )
-    return created.rows[0]?.id ?? null
+    const apresentadoraId = created.rows[0]?.id ?? null
+    await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
+    return apresentadoraId
   } catch (err) {
     if (err?.code === '23505') {
       const retry = await db.query(
         `SELECT id FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid`,
         [u.id, tenantId],
       )
-      return retry.rows[0]?.id ?? null
+      const apresentadoraId = retry.rows[0]?.id ?? null
+      await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
+      return apresentadoraId
     }
     throw err
   }
@@ -123,6 +128,7 @@ export async function apresentadorasRoutes(app) {
       // Resolve id real da apresentadora (aceita user_id de usuário apresentador).
       const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
       if (!apresentadoraId) return [] // sem perfil ainda → sem faixas
+      await ensureDefaultPresenterCommissionTiers(db, tenant_id, apresentadoraId)
 
       if (!READ_APRESENTADORAS.includes(papel)) {
         const own = await db.query(

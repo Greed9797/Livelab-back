@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
 import { z } from 'zod'
 import { SECURITY } from '../config/security.js'
+import { DEFAULT_APRESENTADORA_FIXO, ensureDefaultPresenterCommissionTiers } from '../config/presenter_defaults.js'
 import { notify } from '../services/mailer.js'
 
 const PAPEL_LABELS = {
@@ -79,7 +80,11 @@ export async function usuariosRoutes(app) {
            a.id AS apresentadora_id,
            a.telefone,
            a.cidade,
-           a.fixo,
+           CASE
+             WHEN a.id IS NOT NULL OR u.papel IN ('apresentador', 'apresentadora')
+             THEN COALESCE(NULLIF(a.fixo, 0), ${DEFAULT_APRESENTADORA_FIXO})
+             ELSE a.fixo
+           END AS fixo,
            a.comissao_pct,
            a.meta_diaria_gmv,
            (a.id IS NOT NULL OR u.papel IN ('apresentador', 'apresentadora')) AS pode_apresentar_live
@@ -101,6 +106,8 @@ export async function usuariosRoutes(app) {
     }
     const { nome, email, papel, cliente_id, apresentadora_id, fixo, comissao_pct, meta_diaria_gmv, senha_temporaria } = parsed.data
     const tenantId = request.user.tenant_id
+    const presenterFixo = fixo ?? DEFAULT_APRESENTADORA_FIXO
+    const presenterComissaoPct = comissao_pct ?? 0
 
     // F4: convite via email. Senha inicial é placeholder aleatório (NÃO usável
     // pra login) — usuário define a real ao aceitar o convite via /aceitar-convite.
@@ -190,29 +197,31 @@ export async function usuariosRoutes(app) {
                   SET user_id = $1,
                       nome = $4,
                       email = $5,
-                      fixo = COALESCE($6, fixo),
-                      comissao_pct = COALESCE($7, comissao_pct),
+                      fixo = $6,
+                      comissao_pct = $7,
                       meta_diaria_gmv = COALESCE($8, meta_diaria_gmv),
                       ativo = true
                 WHERE id = $2
                   AND tenant_id = $3
                   AND user_id IS NULL
                 RETURNING id`,
-              [newUser.id, apresentadora_id, tenantId, nome, email, fixo ?? null, comissao_pct ?? null, meta_diaria_gmv ?? null]
+              [newUser.id, apresentadora_id, tenantId, nome, email, presenterFixo, presenterComissaoPct, meta_diaria_gmv ?? null]
             )
             if (linked.rowCount === 0) {
               await db.query('ROLLBACK')
               return reply.code(409).send({ error: 'Perfil de apresentadora indisponível para vínculo.' })
             }
             apresentadoraId = linked.rows[0].id
+            await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
           } else {
             const createdProfile = await db.query(
               `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, ativo)
                VALUES ($1, $2, $3, $4, $5, $6, $7, true)
                RETURNING id`,
-              [tenantId, newUser.id, nome, email, fixo ?? 0, comissao_pct ?? 0, meta_diaria_gmv ?? 0]
+              [tenantId, newUser.id, nome, email, presenterFixo, presenterComissaoPct, meta_diaria_gmv ?? 0]
             )
             apresentadoraId = createdProfile.rows[0]?.id ?? null
+            await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
           }
         }
 

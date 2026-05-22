@@ -1,3 +1,5 @@
+import { DEFAULT_APRESENTADORA_FIXO } from '../config/presenter_defaults.js'
+
 export async function homeRoutes(app) {
   // GET /v1/home/dashboard
   app.get('/v1/home/dashboard', {
@@ -434,29 +436,30 @@ export async function homeRoutes(app) {
         const rankingApQ = await db.query(`
           WITH ranking_apresentadoras_mes AS (
             SELECT
-              va.apresentadora_id AS id,
+              a.id,
               a.nome AS apresentadora_nome,
-              COALESCE(a.fixo, 0) AS fixo,
+              COALESCE(NULLIF(a.fixo, 0), $1::numeric) AS fixo,
               COALESCE(SUM(va.gmv), 0) AS gmv,
               COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
               COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
-            FROM vendas_atribuidas va
-            JOIN apresentadoras a ON a.id = va.apresentadora_id
-             AND a.tenant_id = va.tenant_id
-            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
-              AND va.apresentadora_id IS NOT NULL
-              AND va.origem IN ('live', 'video')
-              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
-              AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-            GROUP BY va.apresentadora_id, a.nome, a.fixo
+            FROM apresentadoras a
+            LEFT JOIN vendas_atribuidas va
+              ON va.apresentadora_id = a.id
+             AND va.tenant_id = a.tenant_id
+             AND va.origem IN ('live', 'video')
+             AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+             AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                 = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            WHERE a.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND a.ativo = true
+            GROUP BY a.id, a.nome, a.fixo
           )
           SELECT id, apresentadora_nome, fixo, gmv, lives, comissao_variavel,
                  (fixo + comissao_variavel) AS total_recebido
           FROM ranking_apresentadoras_mes
           ORDER BY total_recebido DESC, gmv DESC, apresentadora_nome ASC
           LIMIT 10
-        `)
+        `, [DEFAULT_APRESENTADORA_FIXO])
         rankingApresentadorasMes = rankingApQ.rows.map(r => {
           const lives = Number(r.lives)
           const gmv = round2(r.gmv)

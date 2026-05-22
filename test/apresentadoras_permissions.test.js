@@ -43,7 +43,7 @@ describe('apresentadoras permissions', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(query.mock.calls[0][0]).toContain('UPDATE apresentadoras')
+    expect(query.mock.calls.some(([sql]) => sql.includes('UPDATE apresentadoras'))).toBe(true)
 
     await app.close()
   })

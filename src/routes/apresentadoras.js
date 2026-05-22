@@ -62,6 +62,44 @@ const STATS_JOIN = `
   ) stats ON true
 `
 
+// Resolve o id de apresentadora a partir de :id que pode ser:
+//  - id real da tabela apresentadoras, OU
+//  - user_id (quando o usuário tem papel apresentador mas ainda não tem
+//    linha em apresentadoras). Nesse caso busca por user_id e, se não houver,
+//    provisiona uma apresentadora vinculada ao usuário.
+// Retorna o id da apresentadora ou null se nem usuário nem apresentadora existem.
+async function resolveApresentadoraId(db, tenantId, rawId) {
+  const byId = await db.query(
+    `SELECT id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+    [rawId, tenantId],
+  )
+  if (byId.rows[0]) return byId.rows[0].id
+
+  const byUser = await db.query(
+    `SELECT id FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid`,
+    [rawId, tenantId],
+  )
+  if (byUser.rows[0]) return byUser.rows[0].id
+
+  // Não existe apresentadora: tenta provisionar a partir do usuário com papel apresentador.
+  const user = await db.query(
+    `SELECT id, nome, email FROM users
+      WHERE id = $1 AND tenant_id = $2::uuid
+        AND papel IN ('apresentador', 'apresentadora')`,
+    [rawId, tenantId],
+  )
+  if (!user.rows[0]) return null
+
+  const created = await db.query(
+    `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, ativo)
+     VALUES ($1, $2, $3, $4, 0, 0, 0, true)
+     ON CONFLICT (user_id) WHERE user_id IS NOT NULL DO UPDATE SET nome = EXCLUDED.nome
+     RETURNING id`,
+    [tenantId, user.rows[0].id, user.rows[0].nome ?? 'Apresentadora', user.rows[0].email ?? null],
+  )
+  return created.rows[0]?.id ?? null
+}
+
 export async function apresentadorasRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_APRESENTADORAS)]
   const writeAccess = [app.authenticate, app.requirePapel(WRITE_APRESENTADORAS)]
@@ -165,18 +203,15 @@ export async function apresentadorasRoutes(app) {
     const { tenant_id } = request.user
     const d = parsed.data
     return app.withTenant(tenant_id, async (db) => {
-      const apresentadora = await db.query(
-        `SELECT id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
-        [request.params.id, tenant_id],
-      )
-      if (!apresentadora.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
+      if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
       const result = await db.query(
         `INSERT INTO apresentadora_comissao_faixas (
            tenant_id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo
          )
          VALUES ($1,$2,$3,$4,$5,$6)
          RETURNING id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo, criado_em, atualizado_em`,
-        [tenant_id, request.params.id, d.gmv_inicio, d.gmv_fim ?? null, d.comissao_pct, d.ativo],
+        [tenant_id, apresentadoraId, d.gmv_inicio, d.gmv_fim ?? null, d.comissao_pct, d.ativo],
       )
       return reply.code(201).send(result.rows[0])
     })
@@ -270,10 +305,12 @@ export async function apresentadorasRoutes(app) {
     const fields = Object.keys(updates)
     if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
-    const setClauses = fields.map((f, i) => `${f} = $${i + 3}`).join(', ')
-    const values = [request.params.id, tenant_id, ...fields.map((f) => updates[f])]
-
     return app.withTenant(tenant_id, async (db) => {
+      const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
+      if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+
+      const setClauses = fields.map((f, i) => `${f} = $${i + 3}`).join(', ')
+      const values = [apresentadoraId, tenant_id, ...fields.map((f) => updates[f])]
       const result = await db.query(
         `UPDATE apresentadoras SET ${setClauses}
          WHERE id = $1 AND tenant_id = $2::uuid
@@ -281,7 +318,7 @@ export async function apresentadorasRoutes(app) {
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
-      app.audit?.log?.(request, { action: 'apresentadora.update', entity_type: 'apresentadora', entity_id: request.params.id, metadata: { changed_fields: fields } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      app.audit?.log?.(request, { action: 'apresentadora.update', entity_type: 'apresentadora', entity_id: apresentadoraId, metadata: { changed_fields: fields } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })

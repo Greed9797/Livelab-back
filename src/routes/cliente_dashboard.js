@@ -948,23 +948,34 @@ export async function clienteDashboardRoutes(app) {
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
 
       const q = await db.query(`
-        SELECT id, data_solicitada, hora_inicio, hora_fim, observacao, status,
-               motivo_recusa, criado_em
-        FROM live_requests
-        WHERE tenant_id = $1
-          AND cabine_id = $2
-          AND cliente_id = $3
-        ORDER BY criado_em DESC
+        SELECT ae.id,
+               (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date       AS data_solicitada,
+               (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::time::text AS hora_inicio,
+               (ae.data_fim    AT TIME ZONE 'America/Sao_Paulo')::time::text AS hora_fim,
+               ae.observacoes AS observacao,
+               ae.status,
+               ae.motivo_cancelamento AS motivo_recusa,
+               ae.criado_em
+        FROM agenda_eventos ae
+        JOIN marcas mar ON mar.id = ae.marca_id AND mar.tenant_id = ae.tenant_id
+        WHERE ae.tenant_id = $1
+          AND ae.cabine_id = $2
+          AND mar.cliente_id = $3
+          AND ae.tipo = 'live'
+        ORDER BY ae.criado_em DESC
         LIMIT 50
       `, [tenant_id, cabineId, cliente_id])
 
       return q.rows.map(r => ({
         id:              r.id,
-        data_solicitada: r.data_solicitada, // DATE → "YYYY-MM-DD"
-        hora_inicio:     r.hora_inicio,     // TIME → "HH:MM:SS"
-        hora_fim:        r.hora_fim,
+        data_solicitada: r.data_solicitada instanceof Date
+          ? r.data_solicitada.toISOString().slice(0, 10)
+          : String(r.data_solicitada).slice(0, 10),
+        hora_inicio:     String(r.hora_inicio).slice(0, 8),
+        hora_fim:        String(r.hora_fim).slice(0, 8),
         observacao:      r.observacao,
-        status:          r.status,
+        // Retorna status no formato legado para compatibilidade com o frontend
+        status:          { planejado: 'pendente', confirmado: 'aprovada', cancelado: 'recusada' }[r.status] ?? r.status,
         motivo_recusa:   r.motivo_recusa,
         criado_em:       r.criado_em,
       }))
@@ -1020,23 +1031,45 @@ export async function clienteDashboardRoutes(app) {
         return reply.code(400).send({ error: 'data_solicitada não pode ser no passado' })
       }
 
+      // Resolve marca ativa do cliente para criar o evento
+      const marcaQ = await db.query(
+        `SELECT id FROM marcas WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativa' ORDER BY criado_em ASC LIMIT 1`,
+        [cliente_id, tenant_id]
+      )
+      const marcaId = marcaQ.rows[0]?.id ?? null
+      if (!marcaId) {
+        return reply.code(422).send({ error: 'Sua conta não possui marca ativa. Entre em contato com a unidade.' })
+      }
+
       const inserted = await db.query(`
-        INSERT INTO live_requests
-          (tenant_id, cabine_id, cliente_id, solicitante_id,
-           data_solicitada, hora_inicio, hora_fim, observacao)
-        VALUES ($1, $2, $3, $4, $5::date, $6::time, $7::time, $8)
-        RETURNING id, data_solicitada, hora_inicio, hora_fim, observacao, status, criado_em
-      `, [tenant_id, cabineId, cliente_id, user_id,
+        INSERT INTO agenda_eventos
+          (tenant_id, cabine_id, marca_id, criado_por,
+           data_inicio, data_fim, tipo, status, observacoes)
+        VALUES ($1, $2, $3, $4,
+                ($5::date + $6::time) AT TIME ZONE 'America/Sao_Paulo',
+                ($5::date + $7::time) AT TIME ZONE 'America/Sao_Paulo',
+                'live', 'planejado', $8)
+        RETURNING id,
+                  (data_inicio AT TIME ZONE 'America/Sao_Paulo')::date       AS data_solicitada,
+                  (data_inicio AT TIME ZONE 'America/Sao_Paulo')::time::text AS hora_inicio,
+                  (data_fim    AT TIME ZONE 'America/Sao_Paulo')::time::text AS hora_fim,
+                  observacoes AS observacao,
+                  status,
+                  criado_em
+      `, [tenant_id, cabineId, marcaId, user_id,
           data_solicitada, hora_inicio, hora_fim, observacao ?? null])
 
       const r = inserted.rows[0]
       return reply.code(201).send({
         id:              r.id,
-        data_solicitada: r.data_solicitada,
-        hora_inicio:     r.hora_inicio,
-        hora_fim:        r.hora_fim,
+        data_solicitada: r.data_solicitada instanceof Date
+          ? r.data_solicitada.toISOString().slice(0, 10)
+          : String(r.data_solicitada).slice(0, 10),
+        hora_inicio:     String(r.hora_inicio).slice(0, 8),
+        hora_fim:        String(r.hora_fim).slice(0, 8),
         observacao:      r.observacao,
-        status:          r.status,
+        // Retorna 'pendente' para compatibilidade com o frontend
+        status:          'pendente',
         criado_em:       r.criado_em,
       })
     })

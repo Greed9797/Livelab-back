@@ -112,14 +112,16 @@ export async function appmaxRoutes(app) {
     const clientSecret = body.client_secret != null ? String(body.client_secret) : null
     const externalKey = body.external_key != null ? String(body.external_key) : null
 
-    try {
-      const externalId = await resolveAppmaxExternalId(app.db, { appId, clientId, clientSecret, externalKey })
-      app.log.info({ appId, clientId, externalKey }, '[appmax] validate ok')
-      return reply.code(200).send({ external_id: externalId })
-    } catch (err) {
-      app.log.error({ err }, '[appmax] validate: falha ao persistir instalação')
-      return reply.code(500).send({ error: 'Erro ao registrar instalação Appmax' })
-    }
+    // Appmax exige external_id FIXO do app (não por instalação). Vem de APPMAX_EXTERNAL_ID.
+    const fixedExternalId = process.env.APPMAX_EXTERNAL_ID
+    if (!fixedExternalId) return reply.code(503).send({ error: 'APPMAX_EXTERNAL_ID não configurado' })
+
+    // Persiste a instalação pra auditoria (best-effort, não bloqueia a resposta).
+    resolveAppmaxExternalId(app.db, { appId, clientId, clientSecret, externalKey })
+      .catch((err) => app.log.error({ err }, '[appmax] validate: falha ao registrar instalação (auditoria)'))
+
+    app.log.info({ appId, clientId, externalKey }, '[appmax] validate ok')
+    return reply.code(200).send({ external_id: fixedExternalId })
   })
 
   // POST /v1/webhooks/appmax — recebe eventos de pagamento

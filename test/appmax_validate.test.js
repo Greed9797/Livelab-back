@@ -4,41 +4,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { appmaxRoutes } from '../src/routes/appmax.js'
 
 const APP_ID = 'APP_TESTE_123'
+const FIXED_EXTERNAL_ID = '270e7c2d-8795-4320-856d-a4dd95cf727c'
 
-// Mock db com store em memória pra simular idempotência por identidade.
 function buildApp() {
   const app = Fastify()
-  const store = new Map() // key: app_id|client_id|external_key → external_id
-
-  const query = vi.fn(async (sql, params) => {
-    if (/SELECT external_id FROM appmax_installations/i.test(sql)) {
-      const [appId, cid, ekey] = params
-      const key = `${appId}|${cid}|${ekey}`
-      const ext = store.get(key)
-      return { rows: ext ? [{ external_id: ext }] : [] }
-    }
-    if (/UPDATE appmax_installations/i.test(sql)) {
-      return { rows: [] }
-    }
-    if (/INSERT INTO appmax_installations/i.test(sql)) {
-      const [appId, clientId, , externalKey] = params
-      const key = `${appId}|${clientId ?? ''}|${externalKey ?? ''}`
-      const ext = `ext-${store.size + 1}-${Math.random().toString(16).slice(2, 8)}`
-      store.set(key, ext)
-      return { rows: [{ external_id: ext }] }
-    }
+  const query = vi.fn(async (sql) => {
+    if (/INSERT INTO appmax_installations/i.test(sql)) return { rows: [{ external_id: 'ignored' }] }
     return { rows: [] }
   })
-
   app.decorate('db', { query })
-  return { app, query, store }
+  return { app, query }
 }
 
 describe('appmax validate', () => {
-  beforeEach(() => { process.env.APPMAX_APP_ID = APP_ID })
-  afterEach(() => { delete process.env.APPMAX_APP_ID })
+  beforeEach(() => {
+    process.env.APPMAX_APP_ID = APP_ID
+    process.env.APPMAX_EXTERNAL_ID = FIXED_EXTERNAL_ID
+  })
+  afterEach(() => {
+    delete process.env.APPMAX_APP_ID
+    delete process.env.APPMAX_EXTERNAL_ID
+  })
 
-  it('retorna 200 com external_id (key underscore) no POST', async () => {
+  it('retorna 200 com external_id FIXO (key underscore)', async () => {
     const { app } = buildApp()
     await app.register(appmaxRoutes)
     const res = await app.inject({
@@ -48,28 +36,18 @@ describe('appmax validate', () => {
     })
     expect(res.statusCode).toBe(200)
     const body = res.json()
-    expect(body).toHaveProperty('external_id')
+    expect(body.external_id).toBe(FIXED_EXTERNAL_ID)
     expect(body).not.toHaveProperty('external-id')
-    expect(typeof body.external_id).toBe('string')
     await app.close()
   })
 
-  it('mesma instalação retorna o MESMO external_id (idempotência)', async () => {
+  it('external_id é sempre o mesmo (fixo do app), qualquer instalação', async () => {
     const { app } = buildApp()
     await app.register(appmaxRoutes)
-    const payload = { app_id: APP_ID, client_id: 'cid1', client_secret: 'sec1', external_key: 'ekey1' }
-    const r1 = await app.inject({ method: 'POST', url: '/v1/webhooks/appmax/validate', payload })
-    const r2 = await app.inject({ method: 'POST', url: '/v1/webhooks/appmax/validate', payload })
-    expect(r1.json().external_id).toBe(r2.json().external_id)
-    await app.close()
-  })
-
-  it('instalações diferentes geram external_id distinto', async () => {
-    const { app } = buildApp()
-    await app.register(appmaxRoutes)
-    const r1 = await app.inject({ method: 'POST', url: '/v1/webhooks/appmax/validate', payload: { app_id: APP_ID, client_id: 'cidA', external_key: 'kA' } })
-    const r2 = await app.inject({ method: 'POST', url: '/v1/webhooks/appmax/validate', payload: { app_id: APP_ID, client_id: 'cidB', external_key: 'kB' } })
-    expect(r1.json().external_id).not.toBe(r2.json().external_id)
+    const r1 = await app.inject({ method: 'POST', url: '/v1/webhooks/appmax/validate', payload: { app_id: APP_ID, client_id: 'A', external_key: 'kA' } })
+    const r2 = await app.inject({ method: 'POST', url: '/v1/webhooks/appmax/validate', payload: { app_id: APP_ID, client_id: 'B', external_key: 'kB' } })
+    expect(r1.json().external_id).toBe(FIXED_EXTERNAL_ID)
+    expect(r2.json().external_id).toBe(FIXED_EXTERNAL_ID)
     await app.close()
   })
 
@@ -85,6 +63,15 @@ describe('appmax validate', () => {
     await app.close()
   })
 
+  it('503 se APPMAX_EXTERNAL_ID ausente', async () => {
+    delete process.env.APPMAX_EXTERNAL_ID
+    const { app } = buildApp()
+    await app.register(appmaxRoutes)
+    const res = await app.inject({ method: 'POST', url: '/v1/webhooks/appmax/validate', payload: { app_id: APP_ID } })
+    expect(res.statusCode).toBe(503)
+    await app.close()
+  })
+
   it('GET healthcheck não expõe external_id falso', async () => {
     const { app } = buildApp()
     await app.register(appmaxRoutes)
@@ -92,7 +79,6 @@ describe('appmax validate', () => {
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body.ok).toBe(true)
-    expect(body).not.toHaveProperty('external-id')
     expect(body).not.toHaveProperty('external_id')
     await app.close()
   })

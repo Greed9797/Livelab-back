@@ -1,4 +1,4 @@
-import { DEFAULT_APRESENTADORA_FIXO } from '../config/presenter_defaults.js'
+import { presenterFixedSql } from '../config/presenter_defaults.js'
 
 export async function homeRoutes(app) {
   // GET /v1/home/dashboard
@@ -455,7 +455,7 @@ export async function homeRoutes(app) {
               a.id,
               a.nome AS apresentadora_nome,
               a.foto_url,
-              COALESCE(NULLIF(a.fixo, 0), $1::numeric) AS fixo,
+              ${presenterFixedSql('a')} AS fixo,
               COALESCE(SUM(va.gmv), 0) AS gmv,
               COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
               COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
@@ -476,7 +476,7 @@ export async function homeRoutes(app) {
           FROM ranking_apresentadoras_mes
           ORDER BY gmv DESC, total_recebido DESC, apresentadora_nome ASC
           LIMIT 10
-        `, [DEFAULT_APRESENTADORA_FIXO])
+        `)
         rankingApresentadorasMes = rankingApQ.rows.map(r => {
           const lives = Number(r.lives)
           const gmv = round2(r.gmv)

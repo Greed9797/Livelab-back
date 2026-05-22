@@ -2,7 +2,7 @@ import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
 import { z } from 'zod'
 import { SECURITY } from '../config/security.js'
-import { DEFAULT_APRESENTADORA_FIXO, ensureDefaultPresenterCommissionTiers } from '../config/presenter_defaults.js'
+import { DEFAULT_APRESENTADORA_FIXO, MAX_APRESENTADORA_FIXO, ensureDefaultPresenterCommissionTiers, presenterFixedSql } from '../config/presenter_defaults.js'
 import { notify } from '../services/mailer.js'
 
 const PAPEL_LABELS = {
@@ -29,7 +29,7 @@ const convidarSchema = z.object({
   ]),
   cliente_id: z.string().uuid().optional(),
   apresentadora_id: z.string().uuid().optional(),
-  fixo: z.number().nonnegative().optional(),
+  fixo: z.number().nonnegative().max(MAX_APRESENTADORA_FIXO, `Fixo não pode ultrapassar R$ ${MAX_APRESENTADORA_FIXO.toLocaleString('pt-BR')}`).optional(),
   comissao_pct: z.number().min(0).max(100).optional(),
   meta_diaria_gmv: z.number().nonnegative().optional(),
   foto_url: imageUrlSchema,
@@ -85,7 +85,7 @@ export async function usuariosRoutes(app) {
            a.cidade,
            CASE
              WHEN a.id IS NOT NULL OR u.papel IN ('apresentador', 'apresentadora')
-             THEN COALESCE(NULLIF(a.fixo, 0), ${DEFAULT_APRESENTADORA_FIXO})
+             THEN ${presenterFixedSql('a')}
              ELSE a.fixo
            END AS fixo,
            a.comissao_pct,

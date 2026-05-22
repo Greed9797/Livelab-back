@@ -6,6 +6,15 @@
 
 ---
 
+## Última atividade (2026-05-22 — branch codex/blumenau-operational-fase1)
+
+- `f6ee8fc`: fix(sync) — sincronização bidirecional lives↔agenda_eventos
+  - `iniciarLive`: usa `resolvedMarcaId` do payload (fix live sem agenda)
+  - `PATCH /v1/lives/:id`: sincroniza marca_id, apresentadora_id, previsto_fim→data_fim para agenda_evento vinculado
+  - `PATCH /v1/agenda/:id`: ao setar `ao_vivo` com `live_id`, sincroniza live com dados do evento
+
+---
+
 ## Estado atual
 
 - ✅ Health: `https://liveshop-saas-api-production.up.railway.app/health` → `{"ok":true}`

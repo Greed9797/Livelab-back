@@ -1558,6 +1558,12 @@ export async function livesRoutes(app) {
         await db.query('DELETE FROM lives WHERE id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
         await db.query('COMMIT')
 
+        app.audit?.log?.(request, {
+          action: 'deletar_live',
+          entity_type: 'lives',
+          entity_id: request.params.id,
+        }).catch(() => {})
+
         if (live.status === 'em_andamento' && managerHas(live.id)) {
           stopConnector(live.id).catch(err =>
             app.log.error({ err, liveId: live.id }, 'tiktokManager: falha ao parar connector na exclusão')

@@ -646,6 +646,13 @@ export async function agendaRoutes(app) {
         recurrentesCancelados = recResult.rowCount ?? 0
       }
 
+      app.audit?.log?.(request, {
+        action: 'cancelar_agenda',
+        entity_type: 'agenda_eventos',
+        entity_id: request.params.id,
+        metadata: { modo_recorrencia },
+      }).catch(() => {})
+
       return reply.code(204).send()
     })
   })

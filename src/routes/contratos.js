@@ -10,7 +10,9 @@ const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
 const tiktokUsernameField = z
   .string()
   .trim()
-  .transform((v) => v.replace(/^@/, ''))
+  .refine((v) => !v.includes('@'), {
+    message: 'Digite o TikTok sem @',
+  })
   .refine((v) => v === '' || TIKTOK_USERNAME_RE.test(v), {
     message: 'tiktok_username inválido (2-24 chars: letras/números/_/.)',
   })
@@ -480,9 +482,14 @@ export async function contratosRoutes(app) {
     preHandler: app.requirePapel(WRITE_CONTRATOS),
   }, async (request, reply) => {
     const { tiktok_username } = request.body ?? {}
-    const username = typeof tiktok_username === 'string'
-      ? tiktok_username.replace(/^@/, '').trim() || null
-      : null
+    if (tiktok_username != null && typeof tiktok_username !== 'string') {
+      return reply.code(400).send({ error: 'tiktok_username deve ser string ou null' })
+    }
+    const username = typeof tiktok_username === 'string' ? tiktok_username.trim() || null : null
+    if (username?.includes('@')) return reply.code(400).send({ error: 'Digite o TikTok sem @' })
+    if (username !== null && !TIKTOK_USERNAME_RE.test(username)) {
+      return reply.code(400).send({ error: 'tiktok_username inválido (2-24 chars: letras/números/_/.)' })
+    }
 
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {

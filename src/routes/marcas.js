@@ -2,6 +2,8 @@ import { z } from 'zod'
 import { READ_MARCAS, WRITE_MARCAS } from '../config/role_groups.js'
 import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
 
+const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
+
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
   m.tiktok_username, m.site, m.marketplace_url, m.logo_url,
@@ -16,7 +18,11 @@ const marcaBaseSchema = z.object({
   nome: z.string().min(1),
   tipo: z.enum(['cliente', 'afiliada', 'propria', 'parceira']).default('cliente'),
   status: z.enum(['ativa', 'inativa', 'pausada']).default('ativa'),
-  tiktok_username: z.string().trim().transform((value) => value.replace(/^@/, '')).nullable().optional(),
+  tiktok_username: z.string().trim().refine((value) => !value.includes('@'), {
+    message: 'Digite o TikTok sem @',
+  }).refine((value) => value === '' || TIKTOK_USERNAME_RE.test(value), {
+    message: 'tiktok_username inválido (2-24 chars: letras/números/_/.)',
+  }).transform((value) => value === '' ? null : value).nullable().optional(),
   site: z.string().nullable().optional(),
   marketplace_url: z.string().nullable().optional(),
   logo_url: z.string().url().nullable().optional(),

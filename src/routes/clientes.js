@@ -9,7 +9,9 @@ const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
 const tiktokUsernameField = z
   .string()
   .trim()
-  .transform((v) => v.replace(/^@/, ''))
+  .refine((v) => !v.includes('@'), {
+    message: 'Digite o TikTok sem @',
+  })
   .refine((v) => v === '' || TIKTOK_USERNAME_RE.test(v), {
     message: 'tiktok_username inválido (2-24 chars: letras/números/_/.)',
   })

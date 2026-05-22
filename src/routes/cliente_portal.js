@@ -124,7 +124,11 @@ export async function clientePortalRoutes(app) {
     }
     const username = raw == null
       ? null
-      : (raw.trim().replace(/^@/, '') || null)
+      : (raw.trim() || null)
+
+    if (username?.includes('@')) {
+      return reply.code(400).send({ error: 'Digite o TikTok sem @' })
+    }
 
     // Mesmo regex da migration 075 (clientes_tiktok_username_format).
     if (username !== null && !/^[a-zA-Z0-9_.]{2,24}$/.test(username)) {

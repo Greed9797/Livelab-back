@@ -68,7 +68,7 @@ export async function cabinesRoutes(app) {
                 c.status AS status_fisico,
                 c.ativo, c.descricao, l.id AS live_real_id, c.live_atual_id AS live_atual_id_legado, c.contrato_id,
                 ct.status AS contrato_status,
-                ct.tiktok_username,
+                COALESCE(m_live.tiktok_username, cl_live.tiktok_username, ct.tiktok_username, agenda_next.tiktok_username) AS tiktok_username,
                 l.cliente_id AS cliente_id,
                 l.cliente_id AS cliente_em_live_id,
                 cl_live.nome AS cliente_em_live,
@@ -128,6 +128,7 @@ export async function cabinesRoutes(app) {
                   m.nome AS marca_nome,
                   m.logo_url AS marca_logo_url,
                   m.site AS marca_site,
+                  COALESCE(m.tiktok_username, cl2.tiktok_username) AS tiktok_username,
                   m.cliente_id,
                   cl2.nome AS cliente_nome
            FROM agenda_eventos ae
@@ -154,6 +155,7 @@ export async function cabinesRoutes(app) {
              'marca_id', ae.marca_id,
              'marca_nome', m.nome,
              'marca_logo_url', m.logo_url,
+             'tiktok_username', COALESCE(m.tiktok_username, cl2.tiktok_username),
              'status', ae.status
            ) ORDER BY ae.data_inicio), '[]'::json) AS agenda
            FROM agenda_eventos ae
@@ -191,6 +193,7 @@ export async function cabinesRoutes(app) {
               marca_id: c.proxima_marca_id,
               marca_nome: c.proxima_marca_nome,
               marca_logo_url: c.marca_logo_url,
+              tiktok_username: c.tiktok_username,
             }
           : null,
         viewer_count: Number(c.viewer_count ?? 0),
@@ -794,7 +797,7 @@ export async function cabinesRoutes(app) {
                cl.nome AS cliente_nome,
                m.nome AS marca_nome,
                m.logo_url AS marca_logo_url,
-               COALESCE(m.tiktok_username, ct.tiktok_username) AS tiktok_username
+               COALESCE(m.tiktok_username, cl.tiktok_username, ct.tiktok_username) AS tiktok_username
         FROM lives l
         LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
         LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id

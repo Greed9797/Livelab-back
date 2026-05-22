@@ -1,4 +1,10 @@
 export const DEFAULT_APRESENTADORA_FIXO = 2700
+export const MAX_APRESENTADORA_FIXO = 10000
+
+export function presenterFixedSql(alias = 'a') {
+  const column = alias ? `${alias}.fixo` : 'fixo'
+  return `CASE WHEN COALESCE(${column}, 0) <= 0 OR ${column} > ${MAX_APRESENTADORA_FIXO} THEN ${DEFAULT_APRESENTADORA_FIXO} ELSE ${column} END`
+}
 
 export const DEFAULT_APRESENTADORA_COMISSAO_FAIXAS = [
   { gmv_inicio: 0, gmv_fim: 50000, comissao_pct: 0.5 },

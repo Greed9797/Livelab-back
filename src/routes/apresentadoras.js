@@ -1,15 +1,14 @@
 import { z } from 'zod'
 import { READ_APRESENTADORAS, WRITE_APRESENTADORAS } from '../config/role_groups.js'
-import { DEFAULT_APRESENTADORA_FIXO, ensureDefaultPresenterCommissionTiers } from '../config/presenter_defaults.js'
+import { DEFAULT_APRESENTADORA_FIXO, MAX_APRESENTADORA_FIXO, ensureDefaultPresenterCommissionTiers, presenterFixedSql } from '../config/presenter_defaults.js'
 import { moneySchema } from '../lib/money.js'
 import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
 
-const APRESENTADORA_FIXO_MAX = 1_000_000 // R$ 1 milhão — sanity cap
 const APRESENTADORA_META_MAX = 100_000_000 // R$ 100 milhões — sanity cap pra meta diária
 const imageUrlSchema = z.string().max(500000).nullable().optional()
 
-const fixoSchema = moneySchema.refine((v) => v <= APRESENTADORA_FIXO_MAX, {
-  message: `Fixo não pode ultrapassar R$ ${APRESENTADORA_FIXO_MAX.toLocaleString('pt-BR')}`,
+const fixoSchema = moneySchema.refine((v) => v <= MAX_APRESENTADORA_FIXO, {
+  message: `Fixo não pode ultrapassar R$ ${MAX_APRESENTADORA_FIXO.toLocaleString('pt-BR')}`,
 })
 const metaDiariaSchema = moneySchema.refine((v) => v <= APRESENTADORA_META_MAX, {
   message: `Meta diária não pode ultrapassar R$ ${APRESENTADORA_META_MAX.toLocaleString('pt-BR')}`,
@@ -46,7 +45,7 @@ const faixaSchema = z.object({
 
 const faixaPatchSchema = faixaSchema.partial()
 
-const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, COALESCE(NULLIF(fixo, 0), ${DEFAULT_APRESENTADORA_FIXO}) AS fixo, comissao_pct, meta_diaria_gmv, foto_url, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
+const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, ${presenterFixedSql('a')} AS fixo, comissao_pct, meta_diaria_gmv, foto_url, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
 
 // Resolve o id de apresentadora a partir de :id que pode ser:
 //  - id real da tabela apresentadoras, OU

@@ -1,5 +1,5 @@
 import { READ_COMISSOES } from '../config/role_groups.js'
-import { DEFAULT_APRESENTADORA_FIXO } from '../config/presenter_defaults.js'
+import { presenterFixedSql } from '../config/presenter_defaults.js'
 
 const APROVADORES = ['franqueador_master', 'franqueado']
 
@@ -112,7 +112,7 @@ export async function comissoesRoutes(app) {
              a.id AS apresentadora_id,
              COALESCE(a.nome, 'Sem apresentadora') AS nome,
              a.foto_url,
-             COALESCE(NULLIF(a.fixo, 0), $4::numeric) AS fixo,
+             ${presenterFixedSql('a')} AS fixo,
              COALESCE(SUM(va.gmv), 0) AS gmv,
              COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
              COALESCE(SUM(CASE WHEN va.origem = 'video' THEN va.gmv ELSE 0 END), 0) AS gmv_videos,
@@ -145,8 +145,8 @@ export async function comissoesRoutes(app) {
            (fixo + comissao_variavel) AS total_recebido
          FROM ranking_apresentadoras
          ORDER BY total_recebido DESC, gmv DESC, nome ASC
-         LIMIT $5::int`,
-        [tenant_id, range.start, range.end, DEFAULT_APRESENTADORA_FIXO, limit],
+         LIMIT $4::int`,
+        [tenant_id, range.start, range.end, limit],
       )
 
       return result.rows.map((row) => ({
@@ -189,7 +189,7 @@ export async function comissoesRoutes(app) {
          SELECT a.id AS apresentadora_id,
                 COALESCE(a.nome, 'Sem apresentadora') AS nome,
                 a.foto_url,
-                COALESCE(NULLIF(a.fixo, 0), $4::numeric) AS fixo,
+                ${presenterFixedSql('a')} AS fixo,
                 COALESCE(SUM(va.gmv), 0) AS gmv,
                 COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
                 COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
@@ -209,8 +209,8 @@ export async function comissoesRoutes(app) {
               (fixo + comissao_variavel) AS total_recebido
          FROM rk
         ORDER BY total_recebido DESC, gmv DESC, nome ASC
-        LIMIT $5::int`,
-      [tenantId, range.start, range.end, DEFAULT_APRESENTADORA_FIXO, limit],
+        LIMIT $4::int`,
+      [tenantId, range.start, range.end, limit],
     )
 
     return reply.send({

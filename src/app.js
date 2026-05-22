@@ -124,6 +124,8 @@ export async function buildApp(opts = {}) {
             'https://grupolivelab.com.br',
             'https://livelab-3601f.web.app',
             'https://livelab-3601f.firebaseapp.com',
+            'https://liveshop-saas-frontend-react-wine.vercel.app',
+            'https://liveshop-saas-frontend-react.vercel.app',
           ]
         : null)
 

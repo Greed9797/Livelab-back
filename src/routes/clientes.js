@@ -16,6 +16,7 @@ const tiktokUsernameField = z
   .transform((v) => (v === '' ? null : v))
   .nullable()
   .optional()
+const imageUrlField = z.string().max(500000).nullable().optional()
 
 const createSchema = z.object({
   nome:            z.string().min(1),
@@ -35,6 +36,7 @@ const createSchema = z.object({
   estado:          z.string().optional(),
   siga:            z.string().optional(),
   tiktok_username: tiktokUsernameField,
+  logo_url:        imageUrlField,
 })
 
 const patchSchema = z.object({
@@ -51,6 +53,7 @@ const patchSchema = z.object({
   meta_diaria_gmv:  z.number().optional(),
   onboarding_step:  z.number().int().optional(),
   tiktok_username:  tiktokUsernameField,
+  logo_url:         imageUrlField,
 }).passthrough()
 
 const mergeSchema = z.object({
@@ -102,15 +105,15 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `INSERT INTO clientes (tenant_id, nome, celular, cpf, cnpj, razao_social, email,
-          fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga, tiktok_username, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'ativo')
+          fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga, tiktok_username, logo_url, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'ativo')
          RETURNING *`,
         [tenant_id, d.nome, d.celular, d.cpf ?? null, d.cnpj ?? null,
          d.razao_social ?? null, d.email ?? null, d.fat_anual,
          d.nicho ?? null, d.site ?? null, d.vende_tiktok,
          lat, lng,
          d.cep ?? null, cidade, estado, d.siga ?? null,
-         d.tiktok_username ?? null]
+         d.tiktok_username ?? null, d.logo_url ?? null]
       )
       app.audit?.log?.(request, { action: 'cliente.create', entity_type: 'cliente', entity_id: result.rows[0].id, metadata: { nome: d.nome, nicho: d.nicho ?? null, fat_anual: d.fat_anual, vende_tiktok: d.vende_tiktok } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(result.rows[0])
@@ -416,7 +419,7 @@ export async function clientesRoutes(app) {
   // PATCH /v1/clientes/:id
   app.patch('/v1/clientes/:id', { preHandler: app.requirePapel(WRITE_CLIENTES) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status','meta_diaria_gmv','onboarding_step','tiktok_username']
+    const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status','meta_diaria_gmv','onboarding_step','tiktok_username','logo_url']
 
     // Valida via Zod (especialmente o regex de tiktok_username); demais campos
     // continuam permissivos via passthrough pra preservar compat.
@@ -446,10 +449,20 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `UPDATE clientes SET ${set}, atualizado_em = NOW()
-         WHERE id = $${keys.length + 1} AND tenant_id = $${keys.length + 2} RETURNING id, nome, status, onboarding_step, tiktok_username`,
+         WHERE id = $${keys.length + 1} AND tenant_id = $${keys.length + 2} RETURNING id, nome, status, onboarding_step, tiktok_username, logo_url`,
         [...vals, request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      if (Object.prototype.hasOwnProperty.call(updates, 'logo_url')) {
+        await db.query(
+          `UPDATE marcas
+           SET logo_url = $1, atualizado_em = NOW()
+           WHERE cliente_id = $2
+             AND tenant_id = $3::uuid
+             AND tipo = 'cliente'`,
+          [updates.logo_url ?? null, request.params.id, tenant_id],
+        )
+      }
       // Log status change separately if applicable
       if (updates.status !== undefined) {
         app.audit?.log?.(request, { action: 'clientes.status_alterado', entity_type: 'cliente', entity_id: request.params.id, metadata: { new_status: updates.status } })?.catch(err => app.log.error({ err }, 'audit log failed'))

@@ -18,6 +18,8 @@ const PAPEL_LABELS = {
 const _frontendUrl = () =>
   (process.env.FRONTEND_URL ?? 'https://livelab-3601f.web.app').replace(/\/+$/, '')
 
+const imageUrlSchema = z.string().max(500000).nullable().optional()
+
 const convidarSchema = z.object({
   nome: z.string().min(2),
   email: z.string().email(),
@@ -30,6 +32,7 @@ const convidarSchema = z.object({
   fixo: z.number().nonnegative().optional(),
   comissao_pct: z.number().min(0).max(100).optional(),
   meta_diaria_gmv: z.number().nonnegative().optional(),
+  foto_url: imageUrlSchema,
   senha_temporaria: z.string().min(6, 'Senha temporária deve ter no mínimo 6 caracteres').optional(),
 }).refine(d => d.papel !== 'cliente_parceiro' || !!d.cliente_id, {
   message: 'cliente_id é obrigatório para papel cliente_parceiro',
@@ -87,6 +90,7 @@ export async function usuariosRoutes(app) {
            END AS fixo,
            a.comissao_pct,
            a.meta_diaria_gmv,
+           a.foto_url,
            (a.id IS NOT NULL OR u.papel IN ('apresentador', 'apresentadora')) AS pode_apresentar_live
          FROM users u
          LEFT JOIN apresentadoras a ON a.user_id = u.id AND a.tenant_id = u.tenant_id
@@ -104,7 +108,7 @@ export async function usuariosRoutes(app) {
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0].message })
     }
-    const { nome, email, papel, cliente_id, apresentadora_id, fixo, comissao_pct, meta_diaria_gmv, senha_temporaria } = parsed.data
+    const { nome, email, papel, cliente_id, apresentadora_id, fixo, comissao_pct, meta_diaria_gmv, foto_url, senha_temporaria } = parsed.data
     const tenantId = request.user.tenant_id
     const presenterFixo = fixo ?? DEFAULT_APRESENTADORA_FIXO
     const presenterComissaoPct = comissao_pct ?? 0
@@ -200,12 +204,13 @@ export async function usuariosRoutes(app) {
                       fixo = $6,
                       comissao_pct = $7,
                       meta_diaria_gmv = COALESCE($8, meta_diaria_gmv),
+                      foto_url = COALESCE($9, foto_url),
                       ativo = true
                 WHERE id = $2
                   AND tenant_id = $3
                   AND user_id IS NULL
                 RETURNING id`,
-              [newUser.id, apresentadora_id, tenantId, nome, email, presenterFixo, presenterComissaoPct, meta_diaria_gmv ?? null]
+              [newUser.id, apresentadora_id, tenantId, nome, email, presenterFixo, presenterComissaoPct, meta_diaria_gmv ?? null, foto_url ?? null]
             )
             if (linked.rowCount === 0) {
               await db.query('ROLLBACK')
@@ -215,10 +220,10 @@ export async function usuariosRoutes(app) {
             await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
           } else {
             const createdProfile = await db.query(
-              `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, ativo)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+              `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, foto_url, ativo)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
                RETURNING id`,
-              [tenantId, newUser.id, nome, email, presenterFixo, presenterComissaoPct, meta_diaria_gmv ?? 0]
+              [tenantId, newUser.id, nome, email, presenterFixo, presenterComissaoPct, meta_diaria_gmv ?? 0, foto_url ?? null]
             )
             apresentadoraId = createdProfile.rows[0]?.id ?? null
             await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)

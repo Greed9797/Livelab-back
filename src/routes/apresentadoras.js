@@ -6,6 +6,7 @@ import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
 
 const APRESENTADORA_FIXO_MAX = 1_000_000 // R$ 1 milhão — sanity cap
 const APRESENTADORA_META_MAX = 100_000_000 // R$ 100 milhões — sanity cap pra meta diária
+const imageUrlSchema = z.string().max(500000).nullable().optional()
 
 const fixoSchema = moneySchema.refine((v) => v <= APRESENTADORA_FIXO_MAX, {
   message: `Fixo não pode ultrapassar R$ ${APRESENTADORA_FIXO_MAX.toLocaleString('pt-BR')}`,
@@ -25,6 +26,7 @@ const createSchema = z.object({
   comissao_pct:    z.number().min(0).max(100).default(0),
   meta_diaria_gmv: metaDiariaSchema.default(0),
   valor_fixo_mensal: z.number().min(0).default(0),
+  foto_url:        imageUrlSchema,
   observacoes:     z.string().optional(),
   link_contrato:   z.string().optional(),
   data_aniversario: z.string().optional(),
@@ -45,7 +47,7 @@ const faixaSchema = z.object({
 
 const faixaPatchSchema = faixaSchema.partial()
 
-const COLS = `a.id, a.nome, a.telefone, a.cargo, a.email, a.cpf_cnpj, a.cidade, a.ativo, COALESCE(NULLIF(a.fixo, 0), ${DEFAULT_APRESENTADORA_FIXO}) AS fixo, a.comissao_pct, a.meta_diaria_gmv, a.valor_fixo_mensal, a.observacoes, a.link_contrato, a.data_aniversario, a.data_inicio, a.data_fim, a.criado_em, a.user_id`
+const COLS = `a.id, a.nome, a.telefone, a.cargo, a.email, a.cpf_cnpj, a.cidade, a.ativo, COALESCE(NULLIF(a.fixo, 0), ${DEFAULT_APRESENTADORA_FIXO}) AS fixo, a.comissao_pct, a.meta_diaria_gmv, a.valor_fixo_mensal, a.foto_url, a.observacoes, a.link_contrato, a.data_aniversario, a.data_inicio, a.data_fim, a.criado_em, a.user_id`
 
 const STATS = `
   COALESCE(stats.total_lives, 0)::int AS total_lives,

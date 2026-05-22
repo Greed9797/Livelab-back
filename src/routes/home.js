@@ -308,20 +308,24 @@ export async function homeRoutes(app) {
             SELECT
               va.marca_id,
               m.nome,
+              COALESCE(m.logo_url, c.logo_url) AS logo_url,
+              COALESCE(m.site, c.site) AS site,
               COALESCE(SUM(va.gmv), 0) AS gmv,
               COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives
             FROM vendas_atribuidas va
             JOIN marcas m ON m.id = va.marca_id
              AND m.tenant_id = va.tenant_id
+            LEFT JOIN clientes c ON c.id = m.cliente_id
+             AND c.tenant_id = m.tenant_id
             WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND va.marca_id IS NOT NULL
               AND va.origem IN ('live', 'video')
               AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
               AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
                   = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-            GROUP BY va.marca_id, m.nome
+            GROUP BY va.marca_id, m.nome, COALESCE(m.logo_url, c.logo_url), COALESCE(m.site, c.site)
           )
-          SELECT marca_id, nome, gmv, lives
+          SELECT marca_id, nome, logo_url, site, gmv, lives
           FROM ranking_marcas_mes
           ORDER BY gmv DESC, nome ASC
           LIMIT 10
@@ -450,6 +454,7 @@ export async function homeRoutes(app) {
             SELECT
               a.id,
               a.nome AS apresentadora_nome,
+              a.foto_url,
               COALESCE(NULLIF(a.fixo, 0), $1::numeric) AS fixo,
               COALESCE(SUM(va.gmv), 0) AS gmv,
               COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
@@ -464,9 +469,9 @@ export async function homeRoutes(app) {
                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
             WHERE a.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND a.ativo = true
-            GROUP BY a.id, a.nome, a.fixo
+            GROUP BY a.id, a.nome, a.foto_url, a.fixo
           )
-          SELECT id, apresentadora_nome, fixo, gmv, lives, comissao_variavel,
+          SELECT id, apresentadora_nome, foto_url, fixo, gmv, lives, comissao_variavel,
                  (fixo + comissao_variavel) AS total_recebido
           FROM ranking_apresentadoras_mes
           ORDER BY total_recebido DESC, gmv DESC, apresentadora_nome ASC
@@ -481,6 +486,7 @@ export async function homeRoutes(app) {
             id: r.id,
             nome: r.apresentadora_nome,
             apresentadora_nome: r.apresentadora_nome,
+            foto_url: r.foto_url,
             gmv,
             lives,
             fixo,
@@ -526,6 +532,8 @@ export async function homeRoutes(app) {
       const rankingMarcasMes = rankingMarcasQ.rows.map(r => ({
         marca_id: r.marca_id,
         nome: r.nome,
+        logo_url: r.logo_url,
+        site: r.site,
         gmv: parseFloat(Number(r.gmv).toFixed(2)),
         lives: Number(r.lives)
       }))
@@ -574,7 +582,7 @@ export async function homeRoutes(app) {
         videos_mes:       videosMes,
         gmv_lives_mes:    gmvLivesMes,
         gmv_videos_mes:   gmvVideosMes,
-        horas_live_mes:   parseFloat(Number(horasLiveMesQ.rows[0].horas_live_mes ?? 0).toFixed(1)),
+        horas_live_mes:   parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0).toFixed(1)),
         media_viewers:    Math.round(Number(mediaViewersQ.rows[0].media)),
 
         // Operação live commerce

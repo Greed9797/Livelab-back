@@ -95,6 +95,7 @@ export const MIGRATIONS_LIST = [
   '098_repair_zero_video_presenter_commissions.sql',
   '099_default_presenter_compensation.sql',
   '100_meta_unidade.sql',
+  '101_apresentadoras_foto_url.sql',
 ]
 
 async function ensureMigrationsTable(client) {

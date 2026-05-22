@@ -133,7 +133,8 @@ export async function homeRoutes(app) {
         taxaConversaoQ,
         alertasOpsQ,
         ocupacaoQ,
-          rankingMarcasQ,
+        rankingMarcasQ,
+        horasLiveMesQ,
       ] = await Promise.all([
         db.query(`SELECT COUNT(*) AS total FROM clientes
                   WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
@@ -324,6 +325,17 @@ export async function homeRoutes(app) {
           FROM ranking_marcas_mes
           ORDER BY gmv DESC, nome ASC
           LIMIT 10
+        `),
+        db.query(`
+          SELECT COALESCE(SUM(
+            LEAST(EXTRACT(EPOCH FROM (encerrado_em - iniciado_em)) / 3600.0, 24.0)
+          ), 0) AS horas_live_mes
+          FROM lives
+          WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND status = 'encerrada'
+            AND encerrado_em IS NOT NULL
+            AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
         `),
       ])
 
@@ -562,6 +574,7 @@ export async function homeRoutes(app) {
         videos_mes:       videosMes,
         gmv_lives_mes:    gmvLivesMes,
         gmv_videos_mes:   gmvVideosMes,
+        horas_live_mes:   parseFloat(Number(horasLiveMesQ.rows[0].horas_live_mes ?? 0).toFixed(1)),
         media_viewers:    Math.round(Number(mediaViewersQ.rows[0].media)),
 
         // Operação live commerce

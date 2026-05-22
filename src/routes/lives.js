@@ -102,12 +102,12 @@ const liveManualSchema = z.object({
 })
 
 const liveManualEditSchema = z.object({
-  cabine_id:        z.string().uuid().optional(),
-  cliente_id:       z.string().uuid().optional(),
-  marca_id:         z.string().uuid().optional(),
-  apresentador_id:  z.string().uuid().optional(),
+  cabine_id:        z.string().uuid().nullable().optional(),
+  cliente_id:       z.string().uuid().nullable().optional(),
+  marca_id:         z.string().uuid().nullable().optional(),
+  apresentador_id:  z.string().uuid().nullable().optional(),
   apresentador2_id: z.string().uuid().nullable().optional(),
-  gestor_id:        z.string().uuid().optional(),
+  gestor_id:        z.string().uuid().nullable().optional(),
   data:             z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   hora_inicio:      z.string().regex(/^\d{2}:\d{2}$/).optional(),
   hora_fim:         z.string().regex(/^\d{2}:\d{2}$/).optional(),
@@ -808,17 +808,22 @@ export async function livesRoutes(app) {
 
         let resolvedApresentadorId
         if (d.apresentador_id !== undefined) {
-          const apRow = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid', [d.apresentador_id, tenant_id])
-          if (!apRow.rows[0]) {
-            await db.query('ROLLBACK')
-            return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+          if (d.apresentador_id === null) {
+            // Desvincula apresentadora principal.
+            resolvedApresentadorId = null
+          } else {
+            const apRow = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid', [d.apresentador_id, tenant_id])
+            if (!apRow.rows[0]) {
+              await db.query('ROLLBACK')
+              return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+            }
+            // user_id é nullable — apresentadoras sem conta não atualizam lives.apresentador_id
+            if (apRow.rows[0].user_id) resolvedApresentadorId = apRow.rows[0].user_id
           }
-          // user_id é nullable — apresentadoras sem conta não atualizam lives.apresentador_id
-          if (apRow.rows[0].user_id) resolvedApresentadorId = apRow.rows[0].user_id
         }
 
         let resolvedClienteId = d.cliente_id
-        if (d.marca_id !== undefined) {
+        if (d.marca_id !== undefined && d.marca_id !== null) {
           const marcaQ = await db.query(
             `SELECT id, cliente_id FROM marcas WHERE id = $1 AND tenant_id = $2::uuid`,
             [d.marca_id, tenant_id]
@@ -830,7 +835,8 @@ export async function livesRoutes(app) {
           resolvedClienteId = resolvedClienteId ?? marcaQ.rows[0].cliente_id ?? null
         }
 
-        if (d.cabine_id    !== undefined) addField('cabine_id',    d.cabine_id)
+        // cabine_id nunca vira NULL por engano — live sempre tem cabine.
+        if (d.cabine_id) addField('cabine_id', d.cabine_id)
         if (resolvedClienteId !== undefined) addField('cliente_id', resolvedClienteId)
         if (d.marca_id !== undefined) addField('marca_id', d.marca_id)
         if (resolvedApresentadorId !== undefined) addField('apresentador_id', resolvedApresentadorId)
@@ -890,7 +896,7 @@ export async function livesRoutes(app) {
           }
         }
 
-        if (d.marca_id !== undefined) {
+        if (d.marca_id) {
           await upsertVendaAtribuida(db, {
             tenantId: tenant_id,
             origem: 'live',

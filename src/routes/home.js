@@ -1,4 +1,4 @@
-import { presenterFixedSql } from '../config/presenter_defaults.js'
+import { getPresenterRanking, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 
 export async function homeRoutes(app) {
@@ -456,52 +456,20 @@ export async function homeRoutes(app) {
 
       let rankingApresentadorasMes = []
       try {
-        const rankingApQ = await db.query(`
-          WITH ranking_apresentadoras_mes AS (
-            SELECT
-              a.id,
-              a.nome AS apresentadora_nome,
-              a.foto_url,
-              ${presenterFixedSql('a')} AS fixo,
-              COALESCE(SUM(va.gmv), 0) AS gmv,
-              COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
-              COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
-            FROM apresentadoras a
-            LEFT JOIN vendas_atribuidas va
-              ON va.apresentadora_id = a.id
-             AND va.tenant_id = a.tenant_id
-             AND va.origem IN ('live', 'video')
-             AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
-             AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                 = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-            WHERE a.tenant_id = current_setting('app.tenant_id', true)::uuid
-              AND a.ativo = true
-            GROUP BY a.id, a.nome, a.foto_url, a.fixo
-          )
-          SELECT id, apresentadora_nome, foto_url, fixo, gmv, lives, comissao_variavel,
-                 (fixo + comissao_variavel) AS total_recebido
-          FROM ranking_apresentadoras_mes
-          ORDER BY gmv DESC, total_recebido DESC, apresentadora_nome ASC
-          LIMIT 10
-        `)
-        rankingApresentadorasMes = rankingApQ.rows.map(r => {
-          const lives = Number(r.lives)
-          const gmv = round2(r.gmv)
-          const fixo = round2(r.fixo)
-          const comissaoVariavel = round2(r.comissao_variavel)
-          return {
-            id: r.id,
-            nome: r.apresentadora_nome,
-            apresentadora_nome: r.apresentadora_nome,
-            foto_url: r.foto_url,
-            gmv,
-            lives,
-            fixo,
-            comissao_variavel: comissaoVariavel,
-            total_recebido: round2(r.total_recebido),
-            gmv_medio_live: lives > 0 ? round2(gmv / lives) : 0
-          }
-        })
+        rankingApresentadorasMes = (await getPresenterRanking(db, {
+          tenantId: tenant_id,
+          range: monthRangeFromQuery(),
+          limit: 10,
+        })).map((r) => ({
+          ...r,
+          gmv: round2(r.gmv),
+          gmv_lives: round2(r.gmv_lives),
+          gmv_videos: round2(r.gmv_videos),
+          fixo: round2(r.fixo),
+          comissao_variavel: round2(r.comissao_variavel),
+          total_recebido: round2(r.total_recebido),
+          gmv_medio_live: Number(r.lives) > 0 ? round2(r.gmv / Number(r.lives)) : 0,
+        }))
       } catch (error) {
         request.log?.warn?.({ err: error }, 'home/dashboard: ranking de apresentadoras indisponível')
       }

@@ -1,23 +1,7 @@
 import { READ_COMISSOES } from '../config/role_groups.js'
-import { presenterFixedSql } from '../config/presenter_defaults.js'
+import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 
 const APROVADORES = ['franqueador_master', 'franqueado']
-
-function monthRangeFromQuery(query = {}) {
-  const mes = typeof query.mes === 'string' && /^\d{4}-\d{2}$/.test(query.mes)
-    ? query.mes
-    : new Date().toISOString().slice(0, 7)
-  const start = `${mes}-01`
-  const endDate = new Date(`${start}T00:00:00.000Z`)
-  endDate.setUTCMonth(endDate.getUTCMonth() + 1)
-  return { mes, start, end: endDate.toISOString().slice(0, 10) }
-}
-
-function limitFromQuery(query = {}, fallback = 50) {
-  const raw = Number(query.limit ?? fallback)
-  if (!Number.isFinite(raw)) return fallback
-  return Math.min(Math.max(Math.trunc(raw), 1), 100)
-}
 
 function buildComissaoFilters(query, tenantId) {
   const values = [tenantId]
@@ -106,61 +90,7 @@ export async function comissoesRoutes(app) {
     const limit = limitFromQuery(request.query, 50)
 
     return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `WITH ranking_apresentadoras AS (
-           SELECT
-             a.id AS apresentadora_id,
-             COALESCE(a.nome, 'Sem apresentadora') AS nome,
-             a.foto_url,
-             ${presenterFixedSql('a')} AS fixo,
-             COALESCE(SUM(va.gmv), 0) AS gmv,
-             COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
-             COALESCE(SUM(CASE WHEN va.origem = 'video' THEN va.gmv ELSE 0 END), 0) AS gmv_videos,
-             COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
-             COALESCE(SUM(va.pedidos), 0)::int AS pedidos,
-             COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
-           FROM apresentadoras a
-           LEFT JOIN vendas_atribuidas va
-             ON va.apresentadora_id = a.id
-            AND va.tenant_id = a.tenant_id
-            AND va.origem IN ('live', 'video')
-            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
-            AND va.data >= $2::date
-            AND va.data < $3::date
-           WHERE a.tenant_id = $1::uuid
-             AND a.ativo = true
-           GROUP BY a.id, a.nome, a.foto_url, a.fixo
-         )
-         SELECT
-           apresentadora_id,
-           nome,
-           foto_url,
-           gmv,
-           gmv_lives,
-           gmv_videos,
-           lives,
-           pedidos,
-           fixo,
-           comissao_variavel,
-           (fixo + comissao_variavel) AS total_recebido
-         FROM ranking_apresentadoras
-         ORDER BY gmv DESC, total_recebido DESC, nome ASC
-         LIMIT $4::int`,
-        [tenant_id, range.start, range.end, limit],
-      )
-
-      return result.rows.map((row) => ({
-        ...row,
-        mes: range.mes,
-        gmv: Number(row.gmv ?? 0),
-        gmv_lives: Number(row.gmv_lives ?? 0),
-        gmv_videos: Number(row.gmv_videos ?? 0),
-        lives: Number(row.lives ?? 0),
-        pedidos: Number(row.pedidos ?? 0),
-        fixo: Number(row.fixo ?? 0),
-        comissao_variavel: Number(row.comissao_variavel ?? 0),
-        total_recebido: Number(row.total_recebido ?? 0),
-      }))
+      return getPresenterRanking(db, { tenantId: tenant_id, range, limit })
     })
   })
 
@@ -184,46 +114,10 @@ export async function comissoesRoutes(app) {
       return reply.code(404).send({ error: 'Ranking público indisponível para esta unidade' })
     }
 
-    const result = await app.db.query(
-      `WITH rk AS (
-         SELECT a.id AS apresentadora_id,
-                COALESCE(a.nome, 'Sem apresentadora') AS nome,
-                a.foto_url,
-                ${presenterFixedSql('a')} AS fixo,
-                COALESCE(SUM(va.gmv), 0) AS gmv,
-                COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
-                COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
-           FROM apresentadoras a
-           LEFT JOIN vendas_atribuidas va
-             ON va.apresentadora_id = a.id
-            AND va.tenant_id = a.tenant_id
-            AND va.origem IN ('live', 'video')
-            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
-            AND va.data >= $2::date
-            AND va.data < $3::date
-          WHERE a.tenant_id = $1::uuid
-            AND a.ativo = true
-          GROUP BY a.id, a.nome, a.foto_url, a.fixo
-       )
-       SELECT apresentadora_id, nome, foto_url, gmv, lives, fixo, comissao_variavel,
-              (fixo + comissao_variavel) AS total_recebido
-         FROM rk
-        ORDER BY gmv DESC, total_recebido DESC, nome ASC
-        LIMIT $4::int`,
-      [tenantId, range.start, range.end, limit],
-    )
-
     return reply.send({
       unidade: tenant.ranking_publico_nome ?? null,
       mes: range.mes,
-      apresentadoras: result.rows.map((row) => ({
-        ...row,
-        gmv: Number(row.gmv ?? 0),
-        lives: Number(row.lives ?? 0),
-        fixo: Number(row.fixo ?? 0),
-        comissao_variavel: Number(row.comissao_variavel ?? 0),
-        total_recebido: Number(row.total_recebido ?? 0),
-      })),
+      apresentadoras: await getPresenterRanking(app.db, { tenantId, range, limit }),
     })
   })
 

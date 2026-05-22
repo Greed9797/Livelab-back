@@ -159,6 +159,65 @@ export async function comissoesRoutes(app) {
     })
   })
 
+  // Público (sem auth) — ranking de apresentadoras de um tenant com ranking público ativo.
+  // Usa app.db (pool, sem RLS) com filtro explícito de tenant_id validado.
+  app.get('/v1/public/ranking/apresentadoras', async (request, reply) => {
+    const tenantId = typeof request.query?.tenant === 'string' ? request.query.tenant.trim() : ''
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId)) {
+      return reply.code(400).send({ error: 'Parâmetro tenant (uuid) obrigatório' })
+    }
+    const range = monthRangeFromQuery(request.query)
+    const limit = limitFromQuery(request.query, 10)
+
+    const tenantQ = await app.db.query(
+      `SELECT id, ranking_publico_ativo, ranking_publico_nome
+         FROM tenants WHERE id = $1::uuid`,
+      [tenantId],
+    )
+    const tenant = tenantQ.rows[0]
+    if (!tenant || tenant.ranking_publico_ativo === false) {
+      return reply.code(404).send({ error: 'Ranking público indisponível para esta unidade' })
+    }
+
+    const result = await app.db.query(
+      `WITH rk AS (
+         SELECT va.apresentadora_id,
+                COALESCE(a.nome, 'Sem apresentadora') AS nome,
+                COALESCE(a.fixo, 0) AS fixo,
+                COALESCE(SUM(va.gmv), 0) AS gmv,
+                COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
+                COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
+           FROM vendas_atribuidas va
+           JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
+          WHERE va.tenant_id = $1::uuid
+            AND va.apresentadora_id IS NOT NULL
+            AND va.origem IN ('live', 'video')
+            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+            AND va.data >= $2::date AND va.data < $3::date
+          GROUP BY va.apresentadora_id, a.nome, a.fixo
+       )
+       SELECT apresentadora_id, nome, gmv, lives, fixo, comissao_variavel,
+              (fixo + comissao_variavel) AS total_recebido
+         FROM rk
+        ORDER BY total_recebido DESC, gmv DESC, nome ASC
+        LIMIT $4::int`,
+      [tenantId, range.start, range.end, limit],
+    )
+
+    return reply.send({
+      unidade: tenant.ranking_publico_nome ?? null,
+      mes: range.mes,
+      apresentadoras: result.rows.map((row) => ({
+        ...row,
+        gmv: Number(row.gmv ?? 0),
+        lives: Number(row.lives ?? 0),
+        fixo: Number(row.fixo ?? 0),
+        comissao_variavel: Number(row.comissao_variavel ?? 0),
+        total_recebido: Number(row.total_recebido ?? 0),
+      })),
+    })
+  })
+
   app.get('/v1/comissoes/marcas', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {

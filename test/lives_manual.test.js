@@ -478,6 +478,26 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
     expect(res.statusCode).toBe(404)
   })
 
+  it('aceita apresentador_id e marca_id null sem Invalid UUID', async () => {
+    const liveId = '22222222-2222-2222-2222-222222222222'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: liveId, status: 'encerrada', cabine_id: 'cab-1', iniciado_em: '2026-05-22T12:00:00Z', encerrado_em: '2026-05-22T14:00:00Z' }] }) // SELECT live
+      .mockResolvedValue({ rows: [] }) // UPDATE/DELETE/COMMIT
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}`,
+      payload: { apresentador_id: null, marca_id: null, gestor_id: null },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).not.toMatchObject({ error: 'Invalid UUID' })
+  })
+
   it('allows edit of live em_andamento with new fields', async () => {
     const liveId = '11111111-1111-1111-1111-111111111111'
     const tiktokU = 'loja_x'

@@ -14,7 +14,7 @@
 //   3. Live agendada = lives onde a apresentadora está como titular
 //      (lives.apresentador_id == apresentadoras.user_id) OU como extra
 //      (live_apresentadores.apresentador_id == apresentadoras.user_id),
-//      com status em ('em_andamento','aprovada' via live_requests).
+//      com status em ('em_andamento','agendada') OU confirmado via agenda_eventos (migration 106).
 //   4. Lock pessimista no resync via SELECT ... FOR UPDATE em nível de apresentadora
 //      pra evitar duas escritas concorrentes da grade.
 
@@ -299,8 +299,8 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
       }
 
       // 3) Há live ativa/agendada que conflita?
-      // B6.1 — inclui lives 'em_andamento' E 'agendada' (status no DB) + lives aprovadas
-      //         via live_requests (status='aprovada') para detectar conflitos futuros.
+      // B6.1 — inclui lives 'em_andamento' E 'agendada' (status no DB) + eventos confirmados
+      //         via agenda_eventos (status='confirmado') para detectar conflitos futuros.
       // Considera lives sem encerrado_em como "em aberto" — usa interval 4h default.
       if (apr.user_id) {
         const liveR = await db.query(
@@ -317,17 +317,15 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
                   tstzrange(($2::date + $3::time)::timestamptz,
                             ($2::date + $4::time)::timestamptz, '[)')
            UNION
-           SELECT DISTINCT lr.id, 'live_request_aprovada' AS status,
-                  (lr.data_solicitada + lr.hora_inicio)::timestamptz AS iniciado_em,
-                  (lr.data_solicitada + lr.hora_fim)::timestamptz    AS encerrado_em
-             FROM live_requests lr
-            WHERE lr.status = 'aprovada'
-              AND lr.apresentadora_id = $1
-              AND tstzrange(
-                    (lr.data_solicitada + lr.hora_inicio)::timestamptz,
-                    (lr.data_solicitada + lr.hora_fim)::timestamptz,
-                    '[)'
-                  ) &&
+           -- Eventos confirmados em agenda_eventos substituem live_requests (migration 106)
+           SELECT DISTINCT ae.id, 'agenda_evento_confirmado' AS status,
+                  ae.data_inicio AS iniciado_em,
+                  ae.data_fim    AS encerrado_em
+             FROM agenda_eventos ae
+            WHERE ae.status = 'confirmado'
+              AND ae.tipo = 'live'
+              AND ae.apresentadora_id = $1
+              AND tstzrange(ae.data_inicio, ae.data_fim, '[)') &&
                   tstzrange(($2::date + $3::time)::timestamptz,
                             ($2::date + $4::time)::timestamptz, '[)')
             LIMIT 1`,

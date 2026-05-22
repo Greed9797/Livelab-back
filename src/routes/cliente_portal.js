@@ -244,17 +244,25 @@ export async function clientePortalRoutes(app) {
         [tenantId]
       )
 
-      // All live_requests in date range (exclude recusada)
+      // Todos eventos de live no período (exceto cancelado), via agenda_eventos
+      // cliente_id é resolvido via marcas.cliente_id
       const slotsRes = await db.query(
-        `SELECT lr.id, lr.cabine_id, lr.data_solicitada, lr.hora_inicio, lr.hora_fim,
-                lr.status, lr.cliente_id,
-                (lr.cliente_id = $1) AS is_mine
-         FROM live_requests lr
-         WHERE lr.tenant_id = $4::uuid
-           AND lr.data_solicitada >= $2
-           AND lr.data_solicitada <= $3
-           AND lr.status != 'recusada'
-         ORDER BY lr.data_solicitada, lr.hora_inicio`,
+        `SELECT ae.id,
+                ae.cabine_id,
+                (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date       AS data_solicitada,
+                (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::time::text AS hora_inicio,
+                (ae.data_fim    AT TIME ZONE 'America/Sao_Paulo')::time::text AS hora_fim,
+                ae.status,
+                mar.cliente_id,
+                (mar.cliente_id = $1) AS is_mine
+         FROM agenda_eventos ae
+         JOIN marcas mar ON mar.id = ae.marca_id AND mar.tenant_id = ae.tenant_id
+         WHERE ae.tenant_id = $4::uuid
+           AND ae.tipo = 'live'
+           AND ae.status != 'cancelado'
+           AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date >= $2::date
+           AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date <= $3::date
+         ORDER BY ae.data_inicio`,
         [clienteId, data_inicio, data_fim, tenantId]
       )
 
@@ -267,7 +275,9 @@ export async function clientePortalRoutes(app) {
         const horaFim = String(r.hora_fim).slice(0, 5)
 
         if (isMine) {
-          const mappedStatus = r.status === 'aprovada' ? 'confirmada' : r.status // pendente stays pendente
+          // planejado → pendente, confirmado → confirmada, ao_vivo → confirmada
+          const statusMap = { planejado: 'pendente', confirmado: 'confirmada', ao_vivo: 'confirmada' }
+          const mappedStatus = statusMap[r.status] ?? r.status
           return {
             cabine_id: r.cabine_id,
             data,
@@ -316,14 +326,19 @@ export async function clientePortalRoutes(app) {
 
     return app.withTenant(tenantId, async (db) => {
       const result = await db.query(`
-        SELECT lr.id, lr.cabine_id, lr.data_solicitada, lr.hora_inicio, lr.hora_fim,
-               lr.status, lr.observacao,
+        SELECT ae.id, ae.cabine_id,
+               (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date       AS data_solicitada,
+               (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::time::text AS hora_inicio,
+               (ae.data_fim    AT TIME ZONE 'America/Sao_Paulo')::time::text AS hora_fim,
+               ae.status, ae.observacoes AS observacao,
                cab.numero AS cabine_numero
-        FROM live_requests lr
-        JOIN cabines cab ON cab.id = lr.cabine_id
-        WHERE lr.cliente_id = $1
-          AND lr.status != 'recusada'
-        ORDER BY lr.data_solicitada ASC, lr.hora_inicio ASC
+        FROM agenda_eventos ae
+        JOIN marcas mar ON mar.id = ae.marca_id AND mar.tenant_id = ae.tenant_id
+        JOIN cabines cab ON cab.id = ae.cabine_id AND cab.tenant_id = ae.tenant_id
+        WHERE mar.cliente_id = $1
+          AND ae.tipo = 'live'
+          AND ae.status != 'cancelado'
+        ORDER BY ae.data_inicio ASC
       `, [clienteId])
 
       return result.rows.map((r) => ({
@@ -335,7 +350,8 @@ export async function clientePortalRoutes(app) {
           : String(r.data_solicitada).slice(0, 10),
         hora_inicio: String(r.hora_inicio).slice(0, 5),
         hora_fim: String(r.hora_fim).slice(0, 5),
-        status: r.status === 'aprovada' ? 'confirmada' : r.status,
+        // planejado → pendente, confirmado/ao_vivo → confirmada
+        status: r.status === 'confirmado' || r.status === 'ao_vivo' ? 'confirmada' : r.status === 'planejado' ? 'pendente' : r.status,
         observacoes: r.observacao ?? null,
       }))
     })
@@ -371,35 +387,52 @@ export async function clientePortalRoutes(app) {
     }
 
     return app.withTenant(tenantId, async (db) => {
-      // Check for time overlap conflict
+      // Resolve marca ativa do cliente para criar o evento
+      const marcaQ = await db.query(
+        `SELECT id FROM marcas WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativa' ORDER BY criado_em ASC LIMIT 1`,
+        [clienteId, tenantId]
+      )
+      const marcaId = marcaQ.rows[0]?.id ?? null
+      if (!marcaId) {
+        return reply.code(422).send({ error: 'Sua conta não possui marca ativa. Entre em contato com a unidade.' })
+      }
+
+      // Check for time overlap conflict em agenda_eventos (exceto cancelado)
       const conflictRes = await db.query(
-        `SELECT id FROM live_requests
+        `SELECT id FROM agenda_eventos
          WHERE cabine_id = $1
-           AND data_solicitada = $2
-           AND status != 'recusada'
-           AND hora_inicio < $4
-           AND hora_fim > $3
+           AND tenant_id = $5::uuid
+           AND tipo = 'live'
+           AND status != 'cancelado'
+           AND data_inicio < ($2::date + $4::time) AT TIME ZONE 'America/Sao_Paulo'
+           AND data_fim    > ($2::date + $3::time) AT TIME ZONE 'America/Sao_Paulo'
          LIMIT 1`,
-        [cabine_id, data_solicitada, hora_inicio, hora_fim]
+        [cabine_id, data_solicitada, hora_inicio, hora_fim, tenantId]
       )
 
       if (conflictRes.rows.length > 0) {
         return reply.code(409).send({ error: 'Horário indisponível. Escolha outro horário ou cabine.' })
       }
 
-      // Insert — use observacao (actual column name, no 's')
+      // Insert em agenda_eventos com status='planejado' (equivalente a 'pendente')
       const obs = observacoes ?? null
       const insertRes = await db.query(
-        `INSERT INTO live_requests (tenant_id, cliente_id, cabine_id, solicitante_id, data_solicitada, hora_inicio, hora_fim, status, observacao)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pendente', $8)
+        `INSERT INTO agenda_eventos
+           (tenant_id, cabine_id, marca_id, criado_por,
+            data_inicio, data_fim, tipo, status, observacoes)
+         VALUES ($1, $2, $3, $4,
+                 ($5::date + $6::time) AT TIME ZONE 'America/Sao_Paulo',
+                 ($5::date + $7::time) AT TIME ZONE 'America/Sao_Paulo',
+                 'live', 'planejado', $8)
          RETURNING id, status`,
-        [tenantId, clienteId, cabine_id, request.user.sub, data_solicitada, hora_inicio, hora_fim, obs]
+        [tenantId, cabine_id, marcaId, request.user.sub, data_solicitada, hora_inicio, hora_fim, obs]
       )
 
       const row = insertRes.rows[0]
       return reply.code(201).send({
         id: row.id,
-        status: row.status,
+        // Retorna 'pendente' para compatibilidade com o frontend
+        status: 'pendente',
         message: 'Solicitação enviada! A unidade irá confirmar em breve.',
       })
     })

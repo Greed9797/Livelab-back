@@ -311,7 +311,7 @@ export async function cabinesRoutes(app) {
 
       const dependencies = {
         lives: await countCabineDependency(db, 'lives', request.params.id, tenant_id),
-        live_requests: await countCabineDependency(db, 'live_requests', request.params.id, tenant_id),
+        // live_requests migrado para agenda_eventos (migration 106)
         agenda_eventos: await countCabineDependency(db, 'agenda_eventos', request.params.id, tenant_id),
         cabine_eventos: await countCabineDependency(db, 'cabine_eventos', request.params.id, tenant_id),
       }

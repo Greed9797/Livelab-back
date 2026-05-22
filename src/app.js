@@ -116,19 +116,23 @@ export async function buildApp(opts = {}) {
   // A allowlist abaixo é a fonte da verdade para origens permitidas.
   // Para adicionar uma origem nova, atualize tanto este array quanto o
   // env var CORS_ORIGIN no painel de deploy — nunca use '*'.
-  const corsAllowedOrigins = process.env.CORS_ORIGIN
+  const corsBase = process.env.NODE_ENV === 'production'
+    ? [
+        'https://app.grupolivelab.com.br',
+        'https://www.grupolivelab.com.br',
+        'https://grupolivelab.com.br',
+        'https://livelab-3601f.web.app',
+        'https://livelab-3601f.firebaseapp.com',
+        'https://liveshop-saas-frontend-react-wine.vercel.app',
+        'https://liveshop-saas-frontend-react.vercel.app',
+      ]
+    : null
+  const corsEnv = process.env.CORS_ORIGIN
     ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
-    : (process.env.NODE_ENV === 'production'
-        ? [
-            'https://app.grupolivelab.com.br',
-            'https://www.grupolivelab.com.br',
-            'https://grupolivelab.com.br',
-            'https://livelab-3601f.web.app',
-            'https://livelab-3601f.firebaseapp.com',
-            'https://liveshop-saas-frontend-react-wine.vercel.app',
-            'https://liveshop-saas-frontend-react.vercel.app',
-          ]
-        : null)
+    : []
+  const corsAllowedOrigins = corsBase
+    ? [...new Set([...corsBase, ...corsEnv])]
+    : (corsEnv.length ? corsEnv : null)
 
   const TIKTOK_ORIGINS = [
     'https://developers.tiktok.com',

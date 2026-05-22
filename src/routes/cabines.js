@@ -599,6 +599,14 @@ export async function cabinesRoutes(app) {
         }
 
         await db.query('COMMIT')
+
+        app.audit?.log?.(request, {
+          action: 'liberar_cabine',
+          entity_type: 'cabines',
+          entity_id: request.params.id,
+          metadata: { forcado: forceLiberar },
+        }).catch(() => {})
+
         const response = result.rows[0]
         if (avisoLiveAtiva) {
           return { ...response, aviso: avisoLiveAtiva }
@@ -1038,11 +1046,50 @@ export async function cabinesRoutes(app) {
         }
 
         await db.query('COMMIT')
+
+        app.audit?.log?.(request, {
+          action: 'alterar_status_cabine',
+          entity_type: 'cabines',
+          entity_id: request.params.id,
+          metadata: { status_anterior: cabine.status, status_novo: status },
+        }).catch(() => {})
+
         return result.rows[0]
       } catch (error) {
         await db.query('ROLLBACK')
         throw error
       }
+    })
+  })
+
+  // GET /v1/cabines/:id/ultimas-metricas
+  app.get('/v1/cabines/:id/ultimas-metricas', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { id } = request.params
+
+    return app.withTenant(tenant_id, async (db) => {
+      const { rows } = await db.query(`
+        SELECT
+          ROUND(AVG(fat_gerado)::numeric, 2) AS avg_fat_gerado,
+          ROUND(AVG(qtd_pedidos)::numeric, 0)::int AS avg_qtd_pedidos,
+          ROUND(AVG(manual_views)::numeric, 0)::int AS avg_views,
+          ROUND(AVG(manual_likes)::numeric, 0)::int AS avg_likes,
+          ROUND(AVG(manual_comments)::numeric, 0)::int AS avg_comments,
+          ROUND(AVG(manual_shares)::numeric, 0)::int AS avg_shares,
+          COUNT(*)::int AS amostra
+        FROM (
+          SELECT fat_gerado, qtd_pedidos, manual_views, manual_likes, manual_comments, manual_shares
+          FROM lives
+          WHERE tenant_id = $1::uuid
+            AND cabine_id = $2::uuid
+            AND status = 'encerrada'
+            AND fat_gerado IS NOT NULL
+          ORDER BY encerrado_em DESC NULLS LAST
+          LIMIT 5
+        ) ult
+      `, [tenant_id, id])
+
+      return rows[0] ?? {}
     })
   })
 

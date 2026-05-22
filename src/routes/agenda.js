@@ -535,6 +535,38 @@ export async function agendaRoutes(app) {
       )
       const evento = result.rows[0]
 
+      // ── Sync agenda→live para eventos ao_vivo com live vinculada ──────────────
+      if (evento.live_id && evento.status === 'ao_vivo') {
+        const liveSync = []
+        const liveVals = []
+        let lIdx = 1
+        const liveAdd = (col, val) => { liveSync.push(`${col} = $${lIdx++}`); liveVals.push(val) }
+
+        if ('marca_id' in patchUpdates) liveAdd('marca_id', patchUpdates.marca_id)
+        if ('data_fim' in patchUpdates) liveAdd('previsto_fim', patchUpdates.data_fim)
+
+        // apresentadora_id em agenda_eventos é apresentadoras.id;
+        // lives.apresentador_id é users.id — converte via lookup.
+        if ('apresentadora_id' in patchUpdates && patchUpdates.apresentadora_id) {
+          const apRow = await db.query(
+            `SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+            [patchUpdates.apresentadora_id, tenant_id]
+          )
+          const userId = apRow.rows[0]?.user_id
+          if (userId) liveAdd('apresentador_id', userId)
+        }
+
+        if (liveSync.length > 0) {
+          liveVals.push(evento.live_id, tenant_id)
+          await db.query(
+            `UPDATE lives SET ${liveSync.join(', ')}, atualizado_em = NOW()
+             WHERE id = $${lIdx}::uuid AND tenant_id = $${lIdx + 1}::uuid AND status = 'em_andamento'`,
+            liveVals
+          )
+        }
+      }
+      // ── fim sync ─────────────────────────────────────────────────────────────
+
       // Atualiza recorrentes conforme modo_recorrencia
       let recurrentesAtualizados = 0
       if (modo_recorrencia !== 'apenas_este') {

@@ -466,9 +466,9 @@ export async function livesRoutes(app) {
         let finalAgendaEventoId = resolvedAgendaEventoId
         if (!resolvedAgendaEventoId && !agendaWarning) {
           try {
-            // Busca marca_id para o cliente resolvido (necessário pois agenda_eventos.marca_id é NOT NULL)
-            let marcaId = null
-            if (resolvedClienteId) {
+            // Usa marca já resolvida do payload; fallback busca por cliente.
+            let marcaId = resolvedMarcaId ?? null
+            if (!marcaId && resolvedClienteId) {
               const marcaQ = await db.query(
                 `SELECT id FROM marcas
                  WHERE tenant_id = $1::uuid AND cliente_id = $2::uuid AND status = 'ativa'
@@ -957,6 +957,30 @@ export async function livesRoutes(app) {
             }
           }
         }
+
+        // ── Sync live→agenda_eventos para campos críticos ──────────────────────
+        const agendaEvIdToSync = live.agenda_evento_id
+        if (agendaEvIdToSync) {
+          const agendaSync = []
+          const agendaVals = []
+          let aIdx = 1
+          const agendaAdd = (col, val) => { agendaSync.push(`${col} = $${aIdx++}`); agendaVals.push(val) }
+
+          if (d.marca_id !== undefined) agendaAdd('marca_id', d.marca_id)
+          if (d.previsto_fim !== undefined) agendaAdd('data_fim', d.previsto_fim)
+          // Apresentadora: d.apresentador_id é apresentadoras.id; agenda usa o mesmo campo.
+          if (d.apresentador_id !== undefined) agendaAdd('apresentadora_id', d.apresentador_id)
+
+          if (agendaSync.length > 0) {
+            agendaVals.push(agendaEvIdToSync, tenant_id)
+            await db.query(
+              `UPDATE agenda_eventos SET ${agendaSync.join(', ')}, atualizado_em = NOW()
+               WHERE id = $${aIdx}::uuid AND tenant_id = $${aIdx + 1}::uuid`,
+              agendaVals
+            )
+          }
+        }
+        // ── fim sync ────────────────────────────────────────────────────────────
 
         // Audit log — diff de campos efetivamente alterados
         const auditFields = [

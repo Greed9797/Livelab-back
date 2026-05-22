@@ -50,6 +50,7 @@ import { videosRoutes } from './routes/videos.js'
 import { vendasAtribuidasRoutes } from './routes/vendas_atribuidas.js'
 import { comissoesRoutes } from './routes/comissoes.js'
 import { metasRoutes } from './routes/metas.js'
+import { metaUnidadeRoutes } from './routes/meta_unidade.js'
 import { AppError } from './lib/errors.js'
 
 // S-Sentry: inicializa o SDK uma vez, antes de qualquer handler.
@@ -240,6 +241,7 @@ export async function buildApp(opts = {}) {
   await app.register(vendasAtribuidasRoutes)
   await app.register(comissoesRoutes)
   await app.register(metasRoutes)
+  await app.register(metaUnidadeRoutes)
 
   // S-11: opcional — se HEALTH_CHECK_TOKEN setado, exige header pra responder.
   // 404 (não 401) pra não confirmar existência do endpoint a scanners.

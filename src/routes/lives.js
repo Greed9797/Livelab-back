@@ -1053,7 +1053,10 @@ export async function livesRoutes(app) {
         `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
                 l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
-                l.final_orders_count, l.resumo, l.previsto_fim,
+                l.final_orders_count, l.final_peak_viewers,
+                l.final_total_likes, l.final_total_comments,
+                l.final_total_shares, l.final_gifts_diamonds,
+                l.resumo, l.previsto_fim,
                 l.manual_views, l.manual_likes, l.manual_comments, l.manual_shares,
                 l.manual_diamonds, l.manual_orders, l.manual_gmv,
                 c.numero AS cabine_numero, c.contrato_id,
@@ -1173,7 +1176,10 @@ export async function livesRoutes(app) {
         `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
                 l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
-                l.final_orders_count, l.resumo, l.previsto_fim,
+                l.final_orders_count, l.final_peak_viewers,
+                l.final_total_likes, l.final_total_comments,
+                l.final_total_shares, l.final_gifts_diamonds,
+                l.resumo, l.previsto_fim,
                 l.manual_views, l.manual_likes, l.manual_comments, l.manual_shares,
                 l.manual_diamonds, l.manual_orders, l.manual_gmv,
                 c.numero AS cabine_numero, c.contrato_id,
@@ -1190,7 +1196,10 @@ export async function livesRoutes(app) {
                 COALESCE(l.agenda_evento_id, ae.id) AS agenda_evento_id,
                 ae.data_inicio AS agenda_data_inicio,
                 ae.data_fim AS agenda_data_fim,
-                ae.observacoes AS agenda_titulo
+                ae.observacoes AS agenda_titulo,
+                ls.viewer_count, ls.total_viewers, ls.total_orders,
+                ls.gmv AS gmv_atual, ls.likes_count, ls.comments_count,
+                ls.gifts_diamonds, ls.shares_count
          FROM lives l
          JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
          LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
@@ -1245,6 +1254,15 @@ export async function livesRoutes(app) {
            LIMIT 1
          ) va_marca ON true
          LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT viewer_count, total_viewers, total_orders, gmv,
+                  likes_count, comments_count, gifts_diamonds, shares_count
+           FROM live_snapshots
+           WHERE live_id = l.id
+             AND tenant_id = l.tenant_id
+           ORDER BY captured_at DESC
+           LIMIT 1
+         ) ls ON true
          ${where}
          ORDER BY l.iniciado_em DESC LIMIT 100`,
         params

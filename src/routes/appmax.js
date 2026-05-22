@@ -22,6 +22,50 @@ function appmaxEventNonce(payload) {
   return 'sha256:' + crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
 }
 
+// Retorna o external_id estável da instalação Appmax. Idempotente por identidade
+// (app_id + client_id + external_key): mesma instalação → mesmo external_id.
+async function resolveAppmaxExternalId(db, { appId, clientId, clientSecret, externalKey }) {
+  const cid = clientId ?? ''
+  const ekey = externalKey ?? ''
+
+  const existing = await db.query(
+    `SELECT external_id FROM appmax_installations
+      WHERE app_id = $1 AND COALESCE(client_id,'') = $2 AND COALESCE(external_key,'') = $3
+      LIMIT 1`,
+    [appId, cid, ekey],
+  )
+  if (existing.rows[0]) {
+    // Atualiza client_secret (pode ter rotacionado) sem mudar o external_id.
+    await db.query(
+      `UPDATE appmax_installations SET client_secret = $4, atualizado_em = NOW()
+        WHERE app_id = $1 AND COALESCE(client_id,'') = $2 AND COALESCE(external_key,'') = $3`,
+      [appId, cid, ekey, clientSecret],
+    )
+    return existing.rows[0].external_id
+  }
+
+  try {
+    const inserted = await db.query(
+      `INSERT INTO appmax_installations (app_id, client_id, client_secret, external_key)
+       VALUES ($1, $2, $3, $4)
+       RETURNING external_id`,
+      [appId, clientId, clientSecret, externalKey],
+    )
+    return inserted.rows[0].external_id
+  } catch (err) {
+    if (err?.code === '23505') {
+      const retry = await db.query(
+        `SELECT external_id FROM appmax_installations
+          WHERE app_id = $1 AND COALESCE(client_id,'') = $2 AND COALESCE(external_key,'') = $3
+          LIMIT 1`,
+        [appId, cid, ekey],
+      )
+      if (retry.rows[0]) return retry.rows[0].external_id
+    }
+    throw err
+  }
+}
+
 function appmaxWebhookToken(request) {
   return request.headers['x-appmax-signature']
     ?? request.headers['appmax-signature']
@@ -40,28 +84,42 @@ export async function appmaxRoutes(app) {
 
   // GET/POST /v1/webhooks/appmax/validate — Appmax bate aqui na instalação.
   // Aceita GET pra healthcheck rápido + POST com payload de validação.
+  // GET — healthcheck simples (Appmax usa POST para validar a instalação).
   app.get('/v1/webhooks/appmax/validate', async (request, reply) => {
     const appId = process.env.APPMAX_APP_ID
     if (!appId) return reply.code(503).send({ error: 'APPMAX_APP_ID não configurado' })
-    return reply.send({
-      ok: true,
-      app_id: appId,
-      'external-id': crypto.randomUUID(),
-      service: 'liveshop-saas-api',
-    })
+    return reply.send({ ok: true, app_id: appId, service: 'liveshop-saas-api' })
   })
 
+  // POST — validação de instalação. Appmax envia
+  // { app_id, client_id, client_secret, external_key } e espera 200 + { external_id }
+  // ÚNICO e ESTÁVEL por instalação (mesma identidade → mesmo external_id).
   app.post('/v1/webhooks/appmax/validate', {
     config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
   }, async (request, reply) => {
-    const appId = process.env.APPMAX_APP_ID
-    if (!appId) return reply.code(503).send({ error: 'APPMAX_APP_ID não configurado' })
-    app.log.info('[appmax] validate hit')
-    return reply.send({
-      ok: true,
-      app_id: appId,
-      'external-id': crypto.randomUUID(),
-    })
+    const envAppId = process.env.APPMAX_APP_ID
+    if (!envAppId) return reply.code(503).send({ error: 'APPMAX_APP_ID não configurado' })
+
+    const body = request.body ?? {}
+    // Rejeita app_id divergente do nosso app cadastrado.
+    if (body.app_id != null && String(body.app_id) !== String(envAppId)) {
+      app.log.warn({ recebido: body.app_id }, '[appmax] validate: app_id divergente')
+      return reply.code(401).send({ error: 'app_id inválido' })
+    }
+
+    const appId = String(body.app_id ?? envAppId)
+    const clientId = body.client_id != null ? String(body.client_id) : null
+    const clientSecret = body.client_secret != null ? String(body.client_secret) : null
+    const externalKey = body.external_key != null ? String(body.external_key) : null
+
+    try {
+      const externalId = await resolveAppmaxExternalId(app.db, { appId, clientId, clientSecret, externalKey })
+      app.log.info({ appId, clientId, externalKey }, '[appmax] validate ok')
+      return reply.code(200).send({ external_id: externalId })
+    } catch (err) {
+      app.log.error({ err }, '[appmax] validate: falha ao persistir instalação')
+      return reply.code(500).send({ error: 'Erro ao registrar instalação Appmax' })
+    }
   })
 
   // POST /v1/webhooks/appmax — recebe eventos de pagamento

@@ -550,6 +550,22 @@ export async function livesRoutes(app) {
           }
         }
 
+        // ── Fallback: marca sistema do tenant para lives afiliado/teste sem marca ──
+        if (['afiliado', 'teste'].includes(resolvedTipo) && !resolvedMarcaId) {
+          const { rows: [marcaSistema] } = await db.query(
+            `SELECT id FROM marcas WHERE tenant_id = $1::uuid AND sistema = TRUE LIMIT 1`,
+            [tenant_id]
+          )
+          if (!marcaSistema) {
+            await db.query('ROLLBACK')
+            return reply.code(500).send({
+              error: 'Marca sistema do tenant não encontrada — execute a migration 104'
+            })
+          }
+          resolvedMarcaId = marcaSistema.id
+        }
+        // ── fim fallback marca sistema ───────────────────────────────────────────
+
         if (hasTikTokUpdate) {
           await updateCanonicalTikTokUsername(db, {
             tenantId: tenant_id,
@@ -729,13 +745,6 @@ export async function livesRoutes(app) {
         code: 'CLIENTE_REQUIRED'
       })
     }
-    if (d.tipo === 'afiliado' && !d.marca_id) {
-      return reply.code(400).send({
-        error: 'Live de tipo "afiliado" requer marca_id',
-        code: 'MARCA_REQUIRED'
-      })
-    }
-
     return app.withTenant(tenant_id, async (db) => {
       try {
         await db.query('BEGIN')
@@ -758,6 +767,22 @@ export async function livesRoutes(app) {
           }
           resolvedClienteId = resolvedClienteId ?? marca.cliente_id ?? null
         }
+
+        // ── Fallback: marca sistema do tenant para lives afiliado/teste sem marca ──
+        if (['afiliado', 'teste'].includes(d.tipo) && !resolvedMarcaId) {
+          const { rows: [marcaSistema] } = await db.query(
+            `SELECT id FROM marcas WHERE tenant_id = $1::uuid AND sistema = TRUE LIMIT 1`,
+            [tenant_id]
+          )
+          if (!marcaSistema) {
+            await db.query('ROLLBACK')
+            return reply.code(500).send({
+              error: 'Marca sistema do tenant não encontrada — execute a migration 104'
+            })
+          }
+          resolvedMarcaId = marcaSistema.id
+        }
+        // ── fim fallback marca sistema ───────────────────────────────────────────
 
         if (d.tipo === 'cliente' && !resolvedClienteId) {
           await db.query('ROLLBACK')
@@ -1013,6 +1038,28 @@ export async function livesRoutes(app) {
           }
           resolvedClienteId = resolvedClienteId ?? marcaQ.rows[0].cliente_id ?? null
         }
+
+        // ── Fallback: marca sistema do tenant para lives afiliado/teste sem marca ──
+        // Aplica quando o tipo efetivo é afiliado/teste e a marca efetiva ficaria nula.
+        {
+          const tipoEfetivo = d.tipo ?? live.tipo
+          const marcaEfetiva = d.marca_id !== undefined ? d.marca_id : (live.marca_id ?? null)
+          if (['afiliado', 'teste'].includes(tipoEfetivo) && !marcaEfetiva) {
+            const { rows: [marcaSistema] } = await db.query(
+              `SELECT id FROM marcas WHERE tenant_id = $1::uuid AND sistema = TRUE LIMIT 1`,
+              [tenant_id]
+            )
+            if (!marcaSistema) {
+              await db.query('ROLLBACK')
+              return reply.code(500).send({
+                error: 'Marca sistema do tenant não encontrada — execute a migration 104'
+              })
+            }
+            // Sobrescreve d.marca_id para que addField persista o valor correto
+            d.marca_id = marcaSistema.id
+          }
+        }
+        // ── fim fallback marca sistema ───────────────────────────────────────────
 
         // cabine_id nunca vira NULL por engano — live sempre tem cabine.
         if (d.cabine_id) addField('cabine_id', d.cabine_id)

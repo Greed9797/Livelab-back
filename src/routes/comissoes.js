@@ -81,6 +81,7 @@ export async function comissoesRoutes(app) {
         `SELECT
            va.apresentadora_id,
            COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
+           a.foto_url AS apresentadora_foto_url,
            COALESCE(SUM(va.gmv), 0) AS gmv_total,
            COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
            COALESCE(SUM(CASE WHEN va.origem = 'video' THEN va.gmv ELSE 0 END), 0) AS gmv_videos,
@@ -91,7 +92,7 @@ export async function comissoesRoutes(app) {
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
          WHERE ${where}
            AND va.apresentadora_id IS NOT NULL
-         GROUP BY va.apresentadora_id, a.nome
+         GROUP BY va.apresentadora_id, a.nome, a.foto_url
          ORDER BY gmv_total DESC, comissao_apresentadora DESC`,
         values,
       )
@@ -110,6 +111,7 @@ export async function comissoesRoutes(app) {
            SELECT
              a.id AS apresentadora_id,
              COALESCE(a.nome, 'Sem apresentadora') AS nome,
+             a.foto_url,
              COALESCE(NULLIF(a.fixo, 0), $4::numeric) AS fixo,
              COALESCE(SUM(va.gmv), 0) AS gmv,
              COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
@@ -127,11 +129,12 @@ export async function comissoesRoutes(app) {
             AND va.data < $3::date
            WHERE a.tenant_id = $1::uuid
              AND a.ativo = true
-           GROUP BY a.id, a.nome, a.fixo
+           GROUP BY a.id, a.nome, a.foto_url, a.fixo
          )
          SELECT
            apresentadora_id,
            nome,
+           foto_url,
            gmv,
            gmv_lives,
            gmv_videos,
@@ -185,6 +188,7 @@ export async function comissoesRoutes(app) {
       `WITH rk AS (
          SELECT a.id AS apresentadora_id,
                 COALESCE(a.nome, 'Sem apresentadora') AS nome,
+                a.foto_url,
                 COALESCE(NULLIF(a.fixo, 0), $4::numeric) AS fixo,
                 COALESCE(SUM(va.gmv), 0) AS gmv,
                 COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
@@ -199,9 +203,9 @@ export async function comissoesRoutes(app) {
             AND va.data < $3::date
           WHERE a.tenant_id = $1::uuid
             AND a.ativo = true
-          GROUP BY a.id, a.nome, a.fixo
+          GROUP BY a.id, a.nome, a.foto_url, a.fixo
        )
-       SELECT apresentadora_id, nome, gmv, lives, fixo, comissao_variavel,
+       SELECT apresentadora_id, nome, foto_url, gmv, lives, fixo, comissao_variavel,
               (fixo + comissao_variavel) AS total_recebido
          FROM rk
         ORDER BY total_recebido DESC, gmv DESC, nome ASC
@@ -232,6 +236,8 @@ export async function comissoesRoutes(app) {
            va.marca_id,
            m.nome AS marca_nome,
            m.tipo AS marca_tipo,
+           COALESCE(m.logo_url, c.logo_url) AS logo_url,
+           COALESCE(m.site, c.site) AS site,
            COALESCE(SUM(va.gmv), 0) AS gmv_total,
            COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
            COALESCE(SUM(CASE WHEN va.origem = 'video' THEN va.gmv ELSE 0 END), 0) AS gmv_videos,
@@ -242,8 +248,9 @@ export async function comissoesRoutes(app) {
            COALESCE(SUM(va.comissao_franqueadora), 0) AS comissao_franqueadora
          FROM vendas_atribuidas va
          JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+         LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
          WHERE ${where}
-         GROUP BY va.marca_id, m.nome, m.tipo
+         GROUP BY va.marca_id, m.nome, m.tipo, COALESCE(m.logo_url, c.logo_url), COALESCE(m.site, c.site)
          ORDER BY gmv_total DESC`,
         values,
       )

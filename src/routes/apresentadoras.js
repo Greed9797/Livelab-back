@@ -6,6 +6,7 @@ import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
 
 const APRESENTADORA_FIXO_MAX = 1_000_000 // R$ 1 milhão — sanity cap
 const APRESENTADORA_META_MAX = 100_000_000 // R$ 100 milhões — sanity cap pra meta diária
+const imageUrlSchema = z.string().max(500000).nullable().optional()
 
 const fixoSchema = moneySchema.refine((v) => v <= APRESENTADORA_FIXO_MAX, {
   message: `Fixo não pode ultrapassar R$ ${APRESENTADORA_FIXO_MAX.toLocaleString('pt-BR')}`,
@@ -24,6 +25,7 @@ const createSchema = z.object({
   fixo:            fixoSchema.default(DEFAULT_APRESENTADORA_FIXO),
   comissao_pct:    z.number().min(0).max(100).default(0),
   meta_diaria_gmv: metaDiariaSchema.default(0),
+  foto_url:        imageUrlSchema,
   observacoes:     z.string().optional(),
   link_contrato:   z.string().optional(),
   data_aniversario: z.string().optional(),
@@ -44,7 +46,7 @@ const faixaSchema = z.object({
 
 const faixaPatchSchema = faixaSchema.partial()
 
-const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, COALESCE(NULLIF(fixo, 0), ${DEFAULT_APRESENTADORA_FIXO}) AS fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
+const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, COALESCE(NULLIF(fixo, 0), ${DEFAULT_APRESENTADORA_FIXO}) AS fixo, comissao_pct, meta_diaria_gmv, foto_url, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
 
 // Resolve o id de apresentadora a partir de :id que pode ser:
 //  - id real da tabela apresentadoras, OU

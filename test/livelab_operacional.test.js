@@ -8,7 +8,7 @@ import { configuracoesRoutes } from '../src/routes/configuracoes.js'
 import { financeiroRoutes } from '../src/routes/financeiro.js'
 import { livesRoutes } from '../src/routes/lives.js'
 import { marcasRoutes } from '../src/routes/marcas.js'
-import { calcularComissoesAtribuidas, upsertVendaAtribuida, vendasAtribuidasRoutes } from '../src/routes/vendas_atribuidas.js'
+import { calcularComissoesAtribuidas, recalcularVendasAtribuidasApresentadora, upsertVendaAtribuida, vendasAtribuidasRoutes } from '../src/routes/vendas_atribuidas.js'
 import { videosRoutes } from '../src/routes/videos.js'
 
 function buildApp({ papel = 'franqueado', queryMock } = {}) {
@@ -668,6 +668,65 @@ describe('LIVELAB operational routes', () => {
       comissao_franquia: 200,
       comissao_franqueadora: 40,
     })
+  })
+
+  it('calcularComissoesAtribuidas falls back to presenter profile commission for videos', async () => {
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('FROM marcas')) return { rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '2' }] }
+      if (sql.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: '0.00' }] }
+      if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [] }
+      if (sql.includes('FROM apresentadora_marcas')) return { rows: [{ comissao_live_pct: '0', comissao_video_pct: '0' }] }
+      if (sql.includes('FROM apresentadoras')) return { rows: [{ comissao_pct: '1.5' }] }
+      return { rows: [] }
+    })
+
+    const result = await calcularComissoesAtribuidas({ query: queryMock }, {
+      tenantId: 'tenant-1',
+      marcaId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      apresentadoraId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      origem: 'video',
+      origemId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      data: '2026-05-19',
+      gmv: 500000,
+    })
+
+    expect(result).toMatchObject({
+      comissao_apresentadora: 7500,
+      comissao_franquia: 50000,
+      comissao_franqueadora: 10000,
+    })
+  })
+
+  it('recalcularVendasAtribuidasApresentadora updates pending attributed sales', async () => {
+    const venda = {
+      id: 'venda-1',
+      origem: 'video',
+      origem_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      apresentadora_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      data: '2026-05-19',
+      gmv: '500000.00',
+      pedidos: 1,
+    }
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('SELECT id, origem, origem_id')) return { rows: [venda] }
+      if (sql.includes('FROM marcas')) return { rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '2' }] }
+      if (sql.includes('FROM vendas_atribuidas') && sql.includes('COALESCE(SUM(gmv)')) return { rows: [{ gmv_mes: '0.00' }] }
+      if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [] }
+      if (sql.includes('FROM apresentadora_marcas')) return { rows: [{ comissao_live_pct: '0', comissao_video_pct: '0' }] }
+      if (sql.includes('FROM apresentadoras')) return { rows: [{ comissao_pct: '1.5' }] }
+      if (sql.includes('UPDATE vendas_atribuidas')) return { rows: [{ id: 'venda-1' }] }
+      return { rows: [] }
+    })
+
+    const result = await recalcularVendasAtribuidasApresentadora({ query: queryMock }, {
+      tenantId: 'tenant-1',
+      apresentadoraId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    })
+
+    expect(result).toEqual({ updated: 1 })
+    const updateCall = queryMock.mock.calls.find(([sql]) => sql.includes('UPDATE vendas_atribuidas'))
+    expect(updateCall?.[1]?.slice(0, 3)).toEqual([7500, 50000, 10000])
   })
 
   it('upsertVendaAtribuida does not overwrite approved sales', async () => {

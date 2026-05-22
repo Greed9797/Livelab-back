@@ -115,6 +115,54 @@ export async function upsertVendaAtribuida(db, payload) {
   return inserted.rows[0]
 }
 
+export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, apresentadoraId }) {
+  if (!tenantId || !apresentadoraId) return { updated: 0 }
+
+  const vendas = await db.query(
+    `SELECT id, origem, origem_id, marca_id, apresentadora_id, data, gmv, pedidos
+     FROM vendas_atribuidas
+     WHERE tenant_id = $1::uuid
+       AND apresentadora_id = $2::uuid
+       AND origem IN ('live', 'video')
+       AND COALESCE(status_aprovacao, 'pendente_aprovacao') = 'pendente_aprovacao'
+     ORDER BY data ASC, criado_em ASC`,
+    [tenantId, apresentadoraId],
+  )
+
+  let updated = 0
+  for (const venda of vendas.rows) {
+    const comissoes = await calcularComissoesAtribuidas(db, {
+      tenantId,
+      origem: venda.origem,
+      origemId: venda.origem_id,
+      marcaId: venda.marca_id,
+      apresentadoraId: venda.apresentadora_id,
+      data: venda.data,
+      gmv: venda.gmv,
+    })
+    if (!comissoes) continue
+
+    await db.query(
+      `UPDATE vendas_atribuidas
+       SET comissao_apresentadora = $1,
+           comissao_franquia = $2,
+           comissao_franqueadora = $3,
+           atualizado_em = NOW()
+       WHERE id = $4 AND tenant_id = $5::uuid`,
+      [
+        comissoes.comissao_apresentadora,
+        comissoes.comissao_franquia,
+        comissoes.comissao_franqueadora,
+        venda.id,
+        tenantId,
+      ],
+    )
+    updated += 1
+  }
+
+  return { updated }
+}
+
 export async function vendasAtribuidasRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_VENDAS_ATRIBUIDAS)]
   const writeAccess = [app.authenticate, app.requirePapel(WRITE_VENDAS_ATRIBUIDAS)]

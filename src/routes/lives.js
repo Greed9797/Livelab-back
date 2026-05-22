@@ -444,8 +444,8 @@ export async function livesRoutes(app) {
           }
           if (!tiktokUsername && marca.tiktok_username) tiktokUsername = marca.tiktok_username
         }
-        if (!['reservada', 'ativa'].includes(cabine.status) || !cabine.contrato_id) {
-          if (!['disponivel', 'ativa', 'reservada'].includes(cabine.status)) {
+        if (!['reservada', 'ao_vivo'].includes(cabine.status) || !cabine.contrato_id) {
+          if (!['disponivel', 'ao_vivo', 'reservada'].includes(cabine.status)) {
             await db.query('ROLLBACK')
             return reply.code(409).send({ error: 'Cabine indisponível para iniciar live', code: 'CABINE_NOT_AVAILABLE' })
           }
@@ -1817,7 +1817,7 @@ export async function livesRoutes(app) {
         }
         // ── fim encerramento agenda ──────────────────────────────────────────
 
-        // Migration 081 removeu status 'ativa' das cabines — cabine sempre volta para 'disponivel'
+        // Migration 105 removeu status 'ativa' das cabines — cabine sempre volta para 'disponivel'
         const proximoStatus = 'disponivel'
         const proximoContratoId = contrato?.status === 'ativo' ? contrato.id : null
 

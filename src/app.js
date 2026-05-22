@@ -84,7 +84,10 @@ export async function healthHandler(request, reply) {
     const ok = a.length === b.length && timingSafeEqual(a, b)
     if (!ok) return reply.code(404).send()
   }
-  return { ok: true }
+  return {
+    ok: true,
+    commit: process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA ?? null,
+  }
 }
 
 export async function buildApp(opts = {}) {

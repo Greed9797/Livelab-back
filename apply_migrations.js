@@ -92,6 +92,7 @@ export const MIGRATIONS_LIST = [
   '095_apresentadora_fixo_sanity.sql',
   '096_appmax_installations.sql',
   '097_repair_video_presenter_commissions.sql',
+  '098_repair_zero_video_presenter_commissions.sql',
 ]
 
 async function ensureMigrationsTable(client) {

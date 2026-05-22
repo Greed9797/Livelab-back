@@ -233,6 +233,16 @@ export async function webhookBioCrmRoutes(app) {
       })
       app.log.info({ leadId: lead.id, origem: lead.origem }, '[bio-crm webhook] lead criado')
 
+      await app.audit.log(request, {
+        action: 'webhook_received',
+        entity_type: 'bio_crm',
+        entity_id: null,
+        metadata: {
+          source: 'bio-crm',
+          received_keys: Object.keys(request.body || {}),
+        },
+      }).catch(() => {}) // fire-and-forget
+
       // F1: notificação por e-mail — fire-and-forget.
       ;(async () => {
         try {

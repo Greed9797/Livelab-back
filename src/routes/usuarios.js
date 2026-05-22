@@ -26,6 +26,9 @@ const convidarSchema = z.object({
   ]),
   cliente_id: z.string().uuid().optional(),
   apresentadora_id: z.string().uuid().optional(),
+  fixo: z.number().nonnegative().optional(),
+  comissao_pct: z.number().min(0).max(100).optional(),
+  meta_diaria_gmv: z.number().nonnegative().optional(),
   senha_temporaria: z.string().min(6, 'Senha temporária deve ter no mínimo 6 caracteres').optional(),
 }).refine(d => d.papel !== 'cliente_parceiro' || !!d.cliente_id, {
   message: 'cliente_id é obrigatório para papel cliente_parceiro',
@@ -39,6 +42,10 @@ const atualizarSchema = z.object({
   ]).optional(),
   ativo: z.boolean().optional(),
 })
+
+function isPresenterRole(papel) {
+  return papel === 'apresentador' || papel === 'apresentadora'
+}
 
 export async function usuariosRoutes(app) {
   const rbac = [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])]
@@ -92,7 +99,7 @@ export async function usuariosRoutes(app) {
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0].message })
     }
-    const { nome, email, papel, cliente_id, apresentadora_id, senha_temporaria } = parsed.data
+    const { nome, email, papel, cliente_id, apresentadora_id, fixo, comissao_pct, meta_diaria_gmv, senha_temporaria } = parsed.data
     const tenantId = request.user.tenant_id
 
     // F4: convite via email. Senha inicial é placeholder aleatório (NÃO usável
@@ -175,11 +182,38 @@ export async function usuariosRoutes(app) {
           }
         }
 
-        if ((papel === 'apresentador' || papel === 'apresentadora') && apresentadora_id) {
-          await db.query(
-            `UPDATE apresentadoras SET user_id = $1 WHERE id = $2 AND tenant_id = $3`,
-            [newUser.id, apresentadora_id, tenantId]
-          )
+        let apresentadoraId = null
+        if (isPresenterRole(papel)) {
+          if (apresentadora_id) {
+            const linked = await db.query(
+              `UPDATE apresentadoras
+                  SET user_id = $1,
+                      nome = $4,
+                      email = $5,
+                      fixo = COALESCE($6, fixo),
+                      comissao_pct = COALESCE($7, comissao_pct),
+                      meta_diaria_gmv = COALESCE($8, meta_diaria_gmv),
+                      ativo = true
+                WHERE id = $2
+                  AND tenant_id = $3
+                  AND user_id IS NULL
+                RETURNING id`,
+              [newUser.id, apresentadora_id, tenantId, nome, email, fixo ?? null, comissao_pct ?? null, meta_diaria_gmv ?? null]
+            )
+            if (linked.rowCount === 0) {
+              await db.query('ROLLBACK')
+              return reply.code(409).send({ error: 'Perfil de apresentadora indisponível para vínculo.' })
+            }
+            apresentadoraId = linked.rows[0].id
+          } else {
+            const createdProfile = await db.query(
+              `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, ativo)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+               RETURNING id`,
+              [tenantId, newUser.id, nome, email, fixo ?? 0, comissao_pct ?? 0, meta_diaria_gmv ?? 0]
+            )
+            apresentadoraId = createdProfile.rows[0]?.id ?? null
+          }
         }
 
         await db.query('COMMIT')
@@ -212,6 +246,8 @@ export async function usuariosRoutes(app) {
           reply.header('Pragma', 'no-cache')
           return reply.code(201).send({
             ...newUser,
+            apresentadora_id: apresentadoraId,
+            pode_apresentar_live: isPresenterRole(papel),
             invite_enviado: true,
             invite_expira_em: inviteExpiraEm,
           })
@@ -225,6 +261,8 @@ export async function usuariosRoutes(app) {
         reply.header('Pragma', 'no-cache')
         return reply.code(201).send({
           ...newUser,
+          apresentadora_id: apresentadoraId,
+          pode_apresentar_live: isPresenterRole(papel),
           senha_temporaria: senhaInicial,
           invite_enviado: false,
           warning: mailerEnabled

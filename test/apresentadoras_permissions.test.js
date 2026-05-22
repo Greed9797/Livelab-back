@@ -25,6 +25,22 @@ function buildApp({ papel = 'franqueado', queryMock } = {}) {
 }
 
 describe('apresentadoras permissions', () => {
+  it('blocks legacy direct presenter creation outside settings users flow', async () => {
+    const { app } = buildApp()
+    await app.register(apresentadorasRoutes)
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/apresentadoras',
+      payload: { nome: 'Jhemily', fixo: 0, comissao_pct: 0, meta_diaria_gmv: 0 },
+    })
+
+    expect(response.statusCode).toBe(410)
+    expect(response.json()).toMatchObject({ flow: 'usuarios.convidar' })
+
+    await app.close()
+  })
+
   it('allows franqueado to edit presenter profiles', async () => {
     const queryMock = vi.fn().mockResolvedValue({
       rows: [{
@@ -59,7 +75,51 @@ describe('apresentadoras permissions', () => {
     })
 
     expect(response.statusCode).toBe(204)
-    expect(query.mock.calls[0][0]).toContain('UPDATE apresentadoras SET ativo = false')
+    expect(query.mock.calls.some(([sql]) => sql.includes('UPDATE apresentadoras SET ativo = false'))).toBe(true)
+
+    await app.close()
+  })
+
+  it('resolves a presenter user id when listing commission tiers', async () => {
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: 'user-2', nome: 'Jhemily', email: 'jhemily@example.com', papel: 'apresentador' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'ap-1' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'faixa-1', apresentadora_id: 'ap-1', gmv_inicio: 0, gmv_fim: null, comissao_pct: 2, ativo: true }] })
+    const { app, query } = buildApp({ queryMock })
+    await app.register(apresentadorasRoutes)
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/apresentadoras/user-2/faixas-comissao',
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual([
+      expect.objectContaining({ id: 'faixa-1', apresentadora_id: 'ap-1' }),
+    ])
+    expect(query.mock.calls.at(-1)?.[1]).toEqual(['tenant-1', 'ap-1'])
+
+    await app.close()
+  })
+
+  it('resolves a presenter user id when updating a commission tier', async () => {
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: 'ap-1' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'faixa-1', apresentadora_id: 'ap-1', gmv_inicio: 0, gmv_fim: null, comissao_pct: 3, ativo: true }] })
+    const { app, query } = buildApp({ queryMock })
+    await app.register(apresentadorasRoutes)
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: '/v1/apresentadoras/user-2/faixas-comissao/faixa-1',
+      payload: { comissao_pct: 3 },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(query.mock.calls.at(-1)?.[1]?.slice(0, 3)).toEqual(['ap-1', 'faixa-1', 'tenant-1'])
 
     await app.close()
   })

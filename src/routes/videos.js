@@ -51,7 +51,28 @@ async function ensureVideoRefs(db, reply, { tenantId, marcaId, apresentadoraId, 
 }
 
 async function syncVendaVideo(db, tenantId, video) {
-  if (Number(video.gmv_atribuido ?? 0) <= 0) return null
+  if (Number(video.gmv_atribuido ?? 0) <= 0) {
+    await db.query(
+      `DELETE FROM vendas_atribuidas
+       WHERE origem = 'video'
+         AND origem_id = $1::uuid
+         AND tenant_id = $2::uuid
+         AND COALESCE(status_aprovacao, 'pendente_aprovacao') = 'pendente_aprovacao'`,
+      [video.id, tenantId],
+    )
+    return null
+  }
+
+  await db.query(
+    `DELETE FROM vendas_atribuidas
+     WHERE origem = 'video'
+       AND origem_id = $1::uuid
+       AND tenant_id = $2::uuid
+       AND apresentadora_id IS DISTINCT FROM $3::uuid
+       AND COALESCE(status_aprovacao, 'pendente_aprovacao') = 'pendente_aprovacao'`,
+    [video.id, tenantId, video.apresentadora_id ?? null],
+  )
+
   return upsertVendaAtribuida(db, {
     tenantId,
     origem: 'video',

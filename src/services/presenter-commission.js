@@ -9,6 +9,11 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+function positivePct(value) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
 function livePctWithMinimum(origem, pct) {
   if (origem !== 'live') return pct
   return Math.max(MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT, toNumber(pct))
@@ -57,24 +62,36 @@ export async function resolvePresenterCommissionPct(db, {
   if (faixaQ.rows[0]) return livePctWithMinimum(origem, faixaQ.rows[0].comissao_pct)
 
   const fallbackPct = origem === 'video' ? fallbackVideoPct : fallbackLivePct
-  if (fallbackPct !== undefined && fallbackPct !== null) {
-    return livePctWithMinimum(origem, fallbackPct)
+  const fallbackConfigured = positivePct(fallbackPct)
+  if (fallbackConfigured !== null) {
+    return livePctWithMinimum(origem, fallbackConfigured)
   }
 
-  if (!marcaId) return origem === 'live' ? MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT : 0
+  if (marcaId) {
+    const vinculoQ = await db.query(
+      `SELECT comissao_live_pct, comissao_video_pct
+       FROM apresentadora_marcas
+       WHERE tenant_id = $1::uuid
+         AND marca_id = $2::uuid
+         AND apresentadora_id = $3::uuid
+         AND ativo = true
+       LIMIT 1`,
+      [tenantId, marcaId, apresentadoraId],
+    )
+    const vinculo = vinculoQ.rows[0]
+    const vinculoPct = positivePct(origem === 'video' ? vinculo?.comissao_video_pct : vinculo?.comissao_live_pct)
+    if (vinculoPct !== null) return livePctWithMinimum(origem, vinculoPct)
+  }
 
-  const vinculoQ = await db.query(
-    `SELECT comissao_live_pct, comissao_video_pct
-     FROM apresentadora_marcas
-     WHERE tenant_id = $1::uuid
-       AND marca_id = $2::uuid
-       AND apresentadora_id = $3::uuid
-       AND ativo = true
+  const perfilQ = await db.query(
+    `SELECT comissao_pct
+     FROM apresentadoras
+     WHERE id = $1 AND tenant_id = $2::uuid
      LIMIT 1`,
-    [tenantId, marcaId, apresentadoraId],
+    [apresentadoraId, tenantId],
   )
-  const vinculo = vinculoQ.rows[0]
-  const vinculoPct = origem === 'video' ? vinculo?.comissao_video_pct : vinculo?.comissao_live_pct
-  if (vinculoPct !== undefined && vinculoPct !== null) return livePctWithMinimum(origem, vinculoPct)
+  const perfilPct = positivePct(perfilQ.rows[0]?.comissao_pct)
+  if (perfilPct !== null) return livePctWithMinimum(origem, perfilPct)
+
   return origem === 'live' ? MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT : 0
 }

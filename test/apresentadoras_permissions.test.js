@@ -109,6 +109,7 @@ describe('apresentadoras permissions', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: 'ap-1' }] })
       .mockResolvedValueOnce({ rows: [{ id: 'faixa-1', apresentadora_id: 'ap-1', gmv_inicio: 0, gmv_fim: null, comissao_pct: 3, ativo: true }] })
+      .mockResolvedValue({ rows: [] })
     const { app, query } = buildApp({ queryMock })
     await app.register(apresentadorasRoutes)
 
@@ -119,7 +120,8 @@ describe('apresentadoras permissions', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(query.mock.calls.at(-1)?.[1]?.slice(0, 3)).toEqual(['ap-1', 'faixa-1', 'tenant-1'])
+    const updateCall = query.mock.calls.find(([sql]) => sql.includes('UPDATE apresentadora_comissao_faixas'))
+    expect(updateCall?.[1]?.slice(0, 3)).toEqual(['ap-1', 'faixa-1', 'tenant-1'])
 
     await app.close()
   })

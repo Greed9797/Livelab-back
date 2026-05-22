@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { READ_APRESENTADORAS, WRITE_APRESENTADORAS } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
+import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
 
 const APRESENTADORA_FIXO_MAX = 1_000_000 // R$ 1 milhão — sanity cap
 const APRESENTADORA_META_MAX = 100_000_000 // R$ 100 milhões — sanity cap pra meta diária
@@ -233,6 +234,7 @@ export async function apresentadorasRoutes(app) {
          RETURNING id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo, criado_em, atualizado_em`,
         [tenant_id, apresentadoraId, d.gmv_inicio, d.gmv_fim ?? null, d.comissao_pct, d.ativo],
       )
+      await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
       return reply.code(201).send(result.rows[0])
     })
   })
@@ -261,6 +263,7 @@ export async function apresentadorasRoutes(app) {
         values,
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Faixa não encontrada' })
+      await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
       return result.rows[0]
     })
   })
@@ -280,6 +283,7 @@ export async function apresentadorasRoutes(app) {
         [apresentadoraId, request.params.faixaId, tenant_id],
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Faixa não encontrada' })
+      await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
       return reply.code(204).send()
     })
   })
@@ -334,6 +338,9 @@ export async function apresentadorasRoutes(app) {
         values
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      if (fields.includes('comissao_pct')) {
+        await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
+      }
       app.audit?.log?.(request, { action: 'apresentadora.update', entity_type: 'apresentadora', entity_id: apresentadoraId, metadata: { changed_fields: fields } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })

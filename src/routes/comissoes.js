@@ -144,7 +144,7 @@ export async function comissoesRoutes(app) {
            comissao_variavel,
            (fixo + comissao_variavel) AS total_recebido
          FROM ranking_apresentadoras
-         ORDER BY total_recebido DESC, gmv DESC, nome ASC
+         ORDER BY gmv DESC, total_recebido DESC, nome ASC
          LIMIT $4::int`,
         [tenant_id, range.start, range.end, limit],
       )
@@ -208,7 +208,7 @@ export async function comissoesRoutes(app) {
        SELECT apresentadora_id, nome, foto_url, gmv, lives, fixo, comissao_variavel,
               (fixo + comissao_variavel) AS total_recebido
          FROM rk
-        ORDER BY total_recebido DESC, gmv DESC, nome ASC
+        ORDER BY gmv DESC, total_recebido DESC, nome ASC
         LIMIT $4::int`,
       [tenantId, range.start, range.end, limit],
     )

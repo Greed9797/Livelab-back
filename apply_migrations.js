@@ -89,6 +89,7 @@ export const MIGRATIONS_LIST = [
   '093_operational_source_unification.sql',
   '094_lives_update_policy.sql',
   '095_apresentadora_fixo_sanity.sql',
+  '096_appmax_installations.sql',
 ]
 
 async function ensureMigrationsTable(client) {

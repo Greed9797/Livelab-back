@@ -63,23 +63,38 @@ async function resolveApresentadoraId(db, tenantId, rawId) {
   )
   if (byUser.rows[0]) return byUser.rows[0].id
 
-  // Não existe apresentadora: tenta provisionar a partir do usuário com papel apresentador.
+  // Não existe apresentadora: provisiona a partir do usuário com papel apresentador.
+  // rawId pode ser user_id; aceita também quando o usuário existe mas papel divergente
+  // (defensivo — pode ter sido criado como apresentador e depois editado).
   const user = await db.query(
-    `SELECT id, nome, email FROM users
-      WHERE id = $1 AND tenant_id = $2::uuid
-        AND papel IN ('apresentador', 'apresentadora')`,
+    `SELECT id, nome, email, papel FROM users
+      WHERE id = $1 AND tenant_id = $2::uuid`,
     [rawId, tenantId],
   )
-  if (!user.rows[0]) return null
+  const u = user.rows[0]
+  if (!u) return null
+  if (u.papel !== 'apresentador' && u.papel !== 'apresentadora') return null
 
-  const created = await db.query(
-    `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, ativo)
-     VALUES ($1, $2, $3, $4, 0, 0, 0, true)
-     ON CONFLICT (user_id) WHERE user_id IS NOT NULL DO UPDATE SET nome = EXCLUDED.nome
-     RETURNING id`,
-    [tenantId, user.rows[0].id, user.rows[0].nome ?? 'Apresentadora', user.rows[0].email ?? null],
-  )
-  return created.rows[0]?.id ?? null
+  // INSERT plano (já confirmamos que não existe apresentadora por id nem user_id).
+  // Em corrida, captura unique-violation e re-seleciona.
+  try {
+    const created = await db.query(
+      `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, ativo)
+       VALUES ($1, $2, $3, $4, 0, 0, 0, true)
+       RETURNING id`,
+      [tenantId, u.id, u.nome ?? 'Apresentadora', u.email ?? null],
+    )
+    return created.rows[0]?.id ?? null
+  } catch (err) {
+    if (err?.code === '23505') {
+      const retry = await db.query(
+        `SELECT id FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid`,
+        [u.id, tenantId],
+      )
+      return retry.rows[0]?.id ?? null
+    }
+    throw err
+  }
 }
 
 export async function apresentadorasRoutes(app) {
@@ -104,11 +119,19 @@ export async function apresentadorasRoutes(app) {
   app.get('/v1/apresentadoras/:id/faixas-comissao', { preHandler: app.authenticate }, async (request, reply) => {
     const { tenant_id, papel, sub: userId } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      // Resolve id real da apresentadora (aceita user_id de usuário apresentador).
+      const apresentadoraQ = await db.query(
+        `SELECT id FROM apresentadoras WHERE (id = $1 OR user_id = $1) AND tenant_id = $2::uuid LIMIT 1`,
+        [request.params.id, tenant_id],
+      )
+      const apresentadoraId = apresentadoraQ.rows[0]?.id
+      if (!apresentadoraId) return [] // sem perfil ainda → sem faixas
+
       if (!READ_APRESENTADORAS.includes(papel)) {
         const own = await db.query(
           `SELECT id FROM apresentadoras
            WHERE id = $1 AND tenant_id = $2::uuid AND user_id = $3`,
-          [request.params.id, tenant_id, userId],
+          [apresentadoraId, tenant_id, userId],
         )
         if (!own.rows[0]) return reply.code(403).send({ error: 'Acesso negado' })
       }
@@ -117,7 +140,7 @@ export async function apresentadorasRoutes(app) {
          FROM apresentadora_comissao_faixas
          WHERE tenant_id = $1::uuid AND apresentadora_id = $2
          ORDER BY ativo DESC, gmv_inicio ASC`,
-        [tenant_id, request.params.id],
+        [tenant_id, apresentadoraId],
       )
       return result.rows
     })
@@ -154,9 +177,16 @@ export async function apresentadorasRoutes(app) {
     if (!fields.length) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
     const { tenant_id } = request.user
-    const set = fields.map((field, index) => `${field} = $${index + 4}`).concat('atualizado_em = NOW()').join(', ')
-    const values = [request.params.id, request.params.faixaId, tenant_id, ...fields.map((field) => updates[field])]
     return app.withTenant(tenant_id, async (db) => {
+      const apQ = await db.query(
+        `SELECT id FROM apresentadoras WHERE (id = $1 OR user_id = $1) AND tenant_id = $2::uuid LIMIT 1`,
+        [request.params.id, tenant_id],
+      )
+      const apresentadoraId = apQ.rows[0]?.id
+      if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+
+      const set = fields.map((field, index) => `${field} = $${index + 4}`).concat('atualizado_em = NOW()').join(', ')
+      const values = [apresentadoraId, request.params.faixaId, tenant_id, ...fields.map((field) => updates[field])]
       const result = await db.query(
         `UPDATE apresentadora_comissao_faixas
          SET ${set}
@@ -173,12 +203,18 @@ export async function apresentadorasRoutes(app) {
   app.delete('/v1/apresentadoras/:id/faixas-comissao/:faixaId', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      const apQ = await db.query(
+        `SELECT id FROM apresentadoras WHERE (id = $1 OR user_id = $1) AND tenant_id = $2::uuid LIMIT 1`,
+        [request.params.id, tenant_id],
+      )
+      const apresentadoraId = apQ.rows[0]?.id
+      if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
       const result = await db.query(
         `UPDATE apresentadora_comissao_faixas
          SET ativo = false, atualizado_em = NOW()
          WHERE apresentadora_id = $1 AND id = $2 AND tenant_id = $3::uuid
          RETURNING id`,
-        [request.params.id, request.params.faixaId, tenant_id],
+        [apresentadoraId, request.params.faixaId, tenant_id],
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Faixa não encontrada' })
       return reply.code(204).send()

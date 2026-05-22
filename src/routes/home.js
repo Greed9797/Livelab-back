@@ -1,4 +1,5 @@
 import { presenterFixedSql } from '../config/presenter_defaults.js'
+import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 
 export async function homeRoutes(app) {
   // GET /v1/home/dashboard
@@ -51,7 +52,7 @@ export async function homeRoutes(app) {
             COALESCE(ls.total_orders, 0) AS total_orders,
             COALESCE(ls.viewer_count, 0) AS viewer_count,
             COALESCE(ls.gmv, 0) AS gmv_atual,
-            COALESCE(m_live.tiktok_username, cl.tiktok_username, ct.tiktok_username) AS tiktok_username,
+            ${tiktokUsernameSql({ marca: 'm_live', cliente: 'cl_tiktok', contrato: 'ct' })} AS tiktok_username,
             COALESCE(ct.horas_contratadas, 0) AS horas_contratadas,
             COALESCE(enc.horas_realizadas_hoje, 0) AS horas_realizadas_hoje,
             (SELECT JSON_AGG(u2.nome ORDER BY la.criado_em)
@@ -72,6 +73,7 @@ export async function homeRoutes(app) {
         LEFT JOIN marcas m_live ON m_live.id = l.marca_id AND m_live.tenant_id = c.tenant_id
         LEFT JOIN users u ON u.id = l.apresentador_id
         LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = c.tenant_id
+        LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(m_live.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = c.tenant_id
         LEFT JOIN LATERAL (
             SELECT viewer_count, total_orders, gmv
             FROM live_snapshots
@@ -408,7 +410,7 @@ export async function homeRoutes(app) {
                  c.nome AS cabine_nome,
                  m.nome AS marca_nome,
                  cl.nome AS cliente_nome,
-                 COALESCE(m.tiktok_username, cl.tiktok_username) AS tiktok_username,
+                 ${tiktokUsernameSql({ marca: 'm', cliente: 'cl' })} AS tiktok_username,
                  COALESCE(a_evento.nome, ap_marca.nome) AS apresentadora_nome
           FROM agenda_eventos ae
           JOIN marcas m ON m.id = ae.marca_id

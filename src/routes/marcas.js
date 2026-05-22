@@ -1,12 +1,11 @@
 import { z } from 'zod'
 import { READ_MARCAS, WRITE_MARCAS } from '../config/role_groups.js'
 import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
-
-const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
+import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
-  m.tiktok_username, m.site, m.marketplace_url, m.logo_url,
+  ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username, m.site, m.marketplace_url, m.logo_url,
   m.comissao_franquia_pct, m.comissao_franqueadora_pct, m.valor_fixo_minimo,
   m.observacoes, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
@@ -18,11 +17,7 @@ const marcaBaseSchema = z.object({
   nome: z.string().min(1),
   tipo: z.enum(['cliente', 'afiliada', 'propria', 'parceira']).default('cliente'),
   status: z.enum(['ativa', 'inativa', 'pausada']).default('ativa'),
-  tiktok_username: z.string().trim().refine((value) => !value.includes('@'), {
-    message: 'Digite o TikTok sem @',
-  }).refine((value) => value === '' || TIKTOK_USERNAME_RE.test(value), {
-    message: 'tiktok_username inválido (2-24 chars: letras/números/_/.)',
-  }).transform((value) => value === '' ? null : value).nullable().optional(),
+  tiktok_username: tiktokUsernameField,
   site: z.string().nullable().optional(),
   marketplace_url: z.string().nullable().optional(),
   logo_url: z.string().url().nullable().optional(),
@@ -124,7 +119,9 @@ export async function marcasRoutes(app) {
         if (!cliente.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       }
 
-      const result = await db.query(
+      await db.query('BEGIN')
+      try {
+        const result = await db.query(
         `INSERT INTO marcas (
            tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
            marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
@@ -134,13 +131,26 @@ export async function marcasRoutes(app) {
          RETURNING *`,
         [
           tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
-          d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
+          d.tipo === 'cliente' ? null : d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
           d.comissao_franquia_pct, d.comissao_franqueadora_pct,
           d.valor_fixo_minimo, d.observacoes ?? null, d.logo_url ?? null,
         ],
-      )
-      app.audit?.log?.(request, { action: 'marca.create', entity_type: 'marca', entity_id: result.rows[0].id, metadata: { nome: d.nome, tipo: d.tipo } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      return reply.code(201).send(result.rows[0])
+        )
+        if (d.tiktok_username !== undefined) {
+          await updateCanonicalTikTokUsername(db, {
+            tenantId: tenant_id,
+            marcaId: result.rows[0].id,
+            username: d.tiktok_username,
+          })
+          result.rows[0].tiktok_username = d.tiktok_username ?? null
+        }
+        await db.query('COMMIT')
+        app.audit?.log?.(request, { action: 'marca.create', entity_type: 'marca', entity_id: result.rows[0].id, metadata: { nome: d.nome, tipo: d.tipo } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        return reply.code(201).send(result.rows[0])
+      } catch (err) {
+        await db.query('ROLLBACK')
+        throw err
+      }
     })
   })
 
@@ -285,27 +295,63 @@ export async function marcasRoutes(app) {
     const parsed = marcaPatchSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
-    const updates = parsed.data
+    const updates = { ...parsed.data }
+    const hasTikTokUpdate = Object.prototype.hasOwnProperty.call(updates, 'tiktok_username')
+    const nextTikTokUsername = updates.tiktok_username
+    delete updates.tiktok_username
     const fields = Object.keys(updates)
-    if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
+    if (fields.length === 0 && !hasTikTokUpdate) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
     const values = [request.params.id, request.user.tenant_id, ...fields.map((field) => updates[field])]
     const set = fields.map((field, index) => `${field} = $${index + 3}`).concat('atualizado_em = NOW()').join(', ')
 
     return app.withTenant(request.user.tenant_id, async (db) => {
+      await db.query('BEGIN')
+      try {
       if (updates.cliente_id) {
         const cliente = await db.query('SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2::uuid', [updates.cliente_id, request.user.tenant_id])
-        if (!cliente.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+        if (!cliente.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Cliente não encontrado' })
+        }
       }
 
-      const result = await db.query(
-        `UPDATE marcas SET ${set}
-         WHERE id = $1 AND tenant_id = $2::uuid
-         RETURNING *`,
-        values,
-      )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Marca não encontrada' })
+      const result = fields.length > 0
+        ? await db.query(
+            `UPDATE marcas SET ${set}
+             WHERE id = $1 AND tenant_id = $2::uuid
+             RETURNING *`,
+            values,
+          )
+        : await db.query(
+            `SELECT * FROM marcas WHERE id = $1 AND tenant_id = $2::uuid FOR UPDATE`,
+            [request.params.id, request.user.tenant_id],
+          )
+      if (!result.rows[0]) {
+        await db.query('ROLLBACK')
+        return reply.code(404).send({ error: 'Marca não encontrada' })
+      }
+      if (hasTikTokUpdate) {
+        const canonical = await updateCanonicalTikTokUsername(db, {
+          tenantId: request.user.tenant_id,
+          marcaId: request.params.id,
+          username: nextTikTokUsername,
+        })
+        result.rows[0].tiktok_username = canonical?.tiktok_username ?? null
+      }
+      if (result.rows[0].tipo === 'cliente' && result.rows[0].cliente_id) {
+        await db.query(
+          `UPDATE marcas SET tiktok_username = NULL, atualizado_em = NOW()
+           WHERE id = $1 AND tenant_id = $2::uuid`,
+          [request.params.id, request.user.tenant_id],
+        )
+      }
+      await db.query('COMMIT')
       return result.rows[0]
+      } catch (err) {
+        await db.query('ROLLBACK')
+        throw err
+      }
     })
   })
 

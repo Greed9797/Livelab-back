@@ -3,22 +3,7 @@ import { READ_CONTRATOS, WRITE_CONTRATOS } from '../config/role_groups.js'
 import { notify } from '../services/mailer.js'
 import { executarAcaoAuditoria } from '../services/contratos_auditoria.js'
 import { moneySchema } from '../lib/money.js'
-
-// Regex sincronizado com clientes_tiktok_username_format / contratos_tiktok_username_format (migration 075).
-const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
-
-const tiktokUsernameField = z
-  .string()
-  .trim()
-  .refine((v) => !v.includes('@'), {
-    message: 'Digite o TikTok sem @',
-  })
-  .refine((v) => v === '' || TIKTOK_USERNAME_RE.test(v), {
-    message: 'tiktok_username inválido (2-24 chars: letras/números/_/.)',
-  })
-  .transform((v) => (v === '' ? null : v))
-  .nullable()
-  .optional()
+import { tiktokUsernameField, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 
 const createSchema = z.object({
   cliente_id:      z.string().uuid(),
@@ -86,8 +71,7 @@ export async function contratosRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub } = request.user
-    const { cliente_id, valor_fixo, comissao_pct, pacote_id } = parsed.data
-    let { tiktok_username } = parsed.data
+    const { cliente_id, valor_fixo, comissao_pct, pacote_id, tiktok_username } = parsed.data
 
     return app.withTenant(tenant_id, async (db) => {
       // Bloqueia novo contrato se cliente foi reprovado nos últimos 30 dias
@@ -119,33 +103,27 @@ export async function contratosRoutes(app) {
         horasContratadas = Number(pacoteQ.rows[0].horas_incluidas)
       }
 
-      // Auto-preenche tiktok_username com o do cliente quando não veio no body.
-      // Se cliente também não tem, retorna 400 — TikTok @ é obrigatório pra integração.
-      if (tiktok_username == null) {
-        const clienteQ = await db.query(
-          `SELECT tiktok_username FROM clientes WHERE id = $1`,
-          [cliente_id]
-        )
-        if (!clienteQ.rows[0]) {
-          return reply.code(400).send({ error: 'Cliente não encontrado' })
-        }
-        tiktok_username = clienteQ.rows[0].tiktok_username ?? null
-        if (!tiktok_username) {
-          return reply.code(400).send({
-            error: 'TikTok @ obrigatório — preencha no contrato ou no cadastro do cliente',
-          })
-        }
+      const clienteQ = await db.query(
+        `SELECT id, tiktok_username FROM clientes WHERE id = $1 AND tenant_id = $2::uuid`,
+        [cliente_id, tenant_id]
+      )
+      if (!clienteQ.rows[0]) {
+        return reply.code(400).send({ error: 'Cliente não encontrado' })
+      }
+      if (tiktok_username !== undefined) {
+        await updateCanonicalTikTokUsername(db, { tenantId: tenant_id, clienteId: cliente_id, username: tiktok_username })
       }
 
       const result = await db.query(
         `INSERT INTO contratos
-            (tenant_id, cliente_id, user_id, valor_fixo, comissao_pct, pacote_id, horas_contratadas, tiktok_username)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (tenant_id, cliente_id, user_id, valor_fixo, comissao_pct, pacote_id, horas_contratadas)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id, status, criado_em, pacote_id, horas_contratadas, horas_consumidas,
                    (horas_contratadas - horas_consumidas) AS horas_restantes,
                    tiktok_username`,
-        [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null, horasContratadas, tiktok_username]
+        [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null, horasContratadas]
       )
+      result.rows[0].tiktok_username = tiktok_username !== undefined ? tiktok_username : clienteQ.rows[0].tiktok_username ?? null
       app.audit?.log?.(request, { action: 'contratos.create', entity_type: 'contrato', entity_id: result.rows[0].id, metadata: { cliente_id } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(result.rows[0])
     })
@@ -189,7 +167,8 @@ export async function contratosRoutes(app) {
                cl.nome AS cliente_nome, cl.cnpj AS cliente_cnpj,
                cl.fat_anual AS cliente_fat_anual, cl.nicho AS cliente_nicho,
                cl.score AS cliente_score, cl.email AS cliente_email,
-               cl.celular AS cliente_celular
+               cl.celular AS cliente_celular,
+               cl.tiktok_username AS tiktok_username
         FROM contratos c
         JOIN clientes cl ON cl.id = c.cliente_id AND cl.tenant_id = c.tenant_id
         WHERE c.id = $1
@@ -477,30 +456,24 @@ export async function contratosRoutes(app) {
     })
   })
 
-  // PATCH /v1/contratos/:id/tiktok-username — define o @username do apresentador TikTok
+  // PATCH /v1/contratos/:id/tiktok-username — legado: grava no cliente do contrato.
   app.patch('/v1/contratos/:id/tiktok-username', {
     preHandler: app.requirePapel(WRITE_CONTRATOS),
   }, async (request, reply) => {
-    const { tiktok_username } = request.body ?? {}
-    if (tiktok_username != null && typeof tiktok_username !== 'string') {
-      return reply.code(400).send({ error: 'tiktok_username deve ser string ou null' })
-    }
-    const username = typeof tiktok_username === 'string' ? tiktok_username.trim() || null : null
-    if (username?.includes('@')) return reply.code(400).send({ error: 'Digite o TikTok sem @' })
-    if (username !== null && !TIKTOK_USERNAME_RE.test(username)) {
-      return reply.code(400).send({ error: 'tiktok_username inválido (2-24 chars: letras/números/_/.)' })
-    }
+    const parsed = z.object({ tiktok_username: tiktokUsernameField }).safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const { rows } = await db.query(
-        `UPDATE contratos SET tiktok_username = $1 WHERE id = $2 AND tenant_id = $3
-         RETURNING id, tiktok_username`,
-        [username, request.params.id, tenant_id]
+      const contratoQ = await db.query(
+        `SELECT id, cliente_id FROM contratos WHERE id = $1 AND tenant_id = $2::uuid`,
+        [request.params.id, tenant_id],
       )
-      if (!rows.length) return reply.code(404).send({ error: 'Contrato não encontrado' })
-      app.audit?.log?.(request, { action: 'contratos.edit_tiktok_username', entity_type: 'contrato', entity_id: request.params.id, metadata: { new_username: username } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      return reply.send(rows[0])
+      if (!contratoQ.rows[0]) return reply.code(404).send({ error: 'Contrato não encontrado' })
+      const username = parsed.data.tiktok_username ?? null
+      await updateCanonicalTikTokUsername(db, { tenantId: tenant_id, contratoId: request.params.id, username })
+      app.audit?.log?.(request, { action: 'contratos.edit_tiktok_username', entity_type: 'contrato', entity_id: request.params.id, metadata: { new_username: username, canonical_entity: 'cliente', cliente_id: contratoQ.rows[0].cliente_id } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      return reply.send({ id: request.params.id, tiktok_username: username })
     })
   })
 

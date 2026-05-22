@@ -8,6 +8,7 @@ import * as connectorManager from '../services/tiktok-connector-manager.js'
 import { getEmitter } from '../services/tiktok-connector-manager.js'
 import { createSignedState, verifySignedState } from '../services/oauth-state.js'
 import { encryptToken } from '../services/token-crypto.js'
+import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 
 export async function tiktokRoutes(app) {
   const tiktokUrlVerification = {
@@ -318,11 +319,12 @@ export async function tiktokRoutes(app) {
     const { live, snap } = await app.withTenant(tenant_id, async (db) => {
       const liveQ = await db.query(
         `SELECT l.id, l.status, l.tiktok_connector_status,
-                COALESCE(ct.tiktok_username, cl.tiktok_username) AS tiktok_username
+                ${tiktokUsernameSql({ marca: 'm', cliente: 'cl', contrato: 'ct' })} AS tiktok_username
          FROM lives l
          LEFT JOIN cabines cb ON cb.live_atual_id = l.id AND cb.tenant_id = l.tenant_id
          LEFT JOIN contratos ct ON ct.id = cb.contrato_id AND ct.tenant_id = l.tenant_id
-         LEFT JOIN clientes cl ON cl.id = COALESCE(ct.cliente_id, l.cliente_id) AND cl.tenant_id = l.tenant_id
+         LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
+         LEFT JOIN clientes cl ON cl.id = COALESCE(m.cliente_id, l.cliente_id, ct.cliente_id) AND cl.tenant_id = l.tenant_id
          WHERE l.id = $1 AND l.tenant_id = $2::uuid`,
         [liveId, tenant_id]
       )
@@ -352,7 +354,7 @@ export async function tiktokRoutes(app) {
       status = 'disconnected'
     } else if (!live.tiktok_username) {
       status = 'error'
-      error = 'TikTok @ ausente em contrato e cliente'
+      error = 'TikTok não cadastrado no cliente ou marca'
     } else if (live.tiktok_connector_status === 'degraded' || live.tiktok_connector_status === 'offline') {
       status = 'error'
       error = `connector ${live.tiktok_connector_status}`

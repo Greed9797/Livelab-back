@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { READ_AGENDA, WRITE_AGENDA } from '../config/role_groups.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
+import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 
 const activeAgendaStatuses = ['planejado', 'confirmado', 'ao_vivo']
 
@@ -105,7 +106,7 @@ async function resolveAgendaMarcaId(db, tenantId, { marcaId, clienteId }) {
   if (existing.rows[0]) return existing.rows[0].id
 
   const cliente = await db.query(
-    `SELECT id, nome, tiktok_username, site, logo_url
+    `SELECT id, nome, site, logo_url
        FROM clientes
       WHERE id = $1::uuid
         AND tenant_id = $2::uuid`,
@@ -118,9 +119,9 @@ async function resolveAgendaMarcaId(db, tenantId, { marcaId, clienteId }) {
     `INSERT INTO marcas (
        tenant_id, cliente_id, nome, tipo, status, tiktok_username, site, logo_url, observacoes
      )
-     VALUES ($1,$2,$3,'cliente','ativa',$4,$5,$6,'Criada automaticamente ao agendar uma cabine para cliente.')
+     VALUES ($1,$2,$3,'cliente','ativa',NULL,$4,$5,'Criada automaticamente ao agendar uma cabine para cliente.')
      RETURNING id`,
-    [tenantId, row.id, row.nome, row.tiktok_username ?? null, row.site ?? null, row.logo_url ?? null],
+    [tenantId, row.id, row.nome, row.site ?? null, row.logo_url ?? null],
   )
   return inserted.rows[0]?.id ?? null
 }
@@ -343,7 +344,7 @@ export async function agendaRoutes(app) {
                 COALESCE(m.logo_url, cl.logo_url) AS marca_logo_url,
                 COALESCE(m.site, cl.site) AS marca_site,
                 cl.nome AS cliente_nome,
-                COALESCE(m.tiktok_username, cl.tiktok_username) AS tiktok_username,
+                ${tiktokUsernameSql({ marca: 'm', cliente: 'cl' })} AS tiktok_username,
                 c.numero AS cabine_numero,
                 c.nome AS cabine_nome,
                 a.nome AS apresentadora_nome

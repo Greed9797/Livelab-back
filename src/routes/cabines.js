@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import { z } from 'zod'
 import { READ_CABINES, WRITE_CABINES, READ_LIVES, WRITE_LIVES } from '../config/role_groups.js'
 import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
+import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 
 const cabineRoleAccess = (app) => [
   app.authenticate,
@@ -68,7 +69,7 @@ export async function cabinesRoutes(app) {
                 c.status AS status_fisico,
                 c.ativo, c.descricao, l.id AS live_real_id, c.live_atual_id AS live_atual_id_legado, c.contrato_id,
                 ct.status AS contrato_status,
-                COALESCE(m_live.tiktok_username, cl_live.tiktok_username, ct.tiktok_username, agenda_next.tiktok_username) AS tiktok_username,
+                COALESCE(${tiktokUsernameSql({ marca: 'm_live', cliente: 'cl_tiktok_live', contrato: 'ct' })}, agenda_next.tiktok_username) AS tiktok_username,
                 l.cliente_id AS cliente_id,
                 l.cliente_id AS cliente_em_live_id,
                 cl_live.nome AS cliente_em_live,
@@ -111,6 +112,7 @@ export async function cabinesRoutes(app) {
          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = c.tenant_id
          LEFT JOIN clientes cl_live ON cl_live.id = l.cliente_id AND cl_live.tenant_id = c.tenant_id
          LEFT JOIN marcas m_live ON m_live.id = l.marca_id AND m_live.tenant_id = c.tenant_id
+         LEFT JOIN clientes cl_tiktok_live ON cl_tiktok_live.id = COALESCE(m_live.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok_live.tenant_id = c.tenant_id
          LEFT JOIN LATERAL (
            SELECT viewer_count, gmv, likes_count, comments_count,
                   shares_count, gifts_diamonds, total_orders
@@ -128,7 +130,7 @@ export async function cabinesRoutes(app) {
                   m.nome AS marca_nome,
                   m.logo_url AS marca_logo_url,
                   m.site AS marca_site,
-                  COALESCE(m.tiktok_username, cl2.tiktok_username) AS tiktok_username,
+                  ${tiktokUsernameSql({ marca: 'm', cliente: 'cl2' })} AS tiktok_username,
                   m.cliente_id,
                   cl2.nome AS cliente_nome
            FROM agenda_eventos ae
@@ -155,7 +157,7 @@ export async function cabinesRoutes(app) {
              'marca_id', ae.marca_id,
              'marca_nome', m.nome,
              'marca_logo_url', m.logo_url,
-             'tiktok_username', COALESCE(m.tiktok_username, cl2.tiktok_username),
+             'tiktok_username', ${tiktokUsernameSql({ marca: 'm', cliente: 'cl2' })},
              'status', ae.status
            ) ORDER BY ae.data_inicio), '[]'::json) AS agenda
            FROM agenda_eventos ae
@@ -797,14 +799,14 @@ export async function cabinesRoutes(app) {
                cl.nome AS cliente_nome,
                m.nome AS marca_nome,
                m.logo_url AS marca_logo_url,
-               COALESCE(m.tiktok_username, cl.tiktok_username, ct.tiktok_username) AS tiktok_username
+               ${tiktokUsernameSql({ marca: 'm', cliente: 'cl_tiktok', contrato: 'ct' })} AS tiktok_username
         FROM lives l
         LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
         LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
         LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
         LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
         LEFT JOIN LATERAL (
-          SELECT m2.id, m2.nome, m2.logo_url, m2.tiktok_username
+          SELECT m2.id, m2.nome, m2.tipo, m2.cliente_id, m2.logo_url, m2.tiktok_username
           FROM marcas m2
           WHERE m2.tenant_id = l.tenant_id
             AND (
@@ -818,6 +820,7 @@ export async function cabinesRoutes(app) {
           ORDER BY CASE WHEN m2.id = l.marca_id THEN 0 ELSE 1 END, m2.criado_em ASC
           LIMIT 1
         ) m ON true
+        LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(m.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id
         WHERE l.id = $1 AND l.tenant_id = $2
       `, [liveId, tenant_id])
       const liveData = liveQ.rows[0]

@@ -2,22 +2,7 @@ import { z } from 'zod'
 import { resolveCepToGeo } from './cep.js'
 import { READ_CLIENTES, WRITE_CLIENTES } from '../config/role_groups.js'
 import { getClienteOperacional, resolveMonthRange } from '../lib/operacional.js'
-
-// Regex sincronizado com clientes_tiktok_username_format (migration 075).
-const TIKTOK_USERNAME_RE = /^[a-zA-Z0-9_.]{2,24}$/
-
-const tiktokUsernameField = z
-  .string()
-  .trim()
-  .refine((v) => !v.includes('@'), {
-    message: 'Digite o TikTok sem @',
-  })
-  .refine((v) => v === '' || TIKTOK_USERNAME_RE.test(v), {
-    message: 'tiktok_username inválido (2-24 chars: letras/números/_/.)',
-  })
-  .transform((v) => (v === '' ? null : v))
-  .nullable()
-  .optional()
+import { tiktokUsernameField } from '../lib/tiktok-username.js'
 const imageUrlField = z.string().max(500000).nullable().optional()
 
 const createSchema = z.object({

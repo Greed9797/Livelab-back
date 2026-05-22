@@ -141,7 +141,8 @@ describe('home dashboard', () => {
     const agendaSql = sqls.find((sql) => sql.includes('SELECT ae.id, ae.tipo') && sql.includes('FROM agenda_eventos ae'))
     expect(agendaSql).toContain('a_evento.id = ae.apresentadora_id')
     const rankingApSql = sqls.find((sql) => sql.includes('ranking_apresentadoras_mes'))
-    expect(rankingApSql).toContain('FROM vendas_atribuidas va')
+    expect(rankingApSql).toContain('FROM apresentadoras a')
+    expect(rankingApSql).toContain('LEFT JOIN vendas_atribuidas va')
     expect(rankingApSql).toContain('a.fixo')
     expect(queryMock.mock.calls.some(([, params]) => Array.isArray(params) && params.includes('tenant-a'))).toBe(true)
 

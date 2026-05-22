@@ -1,4 +1,5 @@
 import { isWeekendInSaoPaulo } from '../lib/timezone.js'
+import { defaultPresenterCommissionPct } from '../config/presenter_defaults.js'
 
 export const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 export const WEEKEND_LIVE_PRESENTER_COMMISSION_PCT = 2
@@ -93,5 +94,5 @@ export async function resolvePresenterCommissionPct(db, {
   const perfilPct = positivePct(perfilQ.rows[0]?.comissao_pct)
   if (perfilPct !== null) return livePctWithMinimum(origem, perfilPct)
 
-  return origem === 'live' ? MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT : 0
+  return livePctWithMinimum(origem, defaultPresenterCommissionPct(baseGmv))
 }

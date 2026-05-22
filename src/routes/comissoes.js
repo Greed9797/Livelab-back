@@ -1,4 +1,5 @@
 import { READ_COMISSOES } from '../config/role_groups.js'
+import { DEFAULT_APRESENTADORA_FIXO } from '../config/presenter_defaults.js'
 
 const APROVADORES = ['franqueador_master', 'franqueado']
 
@@ -107,25 +108,26 @@ export async function comissoesRoutes(app) {
       const result = await db.query(
         `WITH ranking_apresentadoras AS (
            SELECT
-             va.apresentadora_id,
+             a.id AS apresentadora_id,
              COALESCE(a.nome, 'Sem apresentadora') AS nome,
-             COALESCE(a.fixo, 0) AS fixo,
+             COALESCE(NULLIF(a.fixo, 0), $4::numeric) AS fixo,
              COALESCE(SUM(va.gmv), 0) AS gmv,
              COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
              COALESCE(SUM(CASE WHEN va.origem = 'video' THEN va.gmv ELSE 0 END), 0) AS gmv_videos,
              COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
              COALESCE(SUM(va.pedidos), 0)::int AS pedidos,
              COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
-           FROM vendas_atribuidas va
-           JOIN apresentadoras a ON a.id = va.apresentadora_id
-            AND a.tenant_id = va.tenant_id
-           WHERE va.tenant_id = $1::uuid
-             AND va.apresentadora_id IS NOT NULL
-             AND va.origem IN ('live', 'video')
-             AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
-             AND va.data >= $2::date
-             AND va.data < $3::date
-           GROUP BY va.apresentadora_id, a.nome, a.fixo
+           FROM apresentadoras a
+           LEFT JOIN vendas_atribuidas va
+             ON va.apresentadora_id = a.id
+            AND va.tenant_id = a.tenant_id
+            AND va.origem IN ('live', 'video')
+            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+            AND va.data >= $2::date
+            AND va.data < $3::date
+           WHERE a.tenant_id = $1::uuid
+             AND a.ativo = true
+           GROUP BY a.id, a.nome, a.fixo
          )
          SELECT
            apresentadora_id,
@@ -140,8 +142,8 @@ export async function comissoesRoutes(app) {
            (fixo + comissao_variavel) AS total_recebido
          FROM ranking_apresentadoras
          ORDER BY total_recebido DESC, gmv DESC, nome ASC
-         LIMIT $4::int`,
-        [tenant_id, range.start, range.end, limit],
+         LIMIT $5::int`,
+        [tenant_id, range.start, range.end, DEFAULT_APRESENTADORA_FIXO, limit],
       )
 
       return result.rows.map((row) => ({
@@ -181,27 +183,30 @@ export async function comissoesRoutes(app) {
 
     const result = await app.db.query(
       `WITH rk AS (
-         SELECT va.apresentadora_id,
+         SELECT a.id AS apresentadora_id,
                 COALESCE(a.nome, 'Sem apresentadora') AS nome,
-                COALESCE(a.fixo, 0) AS fixo,
+                COALESCE(NULLIF(a.fixo, 0), $4::numeric) AS fixo,
                 COALESCE(SUM(va.gmv), 0) AS gmv,
                 COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives,
                 COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_variavel
-           FROM vendas_atribuidas va
-           JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
-          WHERE va.tenant_id = $1::uuid
-            AND va.apresentadora_id IS NOT NULL
+           FROM apresentadoras a
+           LEFT JOIN vendas_atribuidas va
+             ON va.apresentadora_id = a.id
+            AND va.tenant_id = a.tenant_id
             AND va.origem IN ('live', 'video')
             AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
-            AND va.data >= $2::date AND va.data < $3::date
-          GROUP BY va.apresentadora_id, a.nome, a.fixo
+            AND va.data >= $2::date
+            AND va.data < $3::date
+          WHERE a.tenant_id = $1::uuid
+            AND a.ativo = true
+          GROUP BY a.id, a.nome, a.fixo
        )
        SELECT apresentadora_id, nome, gmv, lives, fixo, comissao_variavel,
               (fixo + comissao_variavel) AS total_recebido
          FROM rk
         ORDER BY total_recebido DESC, gmv DESC, nome ASC
-        LIMIT $4::int`,
-      [tenantId, range.start, range.end, limit],
+        LIMIT $5::int`,
+      [tenantId, range.start, range.end, DEFAULT_APRESENTADORA_FIXO, limit],
     )
 
     return reply.send({
@@ -270,16 +275,12 @@ export async function comissoesRoutes(app) {
            CASE
              WHEN va.apresentadora_id IS NULL THEN 'sem_apresentadora'
              WHEN va.marca_id IS NULL OR m.id IS NULL THEN 'sem_marca'
-             WHEN va.origem = 'live' AND faixa.id IS NULL AND EXTRACT(ISODOW FROM va.data::date) NOT IN (6, 7) THEN 'sem_faixa_comissao'
-             WHEN va.origem = 'video' AND am.id IS NULL THEN 'sem_vinculo_marca'
              WHEN COALESCE(va.comissao_apresentadora, 0) = 0 THEN 'comissao_zero'
              ELSE 'pronta_para_aprovar'
            END AS diagnostico_operacional,
            CASE
              WHEN va.apresentadora_id IS NULL THEN 'Sem apresentadora vinculada'
              WHEN va.marca_id IS NULL OR m.id IS NULL THEN 'Sem marca vinculada'
-             WHEN va.origem = 'live' AND faixa.id IS NULL AND EXTRACT(ISODOW FROM va.data::date) NOT IN (6, 7) THEN 'Sem faixa de comissão'
-             WHEN va.origem = 'video' AND am.id IS NULL THEN 'Sem vínculo apresentadora-marca'
              WHEN COALESCE(va.comissao_apresentadora, 0) = 0 THEN 'Comissão zerada'
              ELSE 'Pronta para aprovar'
            END AS diagnostico_label

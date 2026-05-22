@@ -93,6 +93,7 @@ export const MIGRATIONS_LIST = [
   '096_appmax_installations.sql',
   '097_repair_video_presenter_commissions.sql',
   '098_repair_zero_video_presenter_commissions.sql',
+  '099_default_presenter_compensation.sql',
 ]
 
 async function ensureMigrationsTable(client) {

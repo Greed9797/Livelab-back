@@ -418,6 +418,17 @@ describe('LIVELAB operational routes', () => {
     expect(migration).not.toContain('apresentadora_faixas_comissao')
   })
 
+  it('migration registry includes default presenter compensation backfill', () => {
+    const registry = readFileSync(new URL('../apply_migrations.js', import.meta.url), 'utf8')
+    const migration = readFileSync(new URL('../migrations/099_default_presenter_compensation.sql', import.meta.url), 'utf8')
+
+    expect(registry).toContain('099_default_presenter_compensation.sql')
+    expect(migration).toContain('ALTER COLUMN fixo SET DEFAULT 2700')
+    expect(migration).toContain('0.5::numeric')
+    expect(migration).toContain('500000.01::numeric')
+    expect(migration).toContain('UPDATE vendas_atribuidas')
+  })
+
   it('GET /v1/comissoes/resumo aggregates live and video attribution rows', async () => {
     const queryMock = vi.fn().mockResolvedValueOnce({
       rows: [{
@@ -528,8 +539,8 @@ describe('LIVELAB operational routes', () => {
       diagnostico_label: 'Sem apresentadora vinculada',
     })
     expect(queryMock.mock.calls[0][0]).toContain('diagnostico_operacional')
-    expect(queryMock.mock.calls[0][0]).toContain('sem_faixa_comissao')
-    expect(queryMock.mock.calls[0][0]).toContain('sem_vinculo_marca')
+    expect(queryMock.mock.calls[0][0]).not.toContain('sem_faixa_comissao')
+    expect(queryMock.mock.calls[0][0]).not.toContain('sem_vinculo_marca')
     await app.close()
   })
 
@@ -694,6 +705,33 @@ describe('LIVELAB operational routes', () => {
       comissao_apresentadora: 7500,
       comissao_franquia: 50000,
       comissao_franqueadora: 10000,
+    })
+  })
+
+  it('calcularComissoesAtribuidas falls back to the default presenter ladder', async () => {
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('FROM marcas')) return { rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '2' }] }
+      if (sql.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: '0.00' }] }
+      if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [] }
+      if (sql.includes('FROM apresentadora_marcas')) return { rows: [{ comissao_live_pct: '0', comissao_video_pct: '0' }] }
+      if (sql.includes('FROM apresentadoras')) return { rows: [{ comissao_pct: '0' }] }
+      return { rows: [] }
+    })
+
+    const result = await calcularComissoesAtribuidas({ query: queryMock }, {
+      tenantId: 'tenant-1',
+      marcaId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      apresentadoraId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      origem: 'video',
+      origemId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      data: '2026-05-19',
+      gmv: 600000,
+    })
+
+    expect(result).toMatchObject({
+      comissao_apresentadora: 12000,
+      comissao_franquia: 60000,
+      comissao_franqueadora: 12000,
     })
   })
 

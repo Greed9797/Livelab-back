@@ -2,9 +2,9 @@ name: Backend CI
 
 on:
   push:
-    branches: [master, stabilization/core-restructure]
+    branches: [master, stabilization/core-restructure, codex/blumenau-operational-fase1]
   pull_request:
-    branches: [master]
+    branches: [master, codex/blumenau-operational-fase1]
 
 jobs:
   test:

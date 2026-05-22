@@ -177,6 +177,13 @@ export async function solicitacoesRoutes(app) {
       )
 
       await client.query('COMMIT')
+
+      app.audit?.log?.(request, {
+        action: 'aprovar_solicitacao',
+        entity_type: 'agenda_eventos',
+        entity_id: id,
+      }).catch(() => {})
+
       return updated.rows[0]
     } catch (e) {
       await client.query('ROLLBACK')
@@ -218,6 +225,13 @@ export async function solicitacoesRoutes(app) {
         WHERE id = $2 AND tenant_id = $3 AND tipo = 'live'
         RETURNING id, status, motivo_cancelamento AS motivo_recusa, atualizado_em
       `, [motivo_recusa ?? null, id, tenant_id])
+
+      app.audit?.log?.(request, {
+        action: 'recusar_solicitacao',
+        entity_type: 'agenda_eventos',
+        entity_id: id,
+        metadata: { motivo: motivo_recusa },
+      }).catch(() => {})
 
       return updated.rows[0]
     })

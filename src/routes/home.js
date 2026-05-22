@@ -481,6 +481,36 @@ export async function homeRoutes(app) {
         request.log?.warn?.({ err: error }, 'home/dashboard: ranking de apresentadoras indisponível')
       }
 
+      const [gmvDiarioQ, metaQ] = await Promise.all([
+        db.query(`
+          SELECT
+            EXTRACT(DAY FROM va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')::int AS dia,
+            COALESCE(SUM(va.gmv), 0) AS gmv
+          FROM vendas_atribuidas va
+          WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+          GROUP BY dia
+          ORDER BY dia
+        `),
+        db.query(`
+          SELECT meta_gmv, m1_teto, m1_pct, m2_teto, m2_pct, m3_teto, m3_pct, m4_pct
+          FROM meta_unidade
+          WHERE tenant_id = $1
+            AND ano_mes = to_char(NOW() AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')
+          LIMIT 1
+        `, [tenant_id]),
+      ])
+
+      const gmvDiario = (() => {
+        const today = new Date()
+        const diasNoMes = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate()
+        const byDay = Object.fromEntries(gmvDiarioQ.rows.map(r => [Number(r.dia), parseFloat(Number(r.gmv).toFixed(2))]))
+        return Array.from({ length: diasNoMes }, (_, i) => ({ dia: i + 1, gmv: byDay[i + 1] ?? 0 }))
+      })()
+
+      const metaUnidade = metaQ.rows[0] ?? null
+
       const rankingMarcasMes = rankingMarcasQ.rows.map(r => ({
         marca_id: r.marca_id,
         nome: r.nome,
@@ -563,7 +593,20 @@ export async function homeRoutes(app) {
         leads_disponiveis: Number(alertas.leads_disponiveis),
 
         // Ranking comercial mensal
-        ranking_marcas_mes: rankingMarcasMes
+        ranking_marcas_mes: rankingMarcasMes,
+
+        // GMV diário e meta da unidade
+        gmv_diario_mes: gmvDiario,
+        meta_gmv: metaUnidade ? parseFloat(Number(metaUnidade.meta_gmv).toFixed(2)) : null,
+        meta_tiers: metaUnidade ? {
+          m1_teto: parseFloat(Number(metaUnidade.m1_teto).toFixed(2)),
+          m1_pct: parseFloat(Number(metaUnidade.m1_pct).toFixed(2)),
+          m2_teto: parseFloat(Number(metaUnidade.m2_teto).toFixed(2)),
+          m2_pct: parseFloat(Number(metaUnidade.m2_pct).toFixed(2)),
+          m3_teto: parseFloat(Number(metaUnidade.m3_teto).toFixed(2)),
+          m3_pct: parseFloat(Number(metaUnidade.m3_pct).toFixed(2)),
+          m4_pct: parseFloat(Number(metaUnidade.m4_pct).toFixed(2)),
+        } : null,
       }
       } catch (error) {
         app.log.error({ err: error }, 'ERRO NA ROTA /v1/home/dashboard')

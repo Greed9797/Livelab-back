@@ -136,6 +136,156 @@ const publicarSchema = z.object({
   motivo: z.string().max(500).optional(),
 })
 
+function liveStatusToAgendaStatus(status) {
+  if (status === 'encerrada') return 'concluido'
+  if (status === 'cancelada') return 'cancelado'
+  if (status === 'em_andamento') return 'ao_vivo'
+  return 'planejado'
+}
+
+function safeAgendaEnd(dataInicio, dataFim) {
+  const inicio = new Date(dataInicio)
+  const fim = dataFim ? new Date(dataFim) : null
+  if (!Number.isNaN(inicio.getTime()) && fim && !Number.isNaN(fim.getTime()) && fim > inicio) return dataFim
+  return new Date(inicio.getTime() + 4 * 60 * 60 * 1000).toISOString()
+}
+
+async function getLivePrimaryApresentadoraId(db, { tenantId, liveId, apresentadorUserId }) {
+  const result = await db.query(
+    `SELECT COALESCE(v2.apresentadora_id, ap.id) AS id
+     FROM (SELECT 1) base
+     LEFT JOIN LATERAL (
+       SELECT lav.apresentadora_id
+       FROM live_apresentadoras_v2 lav
+       WHERE lav.tenant_id = $1::uuid
+         AND lav.live_id = $2::uuid
+       ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+       LIMIT 1
+     ) v2 ON true
+     LEFT JOIN LATERAL (
+       SELECT a.id
+       FROM apresentadoras a
+       WHERE a.tenant_id = $1::uuid
+         AND a.user_id = $3::uuid
+       LIMIT 1
+     ) ap ON true`,
+    [tenantId, liveId, apresentadorUserId ?? null],
+  )
+  return result.rows[0]?.id ?? null
+}
+
+async function syncAgendaEventForLive(db, {
+  tenantId,
+  liveId,
+  agendaEventoId,
+  cabineId,
+  marcaId,
+  apresentadoraId,
+  dataInicio,
+  dataFim,
+  status,
+  observacoes,
+  criadoPor,
+}) {
+  if (!tenantId || !liveId || !marcaId || !dataInicio) return null
+
+  const agendaStatus = liveStatusToAgendaStatus(status)
+  const agendaFim = safeAgendaEnd(dataInicio, dataFim)
+  let eventId = agendaEventoId ?? null
+
+  if (!eventId) {
+    const existing = await db.query(
+      `SELECT ae.id
+       FROM agenda_eventos ae
+       WHERE ae.tenant_id = $1::uuid
+         AND ae.tipo = 'live'
+         AND ae.status <> 'cancelado'
+         AND (
+           ae.live_id = $2::uuid
+           OR (
+             ae.live_id IS NULL
+             AND ae.marca_id = $3::uuid
+             AND ae.cabine_id IS NOT DISTINCT FROM $4::uuid
+             AND ae.data_inicio < $6::timestamptz
+             AND ae.data_fim > $5::timestamptz
+           )
+         )
+       ORDER BY (ae.live_id = $2::uuid) DESC,
+                ABS(EXTRACT(EPOCH FROM (ae.data_inicio - $5::timestamptz)))
+       LIMIT 1`,
+      [tenantId, liveId, marcaId, cabineId ?? null, dataInicio, agendaFim],
+    )
+    eventId = existing.rows[0]?.id ?? null
+  }
+
+  if (eventId) {
+    const updated = await db.query(
+      `UPDATE agenda_eventos
+       SET tipo = 'live',
+           marca_id = $3::uuid,
+           cabine_id = $4::uuid,
+           apresentadora_id = $5::uuid,
+           data_inicio = $6::timestamptz,
+           data_fim = $7::timestamptz,
+           status = $8,
+           live_id = $9::uuid,
+           observacoes = COALESCE(NULLIF(observacoes, ''), $10),
+           atualizado_em = NOW()
+       WHERE id = $1::uuid
+         AND tenant_id = $2::uuid
+       RETURNING id`,
+      [
+        eventId,
+        tenantId,
+        marcaId,
+        cabineId ?? null,
+        apresentadoraId ?? null,
+        dataInicio,
+        agendaFim,
+        agendaStatus,
+        liveId,
+        observacoes ?? 'Live sincronizada automaticamente pelo registro operacional.',
+      ],
+    )
+    eventId = updated.rows[0]?.id ?? eventId
+  } else {
+    const inserted = await db.query(
+      `INSERT INTO agenda_eventos (
+         tenant_id, tipo, marca_id, cabine_id, apresentadora_id, data_inicio, data_fim,
+         status, live_id, observacoes, criado_por
+       )
+       VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING id`,
+      [
+        tenantId,
+        marcaId,
+        cabineId ?? null,
+        apresentadoraId ?? null,
+        dataInicio,
+        agendaFim,
+        agendaStatus,
+        liveId,
+        observacoes ?? 'Live criada automaticamente a partir do registro operacional.',
+        criadoPor ?? null,
+      ],
+    )
+    eventId = inserted.rows[0]?.id ?? null
+  }
+
+  if (eventId) {
+    await db.query(
+      `UPDATE lives
+       SET agenda_evento_id = $1::uuid
+       WHERE id = $2::uuid
+         AND tenant_id = $3::uuid
+         AND agenda_evento_id IS DISTINCT FROM $1::uuid`,
+      [eventId, liveId, tenantId],
+    )
+  }
+
+  return eventId
+}
+
 export async function livesRoutes(app) {
 
   const cabineRoleAccess = (app) => [
@@ -684,6 +834,7 @@ export async function livesRoutes(app) {
           ]
         )
         const liveId = ins.rows[0].id
+        let finalAgendaEventoId = d.agenda_evento_id ?? null
 
         if (d.agenda_evento_id) {
           await db.query(
@@ -737,6 +888,22 @@ export async function livesRoutes(app) {
         }
 
         if (resolvedMarcaId) {
+          finalAgendaEventoId = await syncAgendaEventForLive(db, {
+            tenantId: tenant_id,
+            liveId,
+            agendaEventoId: finalAgendaEventoId,
+            cabineId: d.cabine_id,
+            marcaId: resolvedMarcaId,
+            apresentadoraId: d.apresentador_id ?? null,
+            dataInicio: iniciado,
+            dataFim: encerrado,
+            status: 'encerrada',
+            observacoes: d.resumo ?? 'Live manual sincronizada com a agenda.',
+            criadoPor: gestorId,
+          }) ?? finalAgendaEventoId
+        }
+
+        if (resolvedMarcaId) {
           await upsertVendaAtribuida(db, {
             tenantId: tenant_id,
             origem: 'live',
@@ -751,7 +918,7 @@ export async function livesRoutes(app) {
         }
 
         await db.query('COMMIT')
-        return reply.code(201).send({ id: liveId })
+        return reply.code(201).send({ id: liveId, agenda_evento_id: finalAgendaEventoId })
       } catch (e) {
         await db.query('ROLLBACK')
         throw e
@@ -813,6 +980,8 @@ export async function livesRoutes(app) {
         const updates = []
         const values = []
         let idx = 1
+        let nextIniciadoEm = live.iniciado_em
+        let nextEncerradoEm = live.encerrado_em
 
         const addField = (col, val) => { updates.push(`${col} = $${idx++}`); values.push(val) }
 
@@ -883,8 +1052,10 @@ export async function livesRoutes(app) {
             await db.query('ROLLBACK')
             return reply.code(400).send({ error: 'hora_fim deve ser maior que hora_inicio' })
           }
-          addField('iniciado_em',  saoPauloTimestamp(data, hInicio))
-          addField('encerrado_em', saoPauloTimestamp(data, hFim))
+          nextIniciadoEm = saoPauloTimestamp(data, hInicio)
+          nextEncerradoEm = saoPauloTimestamp(data, hFim)
+          addField('iniciado_em',  nextIniciadoEm)
+          addField('encerrado_em', nextEncerradoEm)
         }
 
         if (updates.length > 0) {
@@ -958,27 +1129,30 @@ export async function livesRoutes(app) {
           }
         }
 
-        // ── Sync live→agenda_eventos para campos críticos ──────────────────────
-        const agendaEvIdToSync = live.agenda_evento_id
-        if (agendaEvIdToSync) {
-          const agendaSync = []
-          const agendaVals = []
-          let aIdx = 1
-          const agendaAdd = (col, val) => { agendaSync.push(`${col} = $${aIdx++}`); agendaVals.push(val) }
-
-          if (d.marca_id !== undefined) agendaAdd('marca_id', d.marca_id)
-          if (d.previsto_fim !== undefined) agendaAdd('data_fim', d.previsto_fim)
-          // Apresentadora: d.apresentador_id é apresentadoras.id; agenda usa o mesmo campo.
-          if (d.apresentador_id !== undefined) agendaAdd('apresentadora_id', d.apresentador_id)
-
-          if (agendaSync.length > 0) {
-            agendaVals.push(agendaEvIdToSync, tenant_id)
-            await db.query(
-              `UPDATE agenda_eventos SET ${agendaSync.join(', ')}, atualizado_em = NOW()
-               WHERE id = $${aIdx}::uuid AND tenant_id = $${aIdx + 1}::uuid`,
-              agendaVals
-            )
-          }
+        // ── Sync live→agenda_eventos: agenda é espelho operacional da live ─────
+        const nextMarcaId = d.marca_id !== undefined ? d.marca_id : live.marca_id
+        let nextApresentadoraId = d.apresentador_id !== undefined ? d.apresentador_id : null
+        if (nextMarcaId && d.apresentador_id === undefined) {
+          nextApresentadoraId = await getLivePrimaryApresentadoraId(db, {
+            tenantId: tenant_id,
+            liveId: request.params.id,
+            apresentadorUserId: resolvedApresentadorId !== undefined ? resolvedApresentadorId : live.apresentador_id,
+          })
+        }
+        if (nextMarcaId) {
+          await syncAgendaEventForLive(db, {
+            tenantId: tenant_id,
+            liveId: request.params.id,
+            agendaEventoId: d.agenda_evento_id !== undefined ? d.agenda_evento_id : live.agenda_evento_id,
+            cabineId,
+            marcaId: nextMarcaId,
+            apresentadoraId: nextApresentadoraId ?? null,
+            dataInicio: nextIniciadoEm,
+            dataFim: d.previsto_fim ?? nextEncerradoEm ?? live.previsto_fim,
+            status: d.status ?? live.status,
+            observacoes: d.resumo ?? 'Live sincronizada com a agenda.',
+            criadoPor: sub,
+          })
         }
         // ── fim sync ────────────────────────────────────────────────────────────
 
@@ -1540,8 +1714,29 @@ export async function livesRoutes(app) {
         }
 
         // ── Encerra evento de agenda vinculado ──────────────────────────────
-        // Tenta primeiro por live_id/agenda_evento_id (preciso), depois por cabine+data (fallback).
-        try {
+        const marcaIdForAgenda = live.marca_id ?? marcaQ.rows[0]?.id ?? null
+        let apresentadoraIdForAgenda = parsed.data.apresentadora_id ?? null
+        if (marcaIdForAgenda && !apresentadoraIdForAgenda) {
+          apresentadoraIdForAgenda = await getLivePrimaryApresentadoraId(db, {
+            tenantId: tenant_id,
+            liveId: live.id,
+            apresentadorUserId: encerramentoApresentadorUserId ?? live.apresentador_id,
+          })
+        }
+        const syncedAgendaId = await syncAgendaEventForLive(db, {
+          tenantId: tenant_id,
+          liveId: live.id,
+          agendaEventoId: live.agenda_evento_id ?? null,
+          cabineId: live.cabine_id,
+          marcaId: marcaIdForAgenda,
+          apresentadoraId: apresentadoraIdForAgenda,
+          dataInicio: live.iniciado_em,
+          dataFim: (encerradoEm ?? new Date()).toISOString(),
+          status: 'encerrada',
+          observacoes: parsed.data.resumo ?? 'Live encerrada e sincronizada com a agenda.',
+          criadoPor: sub,
+        })
+        if (!syncedAgendaId) {
           const agendaEncerradaQ = await db.query(
             `UPDATE agenda_eventos
              SET status = 'concluido',
@@ -1572,8 +1767,6 @@ export async function livesRoutes(app) {
               [tenant_id, live.cabine_id, live.iniciado_em, live.id]
             )
           }
-        } catch (agendaEncErr) {
-          app.log.warn({ err: agendaEncErr, liveId: live.id }, 'agenda: falha ao encerrar evento vinculado (soft)')
         }
         // ── fim encerramento agenda ──────────────────────────────────────────
 

@@ -98,6 +98,7 @@ export const MIGRATIONS_LIST = [
   '101_apresentadoras_foto_url.sql',
   '102_presenter_fixed_compensation_guardrail.sql',
   '103_unify_tiktok_username_source.sql',
+  '104_live_agenda_bidirectional_backfill.sql',
 ]
 
 async function ensureMigrationsTable(client) {

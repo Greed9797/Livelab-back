@@ -624,6 +624,68 @@ describe('Route regressions: SQL and RBAC', () => {
     await app.close()
   })
 
+  it('analytics dashboard returns content metrics from attributed sales and operational records', async () => {
+    const app = Fastify()
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ gmv_total: '1500', gmv_lives: '1000', gmv_videos: '500', pedidos_total: '15', pedidos_lives: '10', pedidos_videos: '5' }] })
+      .mockResolvedValueOnce({ rows: [{ gmv_total: '1000', pedidos_total: '10' }] })
+      .mockResolvedValueOnce({ rows: [{ total_lives: '2', horas_live: '3.5', viewers_total: '120', likes_total: '90', comentarios_total: '12', shares_total: '8', diamonds_total: '3' }] })
+      .mockResolvedValueOnce({ rows: [{ registros_video: '2', total_videos: '4' }] })
+      .mockResolvedValueOnce({ rows: [{ mes: '2026-05', gmv: '1500', gmv_lives: '1000', gmv_videos: '500', pedidos: '15', total_lives: '2', total_videos: '4' }] })
+      .mockResolvedValueOnce({ rows: [{ dia: '2026-05-10', horas: '3.5' }] })
+      .mockResolvedValueOnce({ rows: [{ apresentadora_id: 'ap-1', apresentadora_nome: 'Ana', apresentadora_foto_url: null, gmv_total: '1500', gmv_lives: '1000', gmv_videos: '500', pedidos: '15', total_lives: '2', total_videos: '4' }] })
+      .mockResolvedValueOnce({ rows: [{ marca_id: 'marca-1', marca_nome: 'Marca A', logo_url: null, gmv_total: '1500', gmv_lives: '1000', gmv_videos: '500', pedidos: '15', total_lives: '2', total_videos: '4' }] })
+      .mockResolvedValueOnce({ rows: [{ hora: '20', total_lives: '2', gmv: '1000' }] })
+      .mockResolvedValueOnce({ rows: [{ dow: '5', bloco_hora: '18', lives: '2', gmv: '1000' }] })
+    const releaseMock = vi.fn()
+
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-1', papel: 'franqueado' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!papeis.includes(request.user.papel)) {
+        return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
+      }
+    })
+    app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+    app.decorate('withTenant', async (tenantId, fn) => {
+      const db = await app.dbTenant(tenantId)
+      try { return await fn(db) } finally { db.release() }
+    })
+
+    await app.register(analyticsRoutes)
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/analytics/dashboard?mesAno=2026-05',
+    })
+    const payload = response.json()
+
+    expect(response.statusCode).toBe(200)
+    expect(payload.periodo).toEqual({ from: '2026-05-01', to: '2026-05-31', mesAno: '2026-05' })
+    expect(payload.kpis).toMatchObject({
+      gmv_total: 1500,
+      gmv_lives: 1000,
+      gmv_videos: 500,
+      pedidos_total: 15,
+      total_vendas: 15,
+      ticket_medio: 100,
+      total_lives: 2,
+      total_videos: 4,
+      total_conteudos: 6,
+      horas_live: 3.5,
+    })
+    expect(payload.gmv_mensal[0]).toMatchObject({ mes: '2026-05', gmv: 1500, pedidos: 15, total_lives: 2, total_videos: 4 })
+    expect(payload.ranking_apresentadoras[0]).toMatchObject({ apresentadora_nome: 'Ana', gmv_total: 1500, pedidos: 15 })
+    expect(payload.ranking_marcas[0]).toMatchObject({ marca_nome: 'Marca A', gmv_total: 1500, pedidos: 15 })
+    expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
+    expect(queryMock.mock.calls[2][0]).toContain('FROM lives l')
+    expect(queryMock.mock.calls[3][0]).toContain('FROM video_registros vr')
+    expect(releaseMock).toHaveBeenCalledTimes(1)
+
+    await app.close()
+  })
+
   it('cliente dashboard returns monthly live performance payload with tenant-safe ranking', async () => {
     const app = Fastify()
     const clienteId = '33333333-3333-4333-8333-333333333333'

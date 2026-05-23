@@ -161,6 +161,7 @@ describe('POST /v1/lives — agenda link unificada', () => {
         return { rows: [{ id: cabineId, numero: 1, status: 'disponivel', contrato_id: null, live_atual_id: null, ativo: true }] }
       }
       if (sql.includes('FROM agenda_eventos')) return { rows: [] }
+      if (sql.includes('sistema = TRUE')) return { rows: [{ id: '88888888-8888-4888-8888-888888888888' }] }
       if (sql.includes('SELECT user_id FROM apresentadoras')) {
         return { rows: [{ user_id: apresentadoraUserId }] }
       }

@@ -98,6 +98,10 @@ export const MIGRATIONS_LIST = [
   '102_presenter_fixed_compensation_guardrail.sql',
   '103_unify_tiktok_username_source.sql',
   '104_live_agenda_bidirectional_backfill.sql',
+  '104_marca_sistema_por_tenant.sql',
+  '105_cabines_status_remove_ativa.sql',
+  '106_live_requests_to_agenda_eventos.sql',
+  '107_cleanup_lives_dirty.sql',
 ]
 
 async function ensureMigrationsTable(client) {

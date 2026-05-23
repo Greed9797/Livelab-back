@@ -281,6 +281,63 @@ describe('POST /v1/lives/manual', () => {
     expect(vendaArgs).toContain(marcaId)
   })
 
+  it('creates a linked agenda event for manual lives with marca_id', async () => {
+    const marcaId = '55555555-5555-4555-8555-555555555555'
+    const liveId = '66666666-6666-4666-8666-666666666666'
+    const agendaId = '77777777-7777-4777-8777-777777777777'
+    let agendaInsertArgs = null
+    let liveLinkArgs = null
+    const queryMock = vi.fn(async (sql, args = []) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (sql.includes('FROM marcas') && sql.includes('WHERE id = $1')) {
+        return { rows: [{ id: marcaId, cliente_id: basePayload.cliente_id, tipo: 'cliente' }] }
+      }
+      if (sql.includes('FROM clientes')) return { rows: [{ status: 'ativo' }] }
+      if (sql.includes('FROM cabines')) return { rows: [{ comissao_pct: '0' }] }
+      if (sql.includes('SELECT user_id FROM apresentadoras')) return { rows: [{ user_id: 'user-ap-1' }] }
+      if (sql.includes('INSERT INTO lives')) return { rows: [{ id: liveId }] }
+      if (sql.includes('INSERT INTO live_apresentadoras_v2')) return { rows: [] }
+      if (sql.includes('SELECT ae.id') && sql.includes('FROM agenda_eventos ae')) return { rows: [] }
+      if (sql.includes('INSERT INTO agenda_eventos')) {
+        agendaInsertArgs = args
+        return { rows: [{ id: agendaId }] }
+      }
+      if (sql.includes('UPDATE lives') && sql.includes('agenda_evento_id')) {
+        liveLinkArgs = args
+        return { rows: [] }
+      }
+      if (sql.includes('FROM vendas_atribuidas')) return { rows: [] }
+      if (sql.includes('SELECT comissao_live_pct')) return { rows: [{ comissao_live_pct: '0', comissao_franquia_pct: '0', comissao_franqueadora_pct: '0' }] }
+      if (sql.includes('INSERT INTO vendas_atribuidas')) return { rows: [{ id: 'venda-1' }] }
+      return { rows: [] }
+    })
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/lives/manual',
+      payload: { ...basePayload, marca_id: marcaId },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toMatchObject({ id: liveId, agenda_evento_id: agendaId })
+    expect(agendaInsertArgs).toEqual([
+      'tenant-1',
+      marcaId,
+      basePayload.cabine_id,
+      basePayload.apresentador_id,
+      '2026-05-01T18:00:00-03:00',
+      '2026-05-01T20:00:00-03:00',
+      'concluido',
+      liveId,
+      basePayload.resumo,
+      basePayload.gestor_id,
+    ])
+    expect(liveLinkArgs).toEqual([agendaId, liveId, 'tenant-1'])
+  })
+
   it('inserts apresentador2 into live_apresentadores junction', async () => {
     const junctionCalls = []
     const ap2UserId = '66666666-6666-4666-8666-666666666666'

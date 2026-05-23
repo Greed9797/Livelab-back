@@ -381,17 +381,16 @@ describe('Route regressions: SQL and RBAC', () => {
         rows: [{
           id: requestId,
           cabine_id: cabineId,
-          data_solicitada: '2026-04-24',
-          hora_inicio: '14:00:00',
-          hora_fim: '16:00:00',
-          status: 'pendente',
+          data_inicio: '2026-04-24T14:00:00.000Z',
+          data_fim: '2026-04-24T16:00:00.000Z',
+          status: 'planejado',
           cliente_id: clienteId,
         }],
       })
       .mockResolvedValueOnce({ rows: [] })                    // overlap check
       .mockResolvedValueOnce({ rows: [{ id: contratoId }] }) // contratos check
-      .mockResolvedValueOnce({                                // UPDATE live_requests
-        rows: [{ id: requestId, status: 'aprovada', atualizado_em: '2026-04-24T12:00:00.000Z' }],
+      .mockResolvedValueOnce({                                // UPDATE agenda_eventos
+        rows: [{ id: requestId, status: 'confirmado', atualizado_em: '2026-04-24T12:00:00.000Z' }],
       })
       .mockResolvedValueOnce({ rows: [] })                    // UPDATE cabines reservada
       .mockResolvedValueOnce({ rows: [] })                    // COMMIT
@@ -423,9 +422,9 @@ describe('Route regressions: SQL and RBAC', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(response.json()).toMatchObject({ id: requestId, status: 'aprovada' })
-    expect(queryMock.mock.calls[2][0]).toContain('FROM live_requests')
-    expect(queryMock.mock.calls[5][0]).toContain("SET status = 'aprovada'")
+    expect(response.json()).toMatchObject({ id: requestId, status: 'confirmado' })
+    expect(queryMock.mock.calls[2][0]).toContain('FROM agenda_eventos')
+    expect(queryMock.mock.calls[5][0]).toContain("SET status = 'confirmado'")
     expect(queryMock.mock.calls[6][0]).toContain("SET status = 'reservada', contrato_id")
     expect(releaseMock).toHaveBeenCalledTimes(1)
 
@@ -1390,9 +1389,9 @@ describe('Route regressions: SQL and RBAC', () => {
       .mockResolvedValueOnce({                       // lockQ FOR UPDATE
         rows: [{
           id: requestId, cabine_id: cabineId,
-          data_solicitada: '2026-05-11',
-          hora_inicio: '14:00:00', hora_fim: '16:00:00',
-          status: 'pendente', cliente_id: clienteId,
+          data_inicio: '2026-05-11T14:00:00.000Z',
+          data_fim: '2026-05-11T16:00:00.000Z',
+          status: 'planejado', cliente_id: clienteId,
         }],
       })
       .mockResolvedValueOnce({ rows: [] })           // overlap check
@@ -1436,15 +1435,15 @@ describe('Route regressions: SQL and RBAC', () => {
       .mockResolvedValueOnce({                                // lockQ FOR UPDATE
         rows: [{
           id: requestId, cabine_id: cabineId,
-          data_solicitada: '2026-05-11',
-          hora_inicio: '10:00:00', hora_fim: '12:00:00',
-          status: 'pendente', cliente_id: clienteId,
+          data_inicio: '2026-05-11T10:00:00.000Z',
+          data_fim: '2026-05-11T12:00:00.000Z',
+          status: 'planejado', cliente_id: clienteId,
         }],
       })
       .mockResolvedValueOnce({ rows: [] })                    // overlap check
       .mockResolvedValueOnce({ rows: [{ id: contratoId }] }) // contratos check → ativo
-      .mockResolvedValueOnce({                                // UPDATE live_requests
-        rows: [{ id: requestId, status: 'aprovada', atualizado_em: '2026-05-11T12:00:00.000Z' }],
+      .mockResolvedValueOnce({                                // UPDATE agenda_eventos
+        rows: [{ id: requestId, status: 'confirmado', atualizado_em: '2026-05-11T12:00:00.000Z' }],
       })
       .mockResolvedValueOnce({ rows: [] })                    // UPDATE cabines reservada
       .mockResolvedValueOnce({ rows: [] })                    // COMMIT
@@ -1468,7 +1467,7 @@ describe('Route regressions: SQL and RBAC', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(response.json()).toMatchObject({ id: requestId, status: 'aprovada' })
+    expect(response.json()).toMatchObject({ id: requestId, status: 'confirmado' })
     expect(queryMock.mock.calls[6][0]).toContain("SET status = 'reservada', contrato_id")
     expect(queryMock.mock.calls[6][1]).toEqual([contratoId, cabineId, 'tenant-1'])
     expect(releaseMock).toHaveBeenCalledTimes(1)

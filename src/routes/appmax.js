@@ -139,7 +139,7 @@ export async function appmaxRoutes(app) {
     if (!validateWebhook(payload)) {
       app.log.warn('[appmax webhook] app_id inválido — rejeitando')
       // Audit log: falha de validação (sem PII)
-      await app.audit.log(request, {
+      app.audit?.log?.(request, {
         action: 'webhook_received',
         entity_type: 'appmax',
         entity_id: null,
@@ -147,7 +147,7 @@ export async function appmaxRoutes(app) {
           event_type: payload.event ?? payload.type ?? 'unknown',
           status: 'rejected_invalid_app_id',
         },
-      }).catch(() => {})
+      })?.catch(() => {})
       return reply.code(401).send({ error: 'app_id inválido' })
     }
 
@@ -158,7 +158,7 @@ export async function appmaxRoutes(app) {
     } catch {
       app.log.warn('[appmax webhook] token inválido — rejeitando')
       // Audit log: falha de token (sem PII)
-      await app.audit.log(request, {
+      app.audit?.log?.(request, {
         action: 'webhook_received',
         entity_type: 'appmax',
         entity_id: null,
@@ -166,7 +166,7 @@ export async function appmaxRoutes(app) {
           event_type: payload.event ?? payload.type ?? 'unknown',
           status: 'rejected_invalid_token',
         },
-      }).catch(() => {})
+      })?.catch(() => {})
       return reply.code(401).send({ error: 'Token de webhook Appmax inválido' })
     }
 
@@ -185,7 +185,7 @@ export async function appmaxRoutes(app) {
         if (inserted.rowCount === 0) {
           request.log.warn({ nonce }, '[appmax webhook] replay bloqueado')
           // Audit log: replay bloqueado (sem PII)
-          await app.audit.log(request, {
+          app.audit?.log?.(request, {
             action: 'webhook_received',
             entity_type: 'appmax',
             entity_id: null,
@@ -193,7 +193,7 @@ export async function appmaxRoutes(app) {
               event_type: payload.event ?? payload.type ?? 'unknown',
               status: 'blocked_replay',
             },
-          }).catch(() => {})
+          })?.catch(() => {})
           return reply.code(200).send({ received: true, replay: true })
         }
       } catch (err) {
@@ -217,7 +217,7 @@ export async function appmaxRoutes(app) {
       )
 
       // Audit log sanitizado (sem PII: nome, cpf, email, card, telefone)
-      await app.audit.log(request, {
+      app.audit?.log?.(request, {
         action: 'webhook_received',
         entity_type: 'appmax',
         entity_id: eventId,
@@ -225,7 +225,7 @@ export async function appmaxRoutes(app) {
           event_type: event,
           status: 'received',
         },
-      }).catch(() => {})
+      })?.catch(() => {})
 
       // Processa eventos de pagamento aprovado
       if (
@@ -249,7 +249,7 @@ export async function appmaxRoutes(app) {
         if (candidates.length === 0) {
           app.log.warn({ event, data }, '[appmax webhook] sem identificador de boleto')
           // Audit log: evento sem identificador (sem PII)
-          await app.audit.log(request, {
+          app.audit?.log?.(request, {
             action: 'webhook_received',
             entity_type: 'appmax',
             entity_id: eventId,
@@ -257,7 +257,7 @@ export async function appmaxRoutes(app) {
               event_type: event,
               status: 'missing_identifier',
             },
-          }).catch(() => {})
+          })?.catch(() => {})
           return reply.code(200).send({ received: true })
         }
 
@@ -307,7 +307,7 @@ export async function appmaxRoutes(app) {
           })
           app.log.info({ boletoId, gatewayId, event }, '[appmax webhook] boleto marcado como pago')
           // Audit log: boleto processado com sucesso (sem PII)
-          await app.audit.log(request, {
+          app.audit?.log?.(request, {
             action: 'webhook_received',
             entity_type: 'appmax',
             entity_id: eventId,
@@ -316,11 +316,11 @@ export async function appmaxRoutes(app) {
               status: 'processed_payment_approved',
               boleto_id: boletoId.toString(),
             },
-          }).catch(() => {})
+          })?.catch(() => {})
         } else if (lookup.rows.length > 1) {
           app.log.warn({ candidates }, '[appmax webhook] referência ambígua entre tenants — REJEITANDO')
           // Audit log: referência ambígua (sem PII)
-          await app.audit.log(request, {
+          app.audit?.log?.(request, {
             action: 'webhook_received',
             entity_type: 'appmax',
             entity_id: eventId,
@@ -328,12 +328,12 @@ export async function appmaxRoutes(app) {
               event_type: event,
               status: 'rejected_ambiguous_reference',
             },
-          }).catch(() => {})
+          })?.catch(() => {})
           return reply.code(409).send({ error: 'Referência ambígua' })
         } else {
           app.log.warn({ candidates, gatewayId }, '[appmax webhook] referência não encontrada')
           // Audit log: referência não encontrada (sem PII)
-          await app.audit.log(request, {
+          app.audit?.log?.(request, {
             action: 'webhook_received',
             entity_type: 'appmax',
             entity_id: eventId,
@@ -341,13 +341,13 @@ export async function appmaxRoutes(app) {
               event_type: event,
               status: 'unmatched_reference',
             },
-          }).catch(() => {})
+          })?.catch(() => {})
         }
       } else {
         // Eventos que não são de pagamento (e.g., NotificationReceived, OrderCreated, etc)
         app.log.info({ event }, '[appmax webhook] evento ignorado (tipo não-crítico)')
         // Audit log: evento de tipo não-crítico (sem PII)
-        await app.audit.log(request, {
+        app.audit?.log?.(request, {
           action: 'webhook_received',
           entity_type: 'appmax',
           entity_id: eventId,
@@ -355,12 +355,12 @@ export async function appmaxRoutes(app) {
             event_type: event,
             status: 'received_non_payment_event',
           },
-        }).catch(() => {})
+        })?.catch(() => {})
       }
     } catch (err) {
       app.log.error({ err }, '[appmax webhook] erro processando evento')
       // Audit log: erro no processamento (sem PII)
-      await app.audit.log(request, {
+      app.audit?.log?.(request, {
         action: 'webhook_received',
         entity_type: 'appmax',
         entity_id: eventId || null,
@@ -368,7 +368,7 @@ export async function appmaxRoutes(app) {
           event_type: event,
           status: 'error_processing',
         },
-      }).catch(() => {})
+      })?.catch(() => {})
       return reply.code(500).send({ error: 'Erro ao processar webhook Appmax' })
     }
 

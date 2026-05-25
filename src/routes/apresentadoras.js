@@ -114,6 +114,10 @@ export async function apresentadorasRoutes(app) {
   // de cada apresentadora sem precisar de chamada extra.
   app.get('/v1/apresentadoras', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
+    // Default: exclui ativo=false (soft-delete leakage fix).
+    // ?include_inactive=true → bypass.
+    const includeInactive = String(request.query?.include_inactive ?? '').toLowerCase() === 'true'
+    const activeFilter = includeInactive ? '' : 'AND a.ativo IS NOT FALSE'
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT ${COLS},
@@ -132,6 +136,7 @@ export async function apresentadorasRoutes(app) {
                 ), '[]'::json) AS faixas
          FROM apresentadoras a
          WHERE a.tenant_id = $1::uuid
+           ${activeFilter}
          ORDER BY a.ativo DESC, a.nome ASC`,
         [tenant_id]
       )

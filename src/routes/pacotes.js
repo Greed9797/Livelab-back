@@ -21,10 +21,15 @@ export async function pacotesRoutes(app) {
   // GET /v1/pacotes
   app.get('/v1/pacotes', { preHandler: access }, async (request) => {
     const { tenant_id } = request.user
+    // Default: exclui ativo=false (soft-delete leakage fix).
+    // ?include_inactive=true → bypass.
+    const includeInactive = String(request.query?.include_inactive ?? '').toLowerCase() === 'true'
+    const activeFilter = includeInactive ? '' : 'AND ativo IS NOT FALSE'
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT ${COLS} FROM pacotes
          WHERE tenant_id = $1::uuid
+           ${activeFilter}
          ORDER BY ativo DESC, valor_fixo ASC`,
         [tenant_id]
       )

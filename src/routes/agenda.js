@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { READ_AGENDA, WRITE_AGENDA } from '../config/role_groups.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
+import { applyAgendaStatusFilter } from '../lib/filters.js'
 
 const activeAgendaStatuses = ['planejado', 'confirmado', 'ao_vivo']
 
@@ -329,7 +330,9 @@ export async function agendaRoutes(app) {
         filters.push(sql.replace('?', `$${values.length}`))
       }
 
-      if (status && status !== 'all') add('ae.status = ?', status)
+      // Default: exclui status='cancelado' (soft-delete leakage fix).
+      // ?status=all → bypass; ?status=<valor> → filtra exato.
+      applyAgendaStatusFilter(filters, values, status, 'ae')
       if (tipo && tipo !== 'all') add('ae.tipo = ?', tipo)
       if (cabine_id) add('ae.cabine_id = ?::uuid', cabine_id)
       if (marca_id) add('ae.marca_id = ?::uuid', marca_id)

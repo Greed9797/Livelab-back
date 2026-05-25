@@ -342,7 +342,12 @@ export async function analyticsRoutes(app) {
           `, params),
 
           db.query(`
-            WITH analytics_months AS (
+            -- $1 (fromDate) é compartilhado com as outras queries do Promise.all
+            -- mas esta CTE só usa $2 (toDate). Cast explícito abaixo força tipagem
+            -- do parâmetro $1 — sem isso o Postgres lança "could not determine
+            -- data type of parameter $1" porque $1 nunca aparece tipado na query.
+            WITH typed_params AS (SELECT $1::date AS _from, $2::date AS _to),
+            analytics_months AS (
               SELECT generate_series(
                 date_trunc('month', $2::date) - interval '11 months',
                 date_trunc('month', $2::date),

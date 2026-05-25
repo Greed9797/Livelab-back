@@ -8,6 +8,7 @@ import { READ_AUDIT_LOG } from '../config/role_groups.js'
  * Query params:
  *   action       — string (ex: 'cliente.delete'). LIKE prefix opcional via 'cliente.%'
  *   entity_type  — string ('cliente' | 'contrato' | etc)
+ *   entity_id    — uuid da entidade (filtro combinado com entity_type)
  *   user_id      — uuid do ator
  *   desde        — ISO date (lower bound em criado_em)
  *   pagina       — int default 1
@@ -23,6 +24,7 @@ import { READ_AUDIT_LOG } from '../config/role_groups.js'
 const querySchema = z.object({
   action: z.string().trim().min(1).max(120).optional(),
   entity_type: z.string().trim().min(1).max(60).optional(),
+  entity_id: z.string().uuid().optional(),
   user_id: z.string().uuid().optional(),
   desde: z.string().datetime({ offset: true }).optional()
     .or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'desde inválido').optional()),
@@ -41,7 +43,7 @@ export async function auditLogRoutes(app) {
         detalhes: parsed.error.flatten(),
       })
     }
-    const { action, entity_type, user_id, desde, pagina, por_pagina } = parsed.data
+    const { action, entity_type, entity_id, user_id, desde, pagina, por_pagina } = parsed.data
     const offset = (pagina - 1) * por_pagina
 
     const filtros = []
@@ -65,6 +67,10 @@ export async function auditLogRoutes(app) {
     if (entity_type) {
       filtros.push(`a.entity_type = $${p++}`)
       params.push(entity_type)
+    }
+    if (entity_id) {
+      filtros.push(`a.entity_id = $${p++}::uuid`)
+      params.push(entity_id)
     }
     if (user_id) {
       filtros.push(`a.user_id = $${p++}::uuid`)

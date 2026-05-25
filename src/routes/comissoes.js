@@ -64,7 +64,7 @@ export async function comissoesRoutes(app) {
       const result = await db.query(
         `SELECT
            va.apresentadora_id,
-           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
+           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome, COALESCE(a.nome, 'Sem apresentadora') AS nome,
            a.foto_url AS apresentadora_foto_url,
            COALESCE(SUM(va.gmv), 0) AS gmv_total,
            COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
@@ -172,7 +172,7 @@ export async function comissoesRoutes(app) {
            va.criado_em,
            va.atualizado_em,
            m.nome AS marca_nome,
-           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
+           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome, COALESCE(a.nome, 'Sem apresentadora') AS nome,
            CASE
              WHEN va.apresentadora_id IS NULL THEN 'sem_apresentadora'
              WHEN va.marca_id IS NULL OR m.id IS NULL THEN 'sem_marca'
@@ -320,7 +320,7 @@ export async function comissoesRoutes(app) {
            va.marca_id,
            m.nome AS marca_nome,
            va.apresentadora_id,
-           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome
+           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome, COALESCE(a.nome, 'Sem apresentadora') AS nome
          FROM vendas_atribuidas va
          LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
@@ -372,7 +372,7 @@ export async function comissoesRoutes(app) {
              ELSE 0
            END AS pct_aplicado,
            m.nome AS marca_nome,
-           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome
+           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome, COALESCE(a.nome, 'Sem apresentadora') AS nome
          FROM vendas_atribuidas va
          LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id

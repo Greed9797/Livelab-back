@@ -3,33 +3,36 @@ import { defaultPresenterCommissionPct } from '../config/presenter_defaults.js'
 
 export const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 export const WEEKEND_LIVE_PRESENTER_COMMISSION_PCT = 2
-export const MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT = 0.5
 
 function toNumber(value, fallback = 0) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-function positivePct(value) {
-  const parsed = Number(value)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
-}
-
-function livePctWithMinimum(origem, pct) {
-  if (origem !== 'live') return pct
-  return Math.max(MIN_WEEKDAY_LIVE_PRESENTER_COMMISSION_PCT, toNumber(pct))
-}
-
+/**
+ * Comissão da apresentadora — fonte única de verdade.
+ *
+ * Regras (decisão 2026-05-25, Lucas):
+ *   1) Sábado/domingo (TZ America/Sao_Paulo) em LIVE → 2% fixo, sobrepõe escada.
+ *   2) Caso contrário, escada cliff por GMV mensal acumulado da apresentadora
+ *      (vendas_atribuidas do mês atual, exceto a venda em cálculo) + GMV desta venda:
+ *        SELECT da faixa onde gmv_inicio <= base_gmv AND (gmv_fim IS NULL OR gmv_fim >= base_gmv)
+ *   3) Vídeo segue a MESMA escada — comissão da apresentadora não muda por marca.
+ *   4) Sem faixa configurada → fallback `defaultPresenterCommissionPct(baseGmv)` (escada do código).
+ *
+ * O override antigo via `apresentadora_marcas.comissao_*_pct` foi APOSENTADO:
+ * comissão da apresentadora é sempre por GMV mensal, jamais por marca. O que
+ * varia por marca é a comissão da Livelab (franquia/franqueadora), tratada em
+ * commission-engine.js. Por isso `marcaId` / `fallback*Pct` ficam apenas como
+ * parâmetros legados ignorados.
+ */
 export async function resolvePresenterCommissionPct(db, {
   tenantId,
-  marcaId,
   apresentadoraId,
   origem,
   origemId,
   data,
   gmv,
-  fallbackLivePct,
-  fallbackVideoPct,
 }) {
   if (!apresentadoraId) return 0
 
@@ -37,6 +40,7 @@ export async function resolvePresenterCommissionPct(db, {
     return WEEKEND_LIVE_PRESENTER_COMMISSION_PCT
   }
 
+  // GMV acumulado do mês (exclui a própria venda em recálculo p/ não duplicar).
   const baseGmvQ = data ? await db.query(
     `SELECT COALESCE(SUM(gmv), 0) AS gmv_mes
      FROM vendas_atribuidas
@@ -60,39 +64,8 @@ export async function resolvePresenterCommissionPct(db, {
      LIMIT 1`,
     [tenantId, apresentadoraId, baseGmv],
   )
-  if (faixaQ.rows[0]) return livePctWithMinimum(origem, faixaQ.rows[0].comissao_pct)
+  if (faixaQ.rows[0]) return toNumber(faixaQ.rows[0].comissao_pct)
 
-  const fallbackPct = origem === 'video' ? fallbackVideoPct : fallbackLivePct
-  const fallbackConfigured = positivePct(fallbackPct)
-  if (fallbackConfigured !== null) {
-    return livePctWithMinimum(origem, fallbackConfigured)
-  }
-
-  if (marcaId) {
-    const vinculoQ = await db.query(
-      `SELECT comissao_live_pct, comissao_video_pct
-       FROM apresentadora_marcas
-       WHERE tenant_id = $1::uuid
-         AND marca_id = $2::uuid
-         AND apresentadora_id = $3::uuid
-         AND ativo = true
-       LIMIT 1`,
-      [tenantId, marcaId, apresentadoraId],
-    )
-    const vinculo = vinculoQ.rows[0]
-    const vinculoPct = positivePct(origem === 'video' ? vinculo?.comissao_video_pct : vinculo?.comissao_live_pct)
-    if (vinculoPct !== null) return livePctWithMinimum(origem, vinculoPct)
-  }
-
-  const perfilQ = await db.query(
-    `SELECT comissao_pct
-     FROM apresentadoras
-     WHERE id = $1 AND tenant_id = $2::uuid
-     LIMIT 1`,
-    [apresentadoraId, tenantId],
-  )
-  const perfilPct = positivePct(perfilQ.rows[0]?.comissao_pct)
-  if (perfilPct !== null) return livePctWithMinimum(origem, perfilPct)
-
-  return livePctWithMinimum(origem, defaultPresenterCommissionPct(baseGmv))
+  // Sem faixa cadastrada → escada padrão do código (não bloqueia comissão).
+  return toNumber(defaultPresenterCommissionPct(baseGmv))
 }

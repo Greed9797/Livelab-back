@@ -347,6 +347,17 @@ export async function marcasRoutes(app) {
         )
       }
       await db.query('COMMIT')
+      app.audit?.log?.(request, {
+        action: 'marca.update',
+        entity_type: 'marca',
+        entity_id: request.params.id,
+        metadata: {
+          changed_fields: hasTikTokUpdate ? [...fields, 'tiktok_username'] : fields,
+          comissao_franquia_pct: result.rows[0].comissao_franquia_pct,
+          comissao_franqueadora_pct: result.rows[0].comissao_franqueadora_pct,
+          valor_fixo_minimo: result.rows[0].valor_fixo_minimo,
+        },
+      })?.catch?.(err => app.log.error({ err }, 'audit log marca.update failed'))
       return result.rows[0]
       } catch (err) {
         await db.query('ROLLBACK')

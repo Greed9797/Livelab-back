@@ -103,6 +103,7 @@ export const MIGRATIONS_LIST = [
   '105_cabines_status_remove_ativa.sql',
   '106_live_requests_to_agenda_eventos.sql',
   '107_cleanup_lives_dirty.sql',
+  '108_apresentadora_faixas_default.sql',
 ]
 
 async function ensureMigrationsTable(client) {

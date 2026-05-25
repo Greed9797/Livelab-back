@@ -448,7 +448,8 @@ export async function homeRoutes(app) {
           marca_nome: r.marca_nome,
           cliente_nome: r.cliente_nome,
           tiktok_username: r.tiktok_username,
-          apresentadora_nome: r.apresentadora_nome
+          apresentadora_nome: r.apresentadora_nome,
+          nome: r.apresentadora_nome
         }))
       } catch (error) {
         request.log?.warn?.({ err: error }, 'home/dashboard: agenda_eventos indisponível')

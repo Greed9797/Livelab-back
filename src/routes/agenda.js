@@ -319,7 +319,7 @@ export async function agendaRoutes(app) {
 
   app.get('/v1/agenda', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
-    const { status, tipo, cabine_id, marca_id, cliente_id, data_inicio, data_fim } = request.query ?? {}
+    const { status, tipo, cabine_id, marca_id, cliente_id, data_inicio, data_fim, data } = request.query ?? {}
 
     return app.withTenant(tenant_id, async (db) => {
       const values = [tenant_id]
@@ -336,6 +336,13 @@ export async function agendaRoutes(app) {
       if (cliente_id) add('m.cliente_id = ?::uuid', cliente_id)
       if (data_inicio) add('ae.data_fim >= ?::timestamptz', data_inicio)
       if (data_fim) add('ae.data_inicio <= ?::timestamptz', data_fim)
+      // ?data=YYYY-MM-DD — atalho pra eventos que cruzam o dia (SP TZ).
+      // Cobre o caso da Home/Gantt que pede "agenda de hoje".
+      if (data && /^\d{4}-\d{2}-\d{2}$/.test(String(data))) {
+        const d = String(data)
+        add(`(ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date <= ?::date`, d)
+        add(`(ae.data_fim   AT TIME ZONE 'America/Sao_Paulo')::date >= ?::date`, d)
+      }
 
       const result = await db.query(
         `SELECT ae.*,

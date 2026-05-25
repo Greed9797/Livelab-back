@@ -109,11 +109,28 @@ export async function apresentadorasRoutes(app) {
   const writeAccess = [app.authenticate, app.requirePapel(WRITE_APRESENTADORAS)]
 
   // GET /v1/apresentadoras
+  // Inclui array `faixas` da escada de comissão por GMV — usado por
+  // ApresentadorasPanel + SettingsUsuariosPanel pra exibir a faixa atual
+  // de cada apresentadora sem precisar de chamada extra.
   app.get('/v1/apresentadoras', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT ${COLS} FROM apresentadoras a
+        `SELECT ${COLS},
+                COALESCE((
+                  SELECT json_agg(json_build_object(
+                    'id', f.id,
+                    'gmv_inicio', f.gmv_inicio,
+                    'gmv_fim', f.gmv_fim,
+                    'comissao_pct', f.comissao_pct,
+                    'ativo', f.ativo
+                  ) ORDER BY f.gmv_inicio ASC)
+                  FROM apresentadora_comissao_faixas f
+                  WHERE f.apresentadora_id = a.id
+                    AND f.tenant_id = a.tenant_id
+                    AND f.ativo IS NOT FALSE
+                ), '[]'::json) AS faixas
+         FROM apresentadoras a
          WHERE a.tenant_id = $1::uuid
          ORDER BY a.ativo DESC, a.nome ASC`,
         [tenant_id]
@@ -169,6 +186,12 @@ export async function apresentadorasRoutes(app) {
         [tenant_id, apresentadoraId, d.gmv_inicio, d.gmv_fim ?? null, d.comissao_pct, d.ativo],
       )
       await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
+      app.audit?.log?.(request, {
+        action: 'presenter.faixas.create',
+        entity_type: 'apresentadora_comissao_faixa',
+        entity_id: result.rows[0].id,
+        metadata: { apresentadora_id: apresentadoraId, gmv_inicio: d.gmv_inicio, gmv_fim: d.gmv_fim ?? null, comissao_pct: d.comissao_pct },
+      })?.catch?.(err => app.log.error({ err }, 'audit log presenter.faixas.create failed'))
       return reply.code(201).send(result.rows[0])
     })
   })
@@ -198,6 +221,12 @@ export async function apresentadorasRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Faixa não encontrada' })
       await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
+      app.audit?.log?.(request, {
+        action: 'presenter.faixas.update',
+        entity_type: 'apresentadora_comissao_faixa',
+        entity_id: request.params.faixaId,
+        metadata: { apresentadora_id: apresentadoraId, changed_fields: fields, after: result.rows[0] },
+      })?.catch?.(err => app.log.error({ err }, 'audit log presenter.faixas.update failed'))
       return result.rows[0]
     })
   })
@@ -218,6 +247,12 @@ export async function apresentadorasRoutes(app) {
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Faixa não encontrada' })
       await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
+      app.audit?.log?.(request, {
+        action: 'presenter.faixas.delete',
+        entity_type: 'apresentadora_comissao_faixa',
+        entity_id: request.params.faixaId,
+        metadata: { apresentadora_id: apresentadoraId, soft_delete: true },
+      })?.catch?.(err => app.log.error({ err }, 'audit log presenter.faixas.delete failed'))
       return reply.code(204).send()
     })
   })

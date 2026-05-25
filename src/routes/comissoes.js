@@ -298,4 +298,99 @@ export async function comissoesRoutes(app) {
       return result.rows[0]
     })
   })
+
+  // GET /v1/lives/:id/comissoes — trio de comissões (apresentadora, franquia, franqueadora) de uma live
+  app.get('/v1/lives/:id/comissoes', { preHandler: readAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { id: liveId } = request.params
+
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT
+           va.id,
+           va.gmv,
+           va.comissao_apresentadora,
+           va.comissao_franquia,
+           va.comissao_franqueadora,
+           va.status_aprovacao,
+           CASE WHEN va.gmv > 0
+             THEN ROUND((va.comissao_apresentadora / va.gmv * 100)::numeric, 2)
+             ELSE 0
+           END AS pct_apresentadora,
+           va.marca_id,
+           m.nome AS marca_nome,
+           va.apresentadora_id,
+           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome
+         FROM vendas_atribuidas va
+         LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+         LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
+         WHERE va.tenant_id = $1::uuid
+           AND va.origem = 'live'
+           AND va.origem_id = $2::uuid
+         ORDER BY va.criado_em ASC`,
+        [tenant_id, liveId],
+      )
+
+      if (result.rows.length === 0) {
+        return reply.code(404).send({ error: 'Nenhuma comissão encontrada para essa live' })
+      }
+
+      const rows = result.rows.map((r) => ({
+        ...r,
+        gmv: Number(r.gmv ?? 0),
+        comissao_apresentadora: Number(r.comissao_apresentadora ?? 0),
+        comissao_franquia: Number(r.comissao_franquia ?? 0),
+        comissao_franqueadora: Number(r.comissao_franqueadora ?? 0),
+        pct_apresentadora: Number(r.pct_apresentadora ?? 0),
+      }))
+
+      return { live_id: liveId, comissoes: rows }
+    })
+  })
+
+  // GET /v1/comissoes/por-live?mes=YYYY-MM — lista vendas atribuídas de live no mês
+  app.get('/v1/comissoes/por-live', { preHandler: readAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { mes } = request.query ?? {}
+
+    if (!mes || !/^\d{4}-\d{2}$/.test(mes)) {
+      return reply.code(400).send({ error: 'Parâmetro "mes" obrigatório no formato YYYY-MM' })
+    }
+
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT
+           va.origem_id AS live_id,
+           va.data,
+           va.gmv,
+           va.comissao_apresentadora,
+           va.comissao_franquia,
+           va.comissao_franqueadora,
+           va.status_aprovacao,
+           CASE WHEN va.gmv > 0
+             THEN ROUND((va.comissao_apresentadora / va.gmv * 100)::numeric, 2)
+             ELSE 0
+           END AS pct_aplicado,
+           m.nome AS marca_nome,
+           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome
+         FROM vendas_atribuidas va
+         LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+         LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
+         WHERE va.tenant_id = $1::uuid
+           AND va.origem = 'live'
+           AND to_char(va.data::date, 'YYYY-MM') = $2
+         ORDER BY va.data DESC, va.criado_em DESC`,
+        [tenant_id, mes],
+      )
+
+      return result.rows.map((r) => ({
+        ...r,
+        gmv: Number(r.gmv ?? 0),
+        comissao_apresentadora: Number(r.comissao_apresentadora ?? 0),
+        comissao_franquia: Number(r.comissao_franquia ?? 0),
+        comissao_franqueadora: Number(r.comissao_franqueadora ?? 0),
+        pct_aplicado: Number(r.pct_aplicado ?? 0),
+      }))
+    })
+  })
 }

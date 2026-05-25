@@ -65,9 +65,14 @@ export async function usuariosRoutes(app) {
       conditions.push(`u.papel = $${idx++}`)
       values.push(papel)
     }
+    // Default: exclui ativo=false (soft-delete leakage fix).
+    // ?ativo=true|false → filtra exato; ?include_inactive=true → bypass.
+    const includeInactive = String(request.query?.include_inactive ?? '').toLowerCase() === 'true'
     if (ativo !== undefined) {
       conditions.push(`u.ativo = $${idx++}`)
       values.push(ativo === 'true')
+    } else if (!includeInactive) {
+      conditions.push('u.ativo IS NOT FALSE')
     }
 
     return app.withTenant(request.user.tenant_id, async (db) => {

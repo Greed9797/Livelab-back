@@ -64,9 +64,15 @@ export async function marcasRoutes(app) {
       const values = [tenant_id]
       const filters = ['m.tenant_id = $1::uuid']
 
-      if (status && status !== 'all') {
+      // Default: exclui status='inativa' (soft-delete leakage fix).
+      // ?status=all → bypass; ?status=<valor> → filtra exato.
+      if (status === 'all') {
+        // bypass
+      } else if (status) {
         values.push(status)
         addFilter(filters, values, 'm.status = ?')
+      } else {
+        filters.push(`m.status <> 'inativa'`)
       }
       if (tipo && tipo !== 'all') {
         values.push(tipo)

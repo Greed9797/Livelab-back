@@ -161,8 +161,8 @@ export async function metasRoutes(app) {
     const mesInicio = parseMes(request.query.mes)
     const { gmv_meta_total, calculado_automaticamente } = parsed.data
 
-    return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
+    const result = await app.withTenant(tenant_id, async (db) => {
+      const r = await db.query(
         `INSERT INTO metas_supervisor (tenant_id, mes_referencia, gmv_meta_total, calculado_automaticamente, supervisor_id)
          VALUES ($1, $2::date, $3, $4, $5)
          ON CONFLICT (tenant_id, mes_referencia)
@@ -172,7 +172,16 @@ export async function metasRoutes(app) {
          RETURNING *`,
         [tenant_id, mesInicio, gmv_meta_total, calculado_automaticamente, sub],
       )
-      return result.rows[0]
+      return r.rows[0]
     })
+
+    await app.audit.log(request, {
+      action: 'metas.supervisor.update',
+      entity_type: 'tenant',
+      entity_id: tenant_id,
+      metadata: { mes: request.query.mes, gmv_meta_total },
+    })
+
+    return result
   })
 }

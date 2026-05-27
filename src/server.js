@@ -40,6 +40,7 @@ import { cleanupPasswordResetTokens } from './jobs/cleanup_password_reset_tokens
 import * as connectorManager from './services/tiktok-connector-manager.js'
 import { startBillingEngine } from './jobs/billing_engine.js'
 import { startClienteMetricasSnapshotCron } from './jobs/cliente_metricas_snapshot.js'
+import { startAgendaAutostart } from './jobs/agenda_autostart.js'
 import { notifyBoletosVencidos } from './jobs/notify_boletos_vencidos.js'
 import { runMigrations } from '../apply_migrations.js'
 
@@ -92,6 +93,10 @@ cron.schedule('*/60 * * * * *', async () => {
     _pollRunning = false
   }
 })
+
+// Agenda auto-start: agenda_eventos status='planejado' viram 'ao_vivo'
+// quando bate horário (cada 30s). Ver src/jobs/agenda_autostart.js.
+startAgendaAutostart(app, cron)
 
 // Daily at 02:00: refresh TikTok OAuth tokens expiring within 7 days
 cron.schedule('0 2 * * *', async () => {

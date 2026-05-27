@@ -16,8 +16,24 @@ function buildComissaoFilters(query, tenantId) {
   if (query?.apresentadora_id) add('va.apresentadora_id = ?::uuid', query.apresentadora_id)
   if (query?.data_inicio) add('va.data >= ?::date', query.data_inicio)
   if (query?.data_fim) add('va.data <= ?::date', query.data_fim)
+  // Atalho mes=YYYY-MM para Analytics + relatório de comissionamento.
+  // Expande para data >= primeiro_dia AND data <= último_dia do mês.
+  if (query?.mes && /^\d{4}-\d{2}$/.test(String(query.mes))) {
+    const [y, m] = String(query.mes).split('-').map(Number)
+    const mm = String(m).padStart(2, '0')
+    const fimMes = new Date(y, m, 0).getDate()
+    add('va.data >= ?::date', `${y}-${mm}-01`)
+    add('va.data <= ?::date', `${y}-${mm}-${String(fimMes).padStart(2, '0')}`)
+  }
 
   return { values, where: filters.join(' AND ') }
+}
+
+function csvEscape(value) {
+  if (value === null || value === undefined) return ''
+  const s = String(value)
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
 }
 
 export async function comissoesRoutes(app) {
@@ -391,6 +407,57 @@ export async function comissoesRoutes(app) {
         comissao_franqueadora: Number(r.comissao_franqueadora ?? 0),
         pct_aplicado: Number(r.pct_aplicado ?? 0),
       }))
+    })
+  })
+
+  // GET /v1/comissoes/export-csv — relatório completo de comissionamento.
+  // Filtros (via buildComissaoFilters): mes=YYYY-MM, marca_id, apresentadora_id,
+  // data_inicio, data_fim, origem.
+  app.get('/v1/comissoes/export-csv', { preHandler: readAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const { values, where } = buildComissaoFilters(request.query, tenant_id)
+      const result = await db.query(
+        `SELECT
+           va.data,
+           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
+           COALESCE(m.nome, 'Sem marca')         AS marca_nome,
+           va.origem,
+           va.gmv,
+           va.comissao_apresentadora,
+           va.comissao_franquia,
+           va.comissao_franqueadora,
+           va.status
+         FROM vendas_atribuidas va
+         LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
+         LEFT JOIN marcas m         ON m.id = va.marca_id         AND m.tenant_id = va.tenant_id
+         WHERE ${where}
+         ORDER BY va.data DESC, va.criado_em DESC`,
+        values,
+      )
+
+      const header = ['data', 'apresentadora', 'marca', 'origem', 'gmv', 'comissao_apresentadora', 'comissao_franquia', 'comissao_franqueadora', 'status']
+      const lines = [header.join(',')]
+      for (const r of result.rows) {
+        lines.push([
+          csvEscape(r.data instanceof Date ? r.data.toISOString().slice(0, 10) : r.data),
+          csvEscape(r.apresentadora_nome),
+          csvEscape(r.marca_nome),
+          csvEscape(r.origem),
+          csvEscape(Number(r.gmv ?? 0).toFixed(2)),
+          csvEscape(Number(r.comissao_apresentadora ?? 0).toFixed(2)),
+          csvEscape(Number(r.comissao_franquia ?? 0).toFixed(2)),
+          csvEscape(Number(r.comissao_franqueadora ?? 0).toFixed(2)),
+          csvEscape(r.status),
+        ].join(','))
+      }
+
+      const mesParam = request.query?.mes && /^\d{4}-\d{2}$/.test(String(request.query.mes))
+        ? String(request.query.mes)
+        : new Date().toISOString().slice(0, 7)
+      reply.header('Content-Type', 'text/csv; charset=utf-8')
+      reply.header('Content-Disposition', `attachment; filename="comissoes-${mesParam}.csv"`)
+      return lines.join('\n')
     })
   })
 }

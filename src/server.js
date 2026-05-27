@@ -41,6 +41,7 @@ import * as connectorManager from './services/tiktok-connector-manager.js'
 import { startBillingEngine } from './jobs/billing_engine.js'
 import { startClienteMetricasSnapshotCron } from './jobs/cliente_metricas_snapshot.js'
 import { startAgendaAutostart } from './jobs/agenda_autostart.js'
+import { startRecalcularComissoes } from './jobs/recalcular_comissoes.js'
 import { notifyBoletosVencidos } from './jobs/notify_boletos_vencidos.js'
 import { runMigrations } from '../apply_migrations.js'
 
@@ -97,6 +98,11 @@ cron.schedule('*/60 * * * * *', async () => {
 // Agenda auto-start: agenda_eventos status='planejado' viram 'ao_vivo'
 // quando bate horário (cada 30s). Ver src/jobs/agenda_autostart.js.
 startAgendaAutostart(app, cron)
+
+// Recálculo de comissões zeradas: vendas_atribuidas com comissao_apresentadora=0
+// e gmv>0 são recalculadas a cada 10min. Cobre vendas inseridas via webhook ou
+// snapshot pós-encerramento que não dispararam commission-engine.
+startRecalcularComissoes(app, cron)
 
 // Daily at 02:00: refresh TikTok OAuth tokens expiring within 7 days
 cron.schedule('0 2 * * *', async () => {

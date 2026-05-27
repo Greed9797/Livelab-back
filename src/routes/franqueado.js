@@ -22,6 +22,13 @@ const CRM_STAGE_DEFS = [
   { id: 'perdido', label: 'Fechado perdido' },
 ]
 
+const BIO_ORIGINS = ['bio_cliente', 'bio_franqueado', 'bio_apresentador']
+const BIO_PERSONA_META = {
+  cliente: { label: 'Clientes Bio', key: 'clientes' },
+  franqueado: { label: 'Franqueados Bio', key: 'franqueados' },
+  apresentador: { label: 'Apresentadores Bio', key: 'apresentadores' },
+}
+
 const MONTH_LABELS = [
   'Jan',
   'Fev',
@@ -43,6 +50,13 @@ function toMoney(value) {
 
 function toInt(value) {
   return Number.parseInt(String(value ?? 0), 10) || 0
+}
+
+function bioPersonaFromOrigin(origin) {
+  if (origin === 'bio_cliente') return 'cliente'
+  if (origin === 'bio_franqueado') return 'franqueado'
+  if (origin === 'bio_apresentador') return 'apresentador'
+  return 'outro'
 }
 
 function shiftPeriod(period, delta) {
@@ -792,6 +806,45 @@ async function fetchCrmSnapshot(
   const leads30d = toInt(totalsRow.leads_30d)
   const ganhos30d = toInt(totalsRow.ganhos_30d)
 
+  const bioParams = [...baseParams, BIO_ORIGINS]
+  const bioWhere = baseConditions.length > 0
+    ? `WHERE ${baseConditions.join(' AND ')} AND status <> 'expirado' AND origem = ANY($${bioParams.length}::text[])`
+    : `WHERE status <> 'expirado' AND origem = ANY($${bioParams.length}::text[])`
+  const bioResult = await app.db.query(
+    `
+      SELECT
+        origem,
+        COUNT(*)::int AS total,
+        COALESCE(SUM(CASE WHEN valor_oportunidade > 0 THEN valor_oportunidade ELSE fat_estimado END), 0)::numeric AS valor
+      FROM leads
+      ${bioWhere}
+      GROUP BY origem
+      ORDER BY array_position($${bioParams.length}::text[], origem)
+    `,
+    bioParams
+  )
+  const bioPorPersona = bioResult.rows.map((row) => {
+    const persona = bioPersonaFromOrigin(row.origem)
+    const meta = BIO_PERSONA_META[persona] ?? { label: 'Bio', key: 'outros' }
+    return {
+      persona,
+      label: meta.label,
+      origem: row.origem,
+      total: toInt(row.total),
+      valor: toMoney(row.valor),
+    }
+  })
+  const bioTotals = bioPorPersona.reduce(
+    (acc, item) => {
+      const key = BIO_PERSONA_META[item.persona]?.key ?? 'outros'
+      acc.total += item.total
+      acc.valor_total = toMoney(acc.valor_total + item.valor)
+      acc[key] = (acc[key] ?? 0) + item.total
+      return acc
+    },
+    { total: 0, clientes: 0, franqueados: 0, apresentadores: 0, outros: 0, valor_total: 0 }
+  )
+
   // 6. Motivo de perda mais frequente (top 1).
   const motivoWhere = baseConditions.length > 0
     ? `WHERE ${baseConditions.join(' AND ')} AND crm_etapa = 'perdido'`
@@ -819,10 +872,12 @@ async function fetchCrmSnapshot(
       lead_pool: toInt(summaryRow.lead_pool),
       engaged_leads: toInt(summaryRow.engaged_leads),
       expired_leads: toInt(summaryRow.expired_leads),
+      bio_total: bioTotals.total,
     },
     pipeline,
     totals: {
       leads_total: toInt(totalsRow.leads_total),
+      bio_total: bioTotals.total,
       valor_total: toMoney(totalsRow.valor_total),
       leads_ultimos_7d: toInt(totalsRow.leads_ultimos_7d),
       taxa_ganhos_30d:
@@ -831,6 +886,8 @@ async function fetchCrmSnapshot(
       leads_30d: leads30d,
       motivo_perda_top: motivoTop,
     },
+    bio_totals: bioTotals,
+    bio_por_persona: bioPorPersona,
     recommended_fields: [
       'Nome do lead',
       'Tipo do lead',
@@ -1126,7 +1183,11 @@ function buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stal
         gross_revenue: unit.gross_revenue,
         previous_gross_revenue: unit.previous_gross_revenue,
       })),
+    crm_summary: crmSnapshot.summary,
+    crm_totals: crmSnapshot.totals,
     crm_pipeline: crmSnapshot.pipeline,
+    bio_totals: crmSnapshot.bio_totals,
+    bio_por_persona: crmSnapshot.bio_por_persona,
     comissionamento: {
       previsto: receitaFranqueadora,
       recebido: toMoney(units.reduce((sum, unit) => sum + unit.franchisor_received, 0)),

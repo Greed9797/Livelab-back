@@ -6,6 +6,13 @@ import { applyAgendaStatusFilter } from '../lib/filters.js'
 
 const activeAgendaStatuses = ['planejado', 'confirmado', 'ao_vivo']
 
+// Status que efetivamente bloqueiam outra reserva no mesmo recurso.
+// `planejado` é só reserva — não bloqueia tentativa de iniciar a própria live
+// (POST /v1/lives já reusa o evento via agenda_evento_id em src/routes/lives.js:380-415).
+// Bloquear `planejado` aqui causa false-positive: usuário com agenda 08-14 não
+// consegue clicar "Iniciar live" porque modal alega conflito com a própria agenda.
+const conflictBlockingStatuses = ['confirmado', 'ao_vivo']
+
 const recorrenciaSchema = z.object({
   frequencia: z.enum(['diaria', 'semanal', 'quinzenal', 'mensal']),
   dias_semana: z.array(z.number().int().min(0).max(6)).optional(),
@@ -130,7 +137,7 @@ async function resolveAgendaMarcaId(db, tenantId, { marcaId, clienteId }) {
 async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId }) {
   if (!cabineId && !apresentadoraId) return []
 
-  const values = [tenantId, dataInicio, dataFim, activeAgendaStatuses]
+  const values = [tenantId, dataInicio, dataFim, conflictBlockingStatuses]
   const entityFilters = []
   let cabineParam = null
   let apresentadoraParam = null

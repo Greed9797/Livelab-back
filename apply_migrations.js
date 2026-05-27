@@ -103,6 +103,7 @@ export const MIGRATIONS_LIST = [
   '106_live_requests_to_agenda_eventos.sql',
   '107_cleanup_lives_dirty.sql',
   '108_apresentadora_faixas_default.sql',
+  '109_users_email_active_unique.sql',
 ]
 
 async function ensureMigrationsTable(client) {

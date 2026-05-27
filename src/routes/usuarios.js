@@ -146,13 +146,21 @@ export async function usuariosRoutes(app) {
 
         // S-02: checagem de email apenas dentro do tenant (UNIQUE composto).
         // Antes vazava enumeração cross-tenant via 409.
+        // Migration 109: ignora soft-deletados (ativo=false) — UNIQUE index agora
+        // é parcial, e GETs ocultam inativos. Defesa em profundidade no SELECT.
         const existing = await db.query(
-          'SELECT id FROM users WHERE LOWER(email) = LOWER($1) AND tenant_id = $2',
+          `SELECT id FROM users
+             WHERE LOWER(email) = LOWER($1)
+               AND tenant_id = $2
+               AND ativo IS NOT FALSE`,
           [email, tenantId],
         )
         if (existing.rows.length > 0) {
           await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'E-mail já cadastrado neste tenant' })
+          return reply.code(409).send({
+            error: 'E-mail já cadastrado e ativo neste tenant.',
+            code: 'EMAIL_ALREADY_ACTIVE',
+          })
         }
 
         // Pré-validação: cliente_parceiro precisa de cliente DISPONÍVEL (sem user_id já vinculado)

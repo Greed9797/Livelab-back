@@ -282,9 +282,19 @@ describe('GET /v1/master/crm', () => {
           ],
         }
       }
-      // 5: motivo_perda top
-      if (call === 5) return { rows: [{ motivo_perda: 'concorrente', qtd: 3 }] }
-      // 6+: fetchUnitSummaries (units) — vazio para simplificar
+      // 5: origem Bio agregada
+      if (call === 5) {
+        return {
+          rows: [
+            { persona: 'cliente', origem: 'bio_cliente', total: 3, valor: '9000' },
+            { persona: 'franqueado', origem: 'bio_franqueado', total: 2, valor: '4000' },
+            { persona: 'apresentador', origem: 'bio_apresentador', total: 2, valor: '2000' },
+          ],
+        }
+      }
+      // 6: motivo_perda top
+      if (call === 6) return { rows: [{ motivo_perda: 'concorrente', qtd: 3 }] }
+      // 7+: fetchUnitSummaries (units) — vazio para simplificar
       return { rows: [] }
     })
     const { app } = buildApp({ queryImpl: queryMock })
@@ -304,8 +314,22 @@ describe('GET /v1/master/crm', () => {
     const perdido = body.pipeline.find((p) => p.stage_id === 'perdido')
     expect(perdido.count).toBe(0)
     expect(body.totals.leads_total).toBe(12)
+    expect(body.totals.bio_total).toBe(7)
     expect(body.totals.taxa_ganhos_30d).toBe(20)
     expect(body.totals.motivo_perda_top).toBe('concorrente')
+    expect(body.bio_totals).toMatchObject({
+      total: 7,
+      clientes: 3,
+      franqueados: 2,
+      apresentadores: 2,
+      valor_total: 15000,
+    })
+    expect(body.bio_por_persona).toEqual([
+      { persona: 'cliente', label: 'Clientes Bio', origem: 'bio_cliente', total: 3, valor: 9000 },
+      { persona: 'franqueado', label: 'Franqueados Bio', origem: 'bio_franqueado', total: 2, valor: 4000 },
+      { persona: 'apresentador', label: 'Apresentadores Bio', origem: 'bio_apresentador', total: 2, valor: 2000 },
+    ])
+    expect(queryMock.mock.calls[4][0]).toContain('CASE WHEN valor_oportunidade > 0 THEN valor_oportunidade ELSE fat_estimado END')
     await app.close()
   })
 

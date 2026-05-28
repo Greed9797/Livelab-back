@@ -1937,7 +1937,7 @@ export async function livesRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       const liveQ = await db.query(
-        `SELECT id, status_publicacao FROM lives WHERE id = $1`,
+        `SELECT id, status_publicacao, marca_id, manual_gmv, fat_gerado FROM lives WHERE id = $1`,
         [request.params.id]
       )
       const live = liveQ.rows[0]
@@ -1953,6 +1953,16 @@ export async function livesRoutes(app) {
       if (transicoesValidas[statusAtual] !== status_publicacao) {
         return reply.code(422).send({
           error: `Transição inválida: '${statusAtual}' → '${status_publicacao}'. Permitido: rascunho → revisado, revisado → publicado`,
+        })
+      }
+
+      // Pré-requisito: marca obrigatória pra publicar — engine de comissão
+      // (commission-engine.js:53) retorna [] sem marca, gerando lives "fantasma"
+      // no ranking sem vendas atribuídas. Lucas reportou isso (WEVANS 67bbeef6).
+      if (status_publicacao === 'publicado' && !live.marca_id) {
+        return reply.code(422).send({
+          error: 'Defina a marca da live antes de publicar — necessária para calcular comissão.',
+          code: 'MARCA_OBRIGATORIA_PUBLICAR',
         })
       }
 
@@ -1982,6 +1992,24 @@ export async function livesRoutes(app) {
           entity_id: request.params.id,
           metadata: { status_publicacao, de: statusAtual, para: status_publicacao, motivo, alterado_por: sub, papel }
         })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+        // Engine de comissões — gera vendas_atribuidas pra cada apresentadora
+        // da live. Fire-and-forget (não bloqueia transição). Requer marca,
+        // já validada acima.
+        if (status_publicacao === 'publicado') {
+          const gmvFinal = Number(live.manual_gmv ?? live.fat_gerado ?? 0)
+          app.withTenant(tenant_id, async (db2) => {
+            try {
+              await calcularComissoesDaLive(db2, {
+                liveId: request.params.id,
+                tenantId: tenant_id,
+                gmv: gmvFinal,
+              })
+            } catch (err) {
+              app.log.warn({ err, liveId: request.params.id }, 'commission-engine: falha pós-publicar (soft)')
+            }
+          }).catch(err => app.log.warn({ err, liveId: request.params.id }, 'commission-engine: withTenant falhou'))
+        }
 
         return resultado.rows[0]
       } catch (e) {

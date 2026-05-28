@@ -7,6 +7,7 @@
 // que filtra status_aprovacao='pendente_aprovacao' — não toca aprovadas.
 
 import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
+import { calcularComissoesDaLive } from '../services/commission-engine.js'
 
 const TICK_CRON = '*/10 * * * *' // a cada 10 minutos
 
@@ -76,6 +77,45 @@ export async function runRecalcularComissoesTick(app) {
       }
     }
     results.tenants = seenTenants.size
+
+    // Etapa 2: lives publicadas órfãs (sem vendas_atribuidas).
+    // Cobre lives publicadas antes do fix em lives.js PATCH publicar.
+    try {
+      const livesOrfas = await app.db.query(
+        `SELECT l.id, l.tenant_id, l.marca_id,
+                COALESCE(l.manual_gmv, l.fat_gerado, 0) AS gmv
+           FROM lives l
+          WHERE l.status_publicacao = 'publicado'
+            AND l.marca_id IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM vendas_atribuidas va
+               WHERE va.origem = 'live' AND va.origem_id = l.id
+            )
+          LIMIT 50`,
+      )
+      for (const live of livesOrfas.rows) {
+        const lc = await app.db.pool.connect()
+        try {
+          await lc.query(`SELECT set_config('app.tenant_id', $1::text, true)`, [live.tenant_id])
+          const r = await calcularComissoesDaLive(lc, {
+            liveId: live.id,
+            tenantId: live.tenant_id,
+            gmv: Number(live.gmv),
+          })
+          if (Array.isArray(r) && r.length > 0) {
+            results.livesOrfasProcessadas = (results.livesOrfasProcessadas ?? 0) + 1
+            results.vendas += r.length
+          }
+        } catch (err) {
+          results.errors += 1
+          app.log?.warn?.({ err, liveId: live.id }, '[recalc comissoes] live orfã falhou')
+        } finally {
+          lc.release()
+        }
+      }
+    } catch (err) {
+      app.log?.warn?.({ err }, '[recalc comissoes] varredura lives orfãs falhou')
+    }
 
     if (results.vendas > 0 || results.errors > 0) {
       app.log?.info?.({ ...results }, '[recalc comissoes] tick concluído')

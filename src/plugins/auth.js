@@ -11,7 +11,10 @@ async function authPlugin(app) {
     secret: process.env.JWT_SECRET,
     sign: {
       algorithm: 'HS256',
-      expiresIn: process.env.JWT_EXPIRES_IN ?? '15m',
+      // TTL 60min cobre modais longos (cadastrar usuário, agendar live com
+      // múltiplos selects). Antes 15min causava 401 mid-mutation → redirect
+      // loop /login. Refresh rotation continua válida (7 dias).
+      expiresIn: process.env.JWT_EXPIRES_IN ?? '60m',
     },
     verify: {
       algorithms: ['HS256'],

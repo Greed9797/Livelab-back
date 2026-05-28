@@ -6,6 +6,12 @@ import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 let _db = null
 let _log = null
 const _liveMap = new Map()       // Map<liveId, entry>
+// Backoff por liveId: { attempts, lastFailAt, suppressed }
+// Evita log spam UserOfflineError quando user TikTok não está ao vivo.
+const _failBackoff = new Map()
+const BACKOFF_MAX_ATTEMPTS = 3        // Após N falhas seguidas, ativa cooldown
+const BACKOFF_COOLDOWN_MS = 10 * 60_000   // 10min sem tentar
+const BACKOFF_SUPPRESS_THRESHOLD = 10  // Após N falhas, log apenas 1 vez
 const _emitter = new EventEmitter()
 _emitter.setMaxListeners(0) // Unlimited — SSE clients each add one listener per live, removed on disconnect
 
@@ -81,11 +87,16 @@ export async function syncLives() {
     }
   }
 
-  // Start connectors for active lives without one
+  // Start connectors for active lives without one (respeita backoff)
+  const now = Date.now()
   for (const live of activeLives) {
-    if (!_liveMap.has(live.id)) {
-      await startConnector(live.id, live.tenant_id, live.tiktok_username)
+    if (_liveMap.has(live.id)) continue
+    const bo = _failBackoff.get(live.id)
+    if (bo && bo.attempts >= BACKOFF_MAX_ATTEMPTS && (now - bo.lastFailAt) < BACKOFF_COOLDOWN_MS) {
+      // Em cooldown — pula sem logar
+      continue
     }
+    await startConnector(live.id, live.tenant_id, live.tiktok_username)
   }
 }
 
@@ -323,8 +334,22 @@ export async function startConnector(liveId, tenantId, username) {
   })
 
   // Connect non-blocking — errors handled via 'error' event
-  connection.connect().catch(err => {
-    _log?.warn({ err, liveId, username }, 'tiktokManager: falha ao conectar — cron tentará novamente')
+  connection.connect().then(() => {
+    // Sucesso — reset backoff
+    _failBackoff.delete(liveId)
+  }).catch(err => {
+    const prev = _failBackoff.get(liveId) ?? { attempts: 0, lastFailAt: 0, suppressed: false }
+    prev.attempts += 1
+    prev.lastFailAt = Date.now()
+    _failBackoff.set(liveId, prev)
+    if (prev.attempts < BACKOFF_SUPPRESS_THRESHOLD) {
+      _log?.warn({ err, liveId, username, attempts: prev.attempts },
+        'tiktokManager: falha ao conectar — backoff aplicado')
+    } else if (!prev.suppressed) {
+      prev.suppressed = true
+      _log?.warn({ liveId, username, attempts: prev.attempts },
+        'tiktokManager: falhas persistentes — log suprimido até próximo sucesso')
+    }
     clearInterval(flushTimer)
     _liveMap.delete(liveId)
   })

@@ -42,6 +42,7 @@ import { startBillingEngine } from './jobs/billing_engine.js'
 import { startClienteMetricasSnapshotCron } from './jobs/cliente_metricas_snapshot.js'
 import { startAgendaAutostart } from './jobs/agenda_autostart.js'
 import { startRecalcularComissoes } from './jobs/recalcular_comissoes.js'
+import { startEncerrarLivesZumbi } from './jobs/encerrar_lives_zumbi.js'
 import { notifyBoletosVencidos } from './jobs/notify_boletos_vencidos.js'
 import { runMigrations } from '../apply_migrations.js'
 
@@ -103,6 +104,10 @@ startAgendaAutostart(app, cron)
 // e gmv>0 são recalculadas a cada 10min. Cobre vendas inseridas via webhook ou
 // snapshot pós-encerramento que não dispararam commission-engine.
 startRecalcularComissoes(app, cron)
+
+// Auto-encerrar lives 'em_andamento' que viraram zumbi (>24h sem snapshot
+// recente). Mitiga UserOfflineError loop no connector TikTok.
+startEncerrarLivesZumbi(app, cron)
 
 // Daily at 02:00: refresh TikTok OAuth tokens expiring within 7 days
 cron.schedule('0 2 * * *', async () => {

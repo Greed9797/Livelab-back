@@ -1,4 +1,10 @@
-import { READ_ANALYTICS } from '../config/role_groups.js'
+import { READ_ANALYTICS, WRITE_LIVES } from '../config/role_groups.js'
+import {
+  loadAnalyticsImportCandidates,
+  matchAnalyticsImportRows,
+  parseAnalyticsImportBuffer,
+  summarizeImportRows,
+} from '../services/analytics-import.js'
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -71,7 +77,264 @@ function resolveAnalyticsPeriod(query) {
   }
 }
 
+async function readAnalyticsImportUpload(request) {
+  if (request.isMultipart?.()) {
+    const file = await request.file()
+    if (!file) throw new Error('Arquivo CSV/XLSX obrigatorio')
+    return { filename: file.filename, buffer: await file.toBuffer() }
+  }
+
+  const body = request.body ?? {}
+  if (body.content_base64) {
+    return {
+      filename: body.filename ?? 'analytics-import.xlsx',
+      buffer: Buffer.from(String(body.content_base64), 'base64'),
+    }
+  }
+  if (body.content) {
+    return {
+      filename: body.filename ?? 'analytics-import.csv',
+      buffer: Buffer.from(String(body.content), 'utf8'),
+    }
+  }
+  throw new Error('Envie multipart file ou content_base64')
+}
+
+function rowResponse(row) {
+  return {
+    row_index: row.row_index,
+    marca_nome: row.normalized?.marca_nome ?? row.marca_nome,
+    live_date: row.normalized?.live_date ?? row.live_date,
+    start_time: row.normalized?.start_time ?? row.start_time,
+    duration_seconds: row.normalized?.duration_seconds ?? row.duration_seconds,
+    ads_gmv: row.normalized?.ads_gmv ?? null,
+    ads_cost: row.normalized?.ads_cost ?? null,
+    attributed_orders: row.normalized?.attributed_orders ?? null,
+    views: row.normalized?.views ?? null,
+    match_status: row.match_status,
+    match_reason: row.match_reason,
+    match_confidence: row.match_confidence ?? null,
+    matched_live_id: row.matched_live_id ?? null,
+    matched_agenda_evento_id: row.matched_agenda_evento_id ?? null,
+    candidates: row.candidates ?? [],
+    error: row.error ?? null,
+  }
+}
+
+function rowsDateRange(rows) {
+  const dates = rows.map((r) => r.normalized.live_date).filter(Boolean).sort()
+  if (dates.length === 0) return null
+  return { fromDate: dates[0], toDate: dates[dates.length - 1] }
+}
+
 export async function analyticsRoutes(app) {
+  app.post('/v1/analytics/imports/preview', {
+    preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)],
+  }, async (request, reply) => {
+    const { tenant_id, sub } = request.user
+    try {
+      const upload = await readAnalyticsImportUpload(request)
+      const parsedRows = parseAnalyticsImportBuffer(upload)
+      if (parsedRows.length === 0) {
+        return reply.code(400).send({ error: 'Arquivo sem linhas importaveis' })
+      }
+
+      const range = rowsDateRange(parsedRows)
+      if (!range) return reply.code(400).send({ error: 'Nenhuma linha com data valida encontrada' })
+
+      return await app.withTenant(tenant_id, async (db) => {
+        await db.query('BEGIN')
+        try {
+          const candidates = await loadAnalyticsImportCandidates(db, range)
+          const matchedRows = matchAnalyticsImportRows(parsedRows, candidates)
+          const summary = summarizeImportRows(matchedRows)
+
+          const batchQ = await db.query(
+            `INSERT INTO analytics_import_batches (
+               tenant_id, filename, total_rows, matched_rows, ambiguous_rows,
+               unmatched_rows, skipped_rows, invalid_rows, summary, created_by
+             )
+             VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+             RETURNING id`,
+            [
+              tenant_id,
+              upload.filename,
+              summary.total_rows,
+              summary.matched_rows,
+              summary.ambiguous_rows,
+              summary.unmatched_rows,
+              summary.skipped_rows,
+              summary.invalid_rows,
+              JSON.stringify(summary),
+              sub ?? null,
+            ],
+          )
+          const batchId = batchQ.rows[0].id
+
+          for (const row of matchedRows) {
+            await db.query(
+              `INSERT INTO analytics_import_rows (
+                 tenant_id, batch_id, row_index, raw, normalized,
+                 marca_nome, live_date, start_time, duration_seconds,
+                 matched_live_id, matched_agenda_evento_id,
+                 match_status, match_confidence, match_reason, candidates
+               )
+               VALUES (
+                 $1::uuid, $2::uuid, $3, $4::jsonb, $5::jsonb,
+                 $6, $7::date, $8, $9,
+                 $10::uuid, $11::uuid,
+                 $12, $13, $14, $15::jsonb
+               )`,
+              [
+                tenant_id,
+                batchId,
+                row.row_index,
+                JSON.stringify(row.raw),
+                JSON.stringify(row.normalized),
+                row.normalized.marca_nome,
+                row.normalized.live_date,
+                row.normalized.start_time,
+                row.normalized.duration_seconds,
+                row.matched_live_id ?? null,
+                row.matched_agenda_evento_id ?? null,
+                row.match_status,
+                row.match_confidence ?? null,
+                row.match_reason ?? null,
+                JSON.stringify(row.candidates ?? []),
+              ],
+            )
+          }
+
+          await db.query('COMMIT')
+          return {
+            batch_id: batchId,
+            filename: upload.filename,
+            summary,
+            rows: matchedRows.map(rowResponse),
+          }
+        } catch (err) {
+          await db.query('ROLLBACK').catch(() => {})
+          throw err
+        }
+      })
+    } catch (err) {
+      request.log.error({ err }, 'analytics/imports/preview error')
+      return reply.code(400).send({ error: err.message })
+    }
+  })
+
+  app.post('/v1/analytics/imports/:id/apply', {
+    preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)],
+  }, async (request, reply) => {
+    const { tenant_id, sub } = request.user
+    const batchId = request.params.id
+    if (!UUID_RE.test(batchId)) return reply.code(400).send({ error: 'id must be a valid UUID' })
+
+    return app.withTenant(tenant_id, async (db) => {
+      await db.query('BEGIN')
+      try {
+        const batchQ = await db.query(
+          `SELECT id, status
+             FROM analytics_import_batches
+            WHERE id = $1::uuid
+              AND tenant_id = $2::uuid
+            FOR UPDATE`,
+          [batchId, tenant_id],
+        )
+        const batch = batchQ.rows[0]
+        if (!batch) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Importacao nao encontrada' })
+        }
+        if (batch.status === 'applied') {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'Importacao ja aplicada' })
+        }
+
+        const rowsQ = await db.query(
+          `SELECT id, matched_live_id, normalized
+             FROM analytics_import_rows
+            WHERE tenant_id = $1::uuid
+              AND batch_id = $2::uuid
+              AND match_status = 'matched'
+              AND matched_live_id IS NOT NULL
+            ORDER BY row_index ASC
+            FOR UPDATE`,
+          [tenant_id, batchId],
+        )
+
+        let applied = 0
+        for (const row of rowsQ.rows) {
+          const n = row.normalized ?? {}
+          await db.query(
+            `UPDATE lives
+                SET ads_gmv = $1,
+                    ads_cost = $2,
+                    live_impressions = $3,
+                    product_impressions = $4,
+                    product_clicks = $5,
+                    avg_viewing_duration = $6,
+                    new_followers = $7,
+                    manual_views = $8,
+                    manual_comments = $9,
+                    manual_likes = $10,
+                    manual_shares = $11,
+                    manual_orders = $12,
+                    ads_import_batch_id = $13::uuid,
+                    ads_import_row_id = $14::uuid,
+                    ads_metrics_updated_at = NOW()
+              WHERE id = $15::uuid
+                AND tenant_id = $16::uuid`,
+            [
+              n.ads_gmv ?? null,
+              n.ads_cost ?? null,
+              n.live_impressions ?? null,
+              n.product_impressions ?? null,
+              n.product_clicks ?? null,
+              n.avg_viewing_duration ?? null,
+              n.new_followers ?? null,
+              n.views ?? null,
+              n.comments ?? null,
+              n.likes ?? null,
+              n.shares ?? null,
+              n.attributed_orders ?? null,
+              batchId,
+              row.id,
+              row.matched_live_id,
+              tenant_id,
+            ],
+          )
+          await db.query(
+            `UPDATE analytics_import_rows
+                SET applied_at = NOW(), error = NULL
+              WHERE id = $1::uuid
+                AND tenant_id = $2::uuid`,
+            [row.id, tenant_id],
+          )
+          applied++
+        }
+
+        await db.query(
+          `UPDATE analytics_import_batches
+              SET status = 'applied',
+                  applied_rows = $1,
+                  applied_by = $2,
+                  applied_at = NOW()
+            WHERE id = $3::uuid
+              AND tenant_id = $4::uuid`,
+          [applied, sub ?? null, batchId, tenant_id],
+        )
+
+        await db.query('COMMIT')
+        return { ok: true, batch_id: batchId, applied_rows: applied }
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {})
+        request.log.error({ err }, 'analytics/imports/apply error')
+        return reply.code(500).send({ error: err.message })
+      }
+    })
+  })
+
   app.get('/v1/analytics/franqueado/resumo', {
     preHandler: [
       app.authenticate,
@@ -288,25 +551,60 @@ export async function analyticsRoutes(app) {
           heatmapQ,
         ] = await Promise.all([
           db.query(`
+            WITH live_sales AS (
+              SELECT
+                COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv_lives,
+                COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::int AS pedidos_lives
+              FROM lives l
+              WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+                AND l.status = 'encerrada'
+                ${liveRange}
+                ${clienteLiveFilter}
+            ),
+            video_sales AS (
+              SELECT
+                COALESCE(SUM(va.gmv), 0) AS gmv_videos,
+                COALESCE(SUM(va.pedidos), 0)::int AS pedidos_videos
+              FROM vendas_atribuidas va
+              ${clienteSalesJoin}
+              WHERE ${salesWhere}
+                AND va.origem = 'video'
+            )
             SELECT
-              COALESCE(SUM(va.gmv), 0) AS gmv_total,
-              COALESCE(SUM(va.gmv) FILTER (WHERE va.origem = 'live'), 0) AS gmv_lives,
-              COALESCE(SUM(va.gmv) FILTER (WHERE va.origem = 'video'), 0) AS gmv_videos,
-              COALESCE(SUM(va.pedidos), 0)::int AS pedidos_total,
-              COALESCE(SUM(va.pedidos) FILTER (WHERE va.origem = 'live'), 0)::int AS pedidos_lives,
-              COALESCE(SUM(va.pedidos) FILTER (WHERE va.origem = 'video'), 0)::int AS pedidos_videos
-            FROM vendas_atribuidas va
-            ${clienteSalesJoin}
-            WHERE ${salesWhere}
+              (ls.gmv_lives + vs.gmv_videos) AS gmv_total,
+              ls.gmv_lives,
+              vs.gmv_videos,
+              (ls.pedidos_lives + vs.pedidos_videos)::int AS pedidos_total,
+              ls.pedidos_lives,
+              vs.pedidos_videos
+            FROM live_sales ls CROSS JOIN video_sales vs
           `, params),
 
           db.query(`
+            WITH live_sales AS (
+              SELECT
+                COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv_lives,
+                COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::int AS pedidos_lives
+              FROM lives l
+              WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+                AND l.status = 'encerrada'
+                AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
+                AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
+                ${clienteLiveFilter}
+            ),
+            video_sales AS (
+              SELECT
+                COALESCE(SUM(va.gmv), 0) AS gmv_videos,
+                COALESCE(SUM(va.pedidos), 0)::int AS pedidos_videos
+              FROM vendas_atribuidas va
+              ${clienteSalesJoin}
+              WHERE ${salesWhere}
+                AND va.origem = 'video'
+            )
             SELECT
-              COALESCE(SUM(va.gmv), 0) AS gmv_total,
-              COALESCE(SUM(va.pedidos), 0)::int AS pedidos_total
-            FROM vendas_atribuidas va
-            ${clienteSalesJoin}
-            WHERE ${salesWhere}
+              (ls.gmv_lives + vs.gmv_videos) AS gmv_total,
+              (ls.pedidos_lives + vs.pedidos_videos)::int AS pedidos_total
+            FROM live_sales ls CROSS JOIN video_sales vs
           `, prevParams),
 
           db.query(`
@@ -314,8 +612,9 @@ export async function analyticsRoutes(app) {
               COUNT(*)::int AS total_lives,
               COALESCE(SUM(
                 CASE
-                  WHEN l.encerrado_em IS NOT NULL AND l.encerrado_em > l.iniciado_em
-                    THEN LEAST(EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0, 24.0)
+                  WHEN COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
+                   AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+                    THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
                   ELSE 0
                 END
               ), 0) AS horas_live,
@@ -354,17 +653,28 @@ export async function analyticsRoutes(app) {
                 interval '1 month'
               )::date AS mes_inicio
             ),
-            sales AS (
+            live_sales AS (
+              SELECT
+                date_trunc('month', l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS mes_inicio,
+                COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv_lives,
+                COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::int AS pedidos_lives
+              FROM lives l
+              WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+                AND l.status = 'encerrada'
+                AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= (date_trunc('month', $2::date) - interval '11 months')::date
+                AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date < (date_trunc('month', $2::date) + interval '1 month')::date
+                ${clienteLiveFilter}
+              GROUP BY 1
+            ),
+            video_sales AS (
               SELECT
                 date_trunc('month', va.data)::date AS mes_inicio,
-                COALESCE(SUM(va.gmv), 0) AS gmv_total,
-                COALESCE(SUM(va.gmv) FILTER (WHERE va.origem = 'live'), 0) AS gmv_lives,
-                COALESCE(SUM(va.gmv) FILTER (WHERE va.origem = 'video'), 0) AS gmv_videos,
-                COALESCE(SUM(va.pedidos), 0)::int AS pedidos_total
+                COALESCE(SUM(va.gmv), 0) AS gmv_videos,
+                COALESCE(SUM(va.pedidos), 0)::int AS pedidos_videos
               FROM vendas_atribuidas va
               ${clienteSalesJoin}
               WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
-                AND va.origem IN ('live', 'video')
+                AND va.origem = 'video'
                 AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
                 AND va.data >= date_trunc('month', $2::date) - interval '11 months'
                 AND va.data < date_trunc('month', $2::date) + interval '1 month'
@@ -395,14 +705,15 @@ export async function analyticsRoutes(app) {
             )
             SELECT
               to_char(m.mes_inicio, 'YYYY-MM') AS mes,
-              COALESCE(s.gmv_total, 0) AS gmv,
-              COALESCE(s.gmv_lives, 0) AS gmv_lives,
-              COALESCE(s.gmv_videos, 0) AS gmv_videos,
-              COALESCE(s.pedidos_total, 0)::int AS pedidos,
+              COALESCE(ls.gmv_lives, 0) + COALESCE(vs.gmv_videos, 0) AS gmv,
+              COALESCE(ls.gmv_lives, 0) AS gmv_lives,
+              COALESCE(vs.gmv_videos, 0) AS gmv_videos,
+              (COALESCE(ls.pedidos_lives, 0) + COALESCE(vs.pedidos_videos, 0))::int AS pedidos,
               COALESCE(l.total_lives, 0)::int AS total_lives,
               COALESCE(v.total_videos, 0)::int AS total_videos
             FROM analytics_months m
-            LEFT JOIN sales s ON s.mes_inicio = m.mes_inicio
+            LEFT JOIN live_sales ls ON ls.mes_inicio = m.mes_inicio
+            LEFT JOIN video_sales vs ON vs.mes_inicio = m.mes_inicio
             LEFT JOIN lives_ops l ON l.mes_inicio = m.mes_inicio
             LEFT JOIN videos_ops v ON v.mes_inicio = m.mes_inicio
             ORDER BY m.mes_inicio ASC
@@ -413,8 +724,9 @@ export async function analyticsRoutes(app) {
               (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
               COALESCE(SUM(
                 CASE
-                  WHEN l.encerrado_em IS NOT NULL AND l.encerrado_em > l.iniciado_em
-                    THEN LEAST(EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0, 24.0)
+                  WHEN COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
+                   AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+                    THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
                   ELSE 0
                 END
               ), 0) AS horas
@@ -428,45 +740,113 @@ export async function analyticsRoutes(app) {
           `, params),
 
           db.query(`
+            WITH live_source AS (
+              SELECT
+                COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
+                l.marca_id,
+                l.id AS origem_id,
+                'live' AS origem,
+                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
+                COALESCE(l.manual_orders, l.final_orders_count, 0)::int AS pedidos
+              FROM lives l
+              LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
+              LEFT JOIN LATERAL (
+                SELECT lav.apresentadora_id
+                FROM live_apresentadoras_v2 lav
+                WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+                ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+                LIMIT 1
+              ) ap_v2 ON true
+              WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+                AND l.status = 'encerrada'
+                ${liveRange}
+                ${clienteLiveFilter}
+            ),
+            video_source AS (
+              SELECT
+                va.apresentadora_id,
+                va.marca_id,
+                va.origem_id,
+                va.origem,
+                va.gmv,
+                va.pedidos
+              FROM vendas_atribuidas va
+              JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+              WHERE ${salesWhere}
+                AND va.origem = 'video'
+                ${clienteMarcaFilter}
+            ),
+            combined AS (
+              SELECT * FROM live_source
+              UNION ALL
+              SELECT * FROM video_source
+            )
             SELECT
-              va.apresentadora_id,
+              combined.apresentadora_id,
               COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
               a.foto_url AS apresentadora_foto_url,
-              COALESCE(SUM(va.gmv), 0) AS gmv_total,
-              COALESCE(SUM(va.gmv) FILTER (WHERE va.origem = 'live'), 0) AS gmv_lives,
-              COALESCE(SUM(va.gmv) FILTER (WHERE va.origem = 'video'), 0) AS gmv_videos,
-              COALESCE(SUM(va.pedidos), 0)::int AS pedidos,
-              COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS total_lives,
-              COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'video')::int AS total_videos
-            FROM vendas_atribuidas va
-            JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
-            LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
-            WHERE ${salesWhere}
-              ${clienteMarcaFilter}
-            GROUP BY va.apresentadora_id, a.nome, a.foto_url
-            HAVING COALESCE(SUM(va.gmv), 0) <> 0 OR COALESCE(SUM(va.pedidos), 0) <> 0
+              COALESCE(SUM(combined.gmv), 0) AS gmv_total,
+              COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'live'), 0) AS gmv_lives,
+              COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'video'), 0) AS gmv_videos,
+              COALESCE(SUM(combined.pedidos), 0)::int AS pedidos,
+              COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'live')::int AS total_lives,
+              COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'video')::int AS total_videos
+            FROM combined
+            LEFT JOIN apresentadoras a ON a.id = combined.apresentadora_id AND a.tenant_id = current_setting('app.tenant_id', true)::uuid
+            GROUP BY combined.apresentadora_id, a.nome, a.foto_url
+            HAVING COALESCE(SUM(combined.gmv), 0) <> 0 OR COALESCE(SUM(combined.pedidos), 0) <> 0
             ORDER BY gmv_total DESC, pedidos DESC, apresentadora_nome ASC
             LIMIT 10
           `, params),
 
           db.query(`
+            WITH live_source AS (
+              SELECT
+                l.marca_id,
+                l.id AS origem_id,
+                'live' AS origem,
+                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
+                COALESCE(l.manual_orders, l.final_orders_count, 0)::int AS pedidos
+              FROM lives l
+              WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+                AND l.status = 'encerrada'
+                AND l.marca_id IS NOT NULL
+                ${liveRange}
+                ${clienteLiveFilter}
+            ),
+            video_source AS (
+              SELECT
+                va.marca_id,
+                va.origem_id,
+                va.origem,
+                va.gmv,
+                va.pedidos
+              FROM vendas_atribuidas va
+              JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+              WHERE ${salesWhere}
+                AND va.origem = 'video'
+                ${clienteMarcaFilter}
+            ),
+            combined AS (
+              SELECT * FROM live_source
+              UNION ALL
+              SELECT * FROM video_source
+            )
             SELECT
-              va.marca_id,
+              combined.marca_id,
               m.nome AS marca_nome,
               COALESCE(m.logo_url, c.logo_url) AS logo_url,
-              COALESCE(SUM(va.gmv), 0) AS gmv_total,
-              COALESCE(SUM(va.gmv) FILTER (WHERE va.origem = 'live'), 0) AS gmv_lives,
-              COALESCE(SUM(va.gmv) FILTER (WHERE va.origem = 'video'), 0) AS gmv_videos,
-              COALESCE(SUM(va.pedidos), 0)::int AS pedidos,
-              COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS total_lives,
-              COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'video')::int AS total_videos
-            FROM vendas_atribuidas va
-            JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+              COALESCE(SUM(combined.gmv), 0) AS gmv_total,
+              COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'live'), 0) AS gmv_lives,
+              COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'video'), 0) AS gmv_videos,
+              COALESCE(SUM(combined.pedidos), 0)::int AS pedidos,
+              COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'live')::int AS total_lives,
+              COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'video')::int AS total_videos
+            FROM combined
+            JOIN marcas m ON m.id = combined.marca_id AND m.tenant_id = current_setting('app.tenant_id', true)::uuid
             LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
-            WHERE ${salesWhere}
-              ${clienteMarcaFilter}
-            GROUP BY va.marca_id, m.nome, COALESCE(m.logo_url, c.logo_url)
-            HAVING COALESCE(SUM(va.gmv), 0) <> 0 OR COALESCE(SUM(va.pedidos), 0) <> 0
+            GROUP BY combined.marca_id, m.nome, COALESCE(m.logo_url, c.logo_url)
+            HAVING COALESCE(SUM(combined.gmv), 0) <> 0 OR COALESCE(SUM(combined.pedidos), 0) <> 0
             ORDER BY gmv_total DESC, pedidos DESC, marca_nome ASC
             LIMIT 10
           `, params),
@@ -475,7 +855,7 @@ export async function analyticsRoutes(app) {
             SELECT
               EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::int AS hora,
               COUNT(*)::int AS total_lives,
-              COALESCE(SUM(COALESCE(l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv
+              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv
             FROM lives l
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
@@ -490,7 +870,7 @@ export async function analyticsRoutes(app) {
               EXTRACT(ISODOW FROM l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::int AS dow,
               (FLOOR(EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}') / 3) * 3)::int AS bloco_hora,
               COUNT(*)::int AS lives,
-              COALESCE(SUM(COALESCE(l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv
+              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv
             FROM lives l
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
@@ -516,6 +896,13 @@ export async function analyticsRoutes(app) {
         const totalLives = toInt(liveOps.total_lives)
         const totalVideos = toInt(videoOps.total_videos)
         const totalConteudos = totalLives + totalVideos
+        const gmvLives = round2(sales.gmv_lives)
+        const gmvVideos = round2(sales.gmv_videos)
+        const horasLive = round1(liveOps.horas_live)
+        const pedidosLives = toInt(sales.pedidos_lives)
+        const gmvPorLive = totalLives > 0 ? round2(gmvLives / totalLives) : 0
+        const gmvPorHora = horasLive > 0 ? round2(gmvLives / horasLive) : 0
+        const ticketMedioLive = pedidosLives > 0 ? round2(gmvLives / pedidosLives) : 0
         const hoursRows = hoursQ.rows
         const monthlyRows = monthlyQ.rows.map((row) => ({
           mes: row.mes,
@@ -566,19 +953,23 @@ export async function analyticsRoutes(app) {
           kpis: {
             gmv_total: gmvTotal,
             faturamento_total: gmvTotal,
-            gmv_lives: round2(sales.gmv_lives),
-            gmv_videos: round2(sales.gmv_videos),
+            gmv_lives: gmvLives,
+            gmv_videos: gmvVideos,
             pedidos_total: pedidosTotal,
             total_vendas: pedidosTotal,
-            pedidos_lives: toInt(sales.pedidos_lives),
+            pedidos_lives: pedidosLives,
             pedidos_videos: toInt(sales.pedidos_videos),
             ticket_medio: ticketMedio,
+            ticket_medio_live: ticketMedioLive,
             total_lives: totalLives,
             total_videos: totalVideos,
             total_conteudos: totalConteudos,
             registros_video: toInt(videoOps.registros_video),
-            horas_live: round1(liveOps.horas_live),
-            total_horas_no_ar: round1(liveOps.horas_live),
+            horas_live: horasLive,
+            total_horas_no_ar: horasLive,
+            gmv_por_live: gmvPorLive,
+            gmv_por_hora: gmvPorHora,
+            gmv_hora: gmvPorHora,
             viewers_total: toInt(liveOps.viewers_total),
             audiencia_media: totalLives > 0 ? Math.round(toInt(liveOps.viewers_total) / totalLives) : 0,
             likes_total: toInt(liveOps.likes_total),
@@ -593,8 +984,8 @@ export async function analyticsRoutes(app) {
           },
           gmv_total: gmvTotal,
           gmv_mes: gmvTotal,
-          gmv_lives: round2(sales.gmv_lives),
-          gmv_videos: round2(sales.gmv_videos),
+          gmv_lives: gmvLives,
+          gmv_videos: gmvVideos,
           pedidos_total: pedidosTotal,
           pedidos: pedidosTotal,
           total_lives: totalLives,
@@ -602,8 +993,12 @@ export async function analyticsRoutes(app) {
           total_videos: totalVideos,
           videos_gravados: totalVideos,
           total_conteudos: totalConteudos,
-          horas_live: round1(liveOps.horas_live),
+          horas_live: horasLive,
           ticket_medio: ticketMedio,
+          ticket_medio_live: ticketMedioLive,
+          gmv_por_live: gmvPorLive,
+          gmv_por_hora: gmvPorHora,
+          gmv_hora: gmvPorHora,
           viewers_total: toInt(liveOps.viewers_total),
           likes_total: toInt(liveOps.likes_total),
           comentarios_total: toInt(liveOps.comentarios_total),
@@ -705,9 +1100,9 @@ export async function analyticsRoutes(app) {
         const WHERE_BASE = `
           l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
-          AND l.encerrado_em IS NOT NULL
-          AND l.encerrado_em > l.iniciado_em
-          AND EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) >= 300
+          AND COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
+          AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+          AND EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) >= 300
           AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
           AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
         `
@@ -716,7 +1111,7 @@ export async function analyticsRoutes(app) {
           COUNT(*)::int AS total_lives,
           COALESCE(SUM(l.ads_gmv), 0) AS gmv,
           COALESCE(SUM(l.ads_cost), 0) AS verba,
-          COALESCE(SUM(EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0), 0) AS horas,
+          COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0), 0) AS horas,
           COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::int AS pedidos,
           COALESCE(SUM(COALESCE(l.manual_views, l.final_peak_viewers, 0)), 0)::bigint AS views,
           COALESCE(SUM(COALESCE(l.manual_comments, l.final_total_comments, 0)), 0)::bigint AS comments,

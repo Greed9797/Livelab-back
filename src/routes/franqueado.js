@@ -214,7 +214,7 @@ async function fetchUnitSummaries(
       lives_current AS (
         SELECT
           l.tenant_id,
-          COALESCE(SUM(l.fat_gerado), 0) AS gmv_current,
+	          COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv_current,
           COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_current
         FROM lives l
         LEFT JOIN LATERAL (
@@ -478,7 +478,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
           SELECT
             l.tenant_id,
             l.cliente_id,
-            COALESCE(SUM(l.fat_gerado), 0) AS live_gmv,
+	            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS live_gmv,
             COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
           FROM lives l
           LEFT JOIN LATERAL (
@@ -554,7 +554,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
           SELECT
             l.tenant_id,
             l.cliente_id,
-            COALESCE(SUM(l.fat_gerado), 0) AS live_gmv,
+	            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS live_gmv,
             COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
           FROM lives l
           LEFT JOIN LATERAL (
@@ -1045,7 +1045,7 @@ async function fetchMasterTotals(app, masterTenantId, periodInfo, allowedTenantI
     `
       WITH lives_periodo AS (
         SELECT tenant_id, COUNT(*)::int AS total_lives,
-               COALESCE(SUM(fat_gerado), 0) AS gmv_total
+	               COALESCE(SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)), 0) AS gmv_total
         FROM lives
         WHERE tenant_id <> $1
           AND ($5::uuid[] IS NULL OR tenant_id = ANY($5::uuid[]))
@@ -1054,7 +1054,7 @@ async function fetchMasterTotals(app, masterTenantId, periodInfo, allowedTenantI
         GROUP BY tenant_id
       ),
       lives_anterior AS (
-        SELECT COALESCE(SUM(fat_gerado), 0) AS gmv_total
+	        SELECT COALESCE(SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)), 0) AS gmv_total
         FROM lives
         WHERE tenant_id <> $1
           AND ($5::uuid[] IS NULL OR tenant_id = ANY($5::uuid[]))
@@ -1209,7 +1209,7 @@ async function fetchNetworkRanking(app, {
       WITH lives_atual AS (
         SELECT tenant_id,
                COUNT(*)::int AS total_lives,
-               COALESCE(SUM(fat_gerado), 0) AS gmv_mes
+	               COALESCE(SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)), 0) AS gmv_mes
         FROM lives
         WHERE ($1::uuid IS NULL OR tenant_id <> $1::uuid)
           AND COALESCE(encerrado_em, iniciado_em) >= $2::date
@@ -1218,7 +1218,7 @@ async function fetchNetworkRanking(app, {
       ),
       lives_anterior AS (
         SELECT tenant_id,
-               COALESCE(SUM(fat_gerado), 0) AS gmv_mes_anterior
+	               COALESCE(SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)), 0) AS gmv_mes_anterior
         FROM lives
         WHERE ($1::uuid IS NULL OR tenant_id <> $1::uuid)
           AND COALESCE(encerrado_em, iniciado_em) >= $4::date
@@ -1349,7 +1349,7 @@ export async function franqueadoRoutes(app) {
               t.id,
               t.nome,
               COUNT(DISTINCT c.id) FILTER (WHERE c.status = 'ativo') AS clientes_count,
-              COALESCE(SUM(l.fat_gerado), 0) AS fat_mes,
+	              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS fat_mes,
               COUNT(DISTINCT ct.id) FILTER (
                 WHERE ct.status IN ('gerado', 'enviado', 'em_analise')
               ) AS contratos_pendentes,
@@ -1489,7 +1489,7 @@ export async function franqueadoRoutes(app) {
             SELECT
               date_trunc('month', COALESCE(l.encerrado_em, l.iniciado_em))::date AS mes_inicio,
               COUNT(*)::int AS lives,
-              COALESCE(SUM(l.fat_gerado), 0) AS gmv
+	              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv
             FROM lives l
             WHERE l.tenant_id = $1
               AND COALESCE(l.encerrado_em, l.iniciado_em) >= date_trunc('month', NOW()) - interval '5 months'
@@ -1535,7 +1535,7 @@ export async function franqueadoRoutes(app) {
       const gmvQuedaQuery = app.db.query(
         `
           WITH atual AS (
-            SELECT tenant_id, COALESCE(SUM(fat_gerado), 0) AS gmv
+	            SELECT tenant_id, COALESCE(SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)), 0) AS gmv
             FROM lives
             WHERE tenant_id <> $1
               AND ($4::uuid[] IS NULL OR tenant_id = ANY($4::uuid[]))
@@ -1543,7 +1543,7 @@ export async function franqueadoRoutes(app) {
             GROUP BY tenant_id
           ),
           anterior AS (
-            SELECT tenant_id, COALESCE(SUM(fat_gerado), 0) AS gmv
+	            SELECT tenant_id, COALESCE(SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)), 0) AS gmv
             FROM lives
             WHERE tenant_id <> $1
               AND ($4::uuid[] IS NULL OR tenant_id = ANY($4::uuid[]))

@@ -48,9 +48,12 @@ function emptyLivesPayload(periodo) {
       itens_vendidos: 0,
       total_lives: 0,
       horas_live: 0,
-      valor_investido_lives: 0,
-      roas: 0,
-      viewers: 0,
+	      valor_investido_lives: 0,
+	      roas: 0,
+	      gmv_por_live: 0,
+	      gmv_por_hora: 0,
+	      ticket_medio_live: 0,
+	      viewers: 0,
       comentarios: 0,
       likes: 0,
       shares: 0,
@@ -72,8 +75,11 @@ function emptyDashboard(periodo) {
     horas_live_mes: 0,
     horas_live: 0,
     valor_investido_lives: 0,
-    roas: 0,
-    viewers: 0,
+	    roas: 0,
+	    gmv_por_live: 0,
+	    gmv_por_hora: 0,
+	    ticket_medio_live: 0,
+	    viewers: 0,
     comentarios: 0,
     likes: 0,
     shares: 0,
@@ -161,7 +167,8 @@ async function fetchClienteLives(db, tenantId, clienteId, periodo, custoHora) {
       c.numero AS cabine_numero,
       u.nome AS apresentador_nome,
       l.status,
-      COALESCE(l.manual_gmv, l.fat_gerado, 0) AS total_faturamento,
+      COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS total_faturamento,
+      COALESCE(l.fat_gerado, 0) AS fat_gerado,
       COALESCE(l.comissao_calculada, 0) AS comissao,
       COALESCE(prod.itens, 0) AS total_vendas,
       COALESCE(l.final_orders_count, snap.total_orders, prod.itens, 0) AS pedidos,
@@ -210,9 +217,10 @@ async function fetchClienteLives(db, tenantId, clienteId, periodo, custoHora) {
       encerrado_em: r.encerrado_em,
       cabine_numero: r.cabine_numero == null ? null : Number(r.cabine_numero),
       streamer_nome: r.apresentador_nome,
-      status: r.status,
-      total_faturamento: gmv,
-      gmv,
+	      status: r.status,
+	      total_faturamento: gmv,
+	      gmv,
+	      fat_gerado: round2(r.fat_gerado),
       comissao: round2(r.comissao),
       total_vendas: toInt(r.total_vendas),
       itens_vendidos: toInt(r.total_vendas),
@@ -264,6 +272,9 @@ async function fetchClienteLives(db, tenantId, clienteId, periodo, custoHora) {
   resumo.roas = resumo.valor_investido_lives > 0
     ? round2(resumo.gmv_total / resumo.valor_investido_lives)
     : 0
+  resumo.gmv_por_live = resumo.total_lives > 0 ? round2(resumo.gmv_total / resumo.total_lives) : 0
+  resumo.gmv_por_hora = resumo.horas_live > 0 ? round2(resumo.gmv_total / resumo.horas_live) : 0
+  resumo.ticket_medio_live = resumo.gmv_por_live
 
   return { periodo, resumo, lives }
 }
@@ -301,9 +312,9 @@ export async function clienteDashboardRoutes(app) {
         )
         SELECT
           COALESCE(SUM(CASE WHEN l.iniciado_em >= p.inicio AND l.iniciado_em < p.inicio + INTERVAL '1 month'
-                            THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado) END), 0) AS mes_atual,
+                            THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) END), 0) AS mes_atual,
           COALESCE(SUM(CASE WHEN l.iniciado_em >= p.inicio - INTERVAL '1 month' AND l.iniciado_em < p.inicio
-                            THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado) END), 0) AS mes_anterior
+                            THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) END), 0) AS mes_anterior
         FROM lives l
         CROSS JOIN periodo p
         WHERE l.tenant_id = $1
@@ -400,8 +411,8 @@ export async function clienteDashboardRoutes(app) {
         ), ranked AS (
           SELECT
             l.cliente_id,
-            SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado)) AS total,
-            RANK() OVER (ORDER BY SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado)) DESC) AS posicao,
+            SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)) AS total,
+            RANK() OVER (ORDER BY SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)) DESC) AS posicao,
             COUNT(*) OVER() AS total_participantes
           FROM lives l
           CROSS JOIN periodo p
@@ -429,7 +440,7 @@ export async function clienteDashboardRoutes(app) {
           SELECT
             l.cliente_id,
             c.nicho,
-            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado)), 0) AS gmv_total,
+            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv_total,
             COUNT(l.id) AS total_lives
           FROM lives l
           JOIN clientes c ON c.id = l.cliente_id
@@ -550,8 +561,8 @@ export async function clienteDashboardRoutes(app) {
         ), fallback_hours AS (
           SELECT
             EXTRACT(HOUR FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int AS hora,
-            COUNT(l.id) AS total_lives,
-            COALESCE(SUM(l.fat_gerado), 0) AS gmv_total,
+	            COUNT(l.id) AS total_lives,
+	            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv_total,
             COALESCE(SUM(prod.itens), 0) AS pedidos
           FROM lives l
           CROSS JOIN periodo p
@@ -602,7 +613,7 @@ export async function clienteDashboardRoutes(app) {
           m.ano,
           m.mes,
           COUNT(l.id) AS total_lives,
-          COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado)), 0) AS gmv_total,
+          COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv_total,
           COALESCE(SUM(prod.itens), 0) AS itens_vendidos,
           COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 3600, 0)), 0) AS horas_live
         FROM meses m
@@ -654,9 +665,12 @@ export async function clienteDashboardRoutes(app) {
         comentarios:     resumo.comentarios,
         likes:           resumo.likes,
         shares:          resumo.shares,
-        pedidos:         resumo.pedidos,
-        total_lives:     resumo.total_lives,
-        live_ativa:      liveAtiva,
+	        pedidos:         resumo.pedidos,
+	        total_lives:     resumo.total_lives,
+	        gmv_por_live:    resumo.gmv_por_live,
+	        gmv_por_hora:    resumo.gmv_por_hora,
+	        ticket_medio_live: resumo.ticket_medio_live,
+	        live_ativa:      liveAtiva,
         mais_vendidos:   maisVendidos,
         ranking_dia:     rankingPeriodo,
         ranking_periodo: rankingPeriodo,
@@ -901,8 +915,9 @@ export async function clienteDashboardRoutes(app) {
           l.id,
           l.iniciado_em,
           l.encerrado_em,
-          l.status,
-          COALESCE(l.fat_gerado, 0)        AS fat_gerado,
+	          l.status,
+	          COALESCE(l.fat_gerado, 0)        AS fat_gerado,
+	          COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
           COALESCE(l.comissao_calculada, 0) AS comissao_calculada,
           ROUND(
             EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.iniciado_em) - l.iniciado_em)) / 60
@@ -927,9 +942,10 @@ export async function clienteDashboardRoutes(app) {
           id:                 r.id,
           iniciado_em:        r.iniciado_em,
           encerrado_em:       r.encerrado_em,
-          status:             r.status,
-          fat_gerado:         Number(r.fat_gerado),
-          comissao_calculada: Number(r.comissao_calculada),
+	          status:             r.status,
+	          fat_gerado:         Number(r.fat_gerado),
+	          gmv:                Number(r.gmv),
+	          comissao_calculada: Number(r.comissao_calculada),
           duracao_min:        Number(r.duracao_min),
         })),
       }

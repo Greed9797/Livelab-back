@@ -14,7 +14,7 @@ export async function excelenciaRoutes(app) {
 
       const fatSeries = await db.query(`
         SELECT date_trunc('month', encerrado_em) AS mes,
-               SUM(fat_gerado) AS total
+	               SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)) AS total
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND encerrado_em IS NOT NULL

@@ -1,0 +1,74 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [master, stabilization/core-restructure, codex/blumenau-operational-fase1]
+  pull_request:
+    branches: [master, codex/blumenau-operational-fase1]
+
+jobs:
+  test:
+    name: Test + Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: livelab_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: |
+          for f in $(find src -name '*.js'); do
+            node --check "$f" || exit 1
+          done
+
+      - name: Prepare fresh database schema
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
+          ALLOW_FRESH_SCHEMA_SETUP: 'true'
+          NODE_ENV: test
+        run: |
+          node scripts/setup_fresh_schema.js
+          node apply_migrations.js
+
+      - name: Run tests + coverage threshold
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
+          JWT_SECRET: test-secret-32-chars-minimum-here
+          NODE_ENV: test
+        run: npx vitest run --coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage/
+          retention-days: 14
+
+      - name: Audit (high severity)
+        run: npm audit --omit=dev --audit-level=high || echo "Audit warnings"

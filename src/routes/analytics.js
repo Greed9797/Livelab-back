@@ -620,6 +620,7 @@ export async function analyticsRoutes(app) {
           ranking_apresentadoras: rankingApresentadoras,
           ranking_apresentadores: rankingApresentadoras,
           ranking_marcas: rankingMarcas,
+
           peak_hours: peakHoursQ.rows.map((row) => ({
             hora: toInt(row.hora),
             total_lives: toInt(row.total_lives),
@@ -635,6 +636,143 @@ export async function analyticsRoutes(app) {
       })
     } catch (err) {
       request.log.error({ err }, 'analytics/dashboard error')
+      return reply.code(500).send({ error: err.message })
+    }
+  })
+
+  // ── Funil de Lives (por Marca ou por Apresentadora) ────────────────────
+  // Agrega métricas do TikTok Shop Ads (campos manuais) por período.
+  // Aplica filtro: status=encerrada AND duration>=300s (5min).
+  // Fórmulas do funil: ver doc de handoff (CONSOLIDADO_DIA_28).
+  function mapFunilRow(row) {
+    const gmv     = round2(row.gmv)
+    const verba   = round2(row.verba)
+    const horas   = round2(row.horas)
+    const pedidos = toInt(row.pedidos)
+    const views   = toInt(row.views)
+    const comments = toInt(row.comments)
+    const liveImpressions    = toInt(row.live_impressions)
+    const productImpressions = toInt(row.product_impressions)
+    const productClicks      = toInt(row.product_clicks)
+    return {
+      grupo_id:    row.grupo_id   ?? null,
+      grupo_nome:  row.grupo_nome,
+      logo_url:    row.logo_url   ?? null,
+      total_lives: toInt(row.total_lives),
+      gmv,
+      verba,
+      roi:       verba > 0   ? round2(gmv / verba)           : null,
+      gmv_hora:  horas > 0   ? round2(gmv / horas)           : null,
+      ticket:    pedidos > 0 ? round2(gmv / pedidos)          : null,
+      pedidos,
+      new_followers: toInt(row.new_followers),
+      retencao:  row.retencao != null ? round2(row.retencao) : null,
+      entrada:   liveImpressions > 0    ? round2(views    / liveImpressions)    : null,
+      clique:    productImpressions > 0 ? round2(productClicks / productImpressions) : null,
+      fecha:     productClicks > 0      ? round2(pedidos  / productClicks)      : null,
+      coment:    views > 0              ? round2(comments / views)              : null,
+    }
+  }
+
+  app.get('/v1/analytics/funil', {
+    preHandler: [app.authenticate, app.requirePapel(READ_ANALYTICS)],
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          mesAno:  { type: 'string' },
+          mes:     { type: 'string' },
+          ano:     { type: 'string' },
+          groupBy: { type: 'string', enum: ['marca', 'apresentadora'] },
+        },
+        additionalProperties: true,
+      },
+    },
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const groupBy = request.query?.groupBy ?? 'marca'
+    if (!['marca', 'apresentadora'].includes(groupBy)) {
+      return reply.code(400).send({ error: "groupBy must be 'marca' or 'apresentadora'" })
+    }
+
+    const period = resolveAnalyticsPeriod(request.query)
+    if (period.error) return reply.code(400).send({ error: period.error })
+    const { fromDate, toDate } = period
+
+    try {
+      return await app.withTenant(tenant_id, async (db) => {
+        const params = [fromDate, toDate]
+        const WHERE_BASE = `
+          l.tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND l.status = 'encerrada'
+          AND l.encerrado_em IS NOT NULL
+          AND l.encerrado_em > l.iniciado_em
+          AND EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) >= 300
+          AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
+          AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
+        `
+
+        const AGG_COLS = `
+          COUNT(*)::int AS total_lives,
+          COALESCE(SUM(l.ads_gmv), 0) AS gmv,
+          COALESCE(SUM(l.ads_cost), 0) AS verba,
+          COALESCE(SUM(EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0), 0) AS horas,
+          COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::int AS pedidos,
+          COALESCE(SUM(COALESCE(l.manual_views, l.final_peak_viewers, 0)), 0)::bigint AS views,
+          COALESCE(SUM(COALESCE(l.manual_comments, l.final_total_comments, 0)), 0)::bigint AS comments,
+          COALESCE(SUM(l.live_impressions), 0)::bigint AS live_impressions,
+          COALESCE(SUM(l.product_impressions), 0)::bigint AS product_impressions,
+          COALESCE(SUM(l.product_clicks), 0)::bigint AS product_clicks,
+          AVG(NULLIF(l.avg_viewing_duration, 0)) AS retencao,
+          COALESCE(SUM(l.new_followers), 0)::int AS new_followers
+        `
+
+        if (groupBy === 'marca') {
+          const result = await db.query(`
+            SELECT
+              l.marca_id AS grupo_id,
+              COALESCE(m.nome, 'Sem marca') AS grupo_nome,
+              COALESCE(m.logo_url, cl.logo_url) AS logo_url,
+              ${AGG_COLS}
+            FROM lives l
+            LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
+            LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = l.tenant_id
+            WHERE ${WHERE_BASE}
+            GROUP BY l.marca_id, COALESCE(m.nome, 'Sem marca'), COALESCE(m.logo_url, cl.logo_url)
+            ORDER BY gmv DESC, total_lives DESC
+          `, params)
+          return result.rows.map(mapFunilRow)
+        }
+
+        // groupBy === 'apresentadora'
+        const result = await db.query(`
+          SELECT
+            COALESCE(ap_v2.apresentadora_id, l.apresentador_id) AS grupo_id,
+            COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora') AS grupo_nome,
+            COALESCE(ap_v2.foto_url, ap_user.foto_url) AS logo_url,
+            ${AGG_COLS}
+          FROM lives l
+          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
+          LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
+          LEFT JOIN LATERAL (
+            SELECT lav.apresentadora_id, a.nome, a.foto_url
+            FROM live_apresentadoras_v2 lav
+            JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
+            WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+            ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+            LIMIT 1
+          ) ap_v2 ON true
+          WHERE ${WHERE_BASE}
+          GROUP BY
+            COALESCE(ap_v2.apresentadora_id, l.apresentador_id),
+            COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora'),
+            COALESCE(ap_v2.foto_url, ap_user.foto_url)
+          ORDER BY gmv DESC, total_lives DESC
+        `, params)
+        return result.rows.map(mapFunilRow)
+      })
+    } catch (err) {
+      request.log.error({ err }, 'analytics/funil error')
       return reply.code(500).send({ error: err.message })
     }
   })

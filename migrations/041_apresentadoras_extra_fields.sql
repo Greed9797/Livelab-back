@@ -1,5 +1,0 @@
-ALTER TABLE apresentadoras
-  ADD COLUMN IF NOT EXISTS link_contrato TEXT,
-  ADD COLUMN IF NOT EXISTS data_aniversario DATE,
-  ADD COLUMN IF NOT EXISTS data_inicio DATE,
-  ADD COLUMN IF NOT EXISTS data_fim DATE;

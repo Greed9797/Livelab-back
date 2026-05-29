@@ -34,7 +34,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
        l.iniciado_em,
        c.id          AS contrato_id,
        c.comissao_pct,
-       c.valor_fixo_comissao,
+       c.valor_fixo AS valor_fixo_comissao,
        m.id          AS marca_id,
        m.comissao_franquia_pct,
        m.comissao_franqueadora_pct

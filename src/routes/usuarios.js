@@ -45,10 +45,92 @@ const atualizarSchema = z.object({
     'apresentador', 'apresentadora', 'cliente_parceiro',
   ]).optional(),
   ativo: z.boolean().optional(),
+  fixo: z.number().nonnegative().max(MAX_APRESENTADORA_FIXO, `Fixo não pode ultrapassar R$ ${MAX_APRESENTADORA_FIXO.toLocaleString('pt-BR')}`).optional(),
+  comissao_pct: z.number().min(0).max(100).optional(),
+  meta_diaria_gmv: z.number().nonnegative().optional(),
+  foto_url: imageUrlSchema,
 })
 
 function isPresenterRole(papel) {
   return papel === 'apresentador' || papel === 'apresentadora'
+}
+
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key)
+}
+
+async function ensurePresenterProfileForUser(db, {
+  tenantId,
+  user,
+  fixo,
+  comissaoPct,
+  metaDiariaGmv,
+  fotoUrl,
+  hasFixo,
+  hasComissaoPct,
+  hasMetaDiariaGmv,
+  hasFotoUrl,
+}) {
+  const existing = await db.query(
+    `SELECT id FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid`,
+    [user.id, tenantId],
+  )
+
+  if (existing.rows[0]) {
+    const apresentadoraId = existing.rows[0].id
+    await db.query(
+      `UPDATE apresentadoras
+          SET nome = $1,
+              email = $2,
+              ativo = $3,
+              fixo = CASE WHEN $4::boolean THEN $5 ELSE fixo END,
+              comissao_pct = CASE WHEN $6::boolean THEN $7 ELSE comissao_pct END,
+              meta_diaria_gmv = CASE WHEN $8::boolean THEN $9 ELSE meta_diaria_gmv END,
+              foto_url = CASE WHEN $10::boolean THEN $11 ELSE foto_url END
+        WHERE id = $12
+          AND tenant_id = $13::uuid
+        RETURNING id`,
+      [
+        user.nome,
+        user.email,
+        user.ativo !== false,
+        hasFixo,
+        fixo ?? null,
+        hasComissaoPct,
+        comissaoPct ?? null,
+        hasMetaDiariaGmv,
+        metaDiariaGmv ?? null,
+        hasFotoUrl,
+        fotoUrl ?? null,
+        apresentadoraId,
+        tenantId,
+      ],
+    )
+    await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
+    return apresentadoraId
+  }
+
+  const created = await db.query(
+    `INSERT INTO apresentadoras (
+       tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, foto_url, ativo
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id`,
+    [
+      tenantId,
+      user.id,
+      user.nome,
+      user.email,
+      hasFixo ? fixo : DEFAULT_APRESENTADORA_FIXO,
+      hasComissaoPct ? comissaoPct : 0,
+      hasMetaDiariaGmv ? metaDiariaGmv : 0,
+      hasFotoUrl ? fotoUrl : null,
+      user.ativo !== false,
+    ],
+  )
+  const apresentadoraId = created.rows[0]?.id ?? null
+  await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
+  return apresentadoraId
 }
 
 export async function usuariosRoutes(app) {
@@ -314,6 +396,20 @@ export async function usuariosRoutes(app) {
       return reply.code(400).send({ error: parsed.error.issues[0].message })
     }
     const fields = parsed.data
+    const {
+      fixo,
+      comissao_pct,
+      meta_diaria_gmv,
+      foto_url,
+      ...userFields
+    } = fields
+    const hasPresenterFields =
+      hasOwn(fields, 'fixo') ||
+      hasOwn(fields, 'comissao_pct') ||
+      hasOwn(fields, 'meta_diaria_gmv') ||
+      hasOwn(fields, 'foto_url')
+    const userFieldKeys = Object.keys(userFields)
+
     if (Object.keys(fields).length === 0) {
       return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
     }
@@ -322,52 +418,99 @@ export async function usuariosRoutes(app) {
     // - franqueado/franqueador_master nunca atribuíveis (criados via /v1/tenants).
     // - 'gerente' apenas franqueador_master pode atribuir.
     const PAPEIS_PROIBIDOS = new Set(['franqueado', 'franqueador_master'])
-    if (fields.papel && PAPEIS_PROIBIDOS.has(fields.papel)) {
+    if (userFields.papel && PAPEIS_PROIBIDOS.has(userFields.papel)) {
       return reply.code(403).send({ error: 'Este papel não pode ser atribuído manualmente' })
     }
-    if (fields.papel === 'gerente' && request.user.papel !== 'franqueador_master') {
+    if (userFields.papel === 'gerente' && request.user.papel !== 'franqueador_master') {
       return reply.code(403).send({ error: 'Somente franqueador_master pode atribuir papel gerente' })
     }
 
-    const updates = []
-    const values = []
-    let idx = 1
-
-    for (const [key, val] of Object.entries(fields)) {
-      if (val !== undefined) {
-        updates.push(`${key} = $${idx++}`)
-        values.push(val)
-      }
-    }
-
     return app.withTenant(request.user.tenant_id, async (db) => {
-      if (fields.ativo === false) {
-        await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
-      }
+      try {
+        await db.query('BEGIN')
 
-      // Captura papel atual antes do UPDATE (para audit de role_change)
-      let oldPapel = null
-      if (fields.papel !== undefined) {
-        const oldUser = await db.query(`SELECT papel FROM users WHERE id = $1`, [request.params.id])
-        oldPapel = oldUser.rows[0]?.papel ?? null
-      }
+        const currentQ = await db.query(
+          `SELECT id, nome, email, papel, ativo, criado_em
+           FROM users
+           WHERE id = $1 AND tenant_id = $2::uuid
+           FOR UPDATE`,
+          [request.params.id, request.user.tenant_id],
+        )
+        const currentUser = currentQ.rows[0]
+        if (!currentUser) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Usuário não encontrado' })
+        }
 
-      values.push(request.params.id, request.user.tenant_id)
-      const result = await db.query(
-        `UPDATE users SET ${updates.join(', ')}
-         WHERE id = $${idx} AND tenant_id = $${idx + 1}
-         RETURNING id, nome, email, papel, ativo, criado_em`,
-        values
-      )
-      if (result.rows.length === 0) {
-        return reply.code(404).send({ error: 'Usuário não encontrado' })
-      }
+        const nextPapel = userFields.papel ?? currentUser.papel
+        if (hasPresenterFields && !isPresenterRole(nextPapel)) {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: 'Campos de apresentadora exigem papel apresentadora.' })
+        }
 
-      if (fields.papel !== undefined && oldPapel !== null) {
-        app.audit?.log?.(request, { action: 'usuarios.role_change', entity_type: 'user', entity_id: request.params.id, metadata: { old_papel: oldPapel, new_papel: fields.papel } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      }
+        if (userFields.ativo === false) {
+          await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+        }
 
-      return result.rows[0]
+        let updatedUser = currentUser
+        if (userFieldKeys.length > 0) {
+          const updates = []
+          const values = []
+          let idx = 1
+
+          for (const [key, val] of Object.entries(userFields)) {
+            if (val !== undefined) {
+              updates.push(`${key} = $${idx++}`)
+              values.push(val)
+            }
+          }
+
+          values.push(request.params.id, request.user.tenant_id)
+          const result = await db.query(
+            `UPDATE users SET ${updates.join(', ')}
+             WHERE id = $${idx} AND tenant_id = $${idx + 1}::uuid
+             RETURNING id, nome, email, papel, ativo, criado_em`,
+            values
+          )
+          updatedUser = result.rows[0]
+        }
+
+        let apresentadoraId = null
+        if (isPresenterRole(updatedUser.papel)) {
+          apresentadoraId = await ensurePresenterProfileForUser(db, {
+            tenantId: request.user.tenant_id,
+            user: updatedUser,
+            fixo,
+            comissaoPct: comissao_pct,
+            metaDiariaGmv: meta_diaria_gmv,
+            fotoUrl: foto_url,
+            hasFixo: hasOwn(fields, 'fixo'),
+            hasComissaoPct: hasOwn(fields, 'comissao_pct'),
+            hasMetaDiariaGmv: hasOwn(fields, 'meta_diaria_gmv'),
+            hasFotoUrl: hasOwn(fields, 'foto_url'),
+          })
+        }
+
+        await db.query('COMMIT')
+
+        if (userFields.papel !== undefined && currentUser.papel !== null && currentUser.papel !== userFields.papel) {
+          app.audit?.log?.(request, {
+            action: 'usuarios.role_change',
+            entity_type: 'user',
+            entity_id: request.params.id,
+            metadata: { old_papel: currentUser.papel, new_papel: userFields.papel },
+          })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        }
+
+        return {
+          ...updatedUser,
+          apresentadora_id: apresentadoraId,
+          pode_apresentar_live: isPresenterRole(updatedUser.papel),
+        }
+      } catch (e) {
+        await db.query('ROLLBACK')
+        throw e
+      }
     })
   })
 

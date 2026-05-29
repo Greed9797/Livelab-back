@@ -111,6 +111,11 @@ async function processTenantBilling(tenantId, day, spDate) {
       // Registra o boleto no nosso banco
       const idempotencyKey = gerarIdempotencyKey(tenantId, clienteId, tituloFatura)
       
+      // SAVEPOINT por cliente: se o gateway falhar, desfazemos o boleto deste
+      // cliente (sem marcar a live como faturada) para reprocessar no próximo
+      // ciclo — em vez de comitar boleto órfão sem URL e travar a receita.
+      await db.query('SAVEPOINT cliente_fatura')
+
       const boletoQ = await db.query(
         `INSERT INTO boletos (tenant_id, cliente_id, contrato_id, tipo, valor, status, vencimento, competencia, gerado_automaticamente, idempotency_key)
          VALUES ($1, $2, $3, 'royalties', $4, 'pendente', $5, CURRENT_DATE, true, $6)
@@ -119,23 +124,26 @@ async function processTenantBilling(tenantId, day, spDate) {
         [tenantId, clienteId, data.contrato_id, valorTotal, vencimentoStr, idempotencyKey]
       )
 
-      if (boletoQ.rowCount === 0) continue // Já existia para essa chave
+      if (boletoQ.rowCount === 0) {
+        await db.query('RELEASE SAVEPOINT cliente_fatura')
+        continue // Já existia para essa chave
+      }
 
       const boletoId = boletoQ.rows[0].id
 
-      // Atualiza lives com o boleto_id e marca como faturado
-      if (data.lives.length > 0) {
-        await db.query(
-          `UPDATE lives SET faturado_em = NOW(), boleto_id = $1 WHERE id = ANY($2::uuid[])`,
-          [boletoId, data.lives]
-        )
-      }
-
-      // Comunicação com Asaas
+      // Comunicação com o gateway PRIMEIRO. A live só é marcada como faturada
+      // e os dados do boleto só são gravados APÓS o gateway confirmar a
+      // cobrança — assim uma falha do gateway não trava a receita.
+      let payment
       try {
         const clienteQ = await db.query(`SELECT nome, cpf, cnpj, email, celular, gateway_customer_id FROM clientes WHERE id = $1`, [clienteId])
         const cliente = clienteQ.rows[0]
-        if (!cliente) continue
+        if (!cliente) {
+          // Sem cliente não há como cobrar: desfaz o boleto e segue.
+          await db.query('ROLLBACK TO SAVEPOINT cliente_fatura')
+          await db.query('RELEASE SAVEPOINT cliente_fatura')
+          continue
+        }
 
         let gatewayCustomerId = cliente.gateway_customer_id
         if (!gatewayCustomerId) {
@@ -148,7 +156,7 @@ async function processTenantBilling(tenantId, day, spDate) {
           await db.query(`UPDATE clientes SET gateway_customer_id = $1 WHERE id = $2`, [gatewayCustomerId, clienteId])
         }
 
-        const payment = await criarCobranca({
+        payment = await criarCobranca({
           asaasCustomerId: gatewayCustomerId, // signature legada — primeiro arg é customer id no gateway
           valor: valorTotal,
           vencimento: vencimentoStr,
@@ -157,17 +165,29 @@ async function processTenantBilling(tenantId, day, spDate) {
           billingType: 'BOLETO',
           idempotencyKey,
         })
-
-        await db.query(
-          `UPDATE boletos SET gateway_id = $1, gateway_url = $2, gateway_pix_copia_cola = $3, gateway_provider = 'appmax' WHERE id = $4`,
-          [payment.id, payment.invoiceUrl, payment.pixCopiaECola ?? null, boletoId]
-        )
-
       } catch (err) {
-        // Se a API do gateway falhar, registramos o erro no boleto, mas comitamos o banco.
-        console.error(`Falha no gateway de pagamento para boleto ${boletoId}:`, err.message)
-        await db.query(`UPDATE boletos SET gateway_error = $1 WHERE id = $2`, [err.message, boletoId])
+        // Falha ANTES/DURANTE a criação da cobrança: nenhuma cobrança foi
+        // concluída, então desfazemos o boleto deste cliente para reprocessar
+        // no próximo ciclo (evita boleto sem URL + live travada como faturada).
+        await db.query('ROLLBACK TO SAVEPOINT cliente_fatura').catch(() => {})
+        await db.query('RELEASE SAVEPOINT cliente_fatura').catch(() => {})
+        console.error(`Falha no gateway de pagamento (cliente ${clienteId}):`, err.message)
+        continue
       }
+
+      // Gateway confirmou: a cobrança JÁ existe no provedor. A partir daqui
+      // NUNCA fazemos rollback (evitaria cobrança órfã/dupla — ver idempotência).
+      await db.query(
+        `UPDATE boletos SET gateway_id = $1, gateway_url = $2, gateway_pix_copia_cola = $3, gateway_provider = 'appmax' WHERE id = $4`,
+        [payment.id, payment.invoiceUrl, payment.pixCopiaECola ?? null, boletoId]
+      )
+      if (data.lives.length > 0) {
+        await db.query(
+          `UPDATE lives SET faturado_em = NOW(), boleto_id = $1 WHERE id = ANY($2::uuid[])`,
+          [boletoId, data.lives]
+        )
+      }
+      await db.query('RELEASE SAVEPOINT cliente_fatura')
     }
 
     await db.query('COMMIT')

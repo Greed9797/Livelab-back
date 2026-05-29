@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: liveshop-saas-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+      - key: DATABASE_URL
+        sync: false   # configurar no dashboard do Render
+      - key: JWT_SECRET
+        sync: false   # configurar no dashboard do Render
+      - key: JWT_EXPIRES_IN
+        value: 15m
+      - key: CORS_ORIGIN
+        sync: false   # ex: https://liveshop-saas.web.app
+      - key: ASAAS_API_KEY
+        sync: false
+      - key: ASAAS_WEBHOOK_TOKEN
+        sync: false
+      - key: ASAAS_SANDBOX
+        value: "false"
+      - key: USE_DEV_BYPASS
+        value: "false"

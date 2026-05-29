@@ -1,0 +1,4 @@
+ALTER TABLE lives ADD COLUMN IF NOT EXISTS gestor_id UUID
+  REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE lives ADD COLUMN IF NOT EXISTS resumo TEXT;
+CREATE INDEX IF NOT EXISTS idx_lives_gestor_id ON lives(gestor_id);

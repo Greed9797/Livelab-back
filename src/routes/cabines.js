@@ -96,7 +96,22 @@ export async function cabinesRoutes(app) {
                 COALESCE(ls.shares_count, 0) AS shares_count,
                 COALESCE(ls.gifts_diamonds, 0) AS gifts_diamonds,
                 COALESCE(ls.total_orders, 0) AS total_orders,
-                COALESCE(lr_agg.agenda, '[]'::json) AS agenda
+                CASE
+                  WHEN agenda_next.id IS NOT NULL
+                  THEN json_build_array(json_build_object(
+                    'id',             agenda_next.id,
+                    'data_inicio',    agenda_next.data_inicio,
+                    'data_fim',       agenda_next.data_fim,
+                    'cliente_id',     agenda_next.cliente_id,
+                    'cliente_nome',   agenda_next.cliente_nome,
+                    'marca_id',       agenda_next.marca_id,
+                    'marca_nome',     agenda_next.marca_nome,
+                    'marca_logo_url', agenda_next.marca_logo_url,
+                    'tiktok_username', agenda_next.tiktok_username,
+                    'status', 'planejado'
+                  ))
+                  ELSE '[]'::json
+                END AS agenda
          FROM cabines c
          LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = c.tenant_id
          LEFT JOIN clientes cl_reserva ON cl_reserva.id = ct.cliente_id AND cl_reserva.tenant_id = c.tenant_id
@@ -144,31 +159,6 @@ export async function cabinesRoutes(app) {
            ORDER BY ae.data_inicio
            LIMIT 1
          ) agenda_next ON true
-         LEFT JOIN LATERAL (
-           SELECT COALESCE(json_agg(json_build_object(
-             'id', ae.id,
-             'data', (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date,
-             'hora_inicio', (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::time::text,
-             'hora_fim', (ae.data_fim AT TIME ZONE 'America/Sao_Paulo')::time::text,
-             'data_inicio', ae.data_inicio,
-             'data_fim', ae.data_fim,
-             'cliente_nome', cl2.nome,
-             'cliente_id', m.cliente_id,
-             'marca_id', ae.marca_id,
-             'marca_nome', m.nome,
-             'marca_logo_url', m.logo_url,
-             'tiktok_username', ${tiktokUsernameSql({ marca: 'm', cliente: 'cl2' })},
-             'status', ae.status
-           ) ORDER BY ae.data_inicio), '[]'::json) AS agenda
-           FROM agenda_eventos ae
-           JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
-           LEFT JOIN clientes cl2 ON cl2.id = m.cliente_id AND cl2.tenant_id = ae.tenant_id
-           WHERE ae.cabine_id = c.id
-             AND ae.tenant_id = c.tenant_id
-             AND ae.tipo = 'live'
-             AND ae.status IN ('planejado', 'confirmado', 'ao_vivo')
-             AND ae.data_fim >= NOW()
-         ) lr_agg ON true
          WHERE c.tenant_id = $1::uuid
            AND c.ativo IS NOT FALSE
            AND c.deleted_at IS NULL

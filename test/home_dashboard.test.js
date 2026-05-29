@@ -3,13 +3,13 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { homeRoutes } from '../src/routes/home.js'
 
-function buildApp(queryMock) {
+function buildApp(queryMock, tenantId = 'tenant-a') {
   const app = Fastify()
   const release = vi.fn()
   const tenantIds = []
 
   app.decorate('requirePapel', (papeis) => async (request, reply) => {
-    request.user = { tenant_id: 'tenant-a', sub: 'user-1', papel: 'franqueado' }
+    request.user = { tenant_id: tenantId, sub: 'user-1', papel: 'franqueado' }
     if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
   })
   app.decorate('dbTenant', async () => ({ query: queryMock, release }))
@@ -49,6 +49,7 @@ function createHomeQueryMock() {
       return {
         rows: [{
           numero: 1,
+          id: 'cabine-1',
           status: 'ao_vivo',
           live_atual_id: 'live-1',
           iniciado_em: new Date(Date.now() - 30 * 60_000).toISOString(),
@@ -136,8 +137,7 @@ describe('home dashboard', () => {
     expect(rankingSql).toContain("va.origem = 'live'")
     expect(rankingSql).toContain("date_trunc('month'")
 
-    const proximasSql = sqls.find((sql) => sql.includes('proximas_lives_operacionais') && sql.includes('FROM agenda_eventos ae'))
-    expect(proximasSql).toContain('ae.tenant_id = current_setting')
+    expect(sqls.some((sql) => sql.includes('proximas_lives_operacionais'))).toBe(false)
     const agendaSql = sqls.find((sql) => sql.includes('SELECT ae.id, ae.tipo') && sql.includes('FROM agenda_eventos ae'))
     expect(agendaSql).toContain('a_evento.id = ae.apresentadora_id')
     const rankingApSql = sqls.find((sql) => sql.includes('ranking_apresentadoras_mes'))
@@ -145,6 +145,51 @@ describe('home dashboard', () => {
     expect(rankingApSql).toContain('LEFT JOIN vendas_atribuidas va')
     expect(rankingApSql).toContain('a.fixo')
     expect(queryMock.mock.calls.some(([, params]) => Array.isArray(params) && params.includes('tenant-a'))).toBe(true)
+
+    await app.close()
+  })
+
+  it('adds private cache/timing headers and serves repeated requests from cache', async () => {
+    const queryMock = createHomeQueryMock()
+    const { app } = buildApp(queryMock, 'tenant-cache')
+    await app.register(homeRoutes)
+
+    const first = await app.inject({ method: 'GET', url: '/v1/home/dashboard' })
+    const callsAfterFirst = queryMock.mock.calls.length
+    const second = await app.inject({ method: 'GET', url: '/v1/home/dashboard' })
+
+    expect(first.statusCode).toBe(200)
+    expect(first.headers['x-home-dashboard-cache']).toBe('MISS')
+    expect(first.headers['cache-control']).toContain('private')
+    expect(first.headers['cache-control']).toContain('max-age=15')
+    expect(first.headers['server-timing']).toContain('total;dur=')
+    expect(second.statusCode).toBe(200)
+    expect(second.headers['x-home-dashboard-cache']).toBe('HIT')
+    expect(queryMock.mock.calls.length).toBe(callsAfterFirst)
+
+    await app.close()
+  })
+
+  it('deduplicates simultaneous dashboard requests for the same tenant', async () => {
+    const baselineMock = createHomeQueryMock()
+    const baseline = buildApp(baselineMock, 'tenant-baseline')
+    await baseline.app.register(homeRoutes)
+    await baseline.app.inject({ method: 'GET', url: '/v1/home/dashboard' })
+    const singleRequestQueryCount = baselineMock.mock.calls.length
+    await baseline.app.close()
+
+    const queryMock = createHomeQueryMock()
+    const { app } = buildApp(queryMock, 'tenant-inflight')
+    await app.register(homeRoutes)
+
+    const [first, second] = await Promise.all([
+      app.inject({ method: 'GET', url: '/v1/home/dashboard' }),
+      app.inject({ method: 'GET', url: '/v1/home/dashboard' }),
+    ])
+
+    expect(first.statusCode).toBe(200)
+    expect(second.statusCode).toBe(200)
+    expect(queryMock.mock.calls.length).toBe(singleRequestQueryCount)
 
     await app.close()
   })

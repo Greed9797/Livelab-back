@@ -1,13 +1,51 @@
+import { performance } from 'node:perf_hooks'
 import { getPresenterRanking, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
+
+const HOME_DASHBOARD_CACHE_TTL_MS = Number(process.env.HOME_DASHBOARD_CACHE_TTL_MS ?? 30_000)
+const HOME_DASHBOARD_BROWSER_MAX_AGE_SECONDS = 15
+const HOME_DASHBOARD_STALE_SECONDS = 30
+const homeDashboardCache = new Map()
+const homeDashboardInFlight = new Map()
+
+function homeDashboardCacheEnabled() {
+  return Number.isFinite(HOME_DASHBOARD_CACHE_TTL_MS) && HOME_DASHBOARD_CACHE_TTL_MS > 0
+}
+
+function getHomeDashboardCache(key, now = Date.now()) {
+  const entry = homeDashboardCache.get(key)
+  if (!entry) return null
+  if (entry.expiresAt <= now) {
+    homeDashboardCache.delete(key)
+    return null
+  }
+  return entry.value
+}
+
+function setHomeDashboardHeaders(reply, cacheState, startedAt) {
+  const totalMs = Math.max(performance.now() - startedAt, 0)
+  reply.header('Cache-Control', `private, max-age=${HOME_DASHBOARD_BROWSER_MAX_AGE_SECONDS}, stale-while-revalidate=${HOME_DASHBOARD_STALE_SECONDS}`)
+  reply.header('X-Home-Dashboard-Cache', cacheState)
+  reply.header('Server-Timing', `cache;desc="${cacheState}", total;dur=${totalMs.toFixed(1)}`)
+}
 
 export async function homeRoutes(app) {
   // GET /v1/home/dashboard
   app.get('/v1/home/dashboard', {
     preHandler: app.requirePapel(['franqueado', 'gerente']),
-  }, async (request) => {
+  }, async (request, reply) => {
     const { tenant_id } = request.user
-    return app.withTenant(tenant_id, async (db) => {
+    const startedAt = performance.now()
+    const cacheKey = String(tenant_id)
+    const cached = homeDashboardCacheEnabled() ? getHomeDashboardCache(cacheKey) : null
+    if (cached) {
+      setHomeDashboardHeaders(reply, 'HIT', startedAt)
+      return cached
+    }
+
+    let payloadPromise = homeDashboardInFlight.get(cacheKey)
+    if (!payloadPromise) {
+      payloadPromise = app.withTenant(tenant_id, async (db) => {
       try {
       const round2 = (value) => parseFloat(Number(value ?? 0).toFixed(2))
       const growthPct = (current, previous) => {
@@ -40,6 +78,7 @@ export async function homeRoutes(app) {
       `),
         db.query(`
         SELECT
+            c.id,
             c.numero,
             CASE WHEN l.id IS NOT NULL THEN 'ao_vivo'
                  WHEN c.status = 'ao_vivo' THEN 'disponivel'
@@ -111,6 +150,7 @@ export async function homeRoutes(app) {
         }
         return {
           numero: c.numero,
+          id: c.id,
           status: c.status,
           live_atual_id: c.live_atual_id,
           viewer_count: Number(c.viewer_count),
@@ -118,6 +158,7 @@ export async function homeRoutes(app) {
           gmv_atual: parseFloat(Number(c.gmv_atual).toFixed(2)),
           cliente_nome: c.cliente_nome,
           apresentador: c.apresentador,
+          apresentador_nome: c.apresentador,
           tiktok_username: c.tiktok_username,
           duracao_min: duracaoMin,
           horas_contratadas: parseFloat(Number(c.horas_contratadas).toFixed(2)),
@@ -360,51 +401,7 @@ export async function homeRoutes(app) {
         operacionais: Number(ocupacaoQ.rows[0].operacionais)
       }
 
-      // 8. Próximas lives do dia (agenda operacional)
-      let proximasLives = []
-      try {
-        const proximasQ = await db.query(`
-          WITH proximas_lives_operacionais AS (
-            SELECT ae.id,
-                   (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date AS data_solicitada,
-                   (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::time AS hora_inicio,
-                   (ae.data_fim AT TIME ZONE 'America/Sao_Paulo')::time AS hora_fim,
-                   c.numero AS cabine_numero,
-                   COALESCE(cl.nome, m.nome) AS cliente_nome
-            FROM agenda_eventos ae
-            JOIN marcas m ON m.id = ae.marca_id
-             AND m.tenant_id = ae.tenant_id
-            LEFT JOIN clientes cl ON cl.id = m.cliente_id
-             AND cl.tenant_id = ae.tenant_id
-            LEFT JOIN cabines c ON c.id = ae.cabine_id
-             AND c.tenant_id = ae.tenant_id
-            WHERE ae.tenant_id = current_setting('app.tenant_id', true)::uuid
-              AND ae.tipo = 'live'
-              AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date = CURRENT_DATE
-              AND ae.data_inicio > NOW()
-              AND ae.status IN ('planejado','confirmado')
-          )
-          SELECT *
-          FROM proximas_lives_operacionais
-          ORDER BY hora_inicio
-          LIMIT 5
-        `)
-        proximasLives = proximasQ.rows.map(r => ({
-          id: r.id,
-          data_solicitada: r.data_solicitada,
-          hora_inicio: r.hora_inicio,
-          hora_fim: r.hora_fim,
-          cabine_numero: Number(r.cabine_numero),
-          cliente_nome: r.cliente_nome
-        }))
-      } catch (error) {
-        request.log?.warn?.({ err: error }, 'home/dashboard: próximas lives (agenda_eventos) indisponível')
-        proximasLives = []
-      }
-
-      let agendaHoje = []
-      try {
-        const agendaQ = await db.query(`
+      const agendaHojePromise = db.query(`
           SELECT ae.id, ae.tipo, ae.status, ae.data_inicio, ae.data_fim,
                  c.numero AS cabine_numero,
                  c.nome AS cabine_nome,
@@ -436,8 +433,7 @@ export async function homeRoutes(app) {
             AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
           ORDER BY ae.data_inicio ASC
           LIMIT 50
-        `)
-        agendaHoje = agendaQ.rows.map(r => ({
+        `).then((agendaQ) => agendaQ.rows.map(r => ({
           id: r.id,
           tipo: r.tipo,
           status: r.status,
@@ -450,18 +446,16 @@ export async function homeRoutes(app) {
           tiktok_username: r.tiktok_username,
           apresentadora_nome: r.apresentadora_nome,
           nome: r.apresentadora_nome
-        }))
-      } catch (error) {
+        }))).catch((error) => {
         request.log?.warn?.({ err: error }, 'home/dashboard: agenda_eventos indisponível')
-      }
+        return []
+      })
 
-      let rankingApresentadorasMes = []
-      try {
-        rankingApresentadorasMes = (await getPresenterRanking(db, {
+      const rankingApresentadorasMesPromise = getPresenterRanking(db, {
           tenantId: tenant_id,
           range: monthRangeFromQuery(),
           limit: 10,
-        })).map((r) => ({
+        }).then((rows) => rows.map((r) => ({
           ...r,
           gmv: round2(r.gmv),
           gmv_lives: round2(r.gmv_lives),
@@ -470,13 +464,12 @@ export async function homeRoutes(app) {
           comissao_variavel: round2(r.comissao_variavel),
           total_recebido: round2(r.total_recebido),
           gmv_medio_live: Number(r.lives) > 0 ? round2(r.gmv / Number(r.lives)) : 0,
-        }))
-      } catch (error) {
+        }))).catch((error) => {
         request.log?.warn?.({ err: error }, 'home/dashboard: ranking de apresentadoras indisponível')
-      }
+        return []
+      })
 
-      const [gmvDiarioQ, metaQ] = await Promise.all([
-        db.query(`
+      const gmvDiarioPromise = db.query(`
           SELECT
             EXTRACT(DAY FROM va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')::int AS dia,
             COALESCE(SUM(va.gmv), 0) AS gmv
@@ -486,15 +479,33 @@ export async function homeRoutes(app) {
                 = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
           GROUP BY dia
           ORDER BY dia
-        `),
-        db.query(`
+        `)
+      const metaPromise = db.query(`
           SELECT meta_gmv, m1_teto, m1_pct, m2_teto, m2_pct, m3_teto, m3_pct, m4_pct
           FROM meta_unidade
           WHERE tenant_id = $1
             AND ano_mes = to_char(NOW() AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')
           LIMIT 1
-        `, [tenant_id]),
+        `, [tenant_id])
+
+      const [agendaHoje, rankingApresentadorasMes, gmvDiarioQ, metaQ] = await Promise.all([
+        agendaHojePromise,
+        rankingApresentadorasMesPromise,
+        gmvDiarioPromise,
+        metaPromise,
       ])
+
+      const proximasLives = agendaHoje
+        .filter((r) => r.tipo === 'live' && ['planejado', 'confirmado'].includes(r.status) && new Date(r.data_inicio) > new Date())
+        .slice(0, 5)
+        .map((r) => ({
+          id: r.id,
+          data_solicitada: new Date(r.data_inicio).toISOString().slice(0, 10),
+          hora_inicio: new Date(r.data_inicio).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }),
+          hora_fim: new Date(r.data_fim).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' }),
+          cabine_numero: r.cabine_numero,
+          cliente_nome: r.cliente_nome ?? r.marca_nome,
+        }))
 
       const gmvDiario = (() => {
         const today = new Date()
@@ -609,6 +620,19 @@ export async function homeRoutes(app) {
         app.log.error({ err: error }, 'ERRO NA ROTA /v1/home/dashboard')
         throw error
       }
-    })
+      })
+      homeDashboardInFlight.set(cacheKey, payloadPromise)
+      payloadPromise.finally(() => homeDashboardInFlight.delete(cacheKey)).catch(() => {})
+    }
+
+    const payload = await payloadPromise
+    if (homeDashboardCacheEnabled()) {
+      homeDashboardCache.set(cacheKey, {
+        expiresAt: Date.now() + HOME_DASHBOARD_CACHE_TTL_MS,
+        value: payload,
+      })
+    }
+    setHomeDashboardHeaders(reply, 'MISS', startedAt)
+    return payload
   })
 }

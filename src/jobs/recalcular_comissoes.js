@@ -57,11 +57,16 @@ export async function runRecalcularComissoesTick(app) {
     for (const { tenant_id, apresentadora_id } of targets.rows) {
       const client = await app.db.pool.connect()
       try {
+        // set_config(..., true) é transaction-local; sem BEGIN a GUC reverte
+        // antes do recalc e o contexto RLS é descartado. Envolver em transação
+        // (padrão de encerrar_lives_zumbi.js) garante o tenant_id sob RLS.
+        await client.query('BEGIN')
         await client.query(`SELECT set_config('app.tenant_id', $1::text, true)`, [tenant_id])
         const res = await recalcularVendasAtribuidasApresentadora(client, {
           tenantId: tenant_id,
           apresentadoraId: apresentadora_id,
         })
+        await client.query('COMMIT')
         const updated = res?.updated ?? 0
         if (updated > 0) {
           results.vendas += updated
@@ -69,6 +74,7 @@ export async function runRecalcularComissoesTick(app) {
           seenTenants.add(tenant_id)
         }
       } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
         results.errors += 1
         app.log?.warn?.({ err, tenant_id, apresentadora_id },
           '[recalc comissoes] falha em apresentadora')
@@ -96,17 +102,21 @@ export async function runRecalcularComissoesTick(app) {
       for (const live of livesOrfas.rows) {
         const lc = await app.db.pool.connect()
         try {
+          // Mesma transação local para preservar o contexto RLS (ver acima).
+          await lc.query('BEGIN')
           await lc.query(`SELECT set_config('app.tenant_id', $1::text, true)`, [live.tenant_id])
           const r = await calcularComissoesDaLive(lc, {
             liveId: live.id,
             tenantId: live.tenant_id,
             gmv: Number(live.gmv),
           })
+          await lc.query('COMMIT')
           if (Array.isArray(r) && r.length > 0) {
             results.livesOrfasProcessadas = (results.livesOrfasProcessadas ?? 0) + 1
             results.vendas += r.length
           }
         } catch (err) {
+          await lc.query('ROLLBACK').catch(() => {})
           results.errors += 1
           app.log?.warn?.({ err, liveId: live.id }, '[recalc comissoes] live orfã falhou')
         } finally {

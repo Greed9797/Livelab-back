@@ -623,7 +623,7 @@ export async function cabinesRoutes(app) {
       }
 
       const topClientesQ = await db.query(`
-        SELECT cl.nome, SUM(l.fat_gerado) as fat_total, COUNT(l.id) as total_lives
+        SELECT cl.nome, SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)) as fat_total, COUNT(l.id) as total_lives
         FROM lives l
         JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
         WHERE l.cabine_id = $1
@@ -639,8 +639,8 @@ export async function cabinesRoutes(app) {
         SELECT
           EXTRACT(HOUR FROM iniciado_em) AS hora,
           COUNT(*) AS total_lives,
-          AVG(fat_gerado) AS gmv_medio,
-          SUM(fat_gerado) AS gmv_total
+          AVG(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)) AS gmv_medio,
+          SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)) AS gmv_total
         FROM lives
         WHERE cabine_id = $1
           AND tenant_id = $3::uuid
@@ -654,7 +654,7 @@ export async function cabinesRoutes(app) {
         SELECT
           EXTRACT(MONTH FROM iniciado_em) as mes,
           EXTRACT(YEAR FROM iniciado_em) as ano,
-          SUM(fat_gerado) as fat_total,
+          SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)) as fat_total,
           COUNT(id) as total_lives
         FROM lives
         WHERE cabine_id = $1 AND tenant_id = $2::uuid AND status = 'encerrada'
@@ -675,7 +675,7 @@ export async function cabinesRoutes(app) {
       }
 
       const totaisQ = await db.query(`
-        SELECT COUNT(id) as total_lives, SUM(fat_gerado) as gmv_total
+        SELECT COUNT(id) as total_lives, SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)) as gmv_total
         FROM lives WHERE cabine_id = $1 AND tenant_id = $2::uuid AND status = 'encerrada'
       `, [cabineId, tenant_id])
 
@@ -685,6 +685,7 @@ export async function cabinesRoutes(app) {
           l.iniciado_em,
           l.encerrado_em,
           l.fat_gerado,
+          COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
           l.final_total_likes,
           l.final_total_comments,
           l.final_total_shares,
@@ -731,6 +732,7 @@ export async function cabinesRoutes(app) {
           iniciado_em: r.iniciado_em,
           encerrado_em: r.encerrado_em,
           fat_gerado: parseFloat(r.fat_gerado || 0),
+          gmv: parseFloat(r.gmv || 0),
           final_total_likes: parseInt(r.final_total_likes || 0),
           final_total_comments: parseInt(r.final_total_comments || 0),
           final_total_shares: parseInt(r.final_total_shares || 0),
@@ -790,7 +792,8 @@ export async function cabinesRoutes(app) {
       }
 
       const liveQ = await db.query(`
-        SELECT l.iniciado_em, l.fat_gerado,
+	        SELECT l.iniciado_em, l.fat_gerado,
+	               COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
                l.marca_id,
                c.contrato_id,
                u.nome AS apresentador_nome,
@@ -859,10 +862,11 @@ export async function cabinesRoutes(app) {
         live_id: liveId,
         contrato_id: liveData.contrato_id ?? null,
         tiktok_username: liveData.tiktok_username ?? null,
-        viewer_count: Number(snapshot.viewer_count ?? 0),
-        total_viewers: Number(snapshot.total_viewers ?? 0),
-        gmv_atual: parseFloat(snapshot.gmv ?? 0),
-        total_orders: Number(snapshot.total_orders ?? 0),
+	        viewer_count: Number(snapshot.viewer_count ?? 0),
+	        total_viewers: Number(snapshot.total_viewers ?? 0),
+	        gmv_atual: parseFloat(snapshot.gmv ?? 0),
+	        gmv: parseFloat(liveData.gmv ?? 0),
+	        total_orders: Number(snapshot.total_orders ?? 0),
         likes_count: Number(snapshot.likes_count ?? 0),
         comments_count: Number(snapshot.comments_count ?? 0),
         gifts_diamonds: Number(snapshot.gifts_diamonds ?? 0),
@@ -1060,7 +1064,8 @@ export async function cabinesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const { rows } = await db.query(`
         SELECT
-          ROUND(AVG(fat_gerado)::numeric, 2) AS avg_fat_gerado,
+	          ROUND(AVG(gmv)::numeric, 2) AS avg_fat_gerado,
+	          ROUND(AVG(gmv)::numeric, 2) AS avg_gmv,
           ROUND(AVG(qtd_pedidos)::numeric, 0)::int AS avg_qtd_pedidos,
           ROUND(AVG(manual_views)::numeric, 0)::int AS avg_views,
           ROUND(AVG(manual_likes)::numeric, 0)::int AS avg_likes,
@@ -1068,12 +1073,12 @@ export async function cabinesRoutes(app) {
           ROUND(AVG(manual_shares)::numeric, 0)::int AS avg_shares,
           COUNT(*)::int AS amostra
         FROM (
-          SELECT fat_gerado, qtd_pedidos, manual_views, manual_likes, manual_comments, manual_shares
+	          SELECT COALESCE(ads_gmv, manual_gmv, fat_gerado, 0) AS gmv, qtd_pedidos, manual_views, manual_likes, manual_comments, manual_shares
           FROM lives
           WHERE tenant_id = $1::uuid
             AND cabine_id = $2::uuid
             AND status = 'encerrada'
-            AND fat_gerado IS NOT NULL
+	            AND COALESCE(ads_gmv, manual_gmv, fat_gerado) IS NOT NULL
           ORDER BY encerrado_em DESC NULLS LAST
           LIMIT 5
         ) ult

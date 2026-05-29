@@ -121,13 +121,14 @@ export async function homeRoutes(app) {
             ORDER BY captured_at DESC LIMIT 1
         ) ls ON true
         LEFT JOIN LATERAL (
-            SELECT COALESCE(SUM(LEAST(EXTRACT(EPOCH FROM (encerrado_em - iniciado_em)) / 3600.0, 24.0)), 0) AS horas_realizadas_hoje
-            FROM lives
-            WHERE cabine_id = c.id
-              AND tenant_id = c.tenant_id
-              AND status = 'encerrada'
-              AND encerrado_em IS NOT NULL
-              AND date_trunc('day', iniciado_em) = date_trunc('day', NOW())
+	            SELECT COALESCE(SUM(LEAST(EXTRACT(EPOCH FROM (COALESCE(encerrado_em, previsto_fim) - iniciado_em)) / 3600.0, 24.0)), 0) AS horas_realizadas_hoje
+	            FROM lives
+	            WHERE cabine_id = c.id
+	              AND tenant_id = c.tenant_id
+	              AND status = 'encerrada'
+	              AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
+	              AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
+	              AND date_trunc('day', iniciado_em) = date_trunc('day', NOW())
         ) enc ON true
         WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND c.ativo IS NOT FALSE
@@ -201,39 +202,53 @@ export async function homeRoutes(app) {
               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
       `),
         db.query(`
-        WITH home_gmv_operacional AS (
+        WITH live_metrics AS (
           SELECT
-              COALESCE(SUM(va.gmv) FILTER (
-                WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                      = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-              ), 0) AS gmv_total_mes,
-              COALESCE(SUM(va.gmv) FILTER (
-                WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                      = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-              ), 0) AS gmv_mes,
-              COALESCE(SUM(va.gmv) FILTER (
-                WHERE va.origem = 'live'
-                AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)) FILTER (
+              WHERE date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
                     = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
             ), 0) AS gmv_lives_mes,
+            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)) FILTER (
+              WHERE date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
+            ), 0) AS gmv_lives_mes_anterior
+          FROM lives l
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
+        ),
+        video_metrics AS (
+          SELECT
             COALESCE(SUM(va.gmv) FILTER (
               WHERE va.origem = 'video'
                 AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
                     = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
             ), 0) AS gmv_videos_mes,
-              COALESCE(SUM(va.gmv) FILTER (
-                WHERE date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                      = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
-              ), 0) AS gmv_mes_anterior,
-              (
-                SELECT COUNT(*)::int
-                FROM video_registros vr
-                WHERE vr.tenant_id = current_setting('app.tenant_id', true)::uuid
-                  AND date_trunc('month', vr.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                      = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-              ) AS videos_mes
-            FROM vendas_atribuidas va
+            COALESCE(SUM(va.gmv) FILTER (
+              WHERE va.origem = 'video'
+                AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
+            ), 0) AS gmv_videos_mes_anterior,
+            (
+              SELECT COUNT(*)::int
+              FROM video_registros vr
+              WHERE vr.tenant_id = current_setting('app.tenant_id', true)::uuid
+                AND date_trunc('month', vr.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            ) AS videos_mes
+          FROM vendas_atribuidas va
           WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+        ),
+        home_gmv_operacional AS (
+        SELECT
+          (lm.gmv_lives_mes + vm.gmv_videos_mes) AS gmv_total_mes,
+          (lm.gmv_lives_mes + vm.gmv_videos_mes) AS gmv_mes,
+          lm.gmv_lives_mes,
+          vm.gmv_videos_mes,
+          (lm.gmv_lives_mes_anterior + vm.gmv_videos_mes_anterior) AS gmv_mes_anterior,
+          lm.gmv_lives_mes_anterior,
+          vm.gmv_videos_mes_anterior,
+          vm.videos_mes
+        FROM live_metrics lm CROSS JOIN video_metrics vm
         )
         SELECT * FROM home_gmv_operacional
       `),
@@ -350,26 +365,46 @@ export async function homeRoutes(app) {
         WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
       `),
         db.query(`
-          WITH ranking_marcas_mes AS (
+          WITH live_source AS (
+            SELECT
+              l.marca_id,
+              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv,
+              COUNT(*)::int AS lives
+            FROM lives l
+            WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND l.status = 'encerrada'
+              AND l.marca_id IS NOT NULL
+              AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            GROUP BY l.marca_id
+          ),
+          video_source AS (
             SELECT
               va.marca_id,
-              m.nome,
-              COALESCE(m.logo_url, c.logo_url) AS logo_url,
-              COALESCE(m.site, c.site) AS site,
-              COALESCE(SUM(va.gmv), 0) AS gmv,
-              COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives
+              COALESCE(SUM(va.gmv), 0) AS gmv
             FROM vendas_atribuidas va
-            JOIN marcas m ON m.id = va.marca_id
-             AND m.tenant_id = va.tenant_id
-            LEFT JOIN clientes c ON c.id = m.cliente_id
-             AND c.tenant_id = m.tenant_id
             WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND va.marca_id IS NOT NULL
-              AND va.origem IN ('live', 'video')
+              AND va.origem = 'video'
               AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
               AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
                   = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-            GROUP BY va.marca_id, m.nome, COALESCE(m.logo_url, c.logo_url), COALESCE(m.site, c.site)
+            GROUP BY va.marca_id
+          ),
+          ranking_marcas_mes AS (
+            SELECT
+              m.id AS marca_id,
+              m.nome,
+              COALESCE(m.logo_url, c.logo_url) AS logo_url,
+              COALESCE(m.site, c.site) AS site,
+              COALESCE(ls.gmv, 0) + COALESCE(vs.gmv, 0) AS gmv,
+              COALESCE(ls.lives, 0)::int AS lives
+            FROM marcas m
+            LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
+            LEFT JOIN live_source ls ON ls.marca_id = m.id
+            LEFT JOIN video_source vs ON vs.marca_id = m.id
+            WHERE m.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND (COALESCE(ls.gmv, 0) <> 0 OR COALESCE(vs.gmv, 0) <> 0)
           )
           SELECT marca_id, nome, logo_url, site, gmv, lives
           FROM ranking_marcas_mes
@@ -378,12 +413,13 @@ export async function homeRoutes(app) {
         `),
         db.query(`
           SELECT COALESCE(SUM(
-            LEAST(EXTRACT(EPOCH FROM (encerrado_em - iniciado_em)) / 3600.0, 24.0)
+            LEAST(EXTRACT(EPOCH FROM (COALESCE(encerrado_em, previsto_fim) - iniciado_em)) / 3600.0, 24.0)
           ), 0) AS horas_live_mes
           FROM lives
           WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
             AND status = 'encerrada'
-            AND encerrado_em IS NOT NULL
+            AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
+            AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
             AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
                 = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
         `),
@@ -470,13 +506,32 @@ export async function homeRoutes(app) {
       })
 
       const gmvDiarioPromise = db.query(`
+          WITH daily AS (
+            SELECT
+              EXTRACT(DAY FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS dia,
+              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv
+            FROM lives l
+            WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND l.status = 'encerrada'
+              AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            GROUP BY dia
+            UNION ALL
+            SELECT
+              EXTRACT(DAY FROM va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')::int AS dia,
+              COALESCE(SUM(va.gmv), 0) AS gmv
+            FROM vendas_atribuidas va
+            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND va.origem = 'video'
+              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+              AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            GROUP BY dia
+          )
           SELECT
-            EXTRACT(DAY FROM va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')::int AS dia,
-            COALESCE(SUM(va.gmv), 0) AS gmv
-          FROM vendas_atribuidas va
-          WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
-            AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            dia,
+            COALESCE(SUM(gmv), 0) AS gmv
+          FROM daily
           GROUP BY dia
           ORDER BY dia
         `)
@@ -532,8 +587,13 @@ export async function homeRoutes(app) {
       const videosMes = Number(gmvOperacional.videos_mes ?? 0)
       const livesMes = Number(livesMesQ.rows[0].lives_mes)
       const gmvMesAnterior = round2(gmvOperacional.gmv_mes_anterior)
+      const gmvLivesMesAnterior = round2(gmvOperacional.gmv_lives_mes_anterior)
       const liveCabinesAtivas = cabinesFormatadas.filter(c => c.status === 'ao_vivo')
       const gmvAoVivoAgora = round2(liveCabinesAtivas.reduce((acc, c) => acc + Number(c.gmv_atual ?? 0), 0))
+      const horasLiveMes = parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0).toFixed(1))
+      const gmvPorLiveMes = livesMes > 0 ? round2(gmvLivesMes / livesMes) : 0
+      const gmvPorHoraMes = horasLiveMes > 0 ? round2(gmvLivesMes / horasLiveMes) : 0
+      const gmvPorLivePrev = livesMes > 0 ? round2(gmvLivesMesAnterior / livesMes) : 0
       const alertasOperacionais = [
         { tipo: 'conflitos_agenda', label: 'Conflitos de agenda', valor: Number(alertas.conflitos_agenda), prioridade: 'alta' },
         { tipo: 'lives_sem_apresentador', label: 'Lives sem apresentadora definida', valor: Number(alertas.lives_sem_apresentador), prioridade: 'media' },
@@ -569,16 +629,25 @@ export async function homeRoutes(app) {
         videos_mes:       videosMes,
         gmv_lives_mes:    gmvLivesMes,
         gmv_videos_mes:   gmvVideosMes,
-        horas_live_mes:   parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0).toFixed(1)),
+        horas_live_mes:   horasLiveMes,
+        horas_live:       horasLiveMes,
         media_viewers:    Math.round(Number(mediaViewersQ.rows[0].media)),
 
         // Operação live commerce
         gmv_ao_vivo_agora: gmvAoVivoAgora,
         lives_ativas_agora: liveCabinesAtivas.length,
         lives_hoje: Number(livesHojeQ.rows[0].lives_hoje),
-        ticket_medio_live_mes: livesMes > 0 ? round2(gmvLivesMes / livesMes) : 0,
+        ticket_medio_live_mes: gmvPorLiveMes,
+        gmv_por_live: gmvPorLiveMes,
+        gmv_por_live_mes: gmvPorLiveMes,
+        gmv_por_live_prev: gmvPorLivePrev,
+        gmv_por_hora: gmvPorHoraMes,
+        gmv_por_hora_mes: gmvPorHoraMes,
+        gmv_por_hora_prev: 0,
         variacao_gmv_mes_anterior_pct: growthPct(gmvMes, gmvMesAnterior),
-        gmv_lives_mes_anterior: gmvMesAnterior,
+        gmv_lives_mes_anterior: gmvLivesMesAnterior,
+        gmv_mes_prev: gmvMesAnterior,
+        gmv_prev: gmvMesAnterior,
         alertas_operacionais: alertasOperacionais,
         ranking_apresentadoras_mes: rankingApresentadorasMes,
         ranking_apresentadoras_hoje: rankingApresentadorasMes,

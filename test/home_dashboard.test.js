@@ -133,8 +133,9 @@ describe('home dashboard', () => {
     expect(gmvSql).toContain("va.origem = 'video'")
 
     const rankingSql = sqls.find((sql) => sql.includes('ranking_marcas_mes'))
-    expect(rankingSql).toContain('FROM vendas_atribuidas va')
-    expect(rankingSql).toContain("va.origem = 'live'")
+    expect(rankingSql).toContain('FROM lives l')
+    expect(rankingSql).toContain("COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)")
+    expect(rankingSql).toContain("va.origem = 'video'")
     expect(rankingSql).toContain("date_trunc('month'")
 
     expect(sqls.some((sql) => sql.includes('proximas_lives_operacionais'))).toBe(false)

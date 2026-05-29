@@ -105,6 +105,7 @@ export const MIGRATIONS_LIST = [
   '108_apresentadora_faixas_default.sql',
   '109_users_email_active_unique.sql',
   '110_backfill_user_presenter_profiles.sql',
+  '111_lives_funnel_ads_metrics.sql',
 ]
 
 async function ensureMigrationsTable(client) {

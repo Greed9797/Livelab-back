@@ -4,6 +4,7 @@ import { timingSafeEqual } from 'crypto'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import helmet from '@fastify/helmet'
+import compress from '@fastify/compress'
 import multipart from '@fastify/multipart'
 import { dbPlugin } from './plugins/db.js'
 import { authPlugin } from './plugins/auth.js'
@@ -154,8 +155,10 @@ export async function buildApp(opts = {}) {
         const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
         return cb(isLocal ? null : new Error('Not allowed by CORS'), isLocal)
       }
-      // TikTok portals → sempre permitir (webhooks e OAuth callback)
-      if (TIKTOK_ORIGINS.some(o => origin.startsWith(o))) return cb(null, true)
+      // TikTok portals → sempre permitir (webhooks e OAuth callback).
+      // Match exato: startsWith permitia bypass por prefixo (ex.:
+      // https://open.tiktokapis.com.evil.com). Origins são scheme+host puros.
+      if (TIKTOK_ORIGINS.includes(origin)) return cb(null, true)
       // App Firebase / domínios produção → permitir se na allowlist
       if (corsAllowedOrigins.includes(origin)) return cb(null, true)
       cb(new Error('Not allowed by CORS'))
@@ -181,6 +184,7 @@ export async function buildApp(opts = {}) {
     keyGenerator: (request) => request.ip,
     errorResponseBuilder: () => ({ error: 'Muitas requisições. Tente novamente em breve.' }),
   })
+  await app.register(compress, { global: true })
   await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024 } })
 
   // Captura rawBody em JSON pra validação HMAC de webhooks (bio-crm, tiktok).

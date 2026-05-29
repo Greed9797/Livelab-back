@@ -1378,6 +1378,8 @@ export async function livesRoutes(app) {
   app.get('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request) => {
     const { tenant_id, papel, sub } = request.user
     const statusFilter = request.query?.status // 'em_andamento' | 'encerrada' | undefined
+    const reqLimit = Math.min(200, Math.max(10, parseInt(request.query?.limit ?? '50', 10)))
+    const reqOffset = Math.max(0, parseInt(request.query?.page ?? '0', 10)) * reqLimit
     return app.withTenant(tenant_id, async (db) => {
       const params = [tenant_id]
       let where = 'WHERE l.tenant_id = $1::uuid'
@@ -1485,7 +1487,7 @@ export async function livesRoutes(app) {
            LIMIT 1
          ) ls ON true
          ${where}
-         ORDER BY l.iniciado_em DESC LIMIT 100`,
+         ORDER BY l.iniciado_em DESC LIMIT ${reqLimit} OFFSET ${reqOffset}`,
         params
       )
       return result.rows

@@ -28,7 +28,7 @@ function createHomeQueryMock() {
       return { rows: [{ ao_vivo: '1', operacionais: '7' }] }
     }
     if (sql.includes('home_gmv_operacional')) {
-      return { rows: [{ gmv_total_mes: '1600.50', gmv_lives_mes: '1200.50', gmv_videos_mes: '400.00', videos_mes: '4', gmv_mes_anterior: '1000.00' }] }
+      return { rows: [{ gmv_total_mes: '1600.50', gmv_lives_mes: '1200.50', gmv_videos_mes: '400.00', pedidos_lives_mes: '2', pedidos_videos_mes: '4', pedidos_total_mes: '6', videos_mes: '4', gmv_mes_anterior: '1000.00' }] }
     }
     if (sql.includes('ranking_marcas_mes')) {
       return { rows: [{ marca_id: 'marca-1', nome: 'Marca A', gmv: '1200.50', lives: '2' }] }
@@ -36,8 +36,8 @@ function createHomeQueryMock() {
     if (sql.includes('FROM live_requests lr')) {
       throw new Error('Home operacional não deve usar live_requests')
     }
-    if (sql.includes('ranking_apresentadoras_mes')) {
-      return { rows: [{ id: 'ap-1', apresentadora_nome: 'Edja', gmv: '800', lives: '1', fixo: '2700', comissao_variavel: '16', total_recebido: '2716' }] }
+    if (sql.includes('combined.apresentadora_id')) {
+      return { rows: [{ apresentadora_id: 'ap-1', apresentadora_nome: 'Edja', gmv_total: '800', gmv_lives: '800', gmv_videos: '0', total_lives: '1', pedidos: '8', fixo: '2700', comissao_variavel: '16', total_recebido: '2716' }] }
     }
     if (sql.includes('FROM agenda_eventos ae')) {
       return { rows: [{ id: 'ag-1', tipo: 'live', status: 'confirmado', data_inicio: '2026-05-18T14:00:00.000Z', data_fim: '2026-05-18T16:00:00.000Z', cabine_numero: 2, cabine_nome: 'Cabine 02', marca_nome: 'Marca B', cliente_nome: 'Cliente B', apresentadora_nome: 'Ana' }] }
@@ -141,10 +141,11 @@ describe('home dashboard', () => {
     expect(sqls.some((sql) => sql.includes('proximas_lives_operacionais'))).toBe(false)
     const agendaSql = sqls.find((sql) => sql.includes('SELECT ae.id, ae.tipo') && sql.includes('FROM agenda_eventos ae'))
     expect(agendaSql).toContain('a_evento.id = ae.apresentadora_id')
-    const rankingApSql = sqls.find((sql) => sql.includes('ranking_apresentadoras_mes'))
-    expect(rankingApSql).toContain('FROM apresentadoras a')
-    expect(rankingApSql).toContain('LEFT JOIN vendas_atribuidas va')
-    expect(rankingApSql).toContain('a.fixo')
+    const rankingApSql = sqls.find((sql) => sql.includes('combined.apresentadora_id'))
+    expect(rankingApSql).toContain('FROM lives l')
+    expect(rankingApSql).toContain("va.origem = 'video'")
+    expect(rankingApSql).toContain('COALESCE(ap_v2.apresentadora_id, ap_user.id)')
+    expect(rankingApSql).toContain('MAX(')
     expect(queryMock.mock.calls.some(([, params]) => Array.isArray(params) && params.includes('tenant-a'))).toBe(true)
 
     await app.close()

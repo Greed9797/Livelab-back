@@ -432,12 +432,14 @@ describe('LIVELAB operational routes', () => {
   it('GET /v1/comissoes/resumo aggregates live and video attribution rows', async () => {
     const queryMock = vi.fn().mockResolvedValueOnce({
       rows: [{
+        marca_id: 'marca-1',
+        marca_nome: 'Marca A',
         gmv_total: '2000.00',
         gmv_lives: '2000.00',
         gmv_videos: '0',
-        pedidos_total: '15',
+        pedidos: '15',
         registros: '3',
-        comissao_apresentadoras: '225.00',
+        comissao_apresentadora: '225.00',
         comissao_franquia: '0',
         comissao_franqueadora: '0',
       }],
@@ -456,11 +458,12 @@ describe('LIVELAB operational routes', () => {
       comissao: 225,
       registros: 3,
     })
-    expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
+    expect(queryMock.mock.calls[0][0]).toContain('WITH live_source AS')
+    expect(queryMock.mock.calls[0][0]).toContain("va.origem = 'video'")
     await app.close()
   })
 
-  it('GET /v1/comissoes/apresentadoras ranks only attributed presenters by GMV', async () => {
+  it('GET /v1/comissoes/apresentadoras ranks canonical presenter rollups by GMV', async () => {
     const queryMock = vi.fn().mockResolvedValueOnce({
       rows: [{ apresentadora_id: 'ap-1', apresentadora_nome: 'Edja', gmv_total: '1142.00', comissao_apresentadora: '11.42' }],
     })
@@ -470,9 +473,9 @@ describe('LIVELAB operational routes', () => {
     const res = await app.inject({ method: 'GET', url: '/v1/comissoes/apresentadoras' })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()[0]).toMatchObject({ apresentadora_nome: 'Edja', gmv_total: '1142.00' })
-    expect(queryMock.mock.calls[0][0]).toContain('va.apresentadora_id IS NOT NULL')
-    expect(queryMock.mock.calls[0][0]).toContain('ORDER BY gmv_total DESC, comissao_apresentadora DESC')
+    expect(res.json()[0]).toMatchObject({ apresentadora_nome: 'Edja', gmv_total: 1142 })
+    expect(queryMock.mock.calls[0][0]).toContain('COALESCE(ap_v2.apresentadora_id, ap_user.id)')
+    expect(queryMock.mock.calls[0][0]).toContain('ORDER BY gmv_total DESC, total_recebido DESC')
     await app.close()
   })
 
@@ -480,11 +483,11 @@ describe('LIVELAB operational routes', () => {
     const queryMock = vi.fn().mockResolvedValueOnce({
       rows: [{
         apresentadora_id: 'ap-1',
-        nome: 'Edja',
-        gmv: '1142.00',
+        apresentadora_nome: 'Edja',
+        gmv_total: '1142.00',
         gmv_lives: '1142.00',
         gmv_videos: '0.00',
-        lives: '1',
+        total_lives: '1',
         pedidos: '15',
         fixo: '2700.00',
         comissao_variavel: '22.84',
@@ -505,7 +508,8 @@ describe('LIVELAB operational routes', () => {
       comissao_variavel: 22.84,
       total_recebido: 2722.84,
     })
-    expect(queryMock.mock.calls[0][0]).toContain('fixo + comissao_variavel')
+    expect(queryMock.mock.calls[0][0]).toContain('MAX(')
+    expect(queryMock.mock.calls[0][0]).toContain('COALESCE(ap_v2.apresentadora_id, ap_user.id)')
     expect(queryMock.mock.calls[0][0]).toContain("va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'")
     await app.close()
   })

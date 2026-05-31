@@ -1,5 +1,6 @@
 import { READ_COMISSOES } from '../config/role_groups.js'
 import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
+import { getPerformanceRanking } from '../lib/performance-rollups.js'
 
 const APROVADORES = ['franqueador_master', 'franqueado']
 
@@ -29,6 +30,21 @@ function buildComissaoFilters(query, tenantId) {
   return { values, where: filters.join(' AND ') }
 }
 
+function addDays(dateString, days) {
+  const date = new Date(`${dateString}T00:00:00.000Z`)
+  date.setUTCDate(date.getUTCDate() + days)
+  return date.toISOString().slice(0, 10)
+}
+
+function performanceRangeFromComissaoQuery(query = {}) {
+  if (query?.data_inicio || query?.data_fim) {
+    const start = String(query.data_inicio ?? query.data_fim)
+    const endInclusive = String(query.data_fim ?? query.data_inicio)
+    return { mes: start.slice(0, 7), start, end: addDays(endInclusive, 1) }
+  }
+  return monthRangeFromQuery(query)
+}
+
 function csvEscape(value) {
   if (value === null || value === undefined) return ''
   const s = String(value)
@@ -42,23 +58,36 @@ export async function comissoesRoutes(app) {
 
   app.get('/v1/comissoes/resumo', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
+    const range = performanceRangeFromComissaoQuery(request.query)
     return app.withTenant(tenant_id, async (db) => {
-      const { values, where } = buildComissaoFilters(request.query, tenant_id)
-      const result = await db.query(
-        `SELECT
-           COALESCE(SUM(va.gmv), 0) AS gmv_total,
-           COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
-           COALESCE(SUM(CASE WHEN va.origem = 'video' THEN va.gmv ELSE 0 END), 0) AS gmv_videos,
-           COALESCE(SUM(va.pedidos), 0)::int AS pedidos_total,
-           COUNT(*)::int AS registros,
-           COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_apresentadoras,
-           COALESCE(SUM(va.comissao_franquia), 0) AS comissao_franquia,
-           COALESCE(SUM(va.comissao_franqueadora), 0) AS comissao_franqueadora
-         FROM vendas_atribuidas va
-         WHERE ${where}`,
-        values,
-      )
-      const row = result.rows[0] ?? {}
+      const rows = await getPerformanceRanking(db, {
+        tenantId: tenant_id,
+        range,
+        limit: 10000,
+        groupBy: 'marca',
+        marcaId: request.query?.marca_id ?? null,
+        apresentadoraId: request.query?.apresentadora_id ?? null,
+        origem: request.query?.origem ?? null,
+      })
+      const row = rows.reduce((acc, item) => ({
+        gmv_total: acc.gmv_total + Number(item.gmv_total ?? 0),
+        gmv_lives: acc.gmv_lives + Number(item.gmv_lives ?? 0),
+        gmv_videos: acc.gmv_videos + Number(item.gmv_videos ?? 0),
+        pedidos_total: acc.pedidos_total + Number(item.pedidos_total ?? item.pedidos ?? 0),
+        registros: acc.registros + Number(item.registros ?? 0),
+        comissao_apresentadoras: acc.comissao_apresentadoras + Number(item.comissao_apresentadora ?? 0),
+        comissao_franquia: acc.comissao_franquia + Number(item.comissao_franquia ?? 0),
+        comissao_franqueadora: acc.comissao_franqueadora + Number(item.comissao_franqueadora ?? 0),
+      }), {
+        gmv_total: 0,
+        gmv_lives: 0,
+        gmv_videos: 0,
+        pedidos_total: 0,
+        registros: 0,
+        comissao_apresentadoras: 0,
+        comissao_franquia: 0,
+        comissao_franqueadora: 0,
+      })
       return {
         ...row,
         totais: {
@@ -75,28 +104,18 @@ export async function comissoesRoutes(app) {
 
   app.get('/v1/comissoes/apresentadoras', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
+    const range = performanceRangeFromComissaoQuery(request.query)
+    const limit = limitFromQuery(request.query, 100)
     return app.withTenant(tenant_id, async (db) => {
-      const { values, where } = buildComissaoFilters(request.query, tenant_id)
-      const result = await db.query(
-        `SELECT
-           va.apresentadora_id,
-           COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome, COALESCE(a.nome, 'Sem apresentadora') AS nome,
-           a.foto_url AS apresentadora_foto_url,
-           COALESCE(SUM(va.gmv), 0) AS gmv_total,
-           COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
-           COALESCE(SUM(CASE WHEN va.origem = 'video' THEN va.gmv ELSE 0 END), 0) AS gmv_videos,
-           COALESCE(SUM(va.pedidos), 0)::int AS pedidos_total,
-           COUNT(*)::int AS registros,
-           COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_apresentadora
-         FROM vendas_atribuidas va
-         LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
-         WHERE ${where}
-           AND va.apresentadora_id IS NOT NULL
-         GROUP BY va.apresentadora_id, a.nome, a.foto_url
-         ORDER BY gmv_total DESC, comissao_apresentadora DESC`,
-        values,
-      )
-      return result.rows
+      return getPerformanceRanking(db, {
+        tenantId: tenant_id,
+        range,
+        limit,
+        groupBy: 'apresentadora',
+        marcaId: request.query?.marca_id ?? null,
+        apresentadoraId: request.query?.apresentadora_id ?? null,
+        origem: request.query?.origem ?? null,
+      })
     })
   })
 
@@ -139,32 +158,18 @@ export async function comissoesRoutes(app) {
 
   app.get('/v1/comissoes/marcas', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
+    const range = performanceRangeFromComissaoQuery(request.query)
+    const limit = limitFromQuery(request.query, 100)
     return app.withTenant(tenant_id, async (db) => {
-      const { values, where } = buildComissaoFilters(request.query, tenant_id)
-      const result = await db.query(
-        `SELECT
-           va.marca_id,
-           m.nome AS marca_nome,
-           m.tipo AS marca_tipo,
-           COALESCE(m.logo_url, c.logo_url) AS logo_url,
-           COALESCE(m.site, c.site) AS site,
-           COALESCE(SUM(va.gmv), 0) AS gmv_total,
-           COALESCE(SUM(CASE WHEN va.origem = 'live' THEN va.gmv ELSE 0 END), 0) AS gmv_lives,
-           COALESCE(SUM(CASE WHEN va.origem = 'video' THEN va.gmv ELSE 0 END), 0) AS gmv_videos,
-           COALESCE(SUM(va.pedidos), 0)::int AS pedidos_total,
-           COUNT(*)::int AS registros,
-           COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_apresentadoras,
-           COALESCE(SUM(va.comissao_franquia), 0) AS comissao_franquia,
-           COALESCE(SUM(va.comissao_franqueadora), 0) AS comissao_franqueadora
-         FROM vendas_atribuidas va
-         JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
-         LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
-         WHERE ${where}
-         GROUP BY va.marca_id, m.nome, m.tipo, COALESCE(m.logo_url, c.logo_url), COALESCE(m.site, c.site)
-         ORDER BY gmv_total DESC`,
-        values,
-      )
-      return result.rows
+      return getPerformanceRanking(db, {
+        tenantId: tenant_id,
+        range,
+        limit,
+        groupBy: 'marca',
+        marcaId: request.query?.marca_id ?? null,
+        apresentadoraId: request.query?.apresentadora_id ?? null,
+        origem: request.query?.origem ?? null,
+      })
     })
   })
 

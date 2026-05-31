@@ -5,6 +5,7 @@ import {
   parseAnalyticsImportBuffer,
   summarizeImportRows,
 } from '../services/analytics-import.js'
+import { getPerformanceRanking } from '../lib/performance-rollups.js'
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -513,6 +514,7 @@ export async function analyticsRoutes(app) {
 
     try {
       return await app.withTenant(tenant_id, async (db) => {
+        const rankingRange = { start: fromDate, end: addDays(toDate, 1), mes: mesAno }
         const clienteSalesJoin = cliente_id
           ? 'JOIN marcas m_cliente ON m_cliente.id = va.marca_id AND m_cliente.tenant_id = va.tenant_id AND m_cliente.cliente_id = $3::uuid'
           : ''
@@ -739,117 +741,21 @@ export async function analyticsRoutes(app) {
             ORDER BY 1 ASC
           `, params),
 
-          db.query(`
-            WITH live_source AS (
-              SELECT
-                COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
-                l.marca_id,
-                l.id AS origem_id,
-                'live' AS origem,
-                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
-                COALESCE(l.manual_orders, l.final_orders_count, 0)::int AS pedidos
-              FROM lives l
-              LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
-              LEFT JOIN LATERAL (
-                SELECT lav.apresentadora_id
-                FROM live_apresentadoras_v2 lav
-                WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
-                ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
-                LIMIT 1
-              ) ap_v2 ON true
-              WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
-                AND l.status = 'encerrada'
-                ${liveRange}
-                ${clienteLiveFilter}
-            ),
-            video_source AS (
-              SELECT
-                va.apresentadora_id,
-                va.marca_id,
-                va.origem_id,
-                va.origem,
-                va.gmv,
-                va.pedidos
-              FROM vendas_atribuidas va
-              JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
-              WHERE ${salesWhere}
-                AND va.origem = 'video'
-                ${clienteMarcaFilter}
-            ),
-            combined AS (
-              SELECT * FROM live_source
-              UNION ALL
-              SELECT * FROM video_source
-            )
-            SELECT
-              combined.apresentadora_id,
-              COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
-              a.foto_url AS apresentadora_foto_url,
-              COALESCE(SUM(combined.gmv), 0) AS gmv_total,
-              COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'live'), 0) AS gmv_lives,
-              COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'video'), 0) AS gmv_videos,
-              COALESCE(SUM(combined.pedidos), 0)::int AS pedidos,
-              COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'live')::int AS total_lives,
-              COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'video')::int AS total_videos
-            FROM combined
-            LEFT JOIN apresentadoras a ON a.id = combined.apresentadora_id AND a.tenant_id = current_setting('app.tenant_id', true)::uuid
-            GROUP BY combined.apresentadora_id, a.nome, a.foto_url
-            HAVING COALESCE(SUM(combined.gmv), 0) <> 0 OR COALESCE(SUM(combined.pedidos), 0) <> 0
-            ORDER BY gmv_total DESC, pedidos DESC, apresentadora_nome ASC
-            LIMIT 10
-          `, params),
+          getPerformanceRanking(db, {
+            tenantId: tenant_id,
+            range: rankingRange,
+            groupBy: 'apresentadora',
+            limit: 10,
+            clienteId: cliente_id ?? null,
+          }),
 
-          db.query(`
-            WITH live_source AS (
-              SELECT
-                l.marca_id,
-                l.id AS origem_id,
-                'live' AS origem,
-                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
-                COALESCE(l.manual_orders, l.final_orders_count, 0)::int AS pedidos
-              FROM lives l
-              WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
-                AND l.status = 'encerrada'
-                AND l.marca_id IS NOT NULL
-                ${liveRange}
-                ${clienteLiveFilter}
-            ),
-            video_source AS (
-              SELECT
-                va.marca_id,
-                va.origem_id,
-                va.origem,
-                va.gmv,
-                va.pedidos
-              FROM vendas_atribuidas va
-              JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
-              WHERE ${salesWhere}
-                AND va.origem = 'video'
-                ${clienteMarcaFilter}
-            ),
-            combined AS (
-              SELECT * FROM live_source
-              UNION ALL
-              SELECT * FROM video_source
-            )
-            SELECT
-              combined.marca_id,
-              m.nome AS marca_nome,
-              COALESCE(m.logo_url, c.logo_url) AS logo_url,
-              COALESCE(SUM(combined.gmv), 0) AS gmv_total,
-              COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'live'), 0) AS gmv_lives,
-              COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'video'), 0) AS gmv_videos,
-              COALESCE(SUM(combined.pedidos), 0)::int AS pedidos,
-              COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'live')::int AS total_lives,
-              COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'video')::int AS total_videos
-            FROM combined
-            JOIN marcas m ON m.id = combined.marca_id AND m.tenant_id = current_setting('app.tenant_id', true)::uuid
-            LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
-            GROUP BY combined.marca_id, m.nome, COALESCE(m.logo_url, c.logo_url)
-            HAVING COALESCE(SUM(combined.gmv), 0) <> 0 OR COALESCE(SUM(combined.pedidos), 0) <> 0
-            ORDER BY gmv_total DESC, pedidos DESC, marca_nome ASC
-            LIMIT 10
-          `, params),
+          getPerformanceRanking(db, {
+            tenantId: tenant_id,
+            range: rankingRange,
+            groupBy: 'marca',
+            limit: 10,
+            clienteId: cliente_id ?? null,
+          }),
 
           db.query(`
             SELECT
@@ -900,8 +806,8 @@ export async function analyticsRoutes(app) {
         const gmvVideos = round2(sales.gmv_videos)
         const horasLive = round1(liveOps.horas_live)
         const pedidosLives = toInt(sales.pedidos_lives)
-        const gmvPorLive = totalLives > 0 ? round2(gmvLives / totalLives) : 0
-        const gmvPorHora = horasLive > 0 ? round2(gmvLives / horasLive) : 0
+        const gmvPorLive = totalLives > 0 ? round2(gmvTotal / totalLives) : 0
+        const gmvPorHora = horasLive > 0 ? round2(gmvTotal / horasLive) : 0
         const ticketMedioLive = pedidosLives > 0 ? round2(gmvLives / pedidosLives) : 0
         const hoursRows = hoursQ.rows
         const monthlyRows = monthlyQ.rows.map((row) => ({
@@ -921,7 +827,7 @@ export async function analyticsRoutes(app) {
           total_vendas: row.pedidos,
         }))
 
-        const rankingApresentadoras = presenterRankingQ.rows.map((row) => ({
+        const rankingApresentadoras = presenterRankingQ.map((row) => ({
           apresentadora_id: row.apresentadora_id,
           apresentador_id: row.apresentadora_id,
           apresentadora_nome: row.apresentadora_nome,
@@ -935,7 +841,7 @@ export async function analyticsRoutes(app) {
           gmv_videos: round2(row.gmv_videos),
         }))
 
-        const rankingMarcas = brandRankingQ.rows.map((row) => ({
+        const rankingMarcas = brandRankingQ.map((row) => ({
           marca_id: row.marca_id,
           marca_nome: row.marca_nome,
           nome: row.marca_nome,
@@ -1142,7 +1048,7 @@ export async function analyticsRoutes(app) {
         // groupBy === 'apresentadora'
         const result = await db.query(`
           SELECT
-            COALESCE(ap_v2.apresentadora_id, l.apresentador_id) AS grupo_id,
+            COALESCE(ap_v2.apresentadora_id, ap_user.id) AS grupo_id,
             COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora') AS grupo_nome,
             COALESCE(ap_v2.foto_url, ap_user.foto_url) AS logo_url,
             ${AGG_COLS}
@@ -1159,7 +1065,7 @@ export async function analyticsRoutes(app) {
           ) ap_v2 ON true
           WHERE ${WHERE_BASE}
           GROUP BY
-            COALESCE(ap_v2.apresentadora_id, l.apresentador_id),
+            COALESCE(ap_v2.apresentadora_id, ap_user.id),
             COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora'),
             COALESCE(ap_v2.foto_url, ap_user.foto_url)
           ORDER BY gmv DESC, total_lives DESC
@@ -1168,6 +1074,139 @@ export async function analyticsRoutes(app) {
       })
     } catch (err) {
       request.log.error({ err }, 'analytics/funil error')
+      return reply.code(500).send({ error: err.message })
+    }
+  })
+
+  app.get('/v1/analytics/diario', {
+    preHandler: [app.authenticate, app.requirePapel(READ_ANALYTICS)],
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          from: { type: 'string' },
+          to: { type: 'string' },
+          mesAno: { type: 'string' },
+          mes: { type: 'string' },
+          ano: { type: 'string' },
+          marca_id: { type: 'string' },
+          apresentadora_id: { type: 'string' },
+        },
+        additionalProperties: true,
+      },
+    },
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const period = resolveAnalyticsPeriod(request.query)
+    if (period.error) return reply.code(400).send({ error: period.error })
+
+    const marcaId = request.query?.marca_id ? String(request.query.marca_id) : null
+    const apresentadoraId = request.query?.apresentadora_id ? String(request.query.apresentadora_id) : null
+    if (marcaId && !UUID_RE.test(marcaId)) return reply.code(400).send({ error: 'marca_id must be a valid UUID' })
+    if (apresentadoraId && !UUID_RE.test(apresentadoraId)) return reply.code(400).send({ error: 'apresentadora_id must be a valid UUID' })
+
+    const { fromDate, toDate, mesAno } = period
+    try {
+      return await app.withTenant(tenant_id, async (db) => {
+        const result = await db.query(`
+          WITH dias AS (
+            SELECT generate_series($1::date, $2::date, interval '1 day')::date AS dia
+          ),
+          live_base AS (
+            SELECT
+              (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
+              COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
+              COALESCE(l.manual_orders, l.final_orders_count, 0)::int AS pedidos,
+              CASE
+                WHEN COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
+                 AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+                  THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
+                ELSE 0
+              END AS horas
+            FROM lives l
+            LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
+            LEFT JOIN LATERAL (
+              SELECT lav.apresentadora_id
+              FROM live_apresentadoras_v2 lav
+              WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+              ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+              LIMIT 1
+            ) ap_v2 ON true
+            WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND l.status = 'encerrada'
+              AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
+              AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
+              AND ($3::uuid IS NULL OR l.marca_id = $3::uuid)
+              AND ($4::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $4::uuid)
+          ),
+          live_daily AS (
+            SELECT
+              dia,
+              COUNT(*)::int AS total_lives,
+              COALESCE(SUM(gmv), 0) AS gmv_lives,
+              COALESCE(SUM(pedidos), 0)::int AS pedidos_lives,
+              COALESCE(SUM(horas), 0) AS horas_live
+            FROM live_base
+            GROUP BY dia
+          ),
+          video_daily AS (
+            SELECT
+              va.data::date AS dia,
+              COALESCE(SUM(va.gmv), 0) AS gmv_videos,
+              COALESCE(SUM(va.pedidos), 0)::int AS pedidos_videos,
+              COUNT(DISTINCT va.origem_id)::int AS total_videos
+            FROM vendas_atribuidas va
+            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND va.origem = 'video'
+              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+              AND va.data >= $1::date
+              AND va.data <= $2::date
+              AND ($3::uuid IS NULL OR va.marca_id = $3::uuid)
+              AND ($4::uuid IS NULL OR va.apresentadora_id = $4::uuid)
+            GROUP BY va.data::date
+          )
+          SELECT
+            d.dia,
+            COALESCE(ld.total_lives, 0)::int AS total_lives,
+            COALESCE(vd.total_videos, 0)::int AS total_videos,
+            COALESCE(ld.gmv_lives, 0) AS gmv_lives,
+            COALESCE(vd.gmv_videos, 0) AS gmv_videos,
+            COALESCE(ld.horas_live, 0) AS horas_live,
+            (COALESCE(ld.pedidos_lives, 0) + COALESCE(vd.pedidos_videos, 0))::int AS pedidos
+          FROM dias d
+          LEFT JOIN live_daily ld ON ld.dia = d.dia
+          LEFT JOIN video_daily vd ON vd.dia = d.dia
+          ORDER BY d.dia ASC
+        `, [fromDate, toDate, marcaId, apresentadoraId])
+
+        return {
+          periodo: { from: fromDate, to: toDate, mesAno },
+          filters: { marca_id: marcaId, apresentadora_id: apresentadoraId },
+          rows: result.rows.map((row) => {
+            const gmvLives = round2(row.gmv_lives)
+            const gmvVideos = round2(row.gmv_videos)
+            const gmvTotal = round2(gmvLives + gmvVideos)
+            const totalLives = toInt(row.total_lives)
+            const horasLive = round1(row.horas_live)
+            const pedidos = toInt(row.pedidos)
+            return {
+              dia: typeof row.dia === 'string' ? row.dia : row.dia.toISOString().slice(0, 10),
+              gmv_total: gmvTotal,
+              gmv_lives: gmvLives,
+              gmv_videos: gmvVideos,
+              total_lives: totalLives,
+              total_videos: toInt(row.total_videos),
+              horas_live: horasLive,
+              gmv_por_live: totalLives > 0 ? round2(gmvTotal / totalLives) : 0,
+              gmv_por_hora: horasLive > 0 ? round2(gmvTotal / horasLive) : 0,
+              pedidos,
+              ticket_medio: pedidos > 0 ? round2(gmvTotal / pedidos) : 0,
+            }
+          }),
+        }
+      })
+    } catch (err) {
+      request.log.error({ err }, 'analytics/diario error')
       return reply.code(500).send({ error: err.message })
     }
   })

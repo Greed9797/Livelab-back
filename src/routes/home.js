@@ -211,7 +211,11 @@ export async function homeRoutes(app) {
             COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)) FILTER (
               WHERE date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
                     = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
-            ), 0) AS gmv_lives_mes_anterior
+            ), 0) AS gmv_lives_mes_anterior,
+            COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)) FILTER (
+              WHERE date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            ), 0)::int AS pedidos_lives_mes
           FROM lives l
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status = 'encerrada'
@@ -228,6 +232,11 @@ export async function homeRoutes(app) {
                 AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
                     = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
             ), 0) AS gmv_videos_mes_anterior,
+            COALESCE(SUM(va.pedidos) FILTER (
+              WHERE va.origem = 'video'
+                AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            ), 0)::int AS pedidos_videos_mes,
             (
               SELECT COUNT(*)::int
               FROM video_registros vr
@@ -244,6 +253,9 @@ export async function homeRoutes(app) {
           (lm.gmv_lives_mes + vm.gmv_videos_mes) AS gmv_mes,
           lm.gmv_lives_mes,
           vm.gmv_videos_mes,
+          lm.pedidos_lives_mes,
+          vm.pedidos_videos_mes,
+          (lm.pedidos_lives_mes + vm.pedidos_videos_mes)::int AS pedidos_total_mes,
           (lm.gmv_lives_mes_anterior + vm.gmv_videos_mes_anterior) AS gmv_mes_anterior,
           lm.gmv_lives_mes_anterior,
           vm.gmv_videos_mes_anterior,
@@ -584,6 +596,9 @@ export async function homeRoutes(app) {
       const gmvMes = round2(gmvOperacional.gmv_total_mes ?? gmvOperacional.gmv_mes)
       const gmvLivesMes = round2(gmvOperacional.gmv_lives_mes)
       const gmvVideosMes = round2(gmvOperacional.gmv_videos_mes)
+      const pedidosLivesMes = Number(gmvOperacional.pedidos_lives_mes ?? 0)
+      const pedidosVideosMes = Number(gmvOperacional.pedidos_videos_mes ?? 0)
+      const pedidosTotalMes = Number(gmvOperacional.pedidos_total_mes ?? (pedidosLivesMes + pedidosVideosMes))
       const videosMes = Number(gmvOperacional.videos_mes ?? 0)
       const livesMes = Number(livesMesQ.rows[0].lives_mes)
       const gmvMesAnterior = round2(gmvOperacional.gmv_mes_anterior)
@@ -591,9 +606,11 @@ export async function homeRoutes(app) {
       const liveCabinesAtivas = cabinesFormatadas.filter(c => c.status === 'ao_vivo')
       const gmvAoVivoAgora = round2(liveCabinesAtivas.reduce((acc, c) => acc + Number(c.gmv_atual ?? 0), 0))
       const horasLiveMes = parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0).toFixed(1))
-      const gmvPorLiveMes = livesMes > 0 ? round2(gmvLivesMes / livesMes) : 0
-      const gmvPorHoraMes = horasLiveMes > 0 ? round2(gmvLivesMes / horasLiveMes) : 0
-      const gmvPorLivePrev = livesMes > 0 ? round2(gmvLivesMesAnterior / livesMes) : 0
+      const gmvPorLiveMes = livesMes > 0 ? round2(gmvMes / livesMes) : 0
+      const gmvPorHoraMes = horasLiveMes > 0 ? round2(gmvMes / horasLiveMes) : 0
+      const gmvPorLivePrev = livesMes > 0 ? round2(gmvMesAnterior / livesMes) : 0
+      const ticketMedioMes = pedidosTotalMes > 0 ? round2(gmvMes / pedidosTotalMes) : 0
+      const ticketMedioLiveMes = pedidosLivesMes > 0 ? round2(gmvLivesMes / pedidosLivesMes) : 0
       const alertasOperacionais = [
         { tipo: 'conflitos_agenda', label: 'Conflitos de agenda', valor: Number(alertas.conflitos_agenda), prioridade: 'alta' },
         { tipo: 'lives_sem_apresentador', label: 'Lives sem apresentadora definida', valor: Number(alertas.lives_sem_apresentador), prioridade: 'media' },
@@ -627,6 +644,10 @@ export async function homeRoutes(app) {
         novos_clientes:   Number(novosClientesQ.rows[0].total),
         lives_mes:        livesMes,
         videos_mes:       videosMes,
+        pedidos_mes:      pedidosTotalMes,
+        pedidos_total:    pedidosTotalMes,
+        pedidos_lives_mes: pedidosLivesMes,
+        pedidos_videos_mes: pedidosVideosMes,
         gmv_lives_mes:    gmvLivesMes,
         gmv_videos_mes:   gmvVideosMes,
         horas_live_mes:   horasLiveMes,
@@ -637,7 +658,9 @@ export async function homeRoutes(app) {
         gmv_ao_vivo_agora: gmvAoVivoAgora,
         lives_ativas_agora: liveCabinesAtivas.length,
         lives_hoje: Number(livesHojeQ.rows[0].lives_hoje),
-        ticket_medio_live_mes: gmvPorLiveMes,
+        ticket_medio: ticketMedioMes,
+        ticket_medio_mes: ticketMedioMes,
+        ticket_medio_live_mes: ticketMedioLiveMes,
         gmv_por_live: gmvPorLiveMes,
         gmv_por_live_mes: gmvPorLiveMes,
         gmv_por_live_prev: gmvPorLivePrev,

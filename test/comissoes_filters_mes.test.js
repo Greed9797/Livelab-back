@@ -1,4 +1,5 @@
 // Regressão: GET /v1/comissoes/* aceita ?mes=YYYY-MM e expande pra data range.
+// Os rollups usam fim exclusivo para evitar bug de timezone no último dia.
 
 import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
@@ -24,7 +25,7 @@ function buildApp({ queryMock } = {}) {
 }
 
 describe('buildComissaoFilters — mes=YYYY-MM', () => {
-  it('expande mes=2026-05 em data >= 2026-05-01 AND data <= 2026-05-31', async () => {
+  it('expande mes=2026-05 em data >= 2026-05-01 AND data < 2026-06-01', async () => {
     const { app, query } = buildApp()
     await app.register(comissoesRoutes)
 
@@ -35,7 +36,7 @@ describe('buildComissaoFilters — mes=YYYY-MM', () => {
     expect(call).toBeTruthy()
     const values = call[1]
     expect(values).toContain('2026-05-01')
-    expect(values).toContain('2026-05-31')
+    expect(values).toContain('2026-06-01')
     await app.close()
   })
 
@@ -46,7 +47,7 @@ describe('buildComissaoFilters — mes=YYYY-MM', () => {
     expect(res.statusCode).toBe(200)
     const call = query.mock.calls.find(([sql]) => String(sql).includes('FROM vendas_atribuidas va'))
     const values = call[1]
-    expect(values).not.toContain('2026-05-01')
+    expect(values).not.toContain('2026-5')
     await app.close()
   })
 
@@ -63,18 +64,18 @@ describe('buildComissaoFilters — mes=YYYY-MM', () => {
     const values = call[1]
     expect(values).toContain(apId)
     expect(values).toContain('2026-02-01')
-    expect(values).toContain('2026-02-28') // fevereiro 2026 (não bissexto)
+    expect(values).toContain('2026-03-01')
     await app.close()
   })
 
-  it('fevereiro 2024 (bissexto) → 29 dias', async () => {
+  it('fevereiro 2024 (bissexto) → fim exclusivo em 2024-03-01', async () => {
     const { app, query } = buildApp()
     await app.register(comissoesRoutes)
     const res = await app.inject({ method: 'GET', url: '/v1/comissoes/marcas?mes=2024-02' })
     expect(res.statusCode).toBe(200)
     const call = query.mock.calls.find(([sql]) => String(sql).includes('FROM vendas_atribuidas va'))
     const values = call[1]
-    expect(values).toContain('2024-02-29')
+    expect(values).toContain('2024-03-01')
     await app.close()
   })
 })

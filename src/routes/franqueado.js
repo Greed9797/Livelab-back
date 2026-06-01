@@ -1299,6 +1299,7 @@ function mapNetworkRanking(rows, { publicOnly = false } = {}) {
     }
 
     const base = {
+      id: row.id,
       posicao: index + 1,
       nome: row.nome,
       logo_url: row.logo_url ?? null,

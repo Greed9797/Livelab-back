@@ -1,7 +1,6 @@
 // Job: encerra lives 'em_andamento' que viraram zumbi.
 // Critério:
-//   - iniciado_em > 24h atrás (live antiga)
-//   - E (último snapshot > 2h atrás OU 0 snapshots no total)
+//   - iniciado_em > 24h atrás (limite duro de duração operacional)
 //
 // Causa: lives são marcadas em_andamento ao iniciar mas nem sempre o user
 // clica "Encerrar". Ficam ativas indefinidamente, connector TikTok tenta
@@ -23,15 +22,17 @@ export async function runEncerrarLivesZumbiTick(app) {
 
   try {
     const targets = await app.db.query(
-      `SELECT l.id, l.tenant_id, l.cabine_id
+      `SELECT l.id,
+              l.tenant_id,
+              l.cabine_id,
+              l.iniciado_em,
+              (SELECT MAX(captured_at)
+                 FROM live_snapshots
+                WHERE live_id = l.id
+                  AND tenant_id = l.tenant_id) AS last_snapshot_at
          FROM lives l
         WHERE l.status = 'em_andamento'
           AND l.iniciado_em < NOW() - INTERVAL '24 hours'
-          AND (
-            NOT EXISTS (SELECT 1 FROM live_snapshots WHERE live_id = l.id)
-            OR
-            (SELECT MAX(captured_at) FROM live_snapshots WHERE live_id = l.id) < NOW() - INTERVAL '2 hours'
-          )
         LIMIT 100`,
     )
 
@@ -41,10 +42,21 @@ export async function runEncerrarLivesZumbiTick(app) {
         await client.query('BEGIN')
         await client.query(`SELECT set_config('app.tenant_id', $1::text, true)`, [live.tenant_id])
         const upLive = await client.query(
-          `UPDATE lives SET status='encerrada', encerrado_em=NOW()
-             WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='em_andamento'
-           RETURNING id`,
-          [live.id, live.tenant_id],
+          `UPDATE lives AS target
+              SET status='encerrada',
+                  encerrado_em = LEAST(
+                    NOW(),
+                    l.iniciado_em + INTERVAL '24 hours',
+                    COALESCE($3::timestamptz, l.iniciado_em + INTERVAL '24 hours')
+                  )
+             FROM lives l
+             WHERE target.id=$1::uuid
+               AND target.tenant_id=$2::uuid
+               AND target.status='em_andamento'
+               AND target.id = l.id
+               AND target.tenant_id = l.tenant_id
+           RETURNING target.id`,
+          [live.id, live.tenant_id, live.last_snapshot_at],
         )
         if (upLive.rowCount === 0) {
           await client.query('ROLLBACK')

@@ -1,4 +1,4 @@
-// Job auto-encerra lives 'em_andamento' >24h sem snapshot recente.
+// Job auto-encerra lives 'em_andamento' >24h.
 
 import { describe, expect, it, vi } from 'vitest'
 import { runEncerrarLivesZumbiTick } from '../src/jobs/encerrar_lives_zumbi.js'
@@ -22,14 +22,15 @@ function makeApp({ targets, clientQueryMock }) {
       pool: { connect: vi.fn(async () => ({ query: clientQuery, release })) },
     },
     _clientQuery: clientQuery,
+    _poolQuery: poolQuery,
   }
 }
 
 describe('encerrar_lives_zumbi job', () => {
   it('encerra lives candidatas e libera cabine', async () => {
     const targets = [
-      { id: 'live-1', tenant_id: 'tenant-1', cabine_id: 'cab-1' },
-      { id: 'live-2', tenant_id: 'tenant-1', cabine_id: 'cab-2' },
+      { id: 'live-1', tenant_id: 'tenant-1', cabine_id: 'cab-1', last_snapshot_at: '2026-05-29T12:00:00.000Z' },
+      { id: 'live-2', tenant_id: 'tenant-1', cabine_id: 'cab-2', last_snapshot_at: null },
     ]
     const app = makeApp({ targets })
     const result = await runEncerrarLivesZumbiTick(app)
@@ -39,9 +40,21 @@ describe('encerrar_lives_zumbi job', () => {
     const updateLives = app._clientQuery.mock.calls.filter(([s]) =>
       String(s).includes('UPDATE lives'))
     expect(updateLives.length).toBe(2)
+    expect(updateLives[0][1]).toEqual(['live-1', 'tenant-1', '2026-05-29T12:00:00.000Z'])
+    expect(updateLives[1][1]).toEqual(['live-2', 'tenant-1', null])
     const updateCabines = app._clientQuery.mock.calls.filter(([s]) =>
       String(s).includes('UPDATE cabines'))
     expect(updateCabines.length).toBe(2)
+  })
+
+  it('usa limite duro de 24h mesmo quando há snapshot recente', async () => {
+    const app = makeApp({ targets: [] })
+    await runEncerrarLivesZumbiTick(app)
+
+    const sql = String(app._poolQuery.mock.calls[0][0])
+    expect(sql).toContain("l.iniciado_em < NOW() - INTERVAL '24 hours'")
+    expect(sql).toContain('SELECT MAX(captured_at)')
+    expect(sql).not.toContain("< NOW() - INTERVAL '2 hours'")
   })
 
   it('retorna early quando não há targets', async () => {

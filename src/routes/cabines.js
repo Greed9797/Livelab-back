@@ -121,6 +121,7 @@ export async function cabinesRoutes(app) {
            WHERE l2.cabine_id = c.id
              AND l2.tenant_id = c.tenant_id
              AND l2.status = 'em_andamento'
+             AND l2.iniciado_em >= NOW() - INTERVAL '24 hours'
            ORDER BY (l2.id = c.live_atual_id) DESC, l2.iniciado_em DESC
            LIMIT 1
          ) l ON true

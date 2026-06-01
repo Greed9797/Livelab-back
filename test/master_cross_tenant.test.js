@@ -93,6 +93,7 @@ describe('GET /v1/public/ranking', () => {
     expect(res.statusCode).toBe(200)
     const body = res.json()
     expect(body[0]).toEqual({
+      id: OTHER_TENANT,
       posicao: 1,
       nome: 'Unidade A',
       logo_url: null,

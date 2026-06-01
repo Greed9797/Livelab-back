@@ -37,8 +37,12 @@ export async function homeRoutes(app) {
     preHandler: app.requirePapel(['franqueado', 'gerente']),
   }, async (request, reply) => {
     const { tenant_id } = request.user
+    // Período opcional via ?mes=YYYY-MM. Sem param → mês efetivo (resolvido no DB).
+    const requestedMes = typeof request.query?.mes === 'string' && /^\d{4}-\d{2}$/.test(request.query.mes)
+      ? request.query.mes
+      : null
     const startedAt = performance.now()
-    const cacheKey = String(tenant_id)
+    const cacheKey = `${tenant_id}:${requestedMes ?? 'auto'}`
     const cached = homeDashboardCacheEnabled() ? getHomeDashboardCache(cacheKey) : null
     if (cached) {
       setHomeDashboardHeaders(reply, 'HIT', startedAt)
@@ -57,6 +61,40 @@ export async function homeRoutes(app) {
         return parseFloat((((actual - prior) / prior) * 100).toFixed(1))
       }
 
+      // ── Mês efetivo ──────────────────────────────────────────────
+      // Espelha o fallback latestPeriodWithData do Analytics: usa o mês
+      // corrente se tiver GMV; senão, o último mês com dados. Calculado
+      // 1× e propagado por parâmetro ($N::date) — evita MAX() por query.
+      let effectiveMonth = requestedMes
+      if (!effectiveMonth) {
+        const mesEfetivoQ = await db.query(`
+          WITH meses AS (
+            SELECT date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS m
+            FROM lives l
+            WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND l.status = 'encerrada'
+              AND COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) > 0
+            UNION ALL
+            SELECT date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo') AS m
+            FROM vendas_atribuidas va
+            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND va.origem = 'video'
+              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+              AND COALESCE(va.gmv, 0) > 0
+          )
+          SELECT to_char(
+            COALESCE(
+              (SELECT m FROM meses
+                WHERE m = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+                LIMIT 1),
+              (SELECT MAX(m) FROM meses),
+              date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+            ), 'YYYY-MM') AS mes
+        `)
+        effectiveMonth = mesEfetivoQ.rows[0]?.mes ?? new Date().toISOString().slice(0, 7)
+      }
+      const mesStart = `${effectiveMonth}-01`
+
       // ── Grupo 1: queries financeiras + cabines ──
       // Defesa em profundidade: tenant_id explícito em cada query
       // (role Postgres atual tem BYPASSRLS — RLS sozinha não filtra).
@@ -70,14 +108,14 @@ export async function homeRoutes(app) {
         JOIN contratos c ON c.cliente_id = l.cliente_id AND c.status = 'ativo' AND c.tenant_id = l.tenant_id
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
-          AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
-      `),
+          AND date_trunc('month', l.iniciado_em) = date_trunc('month', $1::date)
+      `, [mesStart]),
         db.query(`
         SELECT COALESCE(SUM(valor), 0) AS valor
         FROM custos
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND date_trunc('month', competencia) = date_trunc('month', NOW())
-      `),
+          AND date_trunc('month', competencia) = date_trunc('month', $1::date)
+      `, [mesStart]),
         db.query(`
         SELECT
             c.id,
@@ -192,31 +230,31 @@ export async function homeRoutes(app) {
         SELECT COUNT(*) AS total FROM clientes
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND date_trunc('month', criado_em AT TIME ZONE 'America/Sao_Paulo')
-              = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+              = date_trunc('month', $1::date)
           AND status = 'ativo'
-      `),
+      `, [mesStart]),
         db.query(`
         SELECT COUNT(id) AS lives_mes
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND status = 'encerrada'
           AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-              = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-      `),
+              = date_trunc('month', $1::date)
+      `, [mesStart]),
         db.query(`
         WITH live_metrics AS (
           SELECT
             COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)) FILTER (
               WHERE date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', $1::date)
             ), 0) AS gmv_lives_mes,
             COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)) FILTER (
               WHERE date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-                    = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
+                    = date_trunc('month', $1::date - INTERVAL '1 month')
             ), 0) AS gmv_lives_mes_anterior,
             COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)) FILTER (
               WHERE date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', $1::date)
             ), 0)::int AS pedidos_lives_mes
           FROM lives l
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
@@ -227,24 +265,24 @@ export async function homeRoutes(app) {
             COALESCE(SUM(va.gmv) FILTER (
               WHERE va.origem = 'video'
                 AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', $1::date)
             ), 0) AS gmv_videos_mes,
             COALESCE(SUM(va.gmv) FILTER (
               WHERE va.origem = 'video'
                 AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                    = date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo') - INTERVAL '1 month')
+                    = date_trunc('month', $1::date - INTERVAL '1 month')
             ), 0) AS gmv_videos_mes_anterior,
             COALESCE(SUM(va.pedidos) FILTER (
               WHERE va.origem = 'video'
                 AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', $1::date)
             ), 0)::int AS pedidos_videos_mes,
             (
               SELECT COUNT(*)::int
               FROM video_registros vr
               WHERE vr.tenant_id = current_setting('app.tenant_id', true)::uuid
                 AND date_trunc('month', vr.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                    = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', $1::date)
             ) AS videos_mes
           FROM vendas_atribuidas va
           WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
@@ -265,7 +303,7 @@ export async function homeRoutes(app) {
         FROM live_metrics lm CROSS JOIN video_metrics vm
         )
         SELECT * FROM home_gmv_operacional
-      `),
+      `, [mesStart]),
         db.query(`
         SELECT COUNT(id) AS lives_hoje
         FROM lives
@@ -277,8 +315,8 @@ export async function homeRoutes(app) {
         SELECT COALESCE(AVG(viewer_count), 0) AS media
         FROM live_snapshots
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND date_trunc('month', captured_at) = date_trunc('month', NOW())
-      `),
+          AND date_trunc('month', captured_at) = date_trunc('month', $1::date)
+      `, [mesStart]),
         db.query(`
         SELECT COUNT(*) AS pipeline_aberto, COALESCE(SUM(valor_oportunidade), 0) AS valor_pipeline
         FROM leads
@@ -380,7 +418,7 @@ export async function homeRoutes(app) {
       `),
         getPerformanceRanking(db, {
           tenantId: tenant_id,
-          range: monthRangeFromQuery(),
+          range: monthRangeFromQuery({ mes: effectiveMonth }),
           groupBy: 'marca',
           limit: 10,
         }),
@@ -394,8 +432,8 @@ export async function homeRoutes(app) {
             AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
             AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
             AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-                = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-        `),
+                = date_trunc('month', $1::date)
+        `, [mesStart]),
       ])
 
       const ganhos = Number(taxaConversaoQ.rows[0].ganhos)
@@ -462,7 +500,7 @@ export async function homeRoutes(app) {
 
       const rankingApresentadorasMesPromise = getPresenterRanking(db, {
           tenantId: tenant_id,
-          range: monthRangeFromQuery(),
+          range: monthRangeFromQuery({ mes: effectiveMonth }),
           limit: 10,
         }).then((rows) => rows.map((r) => ({
           ...r,
@@ -487,7 +525,7 @@ export async function homeRoutes(app) {
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
               AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+                  = date_trunc('month', $1::date)
             GROUP BY dia
             UNION ALL
             SELECT
@@ -498,7 +536,7 @@ export async function homeRoutes(app) {
               AND va.origem = 'video'
               AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
               AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+                  = date_trunc('month', $1::date)
             GROUP BY dia
           )
           SELECT
@@ -507,14 +545,14 @@ export async function homeRoutes(app) {
           FROM daily
           GROUP BY dia
           ORDER BY dia
-        `)
+        `, [mesStart])
       const metaPromise = db.query(`
           SELECT meta_gmv, m1_teto, m1_pct, m2_teto, m2_pct, m3_teto, m3_pct, m4_pct
           FROM meta_unidade
           WHERE tenant_id = $1
-            AND ano_mes = to_char(NOW() AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM')
+            AND ano_mes = $2
           LIMIT 1
-        `, [tenant_id])
+        `, [tenant_id, effectiveMonth])
 
       const [agendaHoje, rankingApresentadorasMes, gmvDiarioQ, metaQ] = await Promise.all([
         agendaHojePromise,
@@ -536,8 +574,8 @@ export async function homeRoutes(app) {
         }))
 
       const gmvDiario = (() => {
-        const today = new Date()
-        const diasNoMes = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate()
+        const [anoRef, mesRef] = effectiveMonth.split('-').map(Number)
+        const diasNoMes = new Date(anoRef, mesRef, 0).getDate()
         const byDay = Object.fromEntries(gmvDiarioQ.rows.map(r => [Number(r.dia), parseFloat(Number(r.gmv).toFixed(2))]))
         return Array.from({ length: diasNoMes }, (_, i) => ({ dia: i + 1, gmv: byDay[i + 1] ?? 0 }))
       })()
@@ -587,6 +625,9 @@ export async function homeRoutes(app) {
       ]
 
       return {
+        // Período de referência (mês efetivo: atual se tem dados, senão último com dados)
+        mes_referencia: effectiveMonth,
+
         // Financeiro
         gmv_total_mes: gmvMes,
         gmv_mes:     gmvMes,

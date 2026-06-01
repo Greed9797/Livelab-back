@@ -33,7 +33,7 @@ const convidarSchema = z.object({
   comissao_pct: z.number().min(0).max(100).optional(),
   meta_diaria_gmv: z.number().nonnegative().optional(),
   foto_url: imageUrlSchema,
-  senha_temporaria: z.string().min(6, 'Senha temporária deve ter no mínimo 6 caracteres').optional(),
+  senha_temporaria: z.string().regex(SECURITY.PASSWORD_REGEX, 'Senha temporária deve ter no mínimo 8 caracteres, com letra e número.'),
 }).refine(d => d.papel !== 'cliente_parceiro' || !!d.cliente_id, {
   message: 'cliente_id é obrigatório para papel cliente_parceiro',
 })
@@ -200,27 +200,10 @@ export async function usuariosRoutes(app) {
     const presenterFixo = fixo ?? DEFAULT_APRESENTADORA_FIXO
     const presenterComissaoPct = comissao_pct ?? 0
 
-    // F4: convite via email. Senha inicial é placeholder aleatório (NÃO usável
-    // pra login) — usuário define a real ao aceitar o convite via /aceitar-convite.
-    // Fallback: se mailer não está configurado (sem RESEND_API_KEY) ou se o caller
-    // forçou senha_temporaria, mantemos comportamento legado pra não quebrar dev.
-    const mailerEnabled = !!process.env.RESEND_API_KEY
-    const useInviteFlow = mailerEnabled && !senha_temporaria
-
+    // Criação direta: o admin define a senha temporária e o usuário troca
+    // depois via PATCH /v1/auth/senha. Sem fluxo de convite por email.
     const senhaInicial = senha_temporaria
-      ?? crypto.randomBytes(32).toString('hex') // só pra ter algo no campo NOT NULL
     const senhaHash = await bcrypt.hash(senhaInicial, SECURITY.BCRYPT_ROUNDS)
-
-    // Token de convite (72h). Hash gravado, plaintext só vai por email.
-    const inviteRawToken = useInviteFlow
-      ? crypto.randomBytes(32).toString('hex')
-      : null
-    const inviteTokenHash = inviteRawToken
-      ? crypto.createHash('sha256').update(inviteRawToken).digest('hex')
-      : null
-    const inviteExpiraEm = useInviteFlow
-      ? new Date(Date.now() + 72 * 60 * 60 * 1000)
-      : null
 
     return app.withTenant(tenantId, async (db) => {
       try {
@@ -268,11 +251,10 @@ export async function usuariosRoutes(app) {
               tenant_id, nome, email, senha_hash, papel, ativo, criado_por,
               invite_token_hash, invite_expira_em, primeiro_acesso
             )
-           VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, false)
+           VALUES ($1, $2, $3, $4, $5, true, $6, NULL, NULL, true)
            RETURNING id, nome, email, papel, ativo, criado_em`,
           [
             tenantId, nome, email, senhaHash, papel, request.user.sub,
-            inviteTokenHash, inviteExpiraEm,
           ]
         )
         const newUser = rows[0]
@@ -327,44 +309,9 @@ export async function usuariosRoutes(app) {
 
         await db.query('COMMIT')
 
-        // F4: dispara email de convite (fire-and-forget — não bloqueia resposta).
-        if (useInviteFlow) {
-          // Pega nome do tenant pra personalizar email.
-          const tenantRow = await db.query(`SELECT nome FROM tenants WHERE id = $1`, [tenantId])
-          const tenantNome = tenantRow.rows[0]?.nome ?? 'LiveShop'
-
-          const link = `${_frontendUrl()}/aceitar-convite?token=${inviteRawToken}`
-          notify({
-            app,
-            tenantId,
-            to: email,
-            template: 'convite_usuario',
-            vars: {
-              nome,
-              papel_label: PAPEL_LABELS[papel] ?? papel,
-              link,
-              tenant_nome: tenantNome,
-            },
-          }).catch((err) => {
-            app.log?.warn?.({ err }, '[usuarios] falha ao enviar email convite_usuario')
-          })
-
-          app.audit?.log?.(request, { action: 'usuarios.invite', entity_type: 'user', entity_id: newUser.id, metadata: { email, papel } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-
-          reply.header('Cache-Control', 'no-store')
-          reply.header('Pragma', 'no-cache')
-          return reply.code(201).send({
-            ...newUser,
-            apresentadora_id: apresentadoraId,
-            pode_apresentar_live: isPresenterRole(papel),
-            invite_enviado: true,
-            invite_expira_em: inviteExpiraEm,
-          })
-        }
-
-        // Fallback legado — sem mailer ou senha forçada pelo caller.
-        // S-10: resposta contém senha — proibir cache em proxies/CDN.
-        app.audit?.log?.(request, { action: 'usuarios.invite', entity_type: 'user', entity_id: newUser.id, metadata: { email, papel, invite_flow: false } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        // Criação direta — a resposta inclui a senha temporária definida pelo
+        // admin. S-10: proibir cache em proxies/CDN.
+        app.audit?.log?.(request, { action: 'usuarios.create', entity_type: 'user', entity_id: newUser.id, metadata: { email, papel } })?.catch(err => app.log.error({ err }, 'audit log failed'))
 
         reply.header('Cache-Control', 'no-store')
         reply.header('Pragma', 'no-cache')
@@ -374,9 +321,6 @@ export async function usuariosRoutes(app) {
           pode_apresentar_live: isPresenterRole(papel),
           senha_temporaria: senhaInicial,
           invite_enviado: false,
-          warning: mailerEnabled
-            ? 'Senha definida pelo administrador (sem fluxo de convite).'
-            : 'Mailer não configurado — usando senha temporária. Configure RESEND_API_KEY para o fluxo de convite por email.',
         })
       } catch (e) {
         await db.query('ROLLBACK')

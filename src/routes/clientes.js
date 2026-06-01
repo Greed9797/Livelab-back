@@ -1,8 +1,11 @@
 import { z } from 'zod'
+import bcrypt from 'bcrypt'
+import crypto from 'node:crypto'
 import { resolveCepToGeo } from './cep.js'
 import { READ_CLIENTES, WRITE_CLIENTES } from '../config/role_groups.js'
 import { getClienteOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
+import { SECURITY } from '../config/security.js'
 const imageUrlField = z.string().max(500000).nullable().optional()
 
 const createSchema = z.object({
@@ -24,6 +27,12 @@ const createSchema = z.object({
   siga:            z.string().optional(),
   tiktok_username: tiktokUsernameField,
   logo_url:        imageUrlField,
+  criar_acesso:    z.boolean().default(false),
+  acesso_nome:     z.string().optional(),
+  acesso_email:    z.string().email().optional(),
+  senha_temporaria: z.string().min(6, 'Senha temporária deve ter no mínimo 6 caracteres').optional(),
+}).refine(d => !d.criar_acesso || Boolean(d.acesso_email || d.email), {
+  message: 'E-mail é obrigatório para criar acesso do cliente',
 })
 
 const patchSchema = z.object({
@@ -90,20 +99,94 @@ export async function clientesRoutes(app) {
     }
 
     return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `INSERT INTO clientes (tenant_id, nome, celular, cpf, cnpj, razao_social, email,
-          fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga, tiktok_username, logo_url, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'ativo')
-         RETURNING *`,
-        [tenant_id, d.nome, d.celular, d.cpf ?? null, d.cnpj ?? null,
-         d.razao_social ?? null, d.email ?? null, d.fat_anual,
-         d.nicho ?? null, d.site ?? null, d.vende_tiktok,
-         lat, lng,
-         d.cep ?? null, cidade, estado, d.siga ?? null,
-         d.tiktok_username ?? null, d.logo_url ?? null]
-      )
-      app.audit?.log?.(request, { action: 'cliente.create', entity_type: 'cliente', entity_id: result.rows[0].id, metadata: { nome: d.nome, nicho: d.nicho ?? null, fat_anual: d.fat_anual, vende_tiktok: d.vende_tiktok } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      return reply.code(201).send(result.rows[0])
+      await db.query('BEGIN')
+      try {
+        const result = await db.query(
+          `INSERT INTO clientes (tenant_id, nome, celular, cpf, cnpj, razao_social, email,
+            fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga, tiktok_username, logo_url, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'ativo')
+           RETURNING *`,
+          [tenant_id, d.nome, d.celular, d.cpf ?? null, d.cnpj ?? null,
+           d.razao_social ?? null, d.email ?? null, d.fat_anual,
+           d.nicho ?? null, d.site ?? null, d.vende_tiktok,
+           lat, lng,
+           d.cep ?? null, cidade, estado, d.siga ?? null,
+           d.tiktok_username ?? null, d.logo_url ?? null]
+        )
+        const cliente = result.rows[0]
+
+        let acesso = null
+        if (d.criar_acesso) {
+          const acessoEmail = normalizedEmail(d.acesso_email ?? d.email)
+          const emailCheck = z.string().email().safeParse(acessoEmail)
+          if (!emailCheck.success) {
+            await db.query('ROLLBACK')
+            return reply.code(400).send({ error: 'E-mail inválido para criar acesso do cliente' })
+          }
+
+          const existing = await db.query(
+            `SELECT id FROM users
+             WHERE LOWER(email) = LOWER($1)
+               AND tenant_id = $2::uuid
+               AND ativo IS NOT FALSE`,
+            [acessoEmail, tenant_id],
+          )
+          if (existing.rows.length > 0) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({
+              error: 'E-mail já cadastrado e ativo neste tenant.',
+              code: 'EMAIL_ALREADY_ACTIVE',
+            })
+          }
+
+          const senhaInicial = d.senha_temporaria ?? crypto.randomBytes(8).toString('hex')
+          const senhaHash = await bcrypt.hash(senhaInicial, SECURITY.BCRYPT_ROUNDS)
+          const userResult = await db.query(
+            `INSERT INTO users (tenant_id, nome, email, senha_hash, papel, ativo, criado_por, primeiro_acesso)
+             VALUES ($1, $2, $3, $4, 'cliente_parceiro', true, $5, false)
+             RETURNING id, nome, email, papel, ativo, criado_em`,
+            [
+              tenant_id,
+              d.acesso_nome || d.razao_social || d.nome,
+              acessoEmail,
+              senhaHash,
+              request.user.sub,
+            ],
+          )
+          const user = userResult.rows[0]
+
+          await db.query(
+            `UPDATE clientes
+             SET user_id = $1
+             WHERE id = $2
+               AND tenant_id = $3::uuid
+               AND user_id IS NULL`,
+            [user.id, cliente.id, tenant_id],
+          )
+
+          acesso = {
+            user_id: user.id,
+            email: user.email,
+            ativo: user.ativo,
+            senha_temporaria: senhaInicial,
+          }
+          cliente.user_id = user.id
+          cliente.acesso_email = user.email
+          cliente.acesso_ativo = user.ativo
+        }
+
+        await db.query('COMMIT')
+        app.audit?.log?.(request, { action: 'cliente.create', entity_type: 'cliente', entity_id: cliente.id, metadata: { nome: d.nome, nicho: d.nicho ?? null, fat_anual: d.fat_anual, vende_tiktok: d.vende_tiktok, acesso_criado: Boolean(acesso) } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+        if (acesso) {
+          reply.header('Cache-Control', 'no-store')
+          reply.header('Pragma', 'no-cache')
+        }
+        return reply.code(201).send(acesso ? { ...cliente, acesso } : cliente)
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {})
+        throw err
+      }
     })
   })
 
@@ -182,12 +265,14 @@ export async function clientesRoutes(app) {
         `SELECT cl.id, cl.nome, cl.celular, cl.email, cl.status, cl.lat, cl.lng,
                 cl.fat_anual, cl.nicho, cl.score, cl.cep, cl.cidade, cl.estado,
                 cl.siga, cl.criado_em, cl.meta_diaria_gmv, cl.logo_url, cl.tiktok_username,
+                cl.user_id, u.email AS acesso_email, u.ativo AS acesso_ativo,
                 c.horas_contratadas, c.horas_consumidas,
                 (c.horas_contratadas - c.horas_consumidas) AS horas_restantes,
                 COALESCE(lm.gmv_mes, 0)::float AS gmv_mes,
                 COALESCE(lm.total_lives_mes, 0)::int AS total_lives_mes,
                 COALESCE(ap.apresentadoras_nomes, '[]'::json) AS apresentadoras_nomes
          FROM clientes cl
+         LEFT JOIN users u ON u.id = cl.user_id AND u.tenant_id = cl.tenant_id AND u.papel = 'cliente_parceiro'
          LEFT JOIN LATERAL (
            SELECT horas_contratadas, horas_consumidas
            FROM contratos

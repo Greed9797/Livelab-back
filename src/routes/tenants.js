@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
 import { z } from 'zod'
 import { SECURITY } from '../config/security.js'
+import { liveGmvSql } from '../lib/metric-sql.js'
 
 const criarFranquiaSchema = z.object({
   nome: z.string().min(2),
@@ -32,13 +33,13 @@ export async function tenantsRoutes(app) {
   app.get('/v1/tenants', { preHandler: masterOnly }, async (request, reply) => {
     const result = await app.db.query(`
       WITH lives_mes AS (
-        SELECT tenant_id,
+        SELECT l.tenant_id,
                COUNT(*)::int                       AS lives_mes,
-               COALESCE(SUM(fat_gerado), 0)::float AS gmv_mes
-        FROM lives
-        WHERE iniciado_em >= date_trunc('month', NOW())
-          AND iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
-        GROUP BY tenant_id
+               COALESCE(SUM(${liveGmvSql('l')}), 0)::float AS gmv_mes
+        FROM lives l
+        WHERE l.iniciado_em >= date_trunc('month', NOW())
+          AND l.iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
+        GROUP BY l.tenant_id
       )
       SELECT t.id, t.nome, t.ativo, t.criado_em,
              t.cnpj, t.telefone_contato, t.email_contato,
@@ -60,14 +61,14 @@ export async function tenantsRoutes(app) {
   app.get('/v1/tenants/:id', { preHandler: masterOnly }, async (request, reply) => {
     const result = await app.db.query(`
       WITH lives_mes AS (
-        SELECT tenant_id,
+        SELECT l.tenant_id,
                COUNT(*)::int                       AS lives_mes,
-               COALESCE(SUM(fat_gerado), 0)::float AS gmv_mes
-        FROM lives
-        WHERE tenant_id = $1
-          AND iniciado_em >= date_trunc('month', NOW())
-          AND iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
-        GROUP BY tenant_id
+               COALESCE(SUM(${liveGmvSql('l')}), 0)::float AS gmv_mes
+        FROM lives l
+        WHERE l.tenant_id = $1
+          AND l.iniciado_em >= date_trunc('month', NOW())
+          AND l.iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
+        GROUP BY l.tenant_id
       )
       SELECT t.id, t.nome, t.ativo, t.criado_em,
              t.cnpj, t.telefone_contato, t.email_contato,

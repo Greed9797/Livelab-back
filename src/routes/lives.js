@@ -138,6 +138,28 @@ const liveManualEditSchema = z.object({
   origem_dados:     z.enum(['manual', 'api']).optional(),
 })
 
+function officialGmvFromPayload(payload = {}, fallback = {}) {
+  return Number(
+    payload.ads_gmv
+    ?? payload.manual_gmv
+    ?? payload.fat_gerado
+    ?? fallback.ads_gmv
+    ?? fallback.manual_gmv
+    ?? fallback.fat_gerado
+    ?? 0
+  )
+}
+
+function officialOrdersFromPayload(payload = {}, fallback = {}) {
+  return Number(
+    payload.manual_orders
+    ?? payload.qtd_pedidos
+    ?? fallback.manual_orders
+    ?? fallback.final_orders_count
+    ?? 0
+  )
+}
+
 const publicarSchema = z.object({
   status_publicacao: z.enum(['revisado', 'publicado']),
   motivo: z.string().max(500).optional(),
@@ -822,7 +844,7 @@ export async function livesRoutes(app) {
           [d.cabine_id]
         )
         const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
-        const comissao = d.fat_gerado * (comissaoPct / 100)
+        const comissao = officialGmvFromPayload(d) * (comissaoPct / 100)
 
         // Resolve apresentadoras.id → users.id (pode ser null para apresentadoras sem conta)
         let apresentadorUserId = null
@@ -943,8 +965,8 @@ export async function livesRoutes(app) {
             marcaId: resolvedMarcaId,
             apresentadoraId: d.apresentador_id ?? null,
             data: d.data,
-            gmv: d.fat_gerado,
-            pedidos: d.qtd_pedidos,
+            gmv: officialGmvFromPayload(d),
+            pedidos: officialOrdersFromPayload(d),
             comissaoApresentadora: comissao,
           })
         }
@@ -973,7 +995,7 @@ export async function livesRoutes(app) {
           `SELECT l.id, l.cabine_id, l.cliente_id, l.marca_id, l.apresentador_id, l.gestor_id, l.agenda_evento_id,
                   ${tiktokUsernameSql({ marca: 'm_current', cliente: 'cl_tiktok', contrato: 'ct' })} AS tiktok_username,
                   l.previsto_fim, l.tipo, l.status_publicacao, l.origem_dados,
-                  l.status, l.fat_gerado, l.manual_gmv, l.final_orders_count, l.iniciado_em, l.encerrado_em,
+                  l.status, l.fat_gerado, l.manual_gmv, l.ads_gmv, l.final_orders_count, l.manual_orders, l.iniciado_em, l.encerrado_em,
                   c.contrato_id
              FROM lives l
              LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
@@ -997,7 +1019,8 @@ export async function livesRoutes(app) {
 
         const cabineId = d.cabine_id ?? live.cabine_id
         let comissao = undefined
-        if (d.fat_gerado !== undefined) {
+        const gmvMudou = d.fat_gerado !== undefined || d.manual_gmv !== undefined || d.ads_gmv !== undefined
+        if (gmvMudou) {
           const cab = await db.query(
             `SELECT ct.comissao_pct FROM cabines c
                LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
@@ -1006,7 +1029,7 @@ export async function livesRoutes(app) {
             [cabineId, tenant_id]
           )
           const pct = Number(cab.rows[0]?.comissao_pct ?? 0)
-          comissao = d.fat_gerado * (pct / 100)
+          comissao = officialGmvFromPayload(d, live) * (pct / 100)
         }
 
         const updates = []
@@ -1076,7 +1099,8 @@ export async function livesRoutes(app) {
         if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
         if (d.tipo         !== undefined) addField('tipo',               d.tipo)
         if (d.status_publicacao !== undefined) addField('status_publicacao', d.status_publicacao)
-        if (d.fat_gerado      !== undefined) { addField('fat_gerado', d.fat_gerado); addField('comissao_calculada', comissao) }
+        if (d.fat_gerado      !== undefined) addField('fat_gerado', d.fat_gerado)
+        if (gmvMudou) addField('comissao_calculada', comissao)
         if (d.qtd_pedidos     !== undefined) addField('final_orders_count', d.qtd_pedidos)
         if (d.resumo          !== undefined) addField('resumo',             d.resumo)
         if (d.manual_views    !== undefined) addField('manual_views',    d.manual_views)
@@ -1155,8 +1179,8 @@ export async function livesRoutes(app) {
             marcaId: d.marca_id,
             apresentadoraId: d.apresentador_id ?? null,
             data: (d.data ?? new Date(live.iniciado_em).toISOString().slice(0, 10)),
-            gmv: d.manual_gmv ?? d.fat_gerado ?? Number(live.manual_gmv ?? live.fat_gerado ?? 0),
-            pedidos: d.qtd_pedidos ?? Number(live.final_orders_count ?? 0),
+            gmv: officialGmvFromPayload(d, live),
+            pedidos: officialOrdersFromPayload(d, live),
           })
         }
 
@@ -1242,10 +1266,9 @@ export async function livesRoutes(app) {
 
         await db.query('COMMIT')
 
-        // Recalcula comissões se fat_gerado ou manual_gmv mudou (fire-and-forget)
-        const gmvMudou = d.fat_gerado !== undefined || d.manual_gmv !== undefined
+        // Recalcula comissões se a base oficial de GMV mudou (fire-and-forget).
         if (gmvMudou) {
-          const gmvAtualizado = d.manual_gmv ?? d.fat_gerado
+          const gmvAtualizado = officialGmvFromPayload(d, live)
           app.withTenant(tenant_id, async (db2) => {
             try {
               await calcularComissoesDaLive(db2, {
@@ -1652,7 +1675,7 @@ export async function livesRoutes(app) {
         const contrato = contratoQ.rows[0]
 
         const comissaoPct = Number(contrato?.comissao_pct ?? 0)
-        const comissao = parsed.data.fat_gerado * (comissaoPct / 100)
+        const comissao = officialGmvFromPayload(parsed.data) * (comissaoPct / 100)
         const encerradoEm = parsed.data.encerrado_em ? new Date(parsed.data.encerrado_em) : null
         let encerramentoApresentadorUserId = null
         if (parsed.data.apresentadora_id) {
@@ -1873,7 +1896,7 @@ export async function livesRoutes(app) {
         await db.query('COMMIT')
 
         // Motor de comissões — recalcula variável da apresentadora; fixo entra no ranking consolidado.
-        const gmvFinal = parsed.data.manual_gmv ?? parsed.data.fat_gerado
+        const gmvFinal = officialGmvFromPayload(parsed.data)
         app.withTenant(tenant_id, async (db2) => {
           try {
             await calcularComissoesDaLive(db2, {
@@ -1955,7 +1978,7 @@ export async function livesRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       const liveQ = await db.query(
-        `SELECT id, status_publicacao, marca_id, manual_gmv, fat_gerado FROM lives WHERE id = $1`,
+        `SELECT id, status_publicacao, marca_id, ads_gmv, manual_gmv, fat_gerado FROM lives WHERE id = $1`,
         [request.params.id]
       )
       const live = liveQ.rows[0]
@@ -2015,7 +2038,7 @@ export async function livesRoutes(app) {
         // da live. Fire-and-forget (não bloqueia transição). Requer marca,
         // já validada acima.
         if (status_publicacao === 'publicado') {
-          const gmvFinal = Number(live.manual_gmv ?? live.fat_gerado ?? 0)
+          const gmvFinal = officialGmvFromPayload({}, live)
           app.withTenant(tenant_id, async (db2) => {
             try {
               await calcularComissoesDaLive(db2, {

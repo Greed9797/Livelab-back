@@ -43,7 +43,7 @@ function createHomeQueryMock() {
       return { rows: [{ id: 'ag-1', tipo: 'live', status: 'confirmado', data_inicio: '2026-05-18T14:00:00.000Z', data_fim: '2026-05-18T16:00:00.000Z', cabine_numero: 2, cabine_nome: 'Cabine 02', marca_nome: 'Marca B', cliente_nome: 'Cliente B', apresentadora_nome: 'Ana' }] }
     }
     if (sql.includes('SUM(valor_fixo)')) return { rows: [{ valor: '1000' }] }
-    if (sql.includes('SUM(l.fat_gerado *')) return { rows: [{ valor: '100' }] }
+    if (sql.includes("COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) *")) return { rows: [{ valor: '100' }] }
     if (sql.includes('FROM custos')) return { rows: [{ valor: '50' }] }
     if (sql.includes('FROM cabines c')) {
       return {

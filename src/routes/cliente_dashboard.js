@@ -171,7 +171,7 @@ async function fetchClienteLives(db, tenantId, clienteId, periodo, custoHora) {
 	      COALESCE(l.fat_gerado, 0) AS fat_gerado,
       COALESCE(l.comissao_calculada, 0) AS comissao,
       COALESCE(prod.itens, 0) AS total_vendas,
-      COALESCE(l.final_orders_count, snap.total_orders, prod.itens, 0) AS pedidos,
+      COALESCE(l.manual_orders, l.final_orders_count, snap.total_orders, prod.itens, 0) AS pedidos,
       COALESCE(l.final_peak_viewers, snap.peak_viewers, snap.total_viewers, 0) AS viewers,
       COALESCE(l.final_total_comments, snap.comments_count, 0) AS comentarios,
       COALESCE(l.final_total_likes, snap.likes_count, 0) AS likes,

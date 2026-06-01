@@ -1,3 +1,5 @@
+import { liveGmvSql, liveOrdersSql } from './metric-sql.js'
+
 const toNum = (value) => Number(value ?? 0)
 
 export function resolveMonthRange(query = {}) {
@@ -69,7 +71,10 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
        WHERE va.tenant_id = $2::uuid
      ),
      legacy_lives AS (
-       SELECT l.id, l.fat_gerado, l.final_orders_count, l.encerrado_em
+       SELECT l.id,
+              ${liveGmvSql('l')} AS gmv,
+              ${liveOrdersSql('l')} AS pedidos,
+              l.encerrado_em
        FROM lives l
        WHERE l.tenant_id = $2::uuid
          AND l.cliente_id = $1
@@ -80,13 +85,13 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
      )
      SELECT
        COALESCE(SUM(v.gmv) FILTER (WHERE v.data >= $3::date AND v.data < ($4::date + interval '1 day')), 0)
-         + COALESCE(SUM(ll.fat_gerado) FILTER (WHERE ll.encerrado_em >= $3::date AND ll.encerrado_em < ($4::date + interval '1 day')), 0) AS gmv_mes,
-       COALESCE(SUM(v.gmv), 0) + COALESCE(SUM(ll.fat_gerado), 0) AS gmv_acumulado,
+         + COALESCE(SUM(ll.gmv) FILTER (WHERE ll.encerrado_em >= $3::date AND ll.encerrado_em < ($4::date + interval '1 day')), 0) AS gmv_mes,
+       COALESCE(SUM(v.gmv), 0) + COALESCE(SUM(ll.gmv), 0) AS gmv_acumulado,
        COUNT(DISTINCT v.origem_id) FILTER (WHERE v.origem = 'live')::int
          + COUNT(DISTINCT ll.id)::int AS total_lives,
        COUNT(DISTINCT v.origem_id) FILTER (WHERE v.origem = 'video')::int AS total_videos,
        COALESCE(SUM(v.pedidos) FILTER (WHERE v.data >= $3::date AND v.data < ($4::date + interval '1 day')), 0)
-         + COALESCE(SUM(ll.final_orders_count) FILTER (WHERE ll.encerrado_em >= $3::date AND ll.encerrado_em < ($4::date + interval '1 day')), 0) AS pedidos_mes,
+         + COALESCE(SUM(ll.pedidos) FILTER (WHERE ll.encerrado_em >= $3::date AND ll.encerrado_em < ($4::date + interval '1 day')), 0) AS pedidos_mes,
        COALESCE(SUM(v.comissao_franquia), 0) AS comissao_franquia,
        COALESCE(SUM(v.comissao_franqueadora), 0) AS comissao_franqueadora,
        COALESCE(SUM(v.comissao_apresentadora), 0) AS comissao_apresentadora
@@ -109,7 +114,10 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
        ORDER BY va.origem_id, va.atualizado_em DESC
      )
      SELECT l.id, l.cabine_id, l.cliente_id, vl.marca_id, l.iniciado_em, l.encerrado_em,
-            l.status, l.status_publicacao, l.fat_gerado, l.final_orders_count,
+            l.status, l.status_publicacao,
+            ${liveGmvSql('l')} AS gmv,
+            ${liveOrdersSql('l')} AS pedidos,
+            l.fat_gerado, l.final_orders_count,
             c.numero AS cabine_numero,
             vl.marca_nome,
             COALESCE(a.nome, u.nome) AS apresentadora_nome
@@ -201,7 +209,10 @@ export async function getMarcaOperacional(db, { tenantId, marcaId, startDate, en
        ORDER BY va.origem_id, va.atualizado_em DESC
      )
      SELECT l.id, l.cabine_id, l.cliente_id, vl.marca_id, l.iniciado_em, l.encerrado_em,
-            l.status, l.status_publicacao, l.fat_gerado, l.final_orders_count,
+            l.status, l.status_publicacao,
+            ${liveGmvSql('l')} AS gmv,
+            ${liveOrdersSql('l')} AS pedidos,
+            l.fat_gerado, l.final_orders_count,
             c.numero AS cabine_numero,
             COALESCE(a.nome, u.nome) AS apresentadora_nome
      FROM lives l

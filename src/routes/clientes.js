@@ -4,6 +4,7 @@ import crypto from 'node:crypto'
 import { resolveCepToGeo } from './cep.js'
 import { READ_CLIENTES, WRITE_CLIENTES } from '../config/role_groups.js'
 import { getClienteOperacional, resolveMonthRange } from '../lib/operacional.js'
+import { liveGmvSql } from '../lib/metric-sql.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
 import { SECURITY } from '../config/security.js'
 const imageUrlField = z.string().max(500000).nullable().optional()
@@ -239,8 +240,8 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT
-           COALESCE(SUM(l.fat_gerado), 0)           AS ltv_total,
-           COALESCE(SUM(l.fat_gerado), 0)           AS faturamento_acumulado,
+           COALESCE(SUM(${liveGmvSql('l')}), 0)     AS ltv_total,
+           COALESCE(SUM(${liveGmvSql('l')}), 0)     AS faturamento_acumulado,
            COUNT(l.id)::int                          AS total_lives,
            COALESCE(SUM(l.comissao_calculada), 0)   AS comissao_paga
          FROM lives l
@@ -533,7 +534,7 @@ export async function clientesRoutes(app) {
           c.nicho, c.cidade, c.estado, c.criado_em,
           COUNT(l.id)::int           AS total_lives,
           MAX(l.iniciado_em)         AS ultima_live,
-          COALESCE(SUM(l.fat_gerado), 0)::float AS gmv_acumulado
+          COALESCE(SUM(${liveGmvSql('l')}), 0)::float AS gmv_acumulado
          FROM clientes c
          LEFT JOIN lives l ON l.cliente_id = c.id AND l.tenant_id = c.tenant_id AND l.status = 'encerrada'
          WHERE c.id = $1 AND c.tenant_id = $2::uuid AND c.deleted_at IS NULL

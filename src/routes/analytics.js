@@ -6,6 +6,7 @@ import {
   summarizeImportRows,
 } from '../services/analytics-import.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
+import { liveGmvSql } from '../lib/metric-sql.js'
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -387,7 +388,7 @@ export async function analyticsRoutes(app) {
           u.id AS apresentador_id,
           u.nome AS apresentador_nome,
           COUNT(l.id) AS total_lives,
-          COALESCE(SUM(l.fat_gerado), 0) AS gmv_total
+          COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_total
         FROM lives l
         JOIN users u ON u.id = l.apresentador_id
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
@@ -400,7 +401,7 @@ export async function analyticsRoutes(app) {
         SELECT
           c.id AS cliente_id,
           c.nome AS cliente_nome,
-          COALESCE(SUM(l.fat_gerado), 0) AS gmv_total,
+          COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_total,
           MAX(l.iniciado_em) AS ultima_live
         FROM lives l
         JOIN clientes c ON c.id = l.cliente_id AND c.tenant_id = l.tenant_id
@@ -414,7 +415,7 @@ export async function analyticsRoutes(app) {
         SELECT
           EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS hora,
           COUNT(*) AS total_lives,
-          COALESCE(SUM(l.fat_gerado), 0) AS gmv_total
+          COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_total
         FROM lives l
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
@@ -426,7 +427,7 @@ export async function analyticsRoutes(app) {
           c.id AS cabine_id,
           CONCAT('Cabine ', LPAD(c.numero::text, 2, '0')) AS cabine_nome,
           COUNT(l.id) AS total_lives,
-          COALESCE(SUM(l.fat_gerado), 0) AS gmv_acumulado
+          COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_acumulado
         FROM cabines c
         LEFT JOIN lives l
           ON l.cabine_id = c.id

@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks'
 import { getPresenterRanking, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
+import { liveGmvSql } from '../lib/metric-sql.js'
 
 const HOME_DASHBOARD_CACHE_TTL_MS = Number(process.env.HOME_DASHBOARD_CACHE_TTL_MS ?? 30_000)
 const HOME_DASHBOARD_BROWSER_MAX_AGE_SECONDS = 15
@@ -63,7 +64,7 @@ export async function homeRoutes(app) {
                   WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
                     AND status = 'ativo'`),
         db.query(`
-        SELECT COALESCE(SUM(l.fat_gerado * (COALESCE(c.comissao_pct, 0) / 100.0)), 0) AS valor
+        SELECT COALESCE(SUM(${liveGmvSql('l')} * (COALESCE(c.comissao_pct, 0) / 100.0)), 0) AS valor
         FROM lives l
         JOIN contratos c ON c.cliente_id = l.cliente_id AND c.status = 'ativo' AND c.tenant_id = l.tenant_id
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid

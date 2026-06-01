@@ -37,6 +37,12 @@ describe('operacional helpers', () => {
     expect(result.metrics.gmv_mes).toBe(1142)
     expect(result.lives).toHaveLength(1)
     expect(db.calls.some(({ sql }) => /\bl\.marca_id\b/.test(sql))).toBe(false)
+    expect(db.calls[2].sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv')
+    expect(db.calls[2].sql).toContain('COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos')
+    expect(db.calls[2].sql).toContain('SUM(ll.gmv)')
+    expect(db.calls[2].sql).toContain('SUM(ll.pedidos)')
+    expect(db.calls[3].sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv')
+    expect(db.calls[3].sql).toContain('COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos')
   })
 
   it('builds marca detail from vendas_atribuidas instead of lives.marca_id', async () => {
@@ -53,5 +59,7 @@ describe('operacional helpers', () => {
     expect(result.metrics.total_lives).toBe(1)
     expect(result.lives[0].marca_id).toBe(marcaId)
     expect(db.calls.some(({ sql }) => /\bl\.marca_id\b/.test(sql))).toBe(false)
+    expect(db.calls[2].sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv')
+    expect(db.calls[2].sql).toContain('COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos')
   })
 })

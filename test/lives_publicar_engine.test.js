@@ -20,7 +20,7 @@ function buildApp({ liveRow }) {
   const query = vi.fn(async (sql) => {
     const s = String(sql)
     if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [] }
-    if (s.includes('SELECT id, status_publicacao, marca_id, manual_gmv, fat_gerado FROM lives')) {
+    if (s.includes('SELECT id, status_publicacao, marca_id, ads_gmv, manual_gmv, fat_gerado FROM lives')) {
       return { rows: [liveRow] }
     }
     if (s.includes('UPDATE lives SET status_publicacao')) {
@@ -48,7 +48,7 @@ describe('PATCH /v1/lives/:id/publicar — engine + validação marca', () => {
   it('retorna 422 quando live não tem marca', async () => {
     calcularMock.mockClear()
     const { app } = buildApp({
-      liveRow: { id: liveId, status_publicacao: 'revisado', marca_id: null, manual_gmv: 1000, fat_gerado: 1000 },
+      liveRow: { id: liveId, status_publicacao: 'revisado', marca_id: null, ads_gmv: null, manual_gmv: 1000, fat_gerado: 1000 },
     })
     await app.register(livesRoutes)
 
@@ -67,7 +67,7 @@ describe('PATCH /v1/lives/:id/publicar — engine + validação marca', () => {
     calcularMock.mockClear()
     calcularMock.mockResolvedValue([])
     const { app } = buildApp({
-      liveRow: { id: liveId, status_publicacao: 'revisado', marca_id: marcaId, manual_gmv: 2500, fat_gerado: 2500 },
+      liveRow: { id: liveId, status_publicacao: 'revisado', marca_id: marcaId, ads_gmv: 3000, manual_gmv: 2500, fat_gerado: 2000 },
     })
     await app.register(livesRoutes)
 
@@ -78,13 +78,16 @@ describe('PATCH /v1/lives/:id/publicar — engine + validação marca', () => {
     })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toMatchObject({ id: liveId, status_publicacao: 'publicado' })
+    await vi.waitFor(() => {
+      expect(calcularMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ gmv: 3000 }))
+    })
     await app.close()
   })
 
   it('422 quando transição inválida (rascunho → publicado direto)', async () => {
     calcularMock.mockClear()
     const { app } = buildApp({
-      liveRow: { id: liveId, status_publicacao: 'rascunho', marca_id: marcaId, manual_gmv: 100, fat_gerado: 100 },
+      liveRow: { id: liveId, status_publicacao: 'rascunho', marca_id: marcaId, ads_gmv: null, manual_gmv: 100, fat_gerado: 100 },
     })
     await app.register(livesRoutes)
 

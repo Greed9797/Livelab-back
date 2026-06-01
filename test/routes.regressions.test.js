@@ -611,12 +611,18 @@ describe('Route regressions: SQL and RBAC', () => {
 
     const closersSql = queryMock.mock.calls[1][0]
     expect(closersSql).toContain('JOIN users u ON u.id = l.apresentador_id')
+    expect(closersSql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
 
     const clientesSql = queryMock.mock.calls[2][0]
     expect(clientesSql).toContain('JOIN clientes c ON c.id = l.cliente_id')
+    expect(clientesSql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
 
     const heatmapSql = queryMock.mock.calls[3][0]
     expect(heatmapSql).toContain("EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS hora")
+    expect(heatmapSql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
+
+    const cabinesSql = queryMock.mock.calls[4][0]
+    expect(cabinesSql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
 
     expect(releaseMock).toHaveBeenCalledTimes(1)
 

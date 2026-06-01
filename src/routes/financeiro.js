@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
+import { liveGmvSql } from '../lib/metric-sql.js'
 
 const custoSchema = z.object({
   descricao:   z.string().min(1),
@@ -151,10 +152,10 @@ export async function financeiroRoutes(app) {
         t.cidade,
         t.uf,
         t.plano,
-        COALESCE(SUM(l.fat_gerado), 0)::float                  AS gmv_total,
+        COALESCE(SUM(${liveGmvSql('l')}), 0)::float            AS gmv_total,
         COALESCE(COUNT(l.id), 0)::int                          AS total_lives,
-        COALESCE(SUM(l.fat_gerado) * 0.05, 0)::float           AS royalties_estimados,
-        COALESCE(SUM(l.fat_gerado) * 0.02, 0)::float           AS taxa_marketing_estimada
+        COALESCE(SUM(${liveGmvSql('l')}) * 0.05, 0)::float     AS royalties_estimados,
+        COALESCE(SUM(${liveGmvSql('l')}) * 0.02, 0)::float     AS taxa_marketing_estimada
       FROM tenants t
       -- Filtra apenas tenants cujo dono tem papel 'franqueado' (não franqueador_master)
       INNER JOIN users u ON u.tenant_id = t.id AND u.papel = 'franqueado'

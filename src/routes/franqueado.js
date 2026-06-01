@@ -1,3 +1,5 @@
+import { liveGmvSql } from '../lib/metric-sql.js'
+
 const MASTER_PIPELINE_STAGES = [
   'Lead captado',
   'Qualificação',
@@ -215,7 +217,7 @@ async function fetchUnitSummaries(
         SELECT
           l.tenant_id,
 	          COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv_current,
-          COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_current
+          COALESCE(SUM(${liveGmvSql('l')} * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_current
         FROM lives l
         LEFT JOIN LATERAL (
           SELECT c.comissao_pct
@@ -232,7 +234,7 @@ async function fetchUnitSummaries(
       lives_previous AS (
         SELECT
           l.tenant_id,
-          COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_previous
+          COALESCE(SUM(${liveGmvSql('l')} * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_previous
         FROM lives l
         LEFT JOIN LATERAL (
           SELECT c.comissao_pct
@@ -384,7 +386,7 @@ async function fetchHistoryRows(app, masterTenantId, periodInfo, allowedTenantId
         SELECT
           tm.tenant_id,
           tm.month_start,
-          COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_revenue
+          COALESCE(SUM(${liveGmvSql('l')} * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_revenue
         FROM tenant_months tm
         LEFT JOIN lives l
           ON l.tenant_id = tm.tenant_id
@@ -479,7 +481,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
             l.tenant_id,
             l.cliente_id,
 	            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS live_gmv,
-            COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
+            COALESCE(SUM(${liveGmvSql('l')} * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
           FROM lives l
           LEFT JOIN LATERAL (
             SELECT c.comissao_pct
@@ -555,7 +557,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
             l.tenant_id,
             l.cliente_id,
 	            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS live_gmv,
-            COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
+            COALESCE(SUM(${liveGmvSql('l')} * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
           FROM lives l
           LEFT JOIN LATERAL (
             SELECT c.comissao_pct

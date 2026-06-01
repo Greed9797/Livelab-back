@@ -12,6 +12,7 @@ import {
   buildBoletosCSV,
   buildClientePDFHtml,
 } from '../services/reports.js'
+import { liveGmvSql } from '../lib/metric-sql.js'
 
 const RATE = { rateLimit: { max: 10, timeWindow: '1 minute' } }
 
@@ -58,7 +59,7 @@ export async function relatoriosRoutes(app) {
              cl.nome                                                         AS cliente,
              ap.nome                                                         AS apresentador,
              cab.nome                                                        AS cabine,
-             COALESCE(l.fat_gerado, 0)                                       AS gmv,
+             ${liveGmvSql('l')}                                               AS gmv,
              COALESCE(l.comissao_calculada, 0)                               AS comissao,
              CASE
                WHEN l.iniciada_em IS NOT NULL AND l.encerrada_em IS NOT NULL
@@ -179,7 +180,7 @@ export async function relatoriosRoutes(app) {
           `SELECT
              COALESCE(l.encerrada_em, l.iniciada_em, l.data_inicio)  AS data,
              ap.nome                                                  AS apresentador,
-             COALESCE(l.fat_gerado, 0)                                AS gmv,
+             ${liveGmvSql('l')}                                        AS gmv,
              CASE
                WHEN l.iniciada_em IS NOT NULL AND l.encerrada_em IS NOT NULL
                THEN EXTRACT(EPOCH FROM (l.encerrada_em - l.iniciada_em)) / 60

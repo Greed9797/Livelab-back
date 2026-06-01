@@ -142,7 +142,7 @@ describe('POST /v1/lives/manual', () => {
     expect(res.json().id).toBe(liveId)
   })
 
-  it('calculates comissao = fat_gerado * (comissao_pct / 100)', async () => {
+  it('falls back to fat_gerado for comissao when no official override exists', async () => {
     let insertArgs = null
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })
@@ -164,6 +164,29 @@ describe('POST /v1/lives/manual', () => {
 
     // insertArgs[8] = comissao_calculada (after fat_gerado at [7])
     expect(insertArgs[8]).toBeCloseTo(200)
+  })
+
+  it('uses manual_gmv as commission base when it differs from fat_gerado', async () => {
+    let insertArgs = null
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })
+      .mockResolvedValueOnce({ rows: [{ comissao_pct: '10' }] })
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })
+      .mockImplementationOnce((sql, args) => { insertArgs = args; return { rows: [{ id: 'id-1' }] } })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    await app.inject({
+      method: 'POST',
+      url: '/v1/lives/manual',
+      payload: { ...basePayload, fat_gerado: 1000, manual_gmv: 1500 },
+    })
+
+    expect(insertArgs[8]).toBeCloseTo(150)
   })
 
   it('accepts BRL strings and persists manual live times in Sao Paulo timezone', async () => {
@@ -510,11 +533,45 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().ok).toBe(true)
     expect(queryMock.mock.calls[1][0]).toContain('tenant_id = $2::uuid')
-    // comissao = 2000 * 0.10 = 200
+    // comissao = official GMV (2000) * 0.10 = 200
     const comissaoIdx = updateArgs[0].indexOf(200)
     expect(comissaoIdx).toBeGreaterThan(-1)
     const updateSql = queryMock.mock.calls.find(([sql]) => /UPDATE lives SET/i.test(sql))?.[0]
     expect(updateSql).toContain('AND tenant_id =')
+  })
+
+  it('updates manual_gmv and recalculates comissao from the official GMV base', async () => {
+    const liveId = 'live-edit-1'
+    const updateArgs = []
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: liveId,
+          status: 'encerrada',
+          cabine_id:    basePayload.cabine_id,
+          fat_gerado:   '1000',
+          manual_gmv:   null,
+          ads_gmv:      null,
+          iniciado_em:  '2026-05-01T18:00:00Z',
+          encerrado_em: '2026-05-01T20:00:00Z',
+        }]
+      })
+      .mockResolvedValueOnce({ rows: [{ comissao_pct: '10' }] })
+      .mockImplementationOnce((sql, args) => { updateArgs.push(args); return { rows: [] } })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}`,
+      payload: { manual_gmv: '2.000,00' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(updateArgs[0]).toContain(200)
   })
 
   it('returns 404 for non-existent live in the current tenant', async () => {

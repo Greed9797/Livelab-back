@@ -149,7 +149,7 @@ export async function clientePortalRoutes(app) {
 
   // GET /v1/cliente/perfil — perfil do cliente vinculado ao user logado
   app.get('/v1/cliente/perfil', {
-    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteFeatureBlocked],
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
   }, async (request, reply) => {
     return app.withTenant(request.user.tenant_id, async (db) => {
       const r = await db.query(

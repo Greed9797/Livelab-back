@@ -3,10 +3,52 @@ import { parseMoneyToDecimal } from '../lib/money.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
 
 export async function clientePortalRoutes(app) {
-  // Helper: resolve cliente_id from authenticated user_id (FK)
-  async function getClienteId(db, userId) {
-    const res = await db.query('SELECT id FROM clientes WHERE user_id = $1 LIMIT 1', [userId])
+  // Helper: resolve cliente_id from authenticated user_id (FK) scoped by JWT tenant.
+  async function getClienteId(db, userId, tenantId) {
+    const res = await db.query(
+      `SELECT id
+       FROM clientes
+       WHERE user_id = $1
+         AND tenant_id = $2::uuid
+       LIMIT 1`,
+      [userId, tenantId]
+    )
     return res.rows[0]?.id ?? null
+  }
+
+  async function resolveClienteContext(user) {
+    const tenantId = user.tenant_id
+    const sysDb = await app.db.pool.connect()
+    try {
+      const res = await sysDb.query(
+        `SELECT c.id AS cliente_id
+         FROM clientes c
+         WHERE c.user_id = $1
+           AND c.tenant_id = $2::uuid
+         LIMIT 1`,
+        [user.sub, tenantId]
+      )
+      return res.rows[0] ? { clienteId: res.rows[0].cliente_id, tenantId } : null
+    } finally {
+      sysDb.release()
+    }
+  }
+
+  function isValidTime(value) {
+    return /^\d{2}:\d{2}(:\d{2})?$/.test(String(value ?? ''))
+  }
+
+  function normalizeTime(value) {
+    return String(value).slice(0, 5)
+  }
+
+  function spTodayISO() {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Sao_Paulo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date())
   }
 
   // Helper: build date range in America/Sao_Paulo timezone
@@ -57,7 +99,7 @@ export async function clientePortalRoutes(app) {
     if (mes < 1 || mes > 12) return reply.code(400).send({ error: 'mes inválido' })
 
     return app.withTenant(request.user.tenant_id, async (db) => {
-      const clienteId = await getClienteId(db, request.user.sub)
+      const clienteId = await getClienteId(db, request.user.sub, request.user.tenant_id)
       if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
 
       const r = await db.query(
@@ -105,8 +147,11 @@ export async function clientePortalRoutes(app) {
       const r = await db.query(
         `SELECT id, nome, email, celular, cnpj, razao_social,
                 site, logo_url, status, fat_anual, nicho, cidade, estado, tiktok_username
-         FROM clientes WHERE user_id = $1 LIMIT 1`,
-        [request.user.sub]
+         FROM clientes
+         WHERE user_id = $1
+           AND tenant_id = $2::uuid
+         LIMIT 1`,
+        [request.user.sub, request.user.tenant_id]
       )
       if (r.rows.length === 0) {
         return reply.code(404).send({ error: 'Cliente não encontrado para este usuário.' })
@@ -153,7 +198,7 @@ export async function clientePortalRoutes(app) {
     }
 
     return app.withTenant(request.user.tenant_id, async (db) => {
-      const clienteId = await getClienteId(db, request.user.sub)
+      const clienteId = await getClienteId(db, request.user.sub, request.user.tenant_id)
       if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
 
       const res = await db.query(
@@ -177,7 +222,7 @@ export async function clientePortalRoutes(app) {
     }
 
     return app.withTenant(request.user.tenant_id, async (db) => {
-      const clienteId = await getClienteId(db, request.user.sub)
+      const clienteId = await getClienteId(db, request.user.sub, request.user.tenant_id)
       if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
 
       const res = await db.query(
@@ -219,20 +264,9 @@ export async function clientePortalRoutes(app) {
       return reply.code(400).send({ error: 'data_inicio e data_fim devem ser YYYY-MM-DD' })
     }
 
-    // Resolve cliente_id from system db (no RLS yet)
-    const sysDb = await app.db.pool.connect()
-    let clienteId, tenantId
-    try {
-      const res = await sysDb.query(
-        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.user_id = $1 LIMIT 1',
-        [request.user.sub]
-      )
-      if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
-      clienteId = res.rows[0].cliente_id
-      tenantId = res.rows[0].tenant_id
-    } finally {
-      sysDb.release()
-    }
+    const clienteContext = await resolveClienteContext(request.user)
+    if (!clienteContext) return reply.code(404).send({ error: 'Cliente não encontrado' })
+    const { clienteId, tenantId } = clienteContext
 
     return app.withTenant(tenantId, async (db) => {
       // All active cabines for this tenant
@@ -310,19 +344,9 @@ export async function clientePortalRoutes(app) {
   app.get('/v1/cliente/reservas', {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
   }, async (request, reply) => {
-    const sysDb = await app.db.pool.connect()
-    let clienteId, tenantId
-    try {
-      const res = await sysDb.query(
-        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.user_id = $1 LIMIT 1',
-        [request.user.sub]
-      )
-      if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
-      clienteId = res.rows[0].cliente_id
-      tenantId = res.rows[0].tenant_id
-    } finally {
-      sysDb.release()
-    }
+    const clienteContext = await resolveClienteContext(request.user)
+    if (!clienteContext) return reply.code(404).send({ error: 'Cliente não encontrado' })
+    const { clienteId, tenantId } = clienteContext
 
     return app.withTenant(tenantId, async (db) => {
       const result = await db.query(`
@@ -371,20 +395,23 @@ export async function clientePortalRoutes(app) {
       return reply.code(400).send({ error: 'data_solicitada deve ser YYYY-MM-DD' })
     }
 
-    // Resolve cliente_id + tenant_id from system db
-    const sysDb = await app.db.pool.connect()
-    let clienteId, tenantId
-    try {
-      const res = await sysDb.query(
-        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.user_id = $1 LIMIT 1',
-        [request.user.sub]
-      )
-      if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
-      clienteId = res.rows[0].cliente_id
-      tenantId = res.rows[0].tenant_id
-    } finally {
-      sysDb.release()
+    if (!isValidTime(hora_inicio) || !isValidTime(hora_fim)) {
+      return reply.code(400).send({ error: 'hora_inicio e hora_fim devem estar no formato HH:MM' })
     }
+
+    const startTime = normalizeTime(hora_inicio)
+    const endTime = normalizeTime(hora_fim)
+    if (endTime <= startTime) {
+      return reply.code(400).send({ error: 'hora_fim deve ser maior que hora_inicio' })
+    }
+
+    if (data_solicitada < spTodayISO()) {
+      return reply.code(400).send({ error: 'data_solicitada não pode ser no passado' })
+    }
+
+    const clienteContext = await resolveClienteContext(request.user)
+    if (!clienteContext) return reply.code(404).send({ error: 'Cliente não encontrado' })
+    const { clienteId, tenantId } = clienteContext
 
     return app.withTenant(tenantId, async (db) => {
       // Resolve marca ativa do cliente para criar o evento
@@ -397,6 +424,19 @@ export async function clientePortalRoutes(app) {
         return reply.code(422).send({ error: 'Sua conta não possui marca ativa. Entre em contato com a unidade.' })
       }
 
+      const cabineQ = await db.query(
+        `SELECT id
+         FROM cabines
+         WHERE id = $1
+           AND tenant_id = $2::uuid
+           AND ativo IS NOT FALSE
+         LIMIT 1`,
+        [cabine_id, tenantId]
+      )
+      if (!cabineQ.rows[0]) {
+        return reply.code(404).send({ error: 'Cabine não encontrada ou inativa.' })
+      }
+
       // Check for time overlap conflict em agenda_eventos (exceto cancelado)
       const conflictRes = await db.query(
         `SELECT id FROM agenda_eventos
@@ -407,7 +447,7 @@ export async function clientePortalRoutes(app) {
            AND data_inicio < ($2::date + $4::time) AT TIME ZONE 'America/Sao_Paulo'
            AND data_fim    > ($2::date + $3::time) AT TIME ZONE 'America/Sao_Paulo'
          LIMIT 1`,
-        [cabine_id, data_solicitada, hora_inicio, hora_fim, tenantId]
+        [cabine_id, data_solicitada, startTime, endTime, tenantId]
       )
 
       if (conflictRes.rows.length > 0) {
@@ -425,7 +465,7 @@ export async function clientePortalRoutes(app) {
                  ($5::date + $7::time) AT TIME ZONE 'America/Sao_Paulo',
                  'live', 'planejado', $8)
          RETURNING id, status`,
-        [tenantId, cabine_id, marcaId, request.user.sub, data_solicitada, hora_inicio, hora_fim, obs]
+        [tenantId, cabine_id, marcaId, request.user.sub, data_solicitada, startTime, endTime, obs]
       )
 
       const row = insertRes.rows[0]
@@ -442,19 +482,9 @@ export async function clientePortalRoutes(app) {
   app.get('/v1/contratos/meu', {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
   }, async (request, reply) => {
-    const sysDb = await app.db.pool.connect()
-    let clienteId, tenantId
-    try {
-      const res = await sysDb.query(
-        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.user_id = $1 LIMIT 1',
-        [request.user.sub]
-      )
-      if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
-      clienteId = res.rows[0].cliente_id
-      tenantId = res.rows[0].tenant_id
-    } finally {
-      sysDb.release()
-    }
+    const clienteContext = await resolveClienteContext(request.user)
+    if (!clienteContext) return reply.code(404).send({ error: 'Cliente não encontrado' })
+    const { clienteId, tenantId } = clienteContext
 
     return app.withTenant(tenantId, async (db) => {
       const result = await db.query(`

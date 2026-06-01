@@ -730,7 +730,7 @@ export async function clienteDashboardRoutes(app) {
     const { sub: user_id, tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
-      const cliente_id = await getClienteId(db, user_id)
+      const cliente_id = await getClienteId(db, user_id, tenant_id)
       if (!cliente_id) return { resumo: { total_produtos: 0, total_qty: 0, total_faturamento: 0 }, produtos: [] }
 
       const mes = Number(request.query.mes) || (new Date().getMonth() + 1)
@@ -780,7 +780,7 @@ export async function clienteDashboardRoutes(app) {
     const { sub: user_id, tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
-      const cliente_id = await getClienteId(db, user_id)
+      const cliente_id = await getClienteId(db, user_id, tenant_id)
       if (!cliente_id) return []
 
       const cabinesQ = await db.query(`
@@ -838,7 +838,7 @@ export async function clienteDashboardRoutes(app) {
     const { cabineId } = request.params
     return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
-      const cliente_id = await getClienteId(db, user_id)
+      const cliente_id = await getClienteId(db, user_id, tenant_id)
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
 
       // Valida que a cabine pertence ao cliente via contrato ativo
@@ -960,7 +960,7 @@ export async function clienteDashboardRoutes(app) {
     const { cabineId } = request.params
     return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
-      const cliente_id = await getClienteId(db, user_id)
+      const cliente_id = await getClienteId(db, user_id, tenant_id)
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
 
       const q = await db.query(`
@@ -1023,7 +1023,7 @@ export async function clienteDashboardRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       // Resolve via FK clientes.user_id (NÃO email — evita vazamento entre clientes do mesmo tenant).
-      const cliente_id = await getClienteId(db, user_id)
+      const cliente_id = await getClienteId(db, user_id, tenant_id)
       if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
 
       // Valida que a cabine pertence ao cliente via contrato ativo

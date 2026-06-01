@@ -51,6 +51,14 @@ export async function clientePortalRoutes(app) {
     }).format(new Date())
   }
 
+  async function clienteFeatureBlocked(_request, reply) {
+    return reply.code(403).send({ error: 'Recurso temporariamente indisponível para cliente parceiro.' })
+  }
+
+  async function clienteMetaWriteBlocked(_request, reply) {
+    return reply.code(403).send({ error: 'A meta do cliente está disponível apenas para visualização.' })
+  }
+
   // Helper: build date range in America/Sao_Paulo timezone
   function buildDateRange(periodo) {
     const now = new Date()
@@ -91,7 +99,7 @@ export async function clientePortalRoutes(app) {
   // Retorna até N meses anteriores ao período base (default 12).
   // Lê tabela cliente_metricas_mensais (snapshots persistentes).
   app.get('/v1/cliente/historico-mensal', {
-    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteFeatureBlocked],
   }, async (request, reply) => {
     const meses = Math.min(Math.max(parseInt(request.query.meses) || 12, 1), 36)
     const ano = parseInt(request.query.ano) || new Date().getFullYear()
@@ -141,7 +149,7 @@ export async function clientePortalRoutes(app) {
 
   // GET /v1/cliente/perfil — perfil do cliente vinculado ao user logado
   app.get('/v1/cliente/perfil', {
-    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteFeatureBlocked],
   }, async (request, reply) => {
     return app.withTenant(request.user.tenant_id, async (db) => {
       const r = await db.query(
@@ -163,7 +171,7 @@ export async function clientePortalRoutes(app) {
   // POST /v1/cliente/perfil/tiktok — atualiza @TikTok do PRÓPRIO cliente_parceiro
   // Importante: filtra por user_id (sub do JWT) — cliente só edita o próprio.
   app.post('/v1/cliente/perfil/tiktok', {
-    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteFeatureBlocked],
   }, async (request, reply) => {
     const parsed = z.object({ tiktok_username: tiktokUsernameField }).safeParse(request.body ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
@@ -213,7 +221,7 @@ export async function clientePortalRoutes(app) {
 
   // PATCH /v1/cliente/meta
   app.patch('/v1/cliente/meta', {
-    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteMetaWriteBlocked],
   }, async (request, reply) => {
     const { ano, mes, meta_gmv } = request.body ?? {}
 
@@ -241,7 +249,7 @@ export async function clientePortalRoutes(app) {
 
   // GET /v1/cliente/agenda
   app.get('/v1/cliente/agenda', {
-    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteFeatureBlocked],
   }, async (request, reply) => {
     // Parse and default date range to current week Mon–Sun
     let { data_inicio, data_fim } = request.query
@@ -342,7 +350,7 @@ export async function clientePortalRoutes(app) {
 
   // GET /v1/cliente/reservas — solicitações de live do cliente (agenda pessoal)
   app.get('/v1/cliente/reservas', {
-    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteFeatureBlocked],
   }, async (request, reply) => {
     const clienteContext = await resolveClienteContext(request.user)
     if (!clienteContext) return reply.code(404).send({ error: 'Cliente não encontrado' })
@@ -383,7 +391,7 @@ export async function clientePortalRoutes(app) {
 
   // POST /v1/cliente/solicitacao
   app.post('/v1/cliente/solicitacao', {
-    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteFeatureBlocked],
   }, async (request, reply) => {
     const { cabine_id, data_solicitada, hora_inicio, hora_fim, observacoes } = request.body ?? {}
 
@@ -480,7 +488,7 @@ export async function clientePortalRoutes(app) {
 
   // GET /v1/contratos/meu — contrato do cliente_parceiro autenticado
   app.get('/v1/contratos/meu', {
-    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteFeatureBlocked],
   }, async (request, reply) => {
     const clienteContext = await resolveClienteContext(request.user)
     if (!clienteContext) return reply.code(404).send({ error: 'Cliente não encontrado' })

@@ -24,19 +24,15 @@ function buildApp({ papel = 'cliente_parceiro', queryMock } = {}) {
 }
 
 describe('boletos cliente_parceiro scoping', () => {
-  it('filters boleto list by clientes.user_id linkage', async () => {
+  it('blocks boleto list for cliente_parceiro during go-live scope', async () => {
     const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ id: 'cliente-1' }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'boleto-1', valor: '100' }] })
     const { app } = buildApp({ queryMock })
     await app.register(boletosRoutes)
 
     const res = await app.inject({ method: 'GET', url: '/v1/boletos' })
 
-    expect(res.statusCode).toBe(200)
-    expect(queryMock.mock.calls[0][0]).toContain('user_id = $1')
-    expect(queryMock.mock.calls[1][0]).toContain('cliente_id = $2')
-    expect(queryMock.mock.calls[1][1]).toEqual(['tenant-1', 'cliente-1'])
+    expect(res.statusCode).toBe(403)
+    expect(queryMock).not.toHaveBeenCalled()
     await app.close()
   })
 

@@ -78,7 +78,6 @@ export async function knowledgeRoutes(app) {
       'operacional',
       'apresentador',
       'apresentadora',
-      'cliente_parceiro',
     ]),
   ]
 

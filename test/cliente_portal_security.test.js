@@ -29,13 +29,9 @@ function buildApp({ sysQuery, tenantQuery }) {
 }
 
 describe('cliente portal security', () => {
-  it('resolves cliente only inside the JWT tenant', async () => {
-    const sysQuery = vi.fn().mockResolvedValue({
-      rows: [{ cliente_id: '22222222-2222-4222-8222-222222222222' }],
-    })
+  it('blocks cliente agenda before resolving tenant data during go-live scope', async () => {
+    const sysQuery = vi.fn()
     const tenantQuery = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ id: 'cab-1', numero: 1 }] })
-      .mockResolvedValueOnce({ rows: [] })
     const { app } = buildApp({ sysQuery, tenantQuery })
 
     await app.register(clientePortalRoutes)
@@ -45,17 +41,14 @@ describe('cliente portal security', () => {
       url: '/v1/cliente/agenda?data_inicio=2026-05-01&data_fim=2026-05-07',
     })
 
-    expect(response.statusCode).toBe(200)
-    expect(sysQuery).toHaveBeenCalledWith(
-      expect.stringContaining('c.tenant_id = $2::uuid'),
-      ['user-1', '11111111-1111-4111-8111-111111111111'],
-    )
-    expect(tenantQuery.mock.calls[0][1]).toEqual(['11111111-1111-4111-8111-111111111111'])
+    expect(response.statusCode).toBe(403)
+    expect(sysQuery).not.toHaveBeenCalled()
+    expect(tenantQuery).not.toHaveBeenCalled()
 
     await app.close()
   })
 
-  it('rejects cliente solicitacao with invalid or inverted hours before touching DB', async () => {
+  it('blocks cliente solicitacao before validating or touching DB during go-live scope', async () => {
     const sysQuery = vi.fn()
     const tenantQuery = vi.fn()
     const { app } = buildApp({ sysQuery, tenantQuery })
@@ -83,10 +76,8 @@ describe('cliente portal security', () => {
       },
     })
 
-    expect(invalid.statusCode).toBe(400)
-    expect(invalid.json().error).toMatch(/hora_inicio/)
-    expect(inverted.statusCode).toBe(400)
-    expect(inverted.json().error).toMatch(/hora_fim/)
+    expect(invalid.statusCode).toBe(403)
+    expect(inverted.statusCode).toBe(403)
     expect(sysQuery).not.toHaveBeenCalled()
     expect(tenantQuery).not.toHaveBeenCalled()
 

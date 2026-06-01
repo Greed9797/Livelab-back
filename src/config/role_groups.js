@@ -20,7 +20,7 @@ export const WRITE_FINANCEIRO = [...ADMIN, 'financeiro']
 
 // ─── BOLETOS ─────────────────────────────────────────────────────────
 export const READ_BOLETOS = [
-  ...ADMIN, 'cliente_parceiro',
+  ...ADMIN,
   'financeiro', 'financeiro_readonly', 'auditor', 'suporte',
 ]
 export const WRITE_BOLETOS = [...ADMIN, 'financeiro']

@@ -724,6 +724,8 @@ export async function analyticsRoutes(app) {
           db.query(`
             SELECT
               (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
+              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv_lives,
+              COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::int AS pedidos_lives,
               COALESCE(SUM(
                 CASE
                   WHEN COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
@@ -917,6 +919,19 @@ export async function analyticsRoutes(app) {
           horas_live_por_dia: hoursRows.map((row) => ({
             dia: typeof row.dia === 'string' ? row.dia : row.dia.toISOString().slice(0, 10),
             horas: round1(row.horas),
+            gmv_total: round2(row.gmv_lives),
+            gmv_lives: round2(row.gmv_lives),
+            pedidos: toInt(row.pedidos_lives),
+          })),
+          gmv_diario: hoursRows.map((row) => ({
+            dia: typeof row.dia === 'string' ? row.dia : row.dia.toISOString().slice(0, 10),
+            gmv_total: round2(row.gmv_lives),
+            gmv_lives: round2(row.gmv_lives),
+          })),
+          pedidos_diario: hoursRows.map((row) => ({
+            dia: typeof row.dia === 'string' ? row.dia : row.dia.toISOString().slice(0, 10),
+            pedidos: toInt(row.pedidos_lives),
+            total_pedidos: toInt(row.pedidos_lives),
           })),
           ranking_apresentadoras: rankingApresentadoras,
           ranking_apresentadores: rankingApresentadoras,

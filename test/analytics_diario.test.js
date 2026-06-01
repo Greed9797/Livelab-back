@@ -23,15 +23,21 @@ function buildApp(queryMock) {
 describe('analytics diario', () => {
   it('returns daily rows and applies marca/apresentadora filters', async () => {
     const queryMock = vi.fn(async (sql, params = []) => {
-      expect(sql).toContain('generate_series($1::date, $2::date')
+      expect(sql).not.toContain('generate_series')
       expect(sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
       expect(sql).toContain('($3::uuid IS NULL OR l.marca_id = $3::uuid)')
       expect(sql).toContain('($4::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $4::uuid)')
       expect(sql).toContain("va.origem = 'video'")
+      expect(sql).toContain('FULL OUTER JOIN video_daily')
+      expect(sql).toContain('COALESCE(ld.marca_nome, vd.marca_nome')
       expect(params).toEqual(['2026-05-01', '2026-05-31', marcaId, apresentadoraId])
       return {
         rows: [{
           dia: '2026-05-28',
+          marca_id: marcaId,
+          marca_nome: 'Haag',
+          apresentadora_id: apresentadoraId,
+          apresentadora_nome: 'Edja',
           total_lives: 2,
           total_videos: 1,
           gmv_lives: '1000.50',
@@ -56,6 +62,10 @@ describe('analytics diario', () => {
       filters: { marca_id: marcaId, apresentadora_id: apresentadoraId },
       rows: [{
         dia: '2026-05-28',
+        marca_id: marcaId,
+        marca_nome: 'Haag',
+        apresentadora_id: apresentadoraId,
+        apresentadora_nome: 'Edja',
         gmv_total: 1200.75,
         gmv_lives: 1000.5,
         gmv_videos: 200.25,

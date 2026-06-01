@@ -1125,12 +1125,13 @@ export async function analyticsRoutes(app) {
     try {
       return await app.withTenant(tenant_id, async (db) => {
         const result = await db.query(`
-          WITH dias AS (
-            SELECT generate_series($1::date, $2::date, interval '1 day')::date AS dia
-          ),
-          live_base AS (
+          WITH live_base AS (
             SELECT
               (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
+              l.marca_id,
+              COALESCE(m.nome, 'Sem marca') AS marca_nome,
+              COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
+              COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora') AS apresentadora_nome,
               COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
               COALESCE(l.manual_orders, l.final_orders_count, 0)::int AS pedidos,
               CASE
@@ -1140,10 +1141,13 @@ export async function analyticsRoutes(app) {
                 ELSE 0
               END AS horas
             FROM lives l
+            LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
+            LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
             LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
             LEFT JOIN LATERAL (
-              SELECT lav.apresentadora_id
+              SELECT lav.apresentadora_id, a.nome
               FROM live_apresentadoras_v2 lav
+              JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
               WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
               ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
               LIMIT 1
@@ -1158,20 +1162,30 @@ export async function analyticsRoutes(app) {
           live_daily AS (
             SELECT
               dia,
+              marca_id,
+              marca_nome,
+              apresentadora_id,
+              apresentadora_nome,
               COUNT(*)::int AS total_lives,
               COALESCE(SUM(gmv), 0) AS gmv_lives,
               COALESCE(SUM(pedidos), 0)::int AS pedidos_lives,
               COALESCE(SUM(horas), 0) AS horas_live
             FROM live_base
-            GROUP BY dia
+            GROUP BY dia, marca_id, marca_nome, apresentadora_id, apresentadora_nome
           ),
           video_daily AS (
             SELECT
               va.data::date AS dia,
+              va.marca_id,
+              COALESCE(m.nome, 'Sem marca') AS marca_nome,
+              va.apresentadora_id,
+              COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
               COALESCE(SUM(va.gmv), 0) AS gmv_videos,
               COALESCE(SUM(va.pedidos), 0)::int AS pedidos_videos,
               COUNT(DISTINCT va.origem_id)::int AS total_videos
             FROM vendas_atribuidas va
+            LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+            LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
             WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND va.origem = 'video'
               AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
@@ -1179,20 +1193,33 @@ export async function analyticsRoutes(app) {
               AND va.data <= $2::date
               AND ($3::uuid IS NULL OR va.marca_id = $3::uuid)
               AND ($4::uuid IS NULL OR va.apresentadora_id = $4::uuid)
-            GROUP BY va.data::date
+            GROUP BY va.data::date, va.marca_id, COALESCE(m.nome, 'Sem marca'), va.apresentadora_id, COALESCE(a.nome, 'Sem apresentadora')
           )
           SELECT
-            d.dia,
+            COALESCE(ld.dia, vd.dia) AS dia,
+            COALESCE(ld.marca_id, vd.marca_id) AS marca_id,
+            COALESCE(ld.marca_nome, vd.marca_nome, 'Sem marca') AS marca_nome,
+            COALESCE(ld.apresentadora_id, vd.apresentadora_id) AS apresentadora_id,
+            COALESCE(ld.apresentadora_nome, vd.apresentadora_nome, 'Sem apresentadora') AS apresentadora_nome,
             COALESCE(ld.total_lives, 0)::int AS total_lives,
             COALESCE(vd.total_videos, 0)::int AS total_videos,
             COALESCE(ld.gmv_lives, 0) AS gmv_lives,
             COALESCE(vd.gmv_videos, 0) AS gmv_videos,
             COALESCE(ld.horas_live, 0) AS horas_live,
             (COALESCE(ld.pedidos_lives, 0) + COALESCE(vd.pedidos_videos, 0))::int AS pedidos
-          FROM dias d
-          LEFT JOIN live_daily ld ON ld.dia = d.dia
-          LEFT JOIN video_daily vd ON vd.dia = d.dia
-          ORDER BY d.dia ASC
+          FROM live_daily ld
+          FULL OUTER JOIN video_daily vd
+            ON vd.dia = ld.dia
+           AND vd.marca_id IS NOT DISTINCT FROM ld.marca_id
+           AND vd.apresentadora_id IS NOT DISTINCT FROM ld.apresentadora_id
+          WHERE
+            COALESCE(ld.total_lives, 0) > 0
+            OR COALESCE(vd.total_videos, 0) > 0
+            OR COALESCE(ld.gmv_lives, 0) > 0
+            OR COALESCE(vd.gmv_videos, 0) > 0
+            OR COALESCE(ld.horas_live, 0) > 0
+            OR (COALESCE(ld.pedidos_lives, 0) + COALESCE(vd.pedidos_videos, 0)) > 0
+          ORDER BY dia ASC, marca_nome ASC, apresentadora_nome ASC
         `, [fromDate, toDate, marcaId, apresentadoraId])
 
         return {
@@ -1207,6 +1234,10 @@ export async function analyticsRoutes(app) {
             const pedidos = toInt(row.pedidos)
             return {
               dia: typeof row.dia === 'string' ? row.dia : row.dia.toISOString().slice(0, 10),
+              marca_id: row.marca_id ?? null,
+              marca_nome: row.marca_nome ?? 'Sem marca',
+              apresentadora_id: row.apresentadora_id ?? null,
+              apresentadora_nome: row.apresentadora_nome ?? 'Sem apresentadora',
               gmv_total: gmvTotal,
               gmv_lives: gmvLives,
               gmv_videos: gmvVideos,

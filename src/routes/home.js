@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks'
 import { getPresenterRanking, monthRangeFromQuery } from '../lib/presenter-ranking.js'
+import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 
@@ -377,53 +378,12 @@ export async function homeRoutes(app) {
         ) l ON true
         WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
       `),
-        db.query(`
-          WITH live_source AS (
-            SELECT
-              l.marca_id,
-              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv,
-              COUNT(*)::int AS lives
-            FROM lives l
-            WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
-              AND l.status = 'encerrada'
-              AND l.marca_id IS NOT NULL
-              AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-            GROUP BY l.marca_id
-          ),
-          video_source AS (
-            SELECT
-              va.marca_id,
-              COALESCE(SUM(va.gmv), 0) AS gmv
-            FROM vendas_atribuidas va
-            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
-              AND va.marca_id IS NOT NULL
-              AND va.origem = 'video'
-              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
-              AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                  = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-            GROUP BY va.marca_id
-          ),
-          ranking_marcas_mes AS (
-            SELECT
-              m.id AS marca_id,
-              m.nome,
-              COALESCE(m.logo_url, c.logo_url) AS logo_url,
-              COALESCE(m.site, c.site) AS site,
-              COALESCE(ls.gmv, 0) + COALESCE(vs.gmv, 0) AS gmv,
-              COALESCE(ls.lives, 0)::int AS lives
-            FROM marcas m
-            LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
-            LEFT JOIN live_source ls ON ls.marca_id = m.id
-            LEFT JOIN video_source vs ON vs.marca_id = m.id
-            WHERE m.tenant_id = current_setting('app.tenant_id', true)::uuid
-              AND (COALESCE(ls.gmv, 0) <> 0 OR COALESCE(vs.gmv, 0) <> 0)
-          )
-          SELECT marca_id, nome, logo_url, site, gmv, lives
-          FROM ranking_marcas_mes
-          ORDER BY gmv DESC, nome ASC
-          LIMIT 10
-        `),
+        getPerformanceRanking(db, {
+          tenantId: tenant_id,
+          range: monthRangeFromQuery(),
+          groupBy: 'marca',
+          limit: 10,
+        }),
         db.query(`
           SELECT COALESCE(SUM(
             LEAST(EXTRACT(EPOCH FROM (COALESCE(encerrado_em, previsto_fim) - iniciado_em)) / 3600.0, 24.0)
@@ -584,13 +544,19 @@ export async function homeRoutes(app) {
 
       const metaUnidade = metaQ.rows[0] ?? null
 
-      const rankingMarcasMes = rankingMarcasQ.rows.map(r => ({
+      const rankingMarcasRows = Array.isArray(rankingMarcasQ) ? rankingMarcasQ : (rankingMarcasQ.rows ?? [])
+      const rankingMarcasMes = rankingMarcasRows.map(r => ({
         marca_id: r.marca_id,
         nome: r.nome,
         logo_url: r.logo_url,
         site: r.site,
-        gmv: parseFloat(Number(r.gmv).toFixed(2)),
-        lives: Number(r.lives)
+        marca_nome: r.marca_nome ?? r.nome,
+        gmv: round2(r.gmv_total ?? r.gmv),
+        gmv_total: round2(r.gmv_total ?? r.gmv),
+        pedidos: Number(r.pedidos ?? 0),
+        lives: Number(r.lives ?? r.total_lives ?? 0),
+        total_lives: Number(r.total_lives ?? r.lives ?? 0),
+        total_videos: Number(r.total_videos ?? 0),
       }))
 
       const gmvOperacional = gmvOperacionalQ.rows[0] ?? {}

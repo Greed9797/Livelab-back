@@ -30,14 +30,14 @@ function createHomeQueryMock() {
     if (sql.includes('home_gmv_operacional')) {
       return { rows: [{ gmv_total_mes: '1600.50', gmv_lives_mes: '1200.50', gmv_videos_mes: '400.00', pedidos_lives_mes: '2', pedidos_videos_mes: '4', pedidos_total_mes: '6', videos_mes: '4', gmv_mes_anterior: '1000.00' }] }
     }
-    if (sql.includes('ranking_marcas_mes')) {
-      return { rows: [{ marca_id: 'marca-1', nome: 'Marca A', gmv: '1200.50', lives: '2' }] }
-    }
     if (sql.includes('FROM live_requests lr')) {
       throw new Error('Home operacional não deve usar live_requests')
     }
     if (sql.includes('combined.apresentadora_id')) {
       return { rows: [{ apresentadora_id: 'ap-1', apresentadora_nome: 'Edja', gmv_total: '800', gmv_lives: '800', gmv_videos: '0', total_lives: '1', pedidos: '8', fixo: '2700', comissao_variavel: '16', total_recebido: '2716' }] }
+    }
+    if (sql.includes('combined.marca_id')) {
+      return { rows: [{ marca_id: 'marca-1', marca_nome: 'Marca A', gmv_total: '1200.50', gmv_lives: '1200.50', gmv_videos: '0', pedidos: '12', total_lives: '2', total_videos: '0' }] }
     }
     if (sql.includes('FROM agenda_eventos ae')) {
       return { rows: [{ id: 'ag-1', tipo: 'live', status: 'confirmado', data_inicio: '2026-05-18T14:00:00.000Z', data_fim: '2026-05-18T16:00:00.000Z', cabine_numero: 2, cabine_nome: 'Cabine 02', marca_nome: 'Marca B', cliente_nome: 'Cliente B', apresentadora_nome: 'Ana' }] }
@@ -132,11 +132,12 @@ describe('home dashboard', () => {
     expect(gmvSql).toContain('FROM vendas_atribuidas va')
     expect(gmvSql).toContain("va.origem = 'video'")
 
-    const rankingSql = sqls.find((sql) => sql.includes('ranking_marcas_mes'))
+    const rankingSql = sqls.find((sql) => sql.includes('combined.marca_id'))
     expect(rankingSql).toContain('FROM lives l')
     expect(rankingSql).toContain("COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)")
     expect(rankingSql).toContain("va.origem = 'video'")
-    expect(rankingSql).toContain("date_trunc('month'")
+    expect(rankingSql).toContain('ORDER BY gmv_total DESC, pedidos DESC, marca_nome ASC')
+    expect(sqls.some((sql) => sql.includes('ranking_marcas_mes'))).toBe(false)
 
     expect(sqls.some((sql) => sql.includes('proximas_lives_operacionais'))).toBe(false)
     const agendaSql = sqls.find((sql) => sql.includes('SELECT ae.id, ae.tipo') && sql.includes('FROM agenda_eventos ae'))

@@ -1420,12 +1420,35 @@ export async function livesRoutes(app) {
     const statusFilter = request.query?.status // 'em_andamento' | 'encerrada' | undefined
     const reqLimit = Math.min(200, Math.max(10, parseInt(request.query?.limit ?? '50', 10)))
     const reqOffset = Math.max(0, parseInt(request.query?.page ?? '0', 10)) * reqLimit
+    const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/
+    const fDataInicio = dateRe.test(request.query?.data_inicio ?? '') ? request.query.data_inicio : null
+    const fDataFim = dateRe.test(request.query?.data_fim ?? '') ? request.query.data_fim : null
+    const fMarcaId = UUID_RE.test(request.query?.marca_id ?? '') ? request.query.marca_id : null
+    const fApresentadoraId = UUID_RE.test(request.query?.apresentadora_id ?? '') ? request.query.apresentadora_id : null
     return app.withTenant(tenant_id, async (db) => {
       const params = [tenant_id]
       let where = 'WHERE l.tenant_id = $1::uuid'
       if (statusFilter && ['em_andamento', 'encerrada', 'faturada'].includes(statusFilter)) {
         params.push(statusFilter)
         where += ` AND l.status = $${params.length}`
+      }
+      // Filtros opcionais da barra de "Lives realizadas" (server-side).
+      if (fDataInicio) {
+        params.push(fDataInicio)
+        where += ` AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date >= $${params.length}::date`
+      }
+      if (fDataFim) {
+        params.push(fDataFim)
+        where += ` AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date <= $${params.length}::date`
+      }
+      if (fMarcaId) {
+        params.push(fMarcaId)
+        where += ` AND COALESCE(l.marca_id, va_marca.marca_id) = $${params.length}::uuid`
+      }
+      if (fApresentadoraId) {
+        params.push(fApresentadoraId)
+        where += ` AND COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) = $${params.length}::uuid`
       }
       // cliente_parceiro só enxerga lives publicadas e do seu próprio cliente
       if (papel === 'cliente_parceiro') {

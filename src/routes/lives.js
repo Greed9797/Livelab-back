@@ -1420,12 +1420,35 @@ export async function livesRoutes(app) {
     const statusFilter = request.query?.status // 'em_andamento' | 'encerrada' | undefined
     const reqLimit = Math.min(200, Math.max(10, parseInt(request.query?.limit ?? '50', 10)))
     const reqOffset = Math.max(0, parseInt(request.query?.page ?? '0', 10)) * reqLimit
+    const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/
+    const fDataInicio = dateRe.test(request.query?.data_inicio ?? '') ? request.query.data_inicio : null
+    const fDataFim = dateRe.test(request.query?.data_fim ?? '') ? request.query.data_fim : null
+    const fMarcaId = UUID_RE.test(request.query?.marca_id ?? '') ? request.query.marca_id : null
+    const fApresentadoraId = UUID_RE.test(request.query?.apresentadora_id ?? '') ? request.query.apresentadora_id : null
     return app.withTenant(tenant_id, async (db) => {
       const params = [tenant_id]
       let where = 'WHERE l.tenant_id = $1::uuid'
       if (statusFilter && ['em_andamento', 'encerrada', 'faturada'].includes(statusFilter)) {
         params.push(statusFilter)
         where += ` AND l.status = $${params.length}`
+      }
+      // Filtros opcionais da barra de "Lives realizadas" (server-side).
+      if (fDataInicio) {
+        params.push(fDataInicio)
+        where += ` AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date >= $${params.length}::date`
+      }
+      if (fDataFim) {
+        params.push(fDataFim)
+        where += ` AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date <= $${params.length}::date`
+      }
+      if (fMarcaId) {
+        params.push(fMarcaId)
+        where += ` AND COALESCE(l.marca_id, va_marca.marca_id) = $${params.length}::uuid`
+      }
+      if (fApresentadoraId) {
+        params.push(fApresentadoraId)
+        where += ` AND COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) = $${params.length}::uuid`
       }
       // cliente_parceiro só enxerga lives publicadas e do seu próprio cliente
       if (papel === 'cliente_parceiro') {
@@ -1534,6 +1557,143 @@ export async function livesRoutes(app) {
         params
       )
       return result.rows
+    })
+  })
+
+  // GET /v1/lives/duplicatas — agrupa lives possivelmente duplicadas em clusters.
+  // Heurística (soft, sem constraint rígida): mesma cabine com horários
+  // sobrepostos, OU mesma marca + mesma apresentadora no mesmo dia.
+  app.get('/v1/lives/duplicatas', { preHandler: cabineRoleAccess(app) }, async (request) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const pares = await db.query(`
+        WITH base AS (
+          SELECT
+            l.id,
+            l.cabine_id,
+            l.marca_id,
+            l.iniciado_em,
+            COALESCE(l.encerrado_em, l.previsto_fim, l.iniciado_em) AS fim,
+            (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
+            COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id
+          FROM lives l
+          LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
+          LEFT JOIN LATERAL (
+            SELECT lav.apresentadora_id
+            FROM live_apresentadoras_v2 lav
+            WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+            ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+            LIMIT 1
+          ) ap_v2 ON true
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status <> 'cancelada'
+        )
+        SELECT a.id AS id_a, b.id AS id_b,
+          CASE
+            WHEN a.cabine_id = b.cabine_id AND a.iniciado_em < b.fim AND b.iniciado_em < a.fim
+              THEN 'cabine_horario'
+            ELSE 'marca_apresentadora_dia'
+          END AS motivo
+        FROM base a
+        JOIN base b ON b.id > a.id
+        WHERE
+          (a.cabine_id = b.cabine_id AND a.iniciado_em < b.fim AND b.iniciado_em < a.fim)
+          OR (a.marca_id IS NOT NULL AND a.marca_id = b.marca_id
+              AND a.apresentadora_id IS NOT NULL AND a.apresentadora_id = b.apresentadora_id
+              AND a.dia = b.dia)
+      `)
+
+      if (pares.rows.length === 0) return { clusters: [] }
+
+      // União de pares em clusters (union-find com path halving).
+      const parent = new Map()
+      const find = (x) => {
+        while (parent.get(x) !== x) {
+          parent.set(x, parent.get(parent.get(x)))
+          x = parent.get(x)
+        }
+        return x
+      }
+      const union = (x, y) => { parent.set(find(x), find(y)) }
+      const motivoDe = new Map()
+      for (const { id_a, id_b, motivo } of pares.rows) {
+        if (!parent.has(id_a)) parent.set(id_a, id_a)
+        if (!parent.has(id_b)) parent.set(id_b, id_b)
+        union(id_a, id_b)
+        for (const id of [id_a, id_b]) {
+          if (!motivoDe.has(id)) motivoDe.set(id, new Set())
+          motivoDe.get(id).add(motivo)
+        }
+      }
+
+      const ids = [...parent.keys()]
+      const detalhe = await db.query(`
+        SELECT
+          l.id, l.iniciado_em, l.encerrado_em, l.status, l.status_publicacao,
+          COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
+          c.numero AS cabine_numero,
+          COALESCE(va_m.nome, m.nome, cl.nome, 'Sem marca') AS marca_nome,
+          COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora') AS apresentadora_nome
+        FROM lives l
+        JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+        LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
+        LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
+        LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
+        LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
+        LEFT JOIN LATERAL (
+          SELECT a.nome
+          FROM live_apresentadoras_v2 lav
+          JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
+          WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+          ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+          LIMIT 1
+        ) ap_v2 ON true
+        LEFT JOIN LATERAL (
+          SELECT m2.nome
+          FROM vendas_atribuidas va
+          JOIN marcas m2 ON m2.id = va.marca_id AND m2.tenant_id = va.tenant_id
+          WHERE va.origem = 'live' AND va.origem_id = l.id AND va.tenant_id = l.tenant_id
+          LIMIT 1
+        ) va_m ON true
+        WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND l.id = ANY($1::uuid[])
+      `, [ids])
+
+      const byId = new Map(detalhe.rows.map((r) => [r.id, r]))
+      const clusters = new Map()
+      for (const id of ids) {
+        const root = find(id)
+        if (!clusters.has(root)) clusters.set(root, [])
+        const row = byId.get(id)
+        if (!row) continue
+        clusters.get(root).push({
+          id: row.id,
+          iniciado_em: row.iniciado_em,
+          encerrado_em: row.encerrado_em,
+          status: row.status,
+          status_publicacao: row.status_publicacao,
+          gmv: Number(row.gmv ?? 0),
+          cabine_numero: row.cabine_numero,
+          marca_nome: row.marca_nome,
+          apresentadora_nome: row.apresentadora_nome,
+          motivos: [...(motivoDe.get(id) ?? [])],
+        })
+      }
+
+      const result = [...clusters.values()]
+        .filter((lives) => lives.length > 1)
+        .map((lives) => {
+          const motivos = new Set()
+          for (const live of lives) for (const m of live.motivos) motivos.add(m)
+          return {
+            motivos: [...motivos],
+            total: lives.length,
+            lives: lives.sort((a, b) => new Date(a.iniciado_em) - new Date(b.iniciado_em)),
+          }
+        })
+        .sort((a, b) => b.total - a.total)
+
+      return { clusters: result }
     })
   })
 

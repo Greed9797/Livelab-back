@@ -957,39 +957,11 @@ export async function analyticsRoutes(app) {
     }
   })
 
-  // ── Funil de Lives (por Marca ou por Apresentadora) ────────────────────
-  // Agrega métricas do TikTok Shop Ads (campos manuais) por período.
-  // Aplica filtro: status=encerrada AND duration>=300s (5min).
-  // Fórmulas do funil: ver doc de handoff (CONSOLIDADO_DIA_28).
-  function mapFunilRow(row) {
-    const gmv     = round2(row.gmv)
-    const verba   = round2(row.verba)
-    const horas   = round2(row.horas)
-    const pedidos = toInt(row.pedidos)
-    const views   = toInt(row.views)
-    const comments = toInt(row.comments)
-    const liveImpressions    = toInt(row.live_impressions)
-    const productImpressions = toInt(row.product_impressions)
-    const productClicks      = toInt(row.product_clicks)
-    return {
-      grupo_id:    row.grupo_id   ?? null,
-      grupo_nome:  row.grupo_nome,
-      logo_url:    row.logo_url   ?? null,
-      total_lives: toInt(row.total_lives),
-      gmv,
-      verba,
-      roi:       verba > 0   ? round2(gmv / verba)           : null,
-      gmv_hora:  horas > 0   ? round2(gmv / horas)           : null,
-      ticket:    pedidos > 0 ? round2(gmv / pedidos)          : null,
-      pedidos,
-      new_followers: toInt(row.new_followers),
-      retencao:  row.retencao != null ? round2(row.retencao) : null,
-      entrada:   liveImpressions > 0    ? round2(views    / liveImpressions)    : null,
-      clique:    productImpressions > 0 ? round2(productClicks / productImpressions) : null,
-      fecha:     productClicks > 0      ? round2(pedidos  / productClicks)      : null,
-      coment:    views > 0              ? round2(comments / views)              : null,
-    }
-  }
+  // ── Funil de conversão de lives ────────────────────────────────────────
+  // Agrega o caminho impressões → visualizações → impressões de produto →
+  // cliques → pedidos no período (lives encerradas ≥ 5 min), com filtro
+  // opcional por marca/apresentadora. As etapas de Ads dependem do import
+  // do TikTok Ads Manager (tem_dados_ads sinaliza se há dados de funil).
 
   app.get('/v1/analytics/funil', {
     preHandler: [app.authenticate, app.requirePapel(READ_ANALYTICS)],
@@ -997,96 +969,108 @@ export async function analyticsRoutes(app) {
       querystring: {
         type: 'object',
         properties: {
-          mesAno:  { type: 'string' },
-          mes:     { type: 'string' },
-          ano:     { type: 'string' },
-          groupBy: { type: 'string', enum: ['marca', 'apresentadora'] },
+          mesAno: { type: 'string' },
+          mes: { type: 'string' },
+          ano: { type: 'string' },
+          from: { type: 'string' },
+          to: { type: 'string' },
+          marca_id: { type: 'string' },
+          apresentadora_id: { type: 'string' },
         },
         additionalProperties: true,
       },
     },
   }, async (request, reply) => {
     const { tenant_id } = request.user
-    const groupBy = request.query?.groupBy ?? 'marca'
-    if (!['marca', 'apresentadora'].includes(groupBy)) {
-      return reply.code(400).send({ error: "groupBy must be 'marca' or 'apresentadora'" })
-    }
-
     const period = resolveAnalyticsPeriod(request.query)
     if (period.error) return reply.code(400).send({ error: period.error })
-    const { fromDate, toDate } = period
+    const { fromDate, toDate, mesAno } = period
+
+    const marcaId = request.query?.marca_id ? String(request.query.marca_id) : null
+    const apresentadoraId = request.query?.apresentadora_id ? String(request.query.apresentadora_id) : null
+    if (marcaId && !UUID_RE.test(marcaId)) return reply.code(400).send({ error: 'marca_id must be a valid UUID' })
+    if (apresentadoraId && !UUID_RE.test(apresentadoraId)) return reply.code(400).send({ error: 'apresentadora_id must be a valid UUID' })
 
     try {
       return await app.withTenant(tenant_id, async (db) => {
-        const params = [fromDate, toDate]
-        const WHERE_BASE = `
-          l.tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND l.status = 'encerrada'
-          AND COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
-          AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
-          AND EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) >= 300
-          AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
-          AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
-        `
-
-        const AGG_COLS = `
-          COUNT(*)::int AS total_lives,
-          COALESCE(SUM(l.ads_gmv), 0) AS gmv,
-          COALESCE(SUM(l.ads_cost), 0) AS verba,
-          COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0), 0) AS horas,
-          COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::int AS pedidos,
-          COALESCE(SUM(COALESCE(l.manual_views, l.final_peak_viewers, 0)), 0)::bigint AS views,
-          COALESCE(SUM(COALESCE(l.manual_comments, l.final_total_comments, 0)), 0)::bigint AS comments,
-          COALESCE(SUM(l.live_impressions), 0)::bigint AS live_impressions,
-          COALESCE(SUM(l.product_impressions), 0)::bigint AS product_impressions,
-          COALESCE(SUM(l.product_clicks), 0)::bigint AS product_clicks,
-          AVG(NULLIF(l.avg_viewing_duration, 0)) AS retencao,
-          COALESCE(SUM(l.new_followers), 0)::int AS new_followers
-        `
-
-        if (groupBy === 'marca') {
-          const result = await db.query(`
-            SELECT
-              l.marca_id AS grupo_id,
-              COALESCE(m.nome, 'Sem marca') AS grupo_nome,
-              COALESCE(m.logo_url, cl.logo_url) AS logo_url,
-              ${AGG_COLS}
-            FROM lives l
-            LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
-            LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = l.tenant_id
-            WHERE ${WHERE_BASE}
-            GROUP BY l.marca_id, COALESCE(m.nome, 'Sem marca'), COALESCE(m.logo_url, cl.logo_url)
-            ORDER BY gmv DESC, total_lives DESC
-          `, params)
-          return result.rows.map(mapFunilRow)
-        }
-
-        // groupBy === 'apresentadora'
         const result = await db.query(`
           SELECT
-            COALESCE(ap_v2.apresentadora_id, ap_user.id) AS grupo_id,
-            COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora') AS grupo_nome,
-            COALESCE(ap_v2.foto_url, ap_user.foto_url) AS logo_url,
-            ${AGG_COLS}
+            COUNT(*)::int AS total_lives,
+            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv,
+            COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::bigint AS pedidos,
+            COALESCE(SUM(COALESCE(l.live_impressions, 0)), 0)::bigint AS impressoes,
+            COALESCE(SUM(COALESCE(l.manual_views, l.final_peak_viewers, 0)), 0)::bigint AS visualizacoes,
+            COALESCE(SUM(COALESCE(l.product_impressions, 0)), 0)::bigint AS impressoes_produto,
+            COALESCE(SUM(COALESCE(l.product_clicks, 0)), 0)::bigint AS cliques,
+            COALESCE(SUM(
+              CASE
+                WHEN COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+                  THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
+                ELSE 0
+              END
+            ), 0) AS horas_live
           FROM lives l
-          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
           LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
           LEFT JOIN LATERAL (
-            SELECT lav.apresentadora_id, a.nome, a.foto_url
+            SELECT lav.apresentadora_id
             FROM live_apresentadoras_v2 lav
-            JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
             WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
             ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
             LIMIT 1
           ) ap_v2 ON true
-          WHERE ${WHERE_BASE}
-          GROUP BY
-            COALESCE(ap_v2.apresentadora_id, ap_user.id),
-            COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora'),
-            COALESCE(ap_v2.foto_url, ap_user.foto_url)
-          ORDER BY gmv DESC, total_lives DESC
-        `, params)
-        return result.rows.map(mapFunilRow)
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
+            AND COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
+            AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+            AND EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) >= 300
+            AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
+            AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
+            AND ($3::uuid IS NULL OR l.marca_id = $3::uuid)
+            AND ($4::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $4::uuid)
+        `, [fromDate, toDate, marcaId, apresentadoraId])
+
+        const r = result.rows[0] || {}
+        const impressoes = toInt(r.impressoes)
+        const visualizacoes = toInt(r.visualizacoes)
+        const impressoesProduto = toInt(r.impressoes_produto)
+        const cliques = toInt(r.cliques)
+        const pedidos = toInt(r.pedidos)
+        const gmv = round2(r.gmv)
+        const horasLive = round1(r.horas_live)
+        const totalLives = toInt(r.total_lives)
+
+        const rate = (a, b) => (b > 0 ? Math.round((a / b) * 10000) / 10000 : null)
+        const rawStages = [
+          { chave: 'impressoes', label: 'Impressões da live', valor: impressoes },
+          { chave: 'visualizacoes', label: 'Visualizações', valor: visualizacoes },
+          { chave: 'impressoes_produto', label: 'Impressões de produto', valor: impressoesProduto },
+          { chave: 'cliques', label: 'Cliques no produto', valor: cliques },
+          { chave: 'pedidos', label: 'Pedidos', valor: pedidos },
+        ]
+        const topo = rawStages[0].valor
+        const etapas = rawStages.map((s, i) => ({
+          chave: s.chave,
+          label: s.label,
+          valor: s.valor,
+          taxa_etapa: i === 0 ? null : rate(s.valor, rawStages[i - 1].valor),
+          taxa_total: rate(s.valor, topo),
+        }))
+
+        return {
+          periodo: { from: fromDate, to: toDate, mesAno },
+          filtros: { marca_id: marcaId, apresentadora_id: apresentadoraId },
+          tem_dados_ads: impressoes > 0 || impressoesProduto > 0 || cliques > 0,
+          resumo: {
+            total_lives: totalLives,
+            gmv,
+            pedidos,
+            ticket_medio: pedidos > 0 ? round2(gmv / pedidos) : 0,
+            horas_live: horasLive,
+            gmv_por_hora: horasLive > 0 ? round2(gmv / horasLive) : 0,
+            visualizacoes,
+          },
+          etapas,
+        }
       })
     } catch (err) {
       request.log.error({ err }, 'analytics/funil error')

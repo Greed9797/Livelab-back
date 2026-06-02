@@ -8,11 +8,16 @@ function num(value) {
 
 export function mapPerformanceRows(rows, { groupBy, mes } = {}) {
   return rows.map((row) => {
+    const gmvLives = num(row.gmv_lives)
+    const horasLive = num(row.horas_live)
     const base = {
       gmv_total: num(row.gmv_total),
       gmv: num(row.gmv_total),
-      gmv_lives: num(row.gmv_lives),
+      gmv_lives: gmvLives,
       gmv_videos: num(row.gmv_videos),
+      horas_live: Math.round(horasLive * 10) / 10,
+      // GMV de live por hora de live (eficiência operacional por entidade).
+      gmv_por_hora: horasLive > 0 ? Math.round((gmvLives / horasLive) * 100) / 100 : 0,
       pedidos: num(row.pedidos),
       pedidos_total: num(row.pedidos),
       total_lives: num(row.total_lives),
@@ -83,7 +88,12 @@ export async function getPerformanceRanking(db, {
           COALESCE(l.manual_orders, l.final_orders_count, 0)::int AS pedidos,
           COALESCE(live_commission.comissao_apresentadora, 0) AS comissao_apresentadora,
           COALESCE(live_commission.comissao_franquia, 0) AS comissao_franquia,
-          COALESCE(live_commission.comissao_franqueadora, 0) AS comissao_franqueadora
+          COALESCE(live_commission.comissao_franqueadora, 0) AS comissao_franqueadora,
+          CASE
+            WHEN COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+              THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
+            ELSE 0
+          END AS horas
         FROM lives l
         LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
         LEFT JOIN LATERAL (
@@ -123,7 +133,8 @@ export async function getPerformanceRanking(db, {
           va.pedidos,
           va.comissao_apresentadora,
           va.comissao_franquia,
-          va.comissao_franqueadora
+          va.comissao_franqueadora,
+          0 AS horas
         FROM vendas_atribuidas va
         JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
         WHERE va.tenant_id = $1::uuid
@@ -149,6 +160,7 @@ export async function getPerformanceRanking(db, {
         COALESCE(SUM(combined.gmv), 0) AS gmv_total,
         COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'live'), 0) AS gmv_lives,
         COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'video'), 0) AS gmv_videos,
+        COALESCE(SUM(combined.horas), 0) AS horas_live,
         COALESCE(SUM(combined.pedidos), 0)::int AS pedidos,
         COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'live')::int AS total_lives,
         COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'video')::int AS total_videos,
@@ -177,7 +189,12 @@ export async function getPerformanceRanking(db, {
         'live' AS origem,
         COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
         COALESCE(l.manual_orders, l.final_orders_count, 0)::int AS pedidos,
-        COALESCE(live_commission.comissao_apresentadora, 0) AS comissao_apresentadora
+        COALESCE(live_commission.comissao_apresentadora, 0) AS comissao_apresentadora,
+        CASE
+          WHEN COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+            THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
+          ELSE 0
+        END AS horas
       FROM lives l
       LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
       LEFT JOIN LATERAL (
@@ -213,7 +230,8 @@ export async function getPerformanceRanking(db, {
         va.origem,
         va.gmv,
         va.pedidos,
-        va.comissao_apresentadora
+        va.comissao_apresentadora,
+        0 AS horas
       FROM vendas_atribuidas va
       JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
       WHERE va.tenant_id = $1::uuid
@@ -239,6 +257,7 @@ export async function getPerformanceRanking(db, {
       COALESCE(SUM(combined.gmv), 0) AS gmv_total,
       COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'live'), 0) AS gmv_lives,
       COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'video'), 0) AS gmv_videos,
+      COALESCE(SUM(combined.horas), 0) AS horas_live,
       COALESCE(SUM(combined.pedidos), 0)::int AS pedidos,
       COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'live')::int AS total_lives,
       COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'video')::int AS total_videos,

@@ -33,7 +33,7 @@ const convidarSchema = z.object({
   comissao_pct: z.number().min(0).max(100).optional(),
   meta_diaria_gmv: z.number().nonnegative().optional(),
   foto_url: imageUrlSchema,
-  senha_temporaria: z.string().regex(SECURITY.PASSWORD_REGEX, 'Senha temporária deve ter no mínimo 8 caracteres, com letra e número.'),
+  senha_temporaria: z.string().regex(SECURITY.PASSWORD_REGEX, 'Senha temporária deve ter no mínimo 8 caracteres, com letra e número.').optional(),
 }).refine(d => d.papel !== 'cliente_parceiro' || !!d.cliente_id, {
   message: 'cliente_id é obrigatório para papel cliente_parceiro',
 })
@@ -200,9 +200,12 @@ export async function usuariosRoutes(app) {
     const presenterFixo = fixo ?? DEFAULT_APRESENTADORA_FIXO
     const presenterComissaoPct = comissao_pct ?? 0
 
-    // Criação direta: o admin define a senha temporária e o usuário troca
-    // depois via PATCH /v1/auth/senha. Sem fluxo de convite por email.
+    // Criação direta: admin pode definir a senha temporária; se omitida (ex:
+    // cadastro de apresentadora sem senha), o sistema gera uma forte e devolve
+    // na resposta. O usuário troca depois via PATCH /v1/auth/senha. Sem convite.
+    // Gerada com letra+dígito garantidos para satisfazer PASSWORD_REGEX.
     const senhaInicial = senha_temporaria
+      ?? `Lv${crypto.randomBytes(6).toString('hex')}9`
     const senhaHash = await bcrypt.hash(senhaInicial, SECURITY.BCRYPT_ROUNDS)
 
     return app.withTenant(tenantId, async (db) => {

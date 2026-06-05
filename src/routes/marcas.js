@@ -31,7 +31,15 @@ const marcaSchema = marcaBaseSchema.refine((data) => data.tipo !== 'cliente' || 
   message: 'cliente_id é obrigatório para marca de cliente',
 })
 
-const marcaPatchSchema = marcaBaseSchema.partial().refine((data) => {
+// PATCH parcial: sobrescreve campos com `.default()` para versões opcionais SEM
+// default — senão o default de `tipo` ('cliente') dispara no parse e o refine
+// passa a exigir cliente_id em qualquer PATCH (ex: só atualizar comissão → 400).
+const marcaPatchSchema = marcaBaseSchema.partial().extend({
+  tipo: z.enum(['cliente', 'afiliada', 'propria', 'parceira']).optional(),
+  status: z.enum(['ativa', 'inativa', 'pausada']).optional(),
+  comissao_franquia_pct: z.number().min(0).max(100).optional(),
+  comissao_franqueadora_pct: z.number().min(0).max(100).optional(),
+}).refine((data) => {
   if (data.tipo === 'cliente') return Boolean(data.cliente_id)
   return true
 }, { message: 'cliente_id é obrigatório para marca de cliente' })

@@ -249,15 +249,17 @@ export async function usuariosRoutes(app) {
           }
         }
 
+        // Cliente final não passa por onboarding obrigatório — nasce liberado.
         const { rows } = await db.query(
           `INSERT INTO users (
               tenant_id, nome, email, senha_hash, papel, ativo, criado_por,
-              invite_token_hash, invite_expira_em, primeiro_acesso
+              invite_token_hash, invite_expira_em, primeiro_acesso, onboarding_completed
             )
-           VALUES ($1, $2, $3, $4, $5, true, $6, NULL, NULL, true)
+           VALUES ($1, $2, $3, $4, $5, true, $6, NULL, NULL, true, $7)
            RETURNING id, nome, email, papel, ativo, criado_em`,
           [
             tenantId, nome, email, senhaHash, papel, request.user.sub,
+            papel === 'cliente_parceiro',
           ]
         )
         const newUser = rows[0]

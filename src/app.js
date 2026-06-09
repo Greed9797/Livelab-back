@@ -39,6 +39,7 @@ import { apresentadorasRoutes } from './routes/apresentadoras.js'
 import { apresentadoraDisponibilidadeRoutes } from './routes/apresentadora_disponibilidade.js'
 import { liveApresentadoresRoutes } from './routes/live_apresentadores.js'
 import { clientePortalRoutes } from './routes/cliente_portal.js'
+import { clienteInsightsRoutes } from './routes/cliente_insights.js'
 import onboardingRoutes from './routes/onboarding.js'
 import { tenantsRoutes } from './routes/tenants.js'
 import { webhookBioCrmRoutes } from './routes/webhook_bio_crm.js'
@@ -235,6 +236,7 @@ export async function buildApp(opts = {}) {
   await app.register(apresentadoraDisponibilidadeRoutes)
   await app.register(liveApresentadoresRoutes)
   await app.register(clientePortalRoutes)
+  await app.register(clienteInsightsRoutes)
   await app.register(onboardingRoutes)
   await app.register(tenantsRoutes)
   await app.register(webhookBioCrmRoutes)

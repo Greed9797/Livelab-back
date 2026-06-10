@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { z } from 'zod'
 import { has as managerHas, stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
+import { calcularComissaoApresentadora, calcularComissaoLivelab } from '../services/comissao.js'
 
 const cabineRoleAccess = (app) => [
   app.authenticate,
@@ -962,28 +963,43 @@ export async function cabinesRoutes(app) {
       await db.query('BEGIN')
 
       const cab = await db.query(
-        `SELECT c.contrato_id, ct.comissao_pct
+        `SELECT c.contrato_id, ct.comissao_pct,
+                ap.comissao_pct AS apresentadora_comissao_pct,
+                ap.id           AS apresentadora_id
            FROM cabines c
            LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
+           LEFT JOIN apresentadoras ap ON ap.user_id = $2
           WHERE c.id = $1`,
-        [d.cabine_id]
+        [d.cabine_id, d.apresentador_id]
       )
-      const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
-      const comissao = d.fat_gerado * (comissaoPct / 100)
 
       const iniciado = `${d.data} ${d.hora_inicio}:00`
       const encerrado = `${d.data} ${d.hora_fim}:00`
+
+      const livelab = calcularComissaoLivelab({
+        fatGerado: d.fat_gerado,
+        contratoPct: cab.rows[0]?.comissao_pct,
+      })
+      const apres = calcularComissaoApresentadora({
+        fatGerado: d.fat_gerado,
+        apresentadoraPct: cab.rows[0]?.apresentadora_comissao_pct ?? null,
+        iniciadoEm: new Date(iniciado),
+        temApresentadora: cab.rows[0]?.apresentadora_id != null,
+      })
 
       const ins = await db.query(
         `INSERT INTO lives
            (tenant_id, cabine_id, cliente_id, apresentador_id, gestor_id,
             status, iniciado_em, encerrado_em, fat_gerado, comissao_calculada,
+            comissao_apresentadora_pct, comissao_apresentadora_valor,
             final_orders_count, resumo)
-         VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11)
+         VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13)
          RETURNING id`,
         [
           tenant_id, d.cabine_id, d.cliente_id, d.apresentador_id, d.gestor_id,
-          iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
+          iniciado, encerrado, d.fat_gerado, livelab.valor,
+          apres.pct, apres.valor,
+          d.qtd_pedidos, d.resumo ?? null,
         ]
       )
       const liveId = ins.rows[0].id
@@ -1019,7 +1035,7 @@ export async function cabinesRoutes(app) {
       await db.query('BEGIN')
 
       const liveQ = await db.query(
-        `SELECT id, cabine_id, fat_gerado, iniciado_em, encerrado_em
+        `SELECT id, cabine_id, fat_gerado, iniciado_em, encerrado_em, apresentador_id
            FROM lives WHERE id = $1 AND status = 'encerrada' FOR UPDATE`,
         [request.params.id]
       )
@@ -1030,16 +1046,41 @@ export async function cabinesRoutes(app) {
       }
 
       const cabineId = d.cabine_id ?? live.cabine_id
+      // apresentador_id pode mudar via d.apresentador_id; usar o novo se fornecido
+      const apresentadorUserId = d.apresentador_id ?? live.apresentador_id
+
       let comissao = undefined
+      let comissaoApresFields = undefined
+
       if (d.fat_gerado !== undefined) {
         const cab = await db.query(
-          `SELECT ct.comissao_pct FROM cabines c
+          `SELECT ct.comissao_pct,
+                  ap.comissao_pct AS apresentadora_comissao_pct,
+                  ap.id           AS apresentadora_id
+             FROM cabines c
              LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
+             LEFT JOIN apresentadoras ap ON ap.user_id = $2
             WHERE c.id = $1`,
-          [cabineId]
+          [cabineId, apresentadorUserId]
         )
-        const pct = Number(cab.rows[0]?.comissao_pct ?? 0)
-        comissao = d.fat_gerado * (pct / 100)
+
+        // iniciado_em pode mudar neste mesmo PATCH se data/hora_inicio são fornecidos;
+        // mas ainda não processamos essa parte — usar o valor atual da live
+        const iniciado = new Date(live.iniciado_em)
+
+        const livelab = calcularComissaoLivelab({
+          fatGerado: d.fat_gerado,
+          contratoPct: cab.rows[0]?.comissao_pct,
+        })
+        const apres = calcularComissaoApresentadora({
+          fatGerado: d.fat_gerado,
+          apresentadoraPct: cab.rows[0]?.apresentadora_comissao_pct ?? null,
+          iniciadoEm: iniciado,
+          temApresentadora: cab.rows[0]?.apresentadora_id != null,
+        })
+
+        comissao = livelab.valor
+        comissaoApresFields = apres
       }
 
       const updates = []
@@ -1052,7 +1093,12 @@ export async function cabinesRoutes(app) {
       if (d.cliente_id   !== undefined) addField('cliente_id',         d.cliente_id)
       if (d.apresentador_id !== undefined) addField('apresentador_id', d.apresentador_id)
       if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
-      if (d.fat_gerado   !== undefined) { addField('fat_gerado', d.fat_gerado); addField('comissao_calculada', comissao) }
+      if (d.fat_gerado   !== undefined) {
+        addField('fat_gerado', d.fat_gerado)
+        addField('comissao_calculada', comissao)
+        addField('comissao_apresentadora_pct',   comissaoApresFields.pct)
+        addField('comissao_apresentadora_valor', comissaoApresFields.valor)
+      }
       if (d.qtd_pedidos  !== undefined) addField('final_orders_count', d.qtd_pedidos)
       if (d.resumo       !== undefined) addField('resumo',             d.resumo)
 
@@ -1129,7 +1175,7 @@ export async function cabinesRoutes(app) {
 
       try {
         const liveQ = await db.query(
-          `SELECT id, cabine_id, cliente_id, status, iniciado_em
+          `SELECT id, cabine_id, cliente_id, status, iniciado_em, apresentador_id
            FROM lives
            WHERE id = $1 AND status = 'em_andamento'
            FOR UPDATE`,
@@ -1162,15 +1208,33 @@ export async function cabinesRoutes(app) {
           : { rows: [] }
         const contrato = contratoQ.rows[0]
 
-        const comissaoPct = Number(contrato?.comissao_pct ?? 0)
-        const comissao = parsed.data.fat_gerado * (comissaoPct / 100)
+        // Busca comissao_pct da apresentadora vinculada à live
+        const apresQ = await db.query(
+          `SELECT ap.comissao_pct AS apresentadora_comissao_pct, ap.id AS apresentadora_id
+             FROM apresentadoras ap
+            WHERE ap.user_id = $1`,
+          [live.apresentador_id]
+        )
+        const apresRow = apresQ.rows[0]
+
+        const livelab = calcularComissaoLivelab({
+          fatGerado: parsed.data.fat_gerado,
+          contratoPct: contrato?.comissao_pct,
+        })
+        const apres = calcularComissaoApresentadora({
+          fatGerado: parsed.data.fat_gerado,
+          apresentadoraPct: apresRow?.apresentadora_comissao_pct ?? null,
+          iniciadoEm: new Date(live.iniciado_em),
+          temApresentadora: apresRow?.apresentadora_id != null,
+        })
 
         await db.query(
           `UPDATE lives
            SET status = 'encerrada', encerrado_em = NOW(),
-               fat_gerado = $1, comissao_calculada = $2
-           WHERE id = $3`,
-          [parsed.data.fat_gerado, comissao, request.params.id]
+               fat_gerado = $1, comissao_calculada = $2,
+               comissao_apresentadora_pct = $3, comissao_apresentadora_valor = $4
+           WHERE id = $5`,
+          [parsed.data.fat_gerado, livelab.valor, apres.pct, apres.valor, request.params.id]
         )
 
         // Deduct live duration from contrato's horas_consumidas

@@ -108,6 +108,7 @@ export const MIGRATIONS_LIST = [
   '111_lives_funnel_ads_metrics.sql',
   '112_home_dashboard_performance_indexes.sql',
   '113_analytics_import_batches.sql',
+  '114_painel_operacional.sql',
 ]
 
 async function ensureMigrationsTable(client) {

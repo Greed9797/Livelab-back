@@ -1,5 +1,6 @@
 import { calcularStatusOperacional } from '../services/status_operacional.js'
 import { isFimDeSemanaSP } from '../services/comissao.js'
+import { gerarRelatorioOperacionalPdf } from '../services/relatorio_pdf.js'
 
 const DASHBOARD_TZ = 'America/Sao_Paulo'
 
@@ -1430,6 +1431,198 @@ export async function clienteDashboardRoutes(app) {
       return { periodo, total, sessoes }
     } catch (e) {
       app.log.error({ err: e }, 'unhandled error in /v1/cliente/sessoes')
+      throw e
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/cliente/relatorio.pdf — relatório operacional mensal em PDF
+  app.get('/v1/cliente/relatorio.pdf', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request, reply) => {
+    const { sub: user_id, tenant_id } = request.user
+    const periodo = parsePeriodo(request.query)
+
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      // 1. Resolver cliente vinculado
+      const clienteAtual = await getClienteVinculado(db, tenant_id, user_id)
+      const cliente_id   = clienteAtual?.id
+
+      if (!cliente_id) {
+        return reply.code(404).send({ error: 'Cliente não encontrado para este usuário' })
+      }
+
+      // 2. Config do cliente (meta_gmv_hora, margem_pct)
+      const configQ = await db.query(
+        `SELECT meta_gmv_hora, margem_pct FROM clientes WHERE id = $1 AND tenant_id = $2`,
+        [cliente_id, tenant_id],
+      )
+      const configRow      = configQ.rows[0] ?? {}
+      const metaGmvHora    = configRow.meta_gmv_hora != null ? Number(configRow.meta_gmv_hora) : 500
+      const margemPct      = configRow.margem_pct    != null ? Number(configRow.margem_pct)    : null
+
+      // 3. Contrato ativo → comissao_livelab_pct
+      const contratoAtivo      = await getContratoAtivo(db, tenant_id, cliente_id)
+      const comissaoLivelabPct = contratoAtivo?.comissao_pct != null
+        ? Number(contratoAtivo.comissao_pct)
+        : null
+
+      // 4. Métricas consolidadas (reutiliza mesma query de /v1/cliente/operacional)
+      const metricsQ = await db.query(`
+        WITH periodo AS (
+          SELECT
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
+        )
+        SELECT
+          ROUND(
+            COALESCE(
+              SUM(
+                EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0
+              ) FILTER (WHERE l.status = 'encerrada' AND l.encerrado_em IS NOT NULL),
+              0
+            )::numeric, 4
+          ) AS horas_live,
+          COALESCE(SUM(l.fat_gerado) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')), 0)
+            AS gmv,
+          SUM(l.comissao_calculada) FILTER (WHERE l.status = 'encerrada')
+            AS comissao_livelab_total,
+          SUM(l.comissao_apresentadora_valor) FILTER (WHERE l.status = 'encerrada')
+            AS comissao_apresentadora_total,
+          COALESCE(
+            SUM(COALESCE(l.final_peak_viewers, 0)) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
+            0
+          ) AS views,
+          CASE
+            WHEN COUNT(l.id) FILTER (WHERE l.clicks IS NOT NULL AND l.status IN ('encerrada', 'em_andamento')) = 0
+              THEN NULL
+            ELSE SUM(l.clicks) FILTER (WHERE l.status IN ('encerrada', 'em_andamento'))
+          END AS clicks,
+          COALESCE(
+            SUM(COALESCE(l.final_orders_count, 0)) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
+            0
+          ) AS pedidos,
+          MIN(l.problema) FILTER (WHERE l.problema IS NOT NULL AND l.status IN ('encerrada', 'em_andamento'))
+            AS primeiro_problema
+        FROM lives l
+        CROSS JOIN periodo p
+        WHERE l.tenant_id = $1
+          AND l.cliente_id = $2
+          AND l.status != 'cancelada'
+          AND l.iniciado_em >= p.inicio
+          AND l.iniciado_em  < p.fim
+      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
+
+      const m = metricsQ.rows[0] ?? {}
+
+      const horasLive            = round2(Number(m.horas_live ?? 0))
+      const gmv                  = round2(Number(m.gmv        ?? 0))
+      const comissaoLivelabTotal = m.comissao_livelab_total   != null ? round2(Number(m.comissao_livelab_total))   : null
+      const comissaoApresTotal   = m.comissao_apresentadora_total != null ? round2(Number(m.comissao_apresentadora_total)) : null
+      const views                = toInt(m.views ?? 0)
+      const clicks               = m.clicks != null ? toInt(m.clicks) : null
+      const pedidos              = toInt(m.pedidos ?? 0)
+      const primeiroproblema     = m.primeiro_problema ?? null
+
+      const gmvPorHora    = (horasLive > 0) ? round2(gmv / horasLive)                    : null
+      const pctMetaHora   = (gmvPorHora != null && metaGmvHora > 0) ? round2((gmvPorHora / metaGmvHora) * 100) : null
+      const comissaoPorHora = (comissaoLivelabTotal != null && horasLive > 0) ? round2(comissaoLivelabTotal / horasLive) : null
+
+      const statusPeriodo = calcularStatusOperacional({
+        metaGmvHora,
+        margemPct,
+        comissaoLivelabPct,
+        horas:             horasLive > 0 ? horasLive : null,
+        gmv,
+        pedidos,
+        views,
+        clicks,
+        problemaReportado: primeiroproblema,
+      })
+
+      const operacional = {
+        periodo,
+        config: {
+          meta_gmv_hora:        metaGmvHora,
+          margem_pct:           margemPct,
+          comissao_livelab_pct: comissaoLivelabPct,
+        },
+        metricas: {
+          horas_live:                 horasLive,
+          gmv,
+          gmv_por_hora:               gmvPorHora,
+          pct_meta_hora:              pctMetaHora,
+          comissao_livelab_total:     comissaoLivelabTotal,
+          comissao_apresentadora_total: comissaoApresTotal,
+          comissao_por_hora:          comissaoPorHora,
+          funil: { views, clicks, pedidos },
+        },
+        status: statusPeriodo,
+      }
+
+      // 5. Sessões do período (sem paginação — PDF usa todas)
+      const sessoesQ = await db.query(`
+        WITH periodo AS (
+          SELECT
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
+        )
+        SELECT
+          l.id,
+          l.iniciado_em,
+          l.encerrado_em,
+          l.status,
+          l.fat_gerado,
+          l.comissao_calculada,
+          l.comissao_apresentadora_valor,
+          l.comissao_apresentadora_pct,
+          l.clicks,
+          l.status_operacional,
+          l.problema,
+          l.proxima_acao,
+          l.final_peak_viewers,
+          l.final_orders_count,
+          COALESCE(a.nome, u.nome) AS apresentadora_nome,
+          COUNT(*) OVER() AS total_count
+        FROM lives l
+        CROSS JOIN periodo p
+        LEFT JOIN users u ON u.id = l.apresentador_id
+        LEFT JOIN apresentadoras a ON a.user_id = l.apresentador_id AND a.tenant_id = l.tenant_id
+        WHERE l.tenant_id = $1
+          AND l.cliente_id = $2
+          AND l.status != 'cancelada'
+          AND l.iniciado_em >= p.inicio
+          AND l.iniciado_em  < p.fim
+        ORDER BY l.iniciado_em ASC
+      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
+
+      const sessoesData = sessoesQ.rows.map((r) => buildSessao(r, {
+        metaGmvHora,
+        margemPct,
+        comissaoLivelabPct,
+      }))
+
+      // 6. Gerar PDF
+      const pdfBuffer = await gerarRelatorioOperacionalPdf({
+        cliente: { nome: clienteAtual.nome ?? null },
+        periodo,
+        operacional,
+        sessoes: { sessoes: sessoesData },
+      })
+
+      const filename = `relatorio-operacional-${periodo.ano}-${String(periodo.mes).padStart(2, '0')}.pdf`
+
+      return reply
+        .code(200)
+        .header('Content-Type', 'application/pdf')
+        .header('Content-Disposition', `attachment; filename="${filename}"`)
+        .send(pdfBuffer)
+
+    } catch (e) {
+      app.log.error({ err: e }, 'unhandled error in /v1/cliente/relatorio.pdf')
       throw e
     } finally {
       db.release()

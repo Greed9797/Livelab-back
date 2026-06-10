@@ -1,4 +1,5 @@
 import { calcularStatusOperacional } from '../services/status_operacional.js'
+import { isFimDeSemanaSP } from '../services/comissao.js'
 
 const DASHBOARD_TZ = 'America/Sao_Paulo'
 
@@ -1342,6 +1343,232 @@ export async function clienteDashboardRoutes(app) {
       db.release()
     }
   })
+
+  // GET /v1/cliente/sessoes — tabela central de sessões de live com status por sessão
+  app.get('/v1/cliente/sessoes', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request) => {
+    const { sub: user_id, tenant_id } = request.user
+    const periodo = parsePeriodo(request.query)
+
+    const rawLimit  = Number.parseInt(request.query.limit,  10)
+    const rawOffset = Number.parseInt(request.query.offset, 10)
+    const limit  = rawLimit  >= 1 && rawLimit  <= 200 ? rawLimit  : 50
+    const offset = rawOffset >= 0 ? rawOffset : 0
+
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      // 1. Resolver cliente vinculado
+      const clienteAtual = await getClienteVinculado(db, tenant_id, user_id)
+      const cliente_id = clienteAtual?.id
+      if (!cliente_id) {
+        return { periodo, total: 0, sessoes: [] }
+      }
+
+      // 2. Config do cliente (meta_gmv_hora, margem_pct)
+      const configQ = await db.query(
+        `SELECT meta_gmv_hora, margem_pct FROM clientes WHERE id = $1 AND tenant_id = $2`,
+        [cliente_id, tenant_id]
+      )
+      const configRow = configQ.rows[0] ?? {}
+      const metaGmvHora = configRow.meta_gmv_hora != null ? Number(configRow.meta_gmv_hora) : 500
+      const margemPct   = configRow.margem_pct    != null ? Number(configRow.margem_pct)    : null
+
+      // 3. Contrato ativo → comissao_livelab_pct
+      const contratoAtivo      = await getContratoAtivo(db, tenant_id, cliente_id)
+      const comissaoLivelabPct = contratoAtivo?.comissao_pct != null
+        ? Number(contratoAtivo.comissao_pct)
+        : null
+
+      // 4. Buscar sessões do período (não-canceladas, DESC por iniciado_em)
+      const sessoesQ = await db.query(`
+        WITH periodo AS (
+          SELECT
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
+        )
+        SELECT
+          l.id,
+          l.iniciado_em,
+          l.encerrado_em,
+          l.status,
+          l.fat_gerado,
+          l.comissao_calculada,
+          l.comissao_apresentadora_valor,
+          l.comissao_apresentadora_pct,
+          l.clicks,
+          l.status_operacional,
+          l.problema,
+          l.proxima_acao,
+          l.final_peak_viewers,
+          l.final_orders_count,
+          -- Nome da apresentadora: preferir apresentadoras.nome, fallback users.nome
+          COALESCE(a.nome, u.nome) AS apresentadora_nome,
+          COUNT(*) OVER() AS total_count
+        FROM lives l
+        CROSS JOIN periodo p
+        LEFT JOIN users u ON u.id = l.apresentador_id
+        LEFT JOIN apresentadoras a ON a.user_id = l.apresentador_id AND a.tenant_id = l.tenant_id
+        WHERE l.tenant_id = $1
+          AND l.cliente_id = $2
+          AND l.status != 'cancelada'
+          AND l.iniciado_em >= p.inicio
+          AND l.iniciado_em  < p.fim
+        ORDER BY l.iniciado_em DESC
+        LIMIT $5 OFFSET $6
+      `, [tenant_id, cliente_id, periodo.ano, periodo.mes, limit, offset])
+
+      const total = sessoesQ.rows.length > 0 ? Number(sessoesQ.rows[0].total_count) : 0
+
+      const sessoes = sessoesQ.rows.map((r) => buildSessao(r, {
+        metaGmvHora,
+        margemPct,
+        comissaoLivelabPct,
+      }))
+
+      return { periodo, total, sessoes }
+    } catch (e) {
+      app.log.error({ err: e }, 'unhandled error in /v1/cliente/sessoes')
+      throw e
+    } finally {
+      db.release()
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers privados para /v1/cliente/sessoes
+// ---------------------------------------------------------------------------
+
+/**
+ * Formata a data da live no fuso America/Sao_Paulo como string YYYY-MM-DD.
+ * Garante que uma live de sábado 21h SP não apareça como domingo UTC.
+ *
+ * @param {Date} date
+ * @returns {string}
+ */
+function toDataSP(date) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year:  'numeric',
+    month: '2-digit',
+    day:   '2-digit',
+  }).format(date)
+}
+
+/**
+ * Calcula horas parciais de uma live em andamento (agora - iniciado_em).
+ * Para lives encerradas, usa encerrado_em - iniciado_em.
+ *
+ * @param {Date|string|null} iniciadoEm
+ * @param {Date|string|null} encerradoEm
+ * @param {string} status
+ * @returns {number}
+ */
+function calcularHoras(iniciadoEm, encerradoEm, status) {
+  if (!iniciadoEm) return 0
+  const inicio = new Date(iniciadoEm)
+  const fim    = encerradoEm ? new Date(encerradoEm) : (status === 'em_andamento' ? new Date() : inicio)
+  const diff   = (fim.getTime() - inicio.getTime()) / 3_600_000
+  return round2(Math.max(diff, 0))
+}
+
+/**
+ * Monta o objeto de sessão a partir de uma linha do banco + config do cliente.
+ * Aplica null-real: campos não medidos → null; ratios → null se denominador 0/null.
+ * Status por sessão: usa coluna lives.status_operacional se preenchida;
+ * senão calcula on-the-fly com calcularStatusOperacional.
+ *
+ * @param {object} r - Linha raw do banco
+ * @param {{ metaGmvHora: number, margemPct: number|null, comissaoLivelabPct: number|null }} cfg
+ * @returns {object}
+ */
+function buildSessao(r, { metaGmvHora, margemPct, comissaoLivelabPct }) {
+  const iniciadoEm  = r.iniciado_em  ? new Date(r.iniciado_em)  : null
+  const encerradoEm = r.encerrado_em ? new Date(r.encerrado_em) : null
+
+  const horas    = calcularHoras(iniciadoEm, encerradoEm, r.status)
+  const gmv      = round2(Number(r.fat_gerado ?? 0))
+  const pedidos  = r.final_orders_count != null ? toInt(r.final_orders_count) : 0
+  const views    = r.final_peak_viewers != null ? toInt(r.final_peak_viewers)  : null
+  const clicks   = r.clicks            != null ? toInt(r.clicks)               : null
+
+  // Ratios: null quando denominador 0 ou null
+  const gmvPorHora     = horas   > 0              ? round2(gmv    / horas)   : null
+  const pedidosPorHora = horas   > 0 && pedidos > 0 ? round2(pedidos / horas) : null
+
+  // Comissão LiveLab
+  const comissaoLivelab = r.comissao_calculada != null
+    ? round2(Number(r.comissao_calculada))
+    : null
+
+  // Comissão apresentadora (null se não há vínculo)
+  const comissaoApresentadora    = r.comissao_apresentadora_valor != null
+    ? round2(Number(r.comissao_apresentadora_valor))
+    : null
+  const comissaoApresentadoraPct = r.comissao_apresentadora_pct != null
+    ? round2(Number(r.comissao_apresentadora_pct))
+    : null
+
+  // fim_de_semana derivado de iniciado_em no fuso SP
+  const fimDeSemana = iniciadoEm != null ? isFimDeSemanaSP(iniciadoEm) : false
+
+  // Status por sessão: coluna first, motor como fallback
+  let statusSessao, motivosSessao, diagnosticoSessao, proximaAcaoSessao
+
+  if (r.status_operacional != null) {
+    // Coluna preenchida — usar como fonte de verdade
+    statusSessao     = r.status_operacional
+    motivosSessao    = []
+    diagnosticoSessao  = null
+    proximaAcaoSessao  = null
+  } else {
+    // Calcular on-the-fly
+    const motor = calcularStatusOperacional({
+      metaGmvHora,
+      margemPct,
+      comissaoLivelabPct,
+      horas:             horas  > 0 ? horas  : null,
+      gmv,
+      pedidos,
+      views:             views  ?? 0,
+      clicks,
+      problemaReportado: r.problema ?? null,
+    })
+    statusSessao      = motor.status
+    motivosSessao     = motor.motivos
+    diagnosticoSessao = motor.diagnostico
+    proximaAcaoSessao = motor.proxima_acao
+  }
+
+  // problema / proxima_acao: coluna first, fallback motor
+  const problemaFinal      = r.problema      ?? null
+  const proximaAcaoFinal   = r.proxima_acao  ?? proximaAcaoSessao ?? null
+
+  return {
+    live_id:                  r.id,
+    data:                     iniciadoEm ? toDataSP(iniciadoEm) : null,
+    inicio:                   r.iniciado_em  ?? null,
+    fim:                      r.encerrado_em ?? null,
+    apresentadora:            r.apresentadora_nome ?? null,
+    horas,
+    gmv,
+    pedidos,
+    views,
+    clicks,
+    gmv_por_hora:             gmvPorHora,
+    pedidos_por_hora:         pedidosPorHora,
+    comissao_livelab:         comissaoLivelab,
+    comissao_apresentadora:   comissaoApresentadora,
+    comissao_apresentadora_pct: comissaoApresentadoraPct,
+    fim_de_semana:            fimDeSemana,
+    status_operacional:       statusSessao,
+    motivos:                  motivosSessao,
+    diagnostico:              diagnosticoSessao,
+    problema:                 problemaFinal,
+    proxima_acao:             proximaAcaoFinal,
+  }
 }
 
 // ---------------------------------------------------------------------------

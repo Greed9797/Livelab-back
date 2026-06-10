@@ -1,3 +1,5 @@
+import { calcularStatusOperacional } from '../services/status_operacional.js'
+
 const DASHBOARD_TZ = 'America/Sao_Paulo'
 
 function toNumber(value) {
@@ -1117,4 +1119,259 @@ export async function clienteDashboardRoutes(app) {
       db.release()
     }
   })
+
+  // GET /v1/cliente/operacional — métricas operacionais com null-real
+  app.get('/v1/cliente/operacional', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request) => {
+    const { sub: user_id, tenant_id } = request.user
+    const periodo = parsePeriodo(request.query)
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      // 1. Resolver cliente vinculado ao usuário logado
+      const clienteAtual = await getClienteVinculado(db, tenant_id, user_id)
+      const cliente_id = clienteAtual?.id
+      if (!cliente_id) {
+        return buildEmptyOperacional(periodo)
+      }
+
+      // 2. Configuração do cliente (meta_gmv_hora, margem_pct)
+      const configQ = await db.query(
+        `SELECT meta_gmv_hora, margem_pct FROM clientes WHERE id = $1 AND tenant_id = $2`,
+        [cliente_id, tenant_id]
+      )
+      const configRow = configQ.rows[0] ?? {}
+      const metaGmvHora = configRow.meta_gmv_hora != null ? Number(configRow.meta_gmv_hora) : 500
+      const margemPct   = configRow.margem_pct    != null ? Number(configRow.margem_pct)    : null
+
+      // 3. Contrato ativo → comissao_livelab_pct (= comissao_pct no contrato)
+      const contratoAtivo = await getContratoAtivo(db, tenant_id, cliente_id)
+      const comissaoLivelabPct = contratoAtivo?.comissao_pct != null
+        ? Number(contratoAtivo.comissao_pct)
+        : null
+
+      // 4. Agregar métricas do período (apenas lives não-canceladas)
+      const metricsQ = await db.query(`
+        WITH periodo AS (
+          SELECT
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
+        )
+        SELECT
+          -- Horas: apenas lives encerradas (consistência com resto do repo)
+          ROUND(
+            COALESCE(
+              SUM(
+                EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0
+              ) FILTER (WHERE l.status = 'encerrada' AND l.encerrado_em IS NOT NULL),
+              0
+            )::numeric, 4
+          ) AS horas_live,
+
+          -- GMV: COALESCE(0) porque zero medido é zero real
+          COALESCE(SUM(l.fat_gerado) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')), 0)
+            AS gmv,
+
+          -- Comissão LiveLab acumulada (lives encerradas com valor registrado)
+          SUM(l.comissao_calculada) FILTER (WHERE l.status = 'encerrada')
+            AS comissao_livelab_total,
+
+          -- Comissão apresentadora acumulada
+          SUM(l.comissao_apresentadora_valor) FILTER (WHERE l.status = 'encerrada')
+            AS comissao_apresentadora_total,
+
+          -- Funil — views: COALESCE(0) → zero real quando não há snapshots
+          COALESCE(
+            SUM(
+              COALESCE(l.final_peak_viewers, 0)
+            ) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
+            0
+          ) AS views,
+
+          -- Clicks: CASE explícito — nenhuma live com clicks = null (não medido)
+          CASE
+            WHEN COUNT(l.id) FILTER (WHERE l.clicks IS NOT NULL AND l.status IN ('encerrada', 'em_andamento')) = 0
+              THEN NULL
+            ELSE SUM(l.clicks) FILTER (WHERE l.status IN ('encerrada', 'em_andamento'))
+          END AS clicks,
+
+          -- Pedidos
+          COALESCE(
+            SUM(COALESCE(l.final_orders_count, 0)) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
+            0
+          ) AS pedidos,
+
+          -- Primeiro problema reportado não-nulo (para status do período)
+          MIN(l.problema) FILTER (WHERE l.problema IS NOT NULL AND l.status IN ('encerrada', 'em_andamento'))
+            AS primeiro_problema
+
+        FROM lives l
+        CROSS JOIN periodo p
+        WHERE l.tenant_id = $1
+          AND l.cliente_id = $2
+          AND l.status != 'cancelada'
+          AND l.iniciado_em >= p.inicio
+          AND l.iniciado_em  < p.fim
+      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
+
+      const m = metricsQ.rows[0] ?? {}
+
+      const horasLive            = round2(Number(m.horas_live ?? 0))
+      const gmv                  = round2(Number(m.gmv        ?? 0))
+      const comissaoLivelabTotal = m.comissao_livelab_total    != null ? round2(Number(m.comissao_livelab_total))    : null
+      const comissaoApresTotal   = m.comissao_apresentadora_total != null ? round2(Number(m.comissao_apresentadora_total)) : null
+      const views                = toInt(m.views ?? 0)
+      const clicks               = m.clicks != null ? toInt(m.clicks) : null
+      const pedidos              = toInt(m.pedidos ?? 0)
+      const primeiroproblema     = m.primeiro_problema ?? null
+
+      // Ratios: null se denominador zero ou null
+      const gmvPorHora       = horasLive > 0 ? round2(gmv / horasLive) : null
+      const pctMetaHora      = (gmvPorHora != null && metaGmvHora > 0)
+        ? round2((gmvPorHora / metaGmvHora) * 100)
+        : null
+      const comissaoPorHora  = (comissaoLivelabTotal != null && horasLive > 0)
+        ? round2(comissaoLivelabTotal / horasLive)
+        : null
+
+      // 5. Status operacional do período
+      const statusPeriodo = calcularStatusOperacional({
+        metaGmvHora,
+        margemPct,
+        comissaoLivelabPct,
+        horas:             horasLive > 0 ? horasLive : null,
+        gmv,
+        pedidos,
+        views,
+        clicks,
+        problemaReportado: primeiroproblema,
+      })
+
+      // 6. Alertas: lives críticas do período (máx 10, mais recentes primeiro)
+      const alertasQ = await db.query(`
+        WITH periodo AS (
+          SELECT
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
+        )
+        SELECT
+          l.id,
+          l.status_operacional,
+          l.problema,
+          l.iniciado_em,
+          l.encerrado_em,
+          l.fat_gerado,
+          EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.iniciado_em) - l.iniciado_em)) / 3600.0
+            AS duracao_horas
+        FROM lives l
+        CROSS JOIN periodo p
+        WHERE l.tenant_id = $1
+          AND l.cliente_id = $2
+          AND l.status != 'cancelada'
+          AND l.iniciado_em >= p.inicio
+          AND l.iniciado_em  < p.fim
+          AND (
+            l.status_operacional = 'critico'
+            OR (l.status = 'encerrada'
+                AND EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0 >= 1
+                AND COALESCE(l.fat_gerado, 0) = 0)
+            OR (l.problema IS NOT NULL)
+          )
+        ORDER BY l.iniciado_em DESC
+        LIMIT 10
+      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
+
+      const alertas = alertasQ.rows.map(r => {
+        let tipo = 'aviso'
+        let descricao = ''
+
+        if (r.status_operacional === 'critico') {
+          tipo = 'critico'
+          descricao = r.problema
+            ? `Problema reportado: ${r.problema}`
+            : `GMV zero em live com ${round2(Number(r.duracao_horas))}h de duração`
+        } else if (
+          r.status === 'encerrada' &&
+          Number(r.duracao_horas) >= 1 &&
+          Number(r.fat_gerado ?? 0) === 0
+        ) {
+          tipo = 'critico'
+          descricao = `GMV zero em live com ${round2(Number(r.duracao_horas))}h de duração`
+        } else if (r.problema) {
+          tipo = 'aviso'
+          descricao = `Problema reportado: ${r.problema}`
+        }
+
+        return {
+          live_id:  r.id,
+          tipo,
+          descricao,
+          data:     r.iniciado_em,
+        }
+      })
+
+      return {
+        periodo,
+        config: {
+          meta_gmv_hora:       metaGmvHora,
+          margem_pct:          margemPct,
+          comissao_livelab_pct: comissaoLivelabPct,
+        },
+        metricas: {
+          horas_live:                 horasLive,
+          gmv,
+          gmv_por_hora:               gmvPorHora,
+          pct_meta_hora:              pctMetaHora,
+          comissao_livelab_total:     comissaoLivelabTotal,
+          comissao_apresentadora_total: comissaoApresTotal,
+          comissao_por_hora:          comissaoPorHora,
+          funil: {
+            views,
+            clicks,
+            pedidos,
+          },
+        },
+        status:  statusPeriodo,
+        alertas,
+      }
+    } catch (e) {
+      app.log.error({ err: e }, 'unhandled error in /v1/cliente/operacional')
+      throw e
+    } finally {
+      db.release()
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers privados para /v1/cliente/operacional
+// ---------------------------------------------------------------------------
+
+function buildEmptyOperacional(periodo) {
+  return {
+    periodo,
+    config: {
+      meta_gmv_hora:        500,
+      margem_pct:           null,
+      comissao_livelab_pct: null,
+    },
+    metricas: {
+      horas_live:                   0,
+      gmv:                          0,
+      gmv_por_hora:                 null,
+      pct_meta_hora:                null,
+      comissao_livelab_total:       null,
+      comissao_apresentadora_total: null,
+      comissao_por_hora:            null,
+      funil: { views: 0, clicks: null, pedidos: 0 },
+    },
+    status: {
+      status:        'dados_incompletos',
+      motivos:       ['cliente não encontrado'],
+      diagnostico:   null,
+      proxima_acao:  null,
+    },
+    alertas: [],
+  }
 }

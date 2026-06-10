@@ -5,6 +5,7 @@ import { notify } from '../services/mailer.js'
 import { upsertVendaAtribuida } from './vendas_atribuidas.js'
 import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
+import { calcularComissaoApresentadora, isFimDeSemanaSP } from '../services/comissao.js'
 import { moneySchema } from '../lib/money.js'
 import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
@@ -846,14 +847,18 @@ export async function livesRoutes(app) {
         const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
         const comissao = officialGmvFromPayload(d) * (comissaoPct / 100)
 
-        // Resolve apresentadoras.id → users.id (pode ser null para apresentadoras sem conta)
+        // Resolve apresentadoras.id → users.id + comissao_pct (para snapshot operacional)
         let apresentadorUserId = null
+        let apresentadoraComissaoPct = null
         if (d.apresentador_id) {
           const apRow = await db.query(
-            `SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+            `SELECT user_id, comissao_pct FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
             [d.apresentador_id, tenant_id]
           )
-          apresentadorUserId = apRow.rows[0]?.user_id ?? null
+          apresentadorUserId      = apRow.rows[0]?.user_id      ?? null
+          apresentadoraComissaoPct = apRow.rows[0]?.comissao_pct != null
+            ? Number(apRow.rows[0].comissao_pct)
+            : null
         }
 
         let apresentador2UserId = null
@@ -865,8 +870,17 @@ export async function livesRoutes(app) {
           apresentador2UserId = ap2Row.rows[0]?.user_id ?? null
         }
 
-        const iniciado = saoPauloTimestamp(d.data, d.hora_inicio)
+        const iniciado  = saoPauloTimestamp(d.data, d.hora_inicio)
         const encerrado = saoPauloTimestamp(d.data, d.hora_fim)
+
+        // Comissão apresentadora — snapshot operacional por live
+        const fatGeradoManual   = Number(officialGmvFromPayload(d) ?? 0)
+        const comApresManual    = calcularComissaoApresentadora({
+          fatGerado:        fatGeradoManual,
+          apresentadoraPct: apresentadoraComissaoPct,
+          iniciadoEm:       iniciado,
+          temApresentadora: apresentadorUserId != null,
+        })
 
         const ins = await db.query(
           `INSERT INTO lives
@@ -875,8 +889,9 @@ export async function livesRoutes(app) {
               final_orders_count, resumo,
               manual_views, manual_likes, manual_comments, manual_shares, manual_diamonds,
               manual_orders, manual_gmv,
-              tipo, status_publicacao, origem_dados, agenda_evento_id, marca_id)
-           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+              tipo, status_publicacao, origem_dados, agenda_evento_id, marca_id,
+              comissao_apresentadora_pct, comissao_apresentadora_valor)
+           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
            RETURNING id`,
           [
             tenant_id, d.cabine_id, resolvedClienteId ?? null, apresentadorUserId, gestorId,
@@ -885,6 +900,7 @@ export async function livesRoutes(app) {
             d.manual_comments ?? null, d.manual_shares ?? null, d.manual_diamonds ?? null,
             d.manual_orders ?? null, d.manual_gmv ?? null,
             d.tipo, d.status_publicacao, d.origem_dados, d.agenda_evento_id ?? null, resolvedMarcaId,
+            comApresManual.pct, comApresManual.valor,
           ]
         )
         const liveId = ins.rows[0].id
@@ -1101,6 +1117,30 @@ export async function livesRoutes(app) {
         if (d.status_publicacao !== undefined) addField('status_publicacao', d.status_publicacao)
         if (d.fat_gerado      !== undefined) addField('fat_gerado', d.fat_gerado)
         if (gmvMudou) addField('comissao_calculada', comissao)
+        // Recalcular comissão apresentadora quando GMV muda (snapshot operacional)
+        if (gmvMudou) {
+          const gmvAtualPatch      = officialGmvFromPayload(d, live)
+          const apResolvido        = resolvedApresentadorId ?? live.apresentador_id
+          let apPctPatch           = null
+          if (apResolvido) {
+            const apPctQ = await db.query(
+              `SELECT comissao_pct FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid LIMIT 1`,
+              [apResolvido, tenant_id]
+            )
+            apPctPatch = apPctQ.rows[0]?.comissao_pct != null
+              ? Number(apPctQ.rows[0].comissao_pct)
+              : null
+          }
+          const inicioParaComApres = live.iniciado_em ? new Date(live.iniciado_em) : new Date()
+          const comApresPatch = calcularComissaoApresentadora({
+            fatGerado:        Number(gmvAtualPatch ?? 0),
+            apresentadoraPct: apPctPatch,
+            iniciadoEm:       inicioParaComApres,
+            temApresentadora: apResolvido != null,
+          })
+          addField('comissao_apresentadora_pct',   comApresPatch.pct)
+          addField('comissao_apresentadora_valor',  comApresPatch.valor)
+        }
         if (d.qtd_pedidos     !== undefined) addField('final_orders_count', d.qtd_pedidos)
         if (d.resumo          !== undefined) addField('resumo',             d.resumo)
         if (d.manual_views    !== undefined) addField('manual_views',    d.manual_views)
@@ -1838,17 +1878,40 @@ export async function livesRoutes(app) {
         const comissao = officialGmvFromPayload(parsed.data) * (comissaoPct / 100)
         const encerradoEm = parsed.data.encerrado_em ? new Date(parsed.data.encerrado_em) : null
         let encerramentoApresentadorUserId = null
+        let encerramentoApresentadoraComissaoPct = null
         if (parsed.data.apresentadora_id) {
           const apRow = await db.query(
-            `SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
+            `SELECT user_id, comissao_pct FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid`,
             [parsed.data.apresentadora_id, tenant_id]
           )
           if (!apRow.rows[0]) {
             await db.query('ROLLBACK')
             return reply.code(404).send({ error: 'Apresentadora não encontrada', code: 'APRESENTADORA_NOT_FOUND' })
           }
-          encerramentoApresentadorUserId = apRow.rows[0].user_id ?? null
+          encerramentoApresentadorUserId       = apRow.rows[0].user_id ?? null
+          encerramentoApresentadoraComissaoPct = apRow.rows[0].comissao_pct != null
+            ? Number(apRow.rows[0].comissao_pct)
+            : null
+        } else if (live.apresentador_id) {
+          // Já havia apresentadora vinculada — buscar comissao_pct pelo user_id
+          const apRow = await db.query(
+            `SELECT comissao_pct FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid LIMIT 1`,
+            [live.apresentador_id, tenant_id]
+          )
+          encerramentoApresentadoraComissaoPct = apRow.rows[0]?.comissao_pct != null
+            ? Number(apRow.rows[0].comissao_pct)
+            : null
         }
+
+        // Snapshot operacional de comissão apresentadora
+        const temApresentadora = (encerramentoApresentadorUserId ?? live.apresentador_id) != null
+        const inicioEncerrar   = live.iniciado_em ? new Date(live.iniciado_em) : new Date()
+        const comApresEncerrar = calcularComissaoApresentadora({
+          fatGerado:        Number(officialGmvFromPayload(parsed.data) ?? 0),
+          apresentadoraPct: encerramentoApresentadoraComissaoPct,
+          iniciadoEm:       inicioEncerrar,
+          temApresentadora,
+        })
 
         await db.query(
           `UPDATE lives
@@ -1866,7 +1929,9 @@ export async function livesRoutes(app) {
                apresentador_id    = COALESCE($14::uuid, apresentador_id),
                manual_comments    = COALESCE($15, manual_comments),
                manual_shares      = COALESCE($16, manual_shares),
-               manual_diamonds    = COALESCE($17, manual_diamonds)
+               manual_diamonds    = COALESCE($17, manual_diamonds),
+               comissao_apresentadora_pct   = $18,
+               comissao_apresentadora_valor = $19
            WHERE id = $5 AND tenant_id = $12::uuid`,
           [
             parsed.data.fat_gerado,
@@ -1886,6 +1951,8 @@ export async function livesRoutes(app) {
             parsed.data.manual_comments ?? null,
             parsed.data.manual_shares ?? null,
             parsed.data.manual_diamonds ?? null,
+            comApresEncerrar.pct,
+            comApresEncerrar.valor,
           ]
         )
 

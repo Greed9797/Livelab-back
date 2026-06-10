@@ -65,6 +65,7 @@ async function main() {
     '048_users_management.sql',            // CHECK papéis expandido + user_id FK em clientes/apresentadoras + criado_por
     '049_tenants_cnpj.sql',               // coluna cnpj em tenants
     '050_lives_manual_entry.sql',         // gestor_id + resumo em lives (entrada manual)
+    '052_painel_operacional.sql',         // clicks/status/problema/comissão apresentadora em lives + meta_gmv_hora/margem em clientes + RLS faltante
   ]
 
   for (const migration of pendingMigrations) {

@@ -175,9 +175,10 @@ describe('calcularComissaoLivelab', () => {
     expect(result.valor).toBe(0)
   })
 
-  it('arredonda a 2 casas decimais', () => {
-    // 1000 * 3% = 30.00 — sem problema de float
-    // 333.33 * 3% = 9.9999 → arredonda para 10.00
+  it('retorna float cru (arredondamento delegado ao Postgres NUMERIC 15,2)', () => {
+    // 333.33 * 3% = 9.9999 — o banco arredonda para 10.00; aqui retornamos o float puro
+    // para manter paridade exata com o legado (cabines.js antes da extração).
+    // toBeCloseTo(10, 1) garante que está próximo de 10 sem exigir arredondamento JS.
     const result = calcularComissaoLivelab({ fatGerado: 333.33, contratoPct: 3 })
     expect(result.valor).toBeCloseTo(10, 1)
   })

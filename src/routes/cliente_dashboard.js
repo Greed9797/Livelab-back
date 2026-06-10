@@ -1154,70 +1154,7 @@ export async function clienteDashboardRoutes(app) {
         : null
 
       // 4. Agregar métricas do período (apenas lives não-canceladas)
-      const metricsQ = await db.query(`
-        WITH periodo AS (
-          SELECT
-            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
-            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
-        )
-        SELECT
-          -- Horas: apenas lives encerradas (consistência com resto do repo)
-          ROUND(
-            COALESCE(
-              SUM(
-                EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0
-              ) FILTER (WHERE l.status = 'encerrada' AND l.encerrado_em IS NOT NULL),
-              0
-            )::numeric, 4
-          ) AS horas_live,
-
-          -- GMV: COALESCE(0) porque zero medido é zero real
-          COALESCE(SUM(l.fat_gerado) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')), 0)
-            AS gmv,
-
-          -- Comissão LiveLab acumulada (lives encerradas com valor registrado)
-          SUM(l.comissao_calculada) FILTER (WHERE l.status = 'encerrada')
-            AS comissao_livelab_total,
-
-          -- Comissão apresentadora acumulada
-          SUM(l.comissao_apresentadora_valor) FILTER (WHERE l.status = 'encerrada')
-            AS comissao_apresentadora_total,
-
-          -- Funil — views: COALESCE(0) → zero real quando não há snapshots
-          COALESCE(
-            SUM(
-              COALESCE(l.final_peak_viewers, 0)
-            ) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
-            0
-          ) AS views,
-
-          -- Clicks: CASE explícito — nenhuma live com clicks = null (não medido)
-          CASE
-            WHEN COUNT(l.id) FILTER (WHERE l.clicks IS NOT NULL AND l.status IN ('encerrada', 'em_andamento')) = 0
-              THEN NULL
-            ELSE SUM(l.clicks) FILTER (WHERE l.status IN ('encerrada', 'em_andamento'))
-          END AS clicks,
-
-          -- Pedidos
-          COALESCE(
-            SUM(COALESCE(l.final_orders_count, 0)) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
-            0
-          ) AS pedidos,
-
-          -- Primeiro problema reportado não-nulo (para status do período)
-          MIN(l.problema) FILTER (WHERE l.problema IS NOT NULL AND l.status IN ('encerrada', 'em_andamento'))
-            AS primeiro_problema
-
-        FROM lives l
-        CROSS JOIN periodo p
-        WHERE l.tenant_id = $1
-          AND l.cliente_id = $2
-          AND l.status != 'cancelada'
-          AND l.iniciado_em >= p.inicio
-          AND l.iniciado_em  < p.fim
-      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
-
-      const m = metricsQ.rows[0] ?? {}
+      const m = await fetchMetricasPeriodo(db, tenant_id, cliente_id, periodo)
 
       const horasLive            = round2(Number(m.horas_live ?? 0))
       const gmv                  = round2(Number(m.gmv        ?? 0))
@@ -1383,46 +1320,15 @@ export async function clienteDashboardRoutes(app) {
         : null
 
       // 4. Buscar sessões do período (não-canceladas, DESC por iniciado_em)
-      const sessoesQ = await db.query(`
-        WITH periodo AS (
-          SELECT
-            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
-            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
-        )
-        SELECT
-          l.id,
-          l.iniciado_em,
-          l.encerrado_em,
-          l.status,
-          l.fat_gerado,
-          l.comissao_calculada,
-          l.comissao_apresentadora_valor,
-          l.comissao_apresentadora_pct,
-          l.clicks,
-          l.status_operacional,
-          l.problema,
-          l.proxima_acao,
-          l.final_peak_viewers,
-          l.final_orders_count,
-          -- Nome da apresentadora: preferir apresentadoras.nome, fallback users.nome
-          COALESCE(a.nome, u.nome) AS apresentadora_nome,
-          COUNT(*) OVER() AS total_count
-        FROM lives l
-        CROSS JOIN periodo p
-        LEFT JOIN users u ON u.id = l.apresentador_id
-        LEFT JOIN apresentadoras a ON a.user_id = l.apresentador_id AND a.tenant_id = l.tenant_id
-        WHERE l.tenant_id = $1
-          AND l.cliente_id = $2
-          AND l.status != 'cancelada'
-          AND l.iniciado_em >= p.inicio
-          AND l.iniciado_em  < p.fim
-        ORDER BY l.iniciado_em DESC
-        LIMIT $5 OFFSET $6
-      `, [tenant_id, cliente_id, periodo.ano, periodo.mes, limit, offset])
+      const sessoesRows = await fetchSessoesPeriodo(db, tenant_id, cliente_id, periodo, {
+        limit,
+        offset,
+        order: 'DESC',
+      })
 
-      const total = sessoesQ.rows.length > 0 ? Number(sessoesQ.rows[0].total_count) : 0
+      const total = sessoesRows.length > 0 ? Number(sessoesRows[0].total_count) : 0
 
-      const sessoes = sessoesQ.rows.map((r) => buildSessao(r, {
+      const sessoes = sessoesRows.map((r) => buildSessao(r, {
         metaGmvHora,
         margemPct,
         comissaoLivelabPct,
@@ -1470,53 +1376,8 @@ export async function clienteDashboardRoutes(app) {
         ? Number(contratoAtivo.comissao_pct)
         : null
 
-      // 4. Métricas consolidadas (reutiliza mesma query de /v1/cliente/operacional)
-      const metricsQ = await db.query(`
-        WITH periodo AS (
-          SELECT
-            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
-            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
-        )
-        SELECT
-          ROUND(
-            COALESCE(
-              SUM(
-                EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0
-              ) FILTER (WHERE l.status = 'encerrada' AND l.encerrado_em IS NOT NULL),
-              0
-            )::numeric, 4
-          ) AS horas_live,
-          COALESCE(SUM(l.fat_gerado) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')), 0)
-            AS gmv,
-          SUM(l.comissao_calculada) FILTER (WHERE l.status = 'encerrada')
-            AS comissao_livelab_total,
-          SUM(l.comissao_apresentadora_valor) FILTER (WHERE l.status = 'encerrada')
-            AS comissao_apresentadora_total,
-          COALESCE(
-            SUM(COALESCE(l.final_peak_viewers, 0)) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
-            0
-          ) AS views,
-          CASE
-            WHEN COUNT(l.id) FILTER (WHERE l.clicks IS NOT NULL AND l.status IN ('encerrada', 'em_andamento')) = 0
-              THEN NULL
-            ELSE SUM(l.clicks) FILTER (WHERE l.status IN ('encerrada', 'em_andamento'))
-          END AS clicks,
-          COALESCE(
-            SUM(COALESCE(l.final_orders_count, 0)) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
-            0
-          ) AS pedidos,
-          MIN(l.problema) FILTER (WHERE l.problema IS NOT NULL AND l.status IN ('encerrada', 'em_andamento'))
-            AS primeiro_problema
-        FROM lives l
-        CROSS JOIN periodo p
-        WHERE l.tenant_id = $1
-          AND l.cliente_id = $2
-          AND l.status != 'cancelada'
-          AND l.iniciado_em >= p.inicio
-          AND l.iniciado_em  < p.fim
-      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
-
-      const m = metricsQ.rows[0] ?? {}
+      // 4. Métricas consolidadas — compartilhadas com /v1/cliente/operacional
+      const m = await fetchMetricasPeriodo(db, tenant_id, cliente_id, periodo)
 
       const horasLive            = round2(Number(m.horas_live ?? 0))
       const gmv                  = round2(Number(m.gmv        ?? 0))
@@ -1563,43 +1424,12 @@ export async function clienteDashboardRoutes(app) {
         status: statusPeriodo,
       }
 
-      // 5. Sessões do período (sem paginação — PDF usa todas)
-      const sessoesQ = await db.query(`
-        WITH periodo AS (
-          SELECT
-            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
-            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
-        )
-        SELECT
-          l.id,
-          l.iniciado_em,
-          l.encerrado_em,
-          l.status,
-          l.fat_gerado,
-          l.comissao_calculada,
-          l.comissao_apresentadora_valor,
-          l.comissao_apresentadora_pct,
-          l.clicks,
-          l.status_operacional,
-          l.problema,
-          l.proxima_acao,
-          l.final_peak_viewers,
-          l.final_orders_count,
-          COALESCE(a.nome, u.nome) AS apresentadora_nome,
-          COUNT(*) OVER() AS total_count
-        FROM lives l
-        CROSS JOIN periodo p
-        LEFT JOIN users u ON u.id = l.apresentador_id
-        LEFT JOIN apresentadoras a ON a.user_id = l.apresentador_id AND a.tenant_id = l.tenant_id
-        WHERE l.tenant_id = $1
-          AND l.cliente_id = $2
-          AND l.status != 'cancelada'
-          AND l.iniciado_em >= p.inicio
-          AND l.iniciado_em  < p.fim
-        ORDER BY l.iniciado_em ASC
-      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
+      // 5. Sessões do período (sem paginação — PDF usa todas, ASC para leitura cronológica)
+      const sessoesRows = await fetchSessoesPeriodo(db, tenant_id, cliente_id, periodo, {
+        order: 'ASC',
+      })
 
-      const sessoesData = sessoesQ.rows.map((r) => buildSessao(r, {
+      const sessoesData = sessoesRows.map((r) => buildSessao(r, {
         metaGmvHora,
         margemPct,
         comissaoLivelabPct,
@@ -1619,6 +1449,9 @@ export async function clienteDashboardRoutes(app) {
         .code(200)
         .header('Content-Type', 'application/pdf')
         .header('Content-Disposition', `attachment; filename="${filename}"`)
+        // Relatório financeiro: nunca armazenar em cache de proxy, disco ou CDN.
+        .header('Cache-Control', 'no-store, no-cache, must-revalidate, private')
+        .header('Pragma', 'no-cache')
         .send(pdfBuffer)
 
     } catch (e) {
@@ -1628,6 +1461,151 @@ export async function clienteDashboardRoutes(app) {
       db.release()
     }
   })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers SQL compartilhados entre /operacional, /sessoes e /relatorio.pdf
+// ---------------------------------------------------------------------------
+
+/**
+ * Busca métricas agregadas do período (GMV, horas, comissões, funil).
+ * Mesma query de /v1/cliente/operacional — centralizada aqui para evitar drift.
+ *
+ * @param {object} db - cliente pg já obtido via app.dbTenant()
+ * @param {string} tenantId
+ * @param {string} clienteId
+ * @param {{ ano: number, mes: number }} periodo
+ * @returns {Promise<object>} linha raw do banco (horas_live, gmv, comissao_livelab_total, …)
+ */
+async function fetchMetricasPeriodo(db, tenantId, clienteId, periodo) {
+  const q = await db.query(`
+    WITH periodo AS (
+      SELECT
+        make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
+        make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
+    )
+    SELECT
+      -- Horas: apenas lives encerradas (consistência com resto do repo)
+      ROUND(
+        COALESCE(
+          SUM(
+            EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600.0
+          ) FILTER (WHERE l.status = 'encerrada' AND l.encerrado_em IS NOT NULL),
+          0
+        )::numeric, 4
+      ) AS horas_live,
+
+      -- GMV: COALESCE(0) porque zero medido é zero real
+      COALESCE(SUM(l.fat_gerado) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')), 0)
+        AS gmv,
+
+      -- Comissão LiveLab acumulada (lives encerradas com valor registrado)
+      SUM(l.comissao_calculada) FILTER (WHERE l.status = 'encerrada')
+        AS comissao_livelab_total,
+
+      -- Comissão apresentadora acumulada
+      SUM(l.comissao_apresentadora_valor) FILTER (WHERE l.status = 'encerrada')
+        AS comissao_apresentadora_total,
+
+      -- Funil — views: COALESCE(0) → zero real quando não há snapshots
+      COALESCE(
+        SUM(
+          COALESCE(l.final_peak_viewers, 0)
+        ) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
+        0
+      ) AS views,
+
+      -- Clicks: CASE explícito — nenhuma live com clicks = null (não medido)
+      CASE
+        WHEN COUNT(l.id) FILTER (WHERE l.clicks IS NOT NULL AND l.status IN ('encerrada', 'em_andamento')) = 0
+          THEN NULL
+        ELSE SUM(l.clicks) FILTER (WHERE l.status IN ('encerrada', 'em_andamento'))
+      END AS clicks,
+
+      -- Pedidos
+      COALESCE(
+        SUM(COALESCE(l.final_orders_count, 0)) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
+        0
+      ) AS pedidos,
+
+      -- Primeiro problema reportado não-nulo (para status do período)
+      MIN(l.problema) FILTER (WHERE l.problema IS NOT NULL AND l.status IN ('encerrada', 'em_andamento'))
+        AS primeiro_problema
+
+    FROM lives l
+    CROSS JOIN periodo p
+    WHERE l.tenant_id = $1
+      AND l.cliente_id = $2
+      AND l.status != 'cancelada'
+      AND l.iniciado_em >= p.inicio
+      AND l.iniciado_em  < p.fim
+  `, [tenantId, clienteId, periodo.ano, periodo.mes])
+
+  return q.rows[0] ?? {}
+}
+
+/**
+ * Busca sessões (lives não-canceladas) do período.
+ *
+ * @param {object} db - cliente pg já obtido via app.dbTenant()
+ * @param {string} tenantId
+ * @param {string} clienteId
+ * @param {{ ano: number, mes: number }} periodo
+ * @param {{ limit?: number, offset?: number, order?: 'ASC'|'DESC' }} opts
+ *   - limit/offset: paginação; omitir (ou passar undefined) para buscar tudo (PDF)
+ *   - order: direção do ORDER BY l.iniciado_em (padrão 'DESC')
+ * @returns {Promise<object[]>} linhas raw do banco
+ */
+async function fetchSessoesPeriodo(db, tenantId, clienteId, periodo, opts = {}) {
+  const { limit, offset, order = 'DESC' } = opts
+  const direction = order === 'ASC' ? 'ASC' : 'DESC'
+  const comPaginacao = limit != null && offset != null
+
+  // Paginação: usa $5/$6 como placeholders para preservar parameterized queries.
+  // Sem limit/offset (PDF) → sem cláusula LIMIT/OFFSET.
+  const paginacaoClause = comPaginacao ? 'LIMIT $5 OFFSET $6' : ''
+  const params = comPaginacao
+    ? [tenantId, clienteId, periodo.ano, periodo.mes, Number(limit), Number(offset)]
+    : [tenantId, clienteId, periodo.ano, periodo.mes]
+
+  const q = await db.query(`
+    WITH periodo AS (
+      SELECT
+        make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') AS inicio,
+        make_timestamptz($3::int, $4::int, 1, 0, 0, 0, 'America/Sao_Paulo') + INTERVAL '1 month' AS fim
+    )
+    SELECT
+      l.id,
+      l.iniciado_em,
+      l.encerrado_em,
+      l.status,
+      l.fat_gerado,
+      l.comissao_calculada,
+      l.comissao_apresentadora_valor,
+      l.comissao_apresentadora_pct,
+      l.clicks,
+      l.status_operacional,
+      l.problema,
+      l.proxima_acao,
+      l.final_peak_viewers,
+      l.final_orders_count,
+      -- Nome da apresentadora: preferir apresentadoras.nome, fallback users.nome
+      COALESCE(a.nome, u.nome) AS apresentadora_nome,
+      COUNT(*) OVER() AS total_count
+    FROM lives l
+    CROSS JOIN periodo p
+    LEFT JOIN users u ON u.id = l.apresentador_id
+    LEFT JOIN apresentadoras a ON a.user_id = l.apresentador_id AND a.tenant_id = l.tenant_id
+    WHERE l.tenant_id = $1
+      AND l.cliente_id = $2
+      AND l.status != 'cancelada'
+      AND l.iniciado_em >= p.inicio
+      AND l.iniciado_em  < p.fim
+    ORDER BY l.iniciado_em ${direction}
+    ${paginacaoClause}
+  `, params)
+
+  return q.rows
 }
 
 // ---------------------------------------------------------------------------

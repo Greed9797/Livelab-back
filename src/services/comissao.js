@@ -59,13 +59,19 @@ export function calcularComissaoApresentadora({ fatGerado, apresentadoraPct, ini
 
 /**
  * Calcula a comissão LiveLab (empresa) — lógica extraída dos 3 pontos de cabines.js.
- * Semanticamente idêntica ao comportamento anterior: nenhuma alteração de resultado.
+ *
+ * O arredondamento a 2 casas decimais é INTENCIONAL ao banco (coluna NUMERIC 15,2):
+ * o valor é inserido cru e o PostgreSQL faz o arredondamento. Manter Math.round
+ * aqui divergia 1 centavo em edge-cases de ponto flutuante (ex: 2.675 → 2.68 JS vs
+ * 2.67 Postgres). Retornamos o float puro para que o banco seja a fonte da verdade.
+ *
+ * ATENÇÃO: NÃO adicionar Math.round aqui sem avaliar paridade com legado.
  *
  * @param {{ fatGerado: number, contratoPct: number | null }} params
  * @returns {{ pct: number, valor: number }}
  */
 export function calcularComissaoLivelab({ fatGerado, contratoPct }) {
   const pct = Number(contratoPct ?? 0)
-  const valor = Math.round(fatGerado * (pct / 100) * 100) / 100
+  const valor = fatGerado * (pct / 100)
   return { pct, valor }
 }

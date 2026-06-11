@@ -5,6 +5,39 @@ import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 
 const HOME_DASHBOARD_CACHE_TTL_MS = Number(process.env.HOME_DASHBOARD_CACHE_TTL_MS ?? 30_000)
+
+// ── Dias úteis (seg–sex, sem feriados — simplificação documentada) ──────────
+// Não inclui feriados nacionais/estaduais. A precisão é suficiente para
+// projeção de ritmo intradia; se precisar de feriados, injetar calendário.
+function _isWeekday(date) {
+  const d = date.getDay() // 0=dom, 6=sab
+  return d !== 0 && d !== 6
+}
+
+/**
+ * Conta dias úteis (seg–sex) no mês YYYY-MM.
+ * Junho/2026 = 22 dias úteis, validado no teste.
+ */
+function countWeekdaysInMonth(yyyy, mm) {
+  const total = new Date(yyyy, mm, 0).getDate() // dias no mês
+  let count = 0
+  for (let d = 1; d <= total; d++) {
+    if (_isWeekday(new Date(yyyy, mm - 1, d))) count++
+  }
+  return count
+}
+
+/**
+ * Conta quantos dias úteis transcorreram até (e incluindo) `dayOfMonth`.
+ * Se o próprio dia for útil, é contado; se for fim de semana, não conta.
+ */
+function countWeekdaysUpTo(yyyy, mm, dayOfMonth) {
+  let count = 0
+  for (let d = 1; d <= dayOfMonth; d++) {
+    if (_isWeekday(new Date(yyyy, mm - 1, d))) count++
+  }
+  return count
+}
 const HOME_DASHBOARD_BROWSER_MAX_AGE_SECONDS = 15
 const HOME_DASHBOARD_STALE_SECONDS = 30
 const homeDashboardCache = new Map()
@@ -554,11 +587,98 @@ export async function homeRoutes(app) {
           LIMIT 1
         `, [tenant_id, effectiveMonth])
 
-      const [agendaHoje, rankingApresentadorasMes, gmvDiarioQ, metaQ] = await Promise.all([
+      // ── Meta diária da unidade (fallback para meta_mes quando não há meta_unidade) ──
+      // Lê tenants.meta_diaria_gmv adicionado em migration 024. Usado apenas se
+      // meta_unidade não tiver registro para o mês; a meta_mes derivada é
+      // meta_diaria_gmv × total de dias úteis do mês (sem feriados).
+      const tenantMetaDiariaPromise = db.query(`
+          SELECT meta_diaria_gmv
+          FROM tenants
+          WHERE id = $1
+          LIMIT 1
+        `, [tenant_id])
+
+      // ── GMV intradia: hoje hora a hora + mesmo dia do mês anterior ──
+      // Fonte: mesma que gmvDiario — lives.iniciado_em (status=encerrada,
+      // COALESCE ads_gmv/manual_gmv/fat_gerado) UNION vendas_atribuidas.criado_em
+      // (origem=video, não reprovada). Uma única query com dois FILTER reduz RTT.
+      // "Hoje" e "prev" são calculados em America/Sao_Paulo para consistência
+      // com o heatmap de analytics.js (L416).
+      // Se o dia do mês atual > dias do mês anterior (ex: 31 em mês que tem 30),
+      // usamos o último dia disponível via LEAST($3, date_part('day',...)).
+      const gmvIntradayPromise = db.query(`
+          WITH hoje_sp AS (
+            SELECT (NOW() AT TIME ZONE 'America/Sao_Paulo')::date AS d
+          ),
+          prev_day AS (
+            SELECT
+              LEAST(
+                EXTRACT(DAY FROM (NOW() AT TIME ZONE 'America/Sao_Paulo'))::int,
+                EXTRACT(DAY FROM
+                  (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) - INTERVAL '1 day')
+                )::int
+              )::int AS dia_prev,
+              to_char(
+                date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) - INTERVAL '1 month',
+                'YYYY-MM'
+              ) AS mes_prev
+          ),
+          src AS (
+            -- Lives encerradas: usa iniciado_em como timestamp da venda
+            SELECT
+              EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS h,
+              COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)                    AS gmv,
+              (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date                AS dia
+            FROM lives l, hoje_sp
+            WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND l.status = 'encerrada'
+              AND (
+                (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date = hoje_sp.d
+                OR to_char(l.iniciado_em AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') = (SELECT mes_prev FROM prev_day)
+                   AND EXTRACT(DAY FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int
+                       = (SELECT dia_prev FROM prev_day)
+              )
+            UNION ALL
+            -- Vendas de vídeo: usa criado_em para capturar a hora exata do registro
+            SELECT
+              EXTRACT(HOUR FROM va.criado_em AT TIME ZONE 'America/Sao_Paulo')::int AS h,
+              va.gmv                                                                  AS gmv,
+              (va.criado_em AT TIME ZONE 'America/Sao_Paulo')::date                  AS dia
+            FROM vendas_atribuidas va, hoje_sp
+            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND va.origem = 'video'
+              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+              AND (
+                (va.criado_em AT TIME ZONE 'America/Sao_Paulo')::date = hoje_sp.d
+                OR to_char(va.criado_em AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') = (SELECT mes_prev FROM prev_day)
+                   AND EXTRACT(DAY FROM va.criado_em AT TIME ZONE 'America/Sao_Paulo')::int
+                       = (SELECT dia_prev FROM prev_day)
+              )
+          ),
+          agg AS (
+            SELECT
+              h,
+              dia,
+              SUM(gmv) AS gmv_h
+            FROM src
+            GROUP BY h, dia
+          )
+          SELECT
+            h,
+            SUM(gmv_h) FILTER (WHERE dia = (SELECT d FROM hoje_sp))                      AS gmv_hoje,
+            SUM(gmv_h) FILTER (WHERE dia <> (SELECT d FROM hoje_sp))                     AS gmv_prev
+          FROM agg
+          GROUP BY h
+          ORDER BY h
+        `, [])
+
+      const [agendaHoje, rankingApresentadorasMes, gmvDiarioQ, metaQ, tenantMetaDiariaQ, gmvIntradayQ] = await Promise.all([
         agendaHojePromise,
         rankingApresentadorasMesPromise,
         gmvDiarioPromise,
         metaPromise,
+        tenantMetaDiariaPromise,
+        gmvIntradayPromise,
       ])
 
       const proximasLives = agendaHoje
@@ -608,6 +728,67 @@ export async function homeRoutes(app) {
       const livesMes = Number(livesMesQ.rows[0].lives_mes)
       const gmvMesAnterior = round2(gmvOperacional.gmv_mes_anterior)
       const gmvLivesMesAnterior = round2(gmvOperacional.gmv_lives_mes_anterior)
+
+      // ── Campos do painel "GMV — desempenho do mês" ──────────────────────────
+
+      // 1. meta_mes: usa meta_unidade.meta_gmv (registro mensal explícito);
+      //    senão deriva tenants.meta_diaria_gmv × dias úteis do mês (sem feriados).
+      //    null se nenhuma configuração existir.
+      const [anoEf, mesEf] = effectiveMonth.split('-').map(Number)
+      const metaMes = (() => {
+        if (metaUnidade && Number(metaUnidade.meta_gmv) > 0) {
+          return round2(metaUnidade.meta_gmv)
+        }
+        const metaDiaria = Number(tenantMetaDiariaQ.rows[0]?.meta_diaria_gmv ?? 0)
+        if (metaDiaria > 0) {
+          // Derivação: meta_diaria_gmv × total de dias úteis (seg–sex) do mês
+          return round2(metaDiaria * countWeekdaysInMonth(anoEf, mesEf))
+        }
+        return null
+      })()
+
+      // 2. periodo: dia_util corrente e total de dias úteis do mês.
+      //    Referência: data atual em America/Sao_Paulo.
+      //    Simplificação documentada: seg–sex, sem feriados nacionais.
+      const agora = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }))
+      const diaCalendarioHoje = agora.getDate()
+      const mesHoje = agora.getMonth() + 1
+      const anoHoje = agora.getFullYear()
+      // Só calcula dia_util dentro do mês de referência; fora do mês retorna 0/total
+      const isEffectiveMonthCurrent = (anoHoje === anoEf && mesHoje === mesEf)
+      const diasUteisMes = countWeekdaysInMonth(anoEf, mesEf)
+      const diaUtilAtual = isEffectiveMonthCurrent
+        ? countWeekdaysUpTo(anoHoje, mesHoje, diaCalendarioHoje)
+        : 0
+
+      // 3. ritmo_projetado: extrapola GMV do mês com base no ritmo até agora.
+      //    null se dia_util=0 (evita divisão por zero) ou gmv nulo.
+      const ritmoProjetado = (diaUtilAtual > 0 && gmvMes != null)
+        ? round2((gmvMes / diaUtilAtual) * diasUteisMes)
+        : null
+
+      // 4. gmv_intraday: array fixo de 16 entradas (08–23), uma por hora.
+      //    v  = GMV somado naquela hora HOJE (horas futuras → null, não 0).
+      //    prev = GMV na mesma hora do mesmo dia do mês anterior (null se sem dados).
+      const horaAtualSP = agora.getHours() // 0–23
+      const byHora = Object.fromEntries(
+        gmvIntradayQ.rows.map(r => [
+          Number(r.h),
+          {
+            v:    r.gmv_hoje != null ? round2(r.gmv_hoje) : null,
+            prev: r.gmv_prev != null ? round2(r.gmv_prev) : null,
+          },
+        ])
+      )
+      const gmvIntraday = Array.from({ length: 16 }, (_, i) => {
+        const h = 8 + i
+        const hStr = String(h).padStart(2, '0')
+        const entry = byHora[h]
+        // Horas futuras de hoje → v=null (front esconde pontos futuros no chart)
+        const vValue = h > horaAtualSP ? null : (entry?.v ?? null)
+        return { h: hStr, v: vValue, prev: entry?.prev ?? null }
+      })
+
       const liveCabinesAtivas = cabinesFormatadas.filter(c => c.status === 'ao_vivo')
       const gmvAoVivoAgora = round2(liveCabinesAtivas.reduce((acc, c) => acc + Number(c.gmv_atual ?? 0), 0))
       const horasLiveMes = parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0).toFixed(1))
@@ -715,6 +896,18 @@ export async function homeRoutes(app) {
           m3_pct: parseFloat(Number(metaUnidade.m3_pct).toFixed(2)),
           m4_pct: parseFloat(Number(metaUnidade.m4_pct).toFixed(2)),
         } : null,
+
+        // ── Painel "GMV — desempenho do mês" ──────────────────────────────
+        // meta_mes: meta mensal explícita (meta_unidade) ou derivada
+        //   (tenants.meta_diaria_gmv × dias úteis do mês). null = não configurada.
+        meta_mes: metaMes,
+        // periodo: dia útil corrente e total de dias úteis do mês (seg–sex, sem feriados).
+        periodo: { dia_util: diaUtilAtual, dias_uteis_total: diasUteisMes },
+        // ritmo_projetado: extrapolação linear pelo ritmo até hoje. null se dia_util=0.
+        ritmo_projetado: ritmoProjetado,
+        // gmv_intraday: 16 entradas (08–23); v=GMV hora hoje, prev=mesmo dia mês anterior.
+        //   Horas futuras de hoje: v=null. Sem dados: v/prev=null.
+        gmv_intraday: gmvIntraday,
       }
       } catch (error) {
         app.log.error({ err: error }, 'ERRO NA ROTA /v1/home/dashboard')

@@ -754,12 +754,16 @@ export async function homeRoutes(app) {
       const diaCalendarioHoje = agora.getDate()
       const mesHoje = agora.getMonth() + 1
       const anoHoje = agora.getFullYear()
-      // Só calcula dia_util dentro do mês de referência; fora do mês retorna 0/total
+      // dia_util depende da posição do mês de referência em relação a hoje:
+      // mês corrente = dias úteis decorridos; mês passado = mês fechado (total);
+      // mês futuro = 0 (nada decorrido). Sem isso, mês passado mostrava
+      // "Dia útil 0/N" e ritmo null no painel.
       const isEffectiveMonthCurrent = (anoHoje === anoEf && mesHoje === mesEf)
+      const isEffectiveMonthPast = (anoEf < anoHoje) || (anoEf === anoHoje && mesEf < mesHoje)
       const diasUteisMes = countWeekdaysInMonth(anoEf, mesEf)
       const diaUtilAtual = isEffectiveMonthCurrent
         ? countWeekdaysUpTo(anoHoje, mesHoje, diaCalendarioHoje)
-        : 0
+        : (isEffectiveMonthPast ? diasUteisMes : 0)
 
       // 3. ritmo_projetado: extrapola GMV do mês com base no ritmo até agora.
       //    null se dia_util=0 (evita divisão por zero) ou gmv nulo.

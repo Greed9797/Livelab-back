@@ -307,6 +307,21 @@ describe('home dashboard', () => {
     await app.close()
   })
 
+  it('periodo: mês passado fecha dia_util = dias_uteis_total (mês completo, ritmo = GMV real)', async () => {
+    const queryMock = createHomeQueryMock()
+    const { app } = buildApp(queryMock, 'tenant-periodo-passado')
+    await app.register(homeRoutes)
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard?mes=2026-01' })).json()
+
+    expect(payload.periodo.dias_uteis_total).toBe(weekdaysInMonth(2026, 1))
+    expect(payload.periodo.dia_util).toBe(payload.periodo.dias_uteis_total)
+    // mês fechado com GMV → ritmo projetado = GMV do mês (extrapolação 1:1), nunca null
+    if (payload.gmv_total_mes != null && payload.gmv_total_mes > 0) {
+      expect(payload.ritmo_projetado).toBeCloseTo(payload.gmv_total_mes, 1)
+    }
+    await app.close()
+  })
+
   it('ritmo_projetado: número quando há GMV e dia_util > 0', async () => {
     const queryMock = createHomeQueryMock()
     const { app } = buildApp(queryMock, 'tenant-ritmo')

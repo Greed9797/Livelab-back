@@ -3,6 +3,34 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { homeRoutes } from '../src/routes/home.js'
 
+// ── Helpers para os testes de GMV intradia ────────────────────────────────────
+
+/**
+ * Calcula quantos dias úteis (seg–sex) há em um mês YYYY-MM.
+ * Espelha countWeekdaysInMonth de home.js para validação cruzada nos testes.
+ */
+function weekdaysInMonth(yyyy, mm) {
+  const total = new Date(yyyy, mm, 0).getDate()
+  let count = 0
+  for (let d = 1; d <= total; d++) {
+    const day = new Date(yyyy, mm - 1, d).getDay()
+    if (day !== 0 && day !== 6) count++
+  }
+  return count
+}
+
+/**
+ * Conta dias úteis transcorridos até (e incluindo) dayOfMonth.
+ */
+function weekdaysUpTo(yyyy, mm, dayOfMonth) {
+  let count = 0
+  for (let d = 1; d <= dayOfMonth; d++) {
+    const day = new Date(yyyy, mm - 1, d).getDay()
+    if (day !== 0 && day !== 6) count++
+  }
+  return count
+}
+
 function buildApp(queryMock, tenantId = 'tenant-a') {
   const app = Fastify()
   const release = vi.fn()
@@ -89,6 +117,14 @@ function createHomeQueryMock() {
           lives_sem_snapshot_recente: '0',
         }],
       }
+    }
+    // tenants.meta_diaria_gmv (fallback para meta_mes quando não há meta_unidade)
+    if (sql.includes('FROM tenants') && sql.includes('meta_diaria_gmv')) {
+      return { rows: [{ meta_diaria_gmv: '500.00' }] }
+    }
+    // GMV intradia hora a hora (hoje + mês anterior)
+    if (sql.includes('hoje_sp') && sql.includes('prev_day')) {
+      return { rows: [] } // sem dados por padrão; testes específicos sobrescrevem
     }
     return { rows: [] }
   })
@@ -194,6 +230,144 @@ describe('home dashboard', () => {
     expect(second.statusCode).toBe(200)
     expect(queryMock.mock.calls.length).toBe(singleRequestQueryCount)
 
+    await app.close()
+  })
+
+  // ── Testes dos campos do painel "GMV — desempenho do mês" ────────────────
+
+  it('meta_mes: usa meta_unidade.meta_gmv quando disponível, ignora meta_diaria_gmv', async () => {
+    // meta_unidade retorna meta_gmv=50000; meta_diaria_gmv=500 não deve ser usada.
+    // Usa tenant único para evitar cache do teste anterior.
+    const mock = vi.fn(async (sql) => {
+      if (sql.includes('home_gmv_operacional')) return { rows: [{ gmv_total_mes: '10000', gmv_lives_mes: '10000', gmv_videos_mes: '0', pedidos_lives_mes: '0', pedidos_videos_mes: '0', pedidos_total_mes: '0', videos_mes: '0', gmv_mes_anterior: '0' }] }
+      if (sql.includes('FROM meta_unidade')) return { rows: [{ meta_gmv: '50000', m1_teto: '0', m1_pct: '0', m2_teto: '0', m2_pct: '0', m3_teto: '0', m3_pct: '0', m4_pct: '0' }] }
+      if (sql.includes('FROM tenants') && sql.includes('meta_diaria_gmv')) return { rows: [{ meta_diaria_gmv: '500' }] }
+      return createHomeQueryMock()(sql)
+    })
+    const { app } = buildApp(mock, 'tenant-meta-explicit')
+    await app.register(homeRoutes)
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard' })).json()
+    expect(payload.meta_mes).toBe(50000)
+    await app.close()
+  })
+
+  it('meta_mes: deriva meta_diaria_gmv × dias_uteis quando meta_unidade ausente', async () => {
+    // Junho/2026 = 22 dias úteis. meta_diaria_gmv=1000 → meta_mes=22000
+    const JUNHO_2026_DIAS_UTEIS = weekdaysInMonth(2026, 6)
+    expect(JUNHO_2026_DIAS_UTEIS).toBe(22) // validação cruzada do helper
+
+    const mock = vi.fn(async (sql) => {
+      if (sql.includes('home_gmv_operacional')) return { rows: [{ gmv_total_mes: '0', gmv_lives_mes: '0', gmv_videos_mes: '0', pedidos_lives_mes: '0', pedidos_videos_mes: '0', pedidos_total_mes: '0', videos_mes: '0', gmv_mes_anterior: '0' }] }
+      if (sql.includes('FROM meta_unidade')) return { rows: [] } // sem meta explícita
+      if (sql.includes('FROM tenants') && sql.includes('meta_diaria_gmv')) return { rows: [{ meta_diaria_gmv: '1000' }] }
+      return createHomeQueryMock()(sql)
+    })
+    const { app } = buildApp(mock, 'tenant-meta-derivada')
+    await app.register(homeRoutes)
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard' })).json()
+    // meta_mes = 1000 × dias_uteis do mês corrente (calculado dinamicamente)
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }))
+    const esperado = 1000 * weekdaysInMonth(now.getFullYear(), now.getMonth() + 1)
+    expect(payload.meta_mes).toBe(esperado)
+    await app.close()
+  })
+
+  it('meta_mes: null quando meta_unidade ausente e meta_diaria_gmv=0', async () => {
+    const mock = vi.fn(async (sql) => {
+      if (sql.includes('home_gmv_operacional')) return { rows: [{ gmv_total_mes: '0', gmv_lives_mes: '0', gmv_videos_mes: '0', pedidos_lives_mes: '0', pedidos_videos_mes: '0', pedidos_total_mes: '0', videos_mes: '0', gmv_mes_anterior: '0' }] }
+      if (sql.includes('FROM meta_unidade')) return { rows: [] }
+      if (sql.includes('FROM tenants') && sql.includes('meta_diaria_gmv')) return { rows: [{ meta_diaria_gmv: '0' }] }
+      return createHomeQueryMock()(sql)
+    })
+    const { app } = buildApp(mock, 'tenant-meta-null')
+    await app.register(homeRoutes)
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard' })).json()
+    expect(payload.meta_mes).toBeNull()
+    await app.close()
+  })
+
+  it('periodo: retorna dia_util e dias_uteis_total; helpers validados com junho/2026', async () => {
+    const queryMock = createHomeQueryMock()
+    const { app } = buildApp(queryMock, 'tenant-periodo')
+    await app.register(homeRoutes)
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard' })).json()
+
+    // dias_uteis_total deve ser > 0 e <= 23 (máximo teórico em qualquer mês)
+    expect(payload.periodo.dias_uteis_total).toBeGreaterThan(0)
+    expect(payload.periodo.dias_uteis_total).toBeLessThanOrEqual(23)
+    // dia_util deve ser >= 0 e <= dias_uteis_total
+    expect(payload.periodo.dia_util).toBeGreaterThanOrEqual(0)
+    expect(payload.periodo.dia_util).toBeLessThanOrEqual(payload.periodo.dias_uteis_total)
+
+    // Caso fixo: junho/2026 tem 22 dias úteis
+    expect(weekdaysInMonth(2026, 6)).toBe(22)
+    // 2026-06-10 é o 8º dia útil de junho/2026
+    expect(weekdaysUpTo(2026, 6, 10)).toBe(8)
+
+    await app.close()
+  })
+
+  it('ritmo_projetado: número quando há GMV e dia_util > 0', async () => {
+    const queryMock = createHomeQueryMock()
+    const { app } = buildApp(queryMock, 'tenant-ritmo')
+    await app.register(homeRoutes)
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard' })).json()
+    // gmv_total_mes=1600.5, dia_util>=1 → ritmo_projetado deve ser número > 0
+    expect(payload.ritmo_projetado === null || typeof payload.ritmo_projetado === 'number').toBe(true)
+    if (payload.periodo.dia_util > 0) {
+      expect(payload.ritmo_projetado).toBeGreaterThan(0)
+    } else {
+      expect(payload.ritmo_projetado).toBeNull()
+    }
+    await app.close()
+  })
+
+  it('gmv_intraday: array de 16 entradas (h 08–23) com v/prev null quando sem dados', async () => {
+    // intraday retorna rows=[] por padrão no mock
+    const queryMock = createHomeQueryMock()
+    const { app } = buildApp(queryMock, 'tenant-intraday-vazio')
+    await app.register(homeRoutes)
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard' })).json()
+
+    expect(Array.isArray(payload.gmv_intraday)).toBe(true)
+    expect(payload.gmv_intraday).toHaveLength(16)
+    expect(payload.gmv_intraday[0].h).toBe('08')
+    expect(payload.gmv_intraday[15].h).toBe('23')
+    // sem dados: prev=null para todas as horas
+    payload.gmv_intraday.forEach(entry => {
+      expect(entry.prev).toBeNull()
+    })
+    await app.close()
+  })
+
+  it('gmv_intraday: hora 8 (passada) tem v preenchido; hora 23 respeitado', async () => {
+    // hora 8 é sempre passada (execução ocorre depois das 0h).
+    // hora 23 pode ser futura ou passada: testamos apenas o tipo.
+    const mock = vi.fn(async (sql) => {
+      if (sql.includes('hoje_sp') && sql.includes('prev_day')) {
+        return {
+          rows: [
+            { h: '8',  gmv_hoje: '1200.50', gmv_prev: '900.00' },
+            { h: '23', gmv_hoje: '500.00',  gmv_prev: null },
+          ],
+        }
+      }
+      return createHomeQueryMock()(sql)
+    })
+    const { app } = buildApp(mock, 'tenant-intraday-dados')
+    await app.register(homeRoutes)
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard' })).json()
+
+    expect(payload.gmv_intraday).toHaveLength(16)
+    const hora8 = payload.gmv_intraday.find(e => e.h === '08')
+    const hora23 = payload.gmv_intraday.find(e => e.h === '23')
+    expect(hora8).toBeDefined()
+    // hora 8 é passada (testes rodam depois das 0h): v deve ter valor
+    expect(hora8.v).toBe(1200.5)
+    expect(hora8.prev).toBe(900)
+    // hora 23: null se futura, 500 se passada
+    expect(hora23.v === null || hora23.v === 500).toBe(true)
+    expect(hora23.prev).toBeNull()
     await app.close()
   })
 })

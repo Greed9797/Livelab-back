@@ -126,10 +126,13 @@ export async function clienteInsightsRoutes(app) {
       )
 
       const proximasQ = await db.query(
+        // agenda_eventos não tem cliente_id: link via marca_id → marcas.cliente_id
+        // (mesmo padrão de lives.js). marca_id presente em todos os eventos de live.
         `SELECT ae.id, ae.data_inicio, ae.data_fim, c.numero AS cabine_numero
          FROM agenda_eventos ae
+         JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
          LEFT JOIN cabines c ON c.id = ae.cabine_id AND c.tenant_id = ae.tenant_id
-         WHERE ae.tenant_id = $1::uuid AND ae.cliente_id = $2::uuid
+         WHERE ae.tenant_id = $1::uuid AND m.cliente_id = $2::uuid
            AND ae.tipo = 'live' AND ae.data_inicio >= NOW()
            AND (ae.data_inicio AT TIME ZONE '${TZ}')::date = (NOW() AT TIME ZONE '${TZ}')::date
            AND ae.status NOT IN ('cancelado')

@@ -7,6 +7,7 @@ import { getClienteOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
 import { SECURITY } from '../config/security.js'
+import { ensureClienteMarca } from '../services/client-brand.js'
 const imageUrlField = z.string().max(500000).nullable().optional()
 
 const createSchema = z.object({
@@ -115,6 +116,11 @@ export async function clientesRoutes(app) {
            d.tiktok_username ?? null, d.logo_url ?? null]
         )
         const cliente = result.rows[0]
+        cliente.marca_id = await ensureClienteMarca(db, {
+          tenantId: tenant_id,
+          clienteId: cliente.id,
+          observacoes: 'Criada automaticamente ao cadastrar cliente.',
+        })
 
         let acesso = null
         if (d.criar_acesso) {

@@ -8,6 +8,8 @@ describe('commission engine', () => {
     const source = readFileSync(new URL('../src/services/commission-engine.js', import.meta.url), 'utf8')
 
     expect(source).toContain("resolvePresenterCommissionPct")
+    expect(source).toContain('m2.id = l.marca_id')
+    expect(source).not.toContain('ON CONFLICT ON CONSTRAINT idx_vendas_atribuidas_origem_unique')
     expect(source).not.toContain('WEEKEND_PRESENTER_PCT')
     expect(source).not.toContain('function isWeekendSaoPaulo')
   })

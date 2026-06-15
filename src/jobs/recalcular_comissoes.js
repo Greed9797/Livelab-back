@@ -89,7 +89,7 @@ export async function runRecalcularComissoesTick(app) {
     try {
       const livesOrfas = await app.db.query(
         `SELECT l.id, l.tenant_id, l.marca_id,
-                COALESCE(l.manual_gmv, l.fat_gerado, 0) AS gmv
+                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv
            FROM lives l
           WHERE l.status_publicacao = 'publicado'
             AND l.marca_id IS NOT NULL

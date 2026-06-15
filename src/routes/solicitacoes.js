@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_SOLICITACOES, WRITE_SOLICITACOES } from '../config/role_groups.js'
+import { ensureClienteMarca } from '../services/client-brand.js'
 
 const agendamentoSchema = z.object({
   cabine_id:        z.string().uuid(),
@@ -252,18 +253,18 @@ export async function solicitacoesRoutes(app) {
       await client.query('BEGIN')
       await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenant_id])
 
-      // Resolve marca_id: usa marca_id explícita ou busca marca ativa do cliente
+      // Resolve marca_id: usa marca explicita ou garante a marca do cliente.
       let marcaId = d.marca_id ?? null
       if (!marcaId) {
-        const marcaQ = await client.query(
-          `SELECT id FROM marcas WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativa' ORDER BY criado_em ASC LIMIT 1`,
-          [d.cliente_id, tenant_id]
-        )
-        marcaId = marcaQ.rows[0]?.id ?? null
+        marcaId = await ensureClienteMarca(client, {
+          tenantId: tenant_id,
+          clienteId: d.cliente_id,
+          observacoes: 'Criada automaticamente ao solicitar agenda de cliente.',
+        })
       }
       if (!marcaId) {
         await client.query('ROLLBACK')
-        return reply.code(422).send({ error: 'Cliente não possui marca ativa. Crie uma marca antes de agendar.' })
+        return reply.code(422).send({ error: 'Cliente não encontrado para gerar marca de agenda.' })
       }
 
       // Monta timestamps com data + hora (tratados como America/Sao_Paulo)

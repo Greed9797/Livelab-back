@@ -1,6 +1,7 @@
 // Portal do cliente final — endpoints de leitura, sempre filtrados pelo cliente
 // vinculado ao usuário logado (resolvido via JWT). NUNCA aceita cliente_id do front.
-// Regra de visibilidade: cliente só vê lives encerradas e status_publicacao='publicado'
+// Regra de visibilidade: métricas (Home/analytics/financeiro) contam toda live
+// encerrada do cliente; a aba Conteúdo (replays) exige status_publicacao='publicado'.
 // (exceto bloco de live ao vivo da Home, que pode mostrar live em andamento própria).
 
 import { calcularStatusOperacional } from '../services/status_operacional.js'
@@ -108,7 +109,7 @@ export async function clienteInsightsRoutes(app) {
            COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.iniciado_em) - l.iniciado_em)) / 3600, 0)), 0) AS horas_live_mes
          FROM lives l CROSS JOIN periodo p
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
-           AND l.status = 'encerrada' AND l.status_publicacao = 'publicado'
+           AND l.status = 'encerrada'
            AND l.iniciado_em >= p.inicio AND l.iniciado_em < p.fim`,
         [tenantId, cliente.id, periodo.ano, periodo.mes],
       )
@@ -146,7 +147,7 @@ export async function clienteInsightsRoutes(app) {
                 COUNT(l.id)::int AS lives
          FROM lives l
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
-           AND l.status = 'encerrada' AND l.status_publicacao = 'publicado'
+           AND l.status = 'encerrada'
            AND l.iniciado_em >= (date_trunc('month', NOW() AT TIME ZONE '${TZ}') - INTERVAL '5 months')
          GROUP BY 1 ORDER BY 1`,
         [tenantId, cliente.id],
@@ -261,7 +262,7 @@ export async function clienteInsightsRoutes(app) {
            COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600, 0)), 0) AS horas_live
          FROM lives l
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
-           AND l.status = 'encerrada' AND l.status_publicacao = 'publicado'
+           AND l.status = 'encerrada'
            AND l.iniciado_em AT TIME ZONE '${TZ}' >= $3::date
            AND l.iniciado_em AT TIME ZONE '${TZ}' < ($4::date + INTERVAL '1 day')
          GROUP BY 1 ORDER BY 1`,
@@ -310,7 +311,7 @@ export async function clienteInsightsRoutes(app) {
                 COALESCE(SUM(l.final_orders_count),0)::int AS pedidos
          FROM lives l CROSS JOIN periodo p
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
-           AND l.status = 'encerrada' AND l.status_publicacao = 'publicado'
+           AND l.status = 'encerrada'
            AND l.iniciado_em >= p.inicio AND l.iniciado_em < p.fim`,
         [tenantId, cliente.id, periodo.ano, periodo.mes],
       )

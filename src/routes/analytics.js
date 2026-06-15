@@ -5,6 +5,7 @@ import {
   parseAnalyticsImportBuffer,
   summarizeImportRows,
 } from '../services/analytics-import.js'
+import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 
@@ -306,6 +307,13 @@ export async function analyticsRoutes(app) {
               tenant_id,
             ],
           )
+          if (n.ads_gmv != null) {
+            await calcularComissoesDaLive(db, {
+              liveId: row.matched_live_id,
+              tenantId: tenant_id,
+              gmv: Number(n.ads_gmv),
+            })
+          }
           await db.query(
             `UPDATE analytics_import_rows
                 SET applied_at = NOW(), error = NULL

@@ -77,8 +77,10 @@ describe('analytics imports routes', () => {
     await app.close()
   })
 
-  it('applies only matched rows to lives ads metrics without changing billing fields', async () => {
+  it('applies matched rows to lives ads metrics and replicates official GMV to finance', async () => {
     let updateLivesArgs = null
+    let insertVendaArgs = null
+    const marcaId = '66666666-6666-4666-8666-666666666666'
     const normalized = {
       ads_gmv: 1000,
       ads_cost: 200,
@@ -101,9 +103,32 @@ describe('analytics imports routes', () => {
       if (sql.includes('FROM analytics_import_rows') && sql.includes("match_status = 'matched'")) {
         return { rows: [{ id: rowId, matched_live_id: liveId, normalized }] }
       }
+      if (sql.includes('FROM lives l') && sql.includes('m2.id = l.marca_id')) {
+        return {
+          rows: [{
+            id: liveId,
+            cliente_id: null,
+            apresentador_id: null,
+            iniciado_em: '2026-05-28T18:00:00.000Z',
+            contrato_id: null,
+            comissao_pct: null,
+            valor_fixo_comissao: '0',
+            marca_id: marcaId,
+            comissao_franquia_pct: '10',
+            comissao_franqueadora_pct: '2',
+          }],
+        }
+      }
+      if (sql.includes('SELECT DISTINCT ap.id AS apresentadora_id')) {
+        return { rows: [] }
+      }
       if (sql.includes('UPDATE lives')) {
         updateLivesArgs = args
         return { rows: [], rowCount: 1 }
+      }
+      if (sql.includes('INSERT INTO vendas_atribuidas')) {
+        insertVendaArgs = args
+        return { rows: [{ id: '77777777-7777-4777-8777-777777777777' }] }
       }
       if (sql.includes('UPDATE analytics_import_rows')) return { rows: [] }
       if (sql.includes('UPDATE analytics_import_batches')) return { rows: [] }
@@ -121,8 +146,19 @@ describe('analytics imports routes', () => {
     const updateSql = queryMock.mock.calls.find(([sql]) => sql.includes('UPDATE lives'))?.[0]
     expect(updateSql).not.toContain('fat_gerado')
     expect(updateSql).not.toContain('comissao_calculada')
+    expect(insertVendaArgs).toEqual([
+      tenantId,
+      liveId,
+      marcaId,
+      null,
+      '2026-05-28',
+      1000,
+      0,
+      0,
+      100,
+      20,
+    ])
 
     await app.close()
   })
 })
-

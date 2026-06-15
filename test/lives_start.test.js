@@ -35,7 +35,8 @@ describe('POST /v1/lives', () => {
     const cabineId = '11111111-1111-4111-8111-111111111111'
     const clienteId = '22222222-2222-4222-8222-222222222222'
     const liveId = '33333333-3333-4333-8333-333333333333'
-    const queryMock = vi.fn()
+    const marcaId = '44444444-4444-4444-8444-444444444444'
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{ id: cabineId, numero: 1, status: 'disponivel', contrato_id: null, live_atual_id: null }],
@@ -44,28 +45,27 @@ describe('POST /v1/lives', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })
       .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: clienteId, nome: 'WEVANS', tiktok_username: null, site: null, logo_url: null }] })
+      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
       .mockResolvedValueOnce({
-          rows: [{ id: liveId, cabine_id: cabineId, iniciado_em: '2026-05-15T18:00:00.000Z', cliente_id: clienteId, apresentador_id: null }],
+          rows: [{ id: liveId, cabine_id: cabineId, iniciado_em: '2026-05-15T18:00:00.000Z', cliente_id: clienteId, apresentador_id: null, marca_id: marcaId }],
       })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
     const { app } = buildApp({ queryMock })
     await app.register(livesRoutes)
 
     const response = await app.inject({
       method: 'POST',
       url: '/v1/lives',
-      payload: { cabine_id: cabineId, cliente_id: clienteId, tiktok_username: 'marca_live' },
+      payload: { cabine_id: cabineId, cliente_id: clienteId },
     })
 
     expect(response.statusCode).toBe(201)
     expect(response.json()).toMatchObject({ id: liveId, cabine_id: cabineId, cliente_id: clienteId })
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo'),
-      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null, null],
+      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null, marcaId],
     )
+    expect(queryMock).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO marcas'), expect.arrayContaining([clienteId, 'WEVANS']))
   })
 
   it('keeps agenda apresentadora attribution without falling back to the operator user', async () => {

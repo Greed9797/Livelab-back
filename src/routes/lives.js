@@ -6,6 +6,7 @@ import { upsertVendaAtribuida } from './vendas_atribuidas.js'
 import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { calcularComissaoApresentadora, isFimDeSemanaSP } from '../services/comissao.js'
+import { ensureClienteMarca } from '../services/client-brand.js'
 import { moneySchema } from '../lib/money.js'
 import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
@@ -580,6 +581,18 @@ export async function livesRoutes(app) {
           }
         }
 
+        if (resolvedTipo === 'cliente' && resolvedClienteId && !resolvedMarcaId) {
+          resolvedMarcaId = await ensureClienteMarca(db, {
+            tenantId: tenant_id,
+            clienteId: resolvedClienteId,
+            observacoes: 'Criada automaticamente ao iniciar live de cliente.',
+          })
+          if (!resolvedMarcaId) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Cliente não encontrado para gerar marca da live', code: 'CLIENTE_NOT_FOUND' })
+          }
+        }
+
         // ── Fallback: marca sistema do tenant para lives afiliado/teste sem marca ──
         if (['afiliado', 'teste'].includes(resolvedTipo) && !resolvedMarcaId) {
           const { rows: [marcaSistema] } = await db.query(
@@ -837,6 +850,18 @@ export async function livesRoutes(app) {
           }
         }
 
+        if (d.tipo === 'cliente' && resolvedClienteId && !resolvedMarcaId) {
+          resolvedMarcaId = await ensureClienteMarca(db, {
+            tenantId: tenant_id,
+            clienteId: resolvedClienteId,
+            observacoes: 'Criada automaticamente ao registrar live manual de cliente.',
+          })
+          if (!resolvedMarcaId) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Cliente não encontrado para gerar marca da live', code: 'CLIENTE_NOT_FOUND' })
+          }
+        }
+
         const cab = await db.query(
           `SELECT c.contrato_id, ct.comissao_pct
              FROM cabines c
@@ -1083,6 +1108,21 @@ export async function livesRoutes(app) {
             return reply.code(404).send({ error: 'Marca não encontrada' })
           }
           resolvedClienteId = resolvedClienteId ?? marcaQ.rows[0].cliente_id ?? null
+        }
+
+        const tipoEfetivoClienteMarca = d.tipo ?? live.tipo
+        const clienteEfetivoClienteMarca = resolvedClienteId !== undefined ? resolvedClienteId : live.cliente_id
+        const marcaEfetivaClienteMarca = d.marca_id !== undefined ? d.marca_id : live.marca_id
+        if (tipoEfetivoClienteMarca === 'cliente' && clienteEfetivoClienteMarca && !marcaEfetivaClienteMarca) {
+          d.marca_id = await ensureClienteMarca(db, {
+            tenantId: tenant_id,
+            clienteId: clienteEfetivoClienteMarca,
+            observacoes: 'Criada automaticamente ao editar live de cliente.',
+          })
+          if (!d.marca_id) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Cliente não encontrado para gerar marca da live', code: 'CLIENTE_NOT_FOUND' })
+          }
         }
 
         // ── Fallback: marca sistema do tenant para lives afiliado/teste sem marca ──

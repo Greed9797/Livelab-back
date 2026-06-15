@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { parseMoneyToDecimal } from '../lib/money.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
+import { ensureClienteMarca } from '../services/client-brand.js'
 
 export async function clientePortalRoutes(app) {
   // Helper: resolve cliente_id from authenticated user_id (FK) scoped by JWT tenant.
@@ -422,14 +423,13 @@ export async function clientePortalRoutes(app) {
     const { clienteId, tenantId } = clienteContext
 
     return app.withTenant(tenantId, async (db) => {
-      // Resolve marca ativa do cliente para criar o evento
-      const marcaQ = await db.query(
-        `SELECT id FROM marcas WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativa' ORDER BY criado_em ASC LIMIT 1`,
-        [clienteId, tenantId]
-      )
-      const marcaId = marcaQ.rows[0]?.id ?? null
+      const marcaId = await ensureClienteMarca(db, {
+        tenantId,
+        clienteId,
+        observacoes: 'Criada automaticamente ao cliente solicitar agenda.',
+      })
       if (!marcaId) {
-        return reply.code(422).send({ error: 'Sua conta não possui marca ativa. Entre em contato com a unidade.' })
+        return reply.code(422).send({ error: 'Sua conta não possui cliente válido. Entre em contato com a unidade.' })
       }
 
       const cabineQ = await db.query(

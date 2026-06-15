@@ -489,17 +489,17 @@ describe('Route regressions: SQL and RBAC', () => {
     const clienteId = '33333333-3333-4333-8333-333333333333'
     const userId = '44444444-4444-4444-8444-444444444444'
     const liveId = '55555555-5555-4555-8555-555555555555'
-    const queryMock = vi.fn()
+    const marcaId = '66666666-6666-4666-8666-666666666666'
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: cabineId, numero: 1, status: 'reservada', contrato_id: contratoId, live_atual_id: null }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: contratoId, cliente_id: clienteId, status: 'ativo' }] })
       .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: clienteId, nome: 'Cliente Contrato', tiktok_username: null, site: null, logo_url: null }] })
+      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
       .mockResolvedValueOnce({ rows: [{ id: liveId, iniciado_em: '2026-04-03T21:00:00.000Z', cliente_id: clienteId, apresentador_id: userId }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
     const releaseMock = vi.fn()
 
     app.decorate('authenticate', async (request) => {
@@ -527,7 +527,7 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(response.statusCode).toBe(201)
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo'),
-      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null, null]
+      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null, marcaId]
     )
     expect(releaseMock).toHaveBeenCalledTimes(1)
 
@@ -1389,7 +1389,8 @@ describe('Route regressions: SQL and RBAC', () => {
     const requestId = 'aaaa1111-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const cabineId = 'bbbb2222-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
     const clienteId = 'cccc3333-cccc-4ccc-8ccc-cccccccccccc'
-    const queryMock = vi.fn()
+    const marcaId = 'f6666666-f666-4f66-8f66-f66666666666'
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })           // BEGIN
       .mockResolvedValueOnce({ rows: [] })           // set_config RLS
       .mockResolvedValueOnce({                       // lockQ FOR UPDATE
@@ -1487,7 +1488,8 @@ describe('Route regressions: SQL and RBAC', () => {
     const contratoId = 'c3333333-c333-4c33-8c33-c33333333333'
     const userId = 'd4444444-d444-4d44-8d44-d44444444444'
     const liveId = 'e5555555-e555-4e55-8e55-e55555555555'
-    const queryMock = vi.fn()
+    const marcaId = 'f6666666-f666-4f66-8f66-f66666666666'
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })           // BEGIN
       .mockResolvedValueOnce({                       // SELECT cabine FOR UPDATE → disponivel
         rows: [{ id: cabineId, numero: 1, status: 'disponivel', contrato_id: null, live_atual_id: null }],
@@ -1504,13 +1506,12 @@ describe('Route regressions: SQL and RBAC', () => {
         rows: [{ id: contratoId, cliente_id: clienteId, status: 'ativo' }],
       })
       .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] }) // SELECT cliente status
+      .mockResolvedValueOnce({ rows: [] })           // marca cliente existente
+      .mockResolvedValueOnce({ rows: [{ id: clienteId, nome: 'Cliente LR', tiktok_username: null, site: null, logo_url: null }] })
+      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
       .mockResolvedValueOnce({                       // INSERT INTO lives
         rows: [{ id: liveId, iniciado_em: new Date().toISOString(), cliente_id: clienteId, apresentador_id: userId }],
       })
-      .mockResolvedValueOnce({ rows: [] })           // SELECT marca ativa
-      .mockResolvedValueOnce({ rows: [] })           // UPDATE cabines ao_vivo
-      .mockResolvedValueOnce({ rows: [] })           // INSERT cabine_eventos
-      .mockResolvedValueOnce({ rows: [] })           // COMMIT
     const releaseMock = vi.fn()
 
     app.decorate('authenticate', async (request) => {

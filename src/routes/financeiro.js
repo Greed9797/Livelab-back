@@ -67,13 +67,17 @@ export async function financeiroRoutes(app) {
                 + DATE_PART('month', $2::date) - DATE_PART('month', $1::date)
                 + CASE WHEN DATE_PART('day', $2::date) >= DATE_PART('day', $1::date) THEN 1 ELSE 0 END
               )::numeric
-              AS fat_bruto_fixo,
-            COALESCE(SUM(l.fat_gerado * c.comissao_pct / 100.0), 0) AS fat_bruto_comissao
+              AS fat_bruto_fixo
           FROM contratos c
-          LEFT JOIN lives l ON l.cliente_id = c.cliente_id
-            AND l.encerrado_em >= $1::date
-            AND l.encerrado_em <  ($2::date + interval '1 day')
           WHERE c.status = 'ativo'
+        ),
+        -- Usa o snapshot histórico de comissão gravado em vendas_atribuidas pelo commission-engine,
+        -- evitando recalcular com a taxa atual de marcas (o que distorceria relatórios passados).
+        comissoes_periodo AS (
+          SELECT COALESCE(SUM(va.comissao_franquia), 0) AS fat_bruto_comissao
+          FROM vendas_atribuidas va
+          WHERE va.data >= $1::date
+            AND va.data <  ($2::date + interval '1 day')
         ),
         custos_periodo AS (
           SELECT COALESCE(SUM(valor), 0) AS total_custos
@@ -83,9 +87,10 @@ export async function financeiroRoutes(app) {
         )
         SELECT
           cm.fat_bruto_fixo,
-          cm.fat_bruto_comissao,
+          co.fat_bruto_comissao,
           cu.total_custos
         FROM contratos_periodo cm
+        CROSS JOIN comissoes_periodo co
         CROSS JOIN custos_periodo cu
       `, [startDate, endDate])
 
@@ -150,7 +155,7 @@ export async function financeiroRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       const porCliente = await db.query(`
-        SELECT cl.nome, cl.nicho, COALESCE(SUM(l.fat_gerado), 0) AS total
+        SELECT cl.nome, cl.nicho, COALESCE(SUM(COALESCE(l.manual_gmv, l.fat_gerado)), 0) AS total
         FROM clientes cl
         LEFT JOIN lives l ON l.cliente_id = cl.id AND l.tenant_id = cl.tenant_id
           AND l.encerrado_em >= $1::date

@@ -2,7 +2,8 @@
  * Motor de comissões — v2
  *
  * Regras:
- *  - comissao_franquia     = MAX(valor_fixo_contrato, gmv × comissao_franquia_pct / 100)
+ *  - comissao_franquia     = MAX(marca.valor_fixo_minimo, gmv × marca.comissao_franquia_pct / 100)
+ *    Fonte única de verdade: marcas. contratos.valor_fixo é EXCLUSIVAMENTE mensalidade (billing_engine).
  *  - comissao_franqueadora = MAX(marca.valor_fixo_minimo, gmv × marca.comissao_franqueadora_pct / 100)
  *  - comissao_apresentadora = gmv_live × faixa_pct / 100
  *    onde faixa_pct é determinada pelo GMV acumulado da apresentadora no mês
@@ -62,8 +63,6 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
        l.apresentador_id,
        l.iniciado_em,
        c.id                    AS contrato_id,
-       c.comissao_pct,
-       c.valor_fixo_comissao,
        m.id                    AS marca_id,
        m.tipo                  AS marca_tipo,
        m.comissao_franquia_pct,
@@ -92,14 +91,15 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
   const mesInicio = `${ano}-${mes}-01`
   const mesFim = new Date(Date.UTC(Number(ano), Number(mes), 0)).toISOString().slice(0, 10)
 
-  // 2. Comissão franquia = MAX(valor_fixo_contrato, gmv * pct)
+  // 2. Comissão franquia = MAX(marca.valor_fixo_minimo, gmv * pct)
+  // Fonte única de verdade: marcas.comissao_franquia_pct e marcas.valor_fixo_minimo.
+  // contratos.valor_fixo é usado exclusivamente pelo billing_engine para mensalidade fixa.
   const franquiaPct   = Number(live.comissao_franquia_pct ?? 0)
-  const valorFixoContrato = Number(live.valor_fixo_comissao ?? 0)
-  const comissao_franquia = Math.max(valorFixoContrato, gmvNum * (franquiaPct / 100))
+  const valorFixoMarca = Number(live.valor_fixo_minimo ?? 0)
+  const comissao_franquia = Math.max(valorFixoMarca, gmvNum * (franquiaPct / 100))
 
   // 3. Comissão franqueadora = MAX(marca.valor_fixo_minimo, gmv * pct)
   const franqueadoraPct = Number(live.comissao_franqueadora_pct ?? 0)
-  const valorFixoMarca  = Number(live.valor_fixo_minimo ?? 0)
   const comissao_franqueadora = Math.max(valorFixoMarca, gmvNum * (franqueadoraPct / 100))
 
   // 4. Resolve apresentadoras da live

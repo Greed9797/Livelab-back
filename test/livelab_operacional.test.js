@@ -49,7 +49,9 @@ describe('LIVELAB operational routes', () => {
     expect(res.json()).toEqual([{ id: 'marca-1', nome: 'Marca A', ativo: true }])
     expect(tenantIds).toEqual(['tenant-1'])
     expect(queryMock.mock.calls[0][0]).toContain('WHERE m.tenant_id = $1::uuid')
-    expect(queryMock.mock.calls[0][1]).toEqual(['tenant-1'])
+    // params: [tenant_id, mStart, mEnd] — métricas de GMV/lives/vídeos do mês corrente
+    expect(queryMock.mock.calls[0][1][0]).toBe('tenant-1')
+    expect(queryMock.mock.calls[0][1]).toHaveLength(3)
     await app.close()
   })
 
@@ -548,13 +550,19 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
-  it('GET /v1/financeiro/resumo uses vendas_atribuidas as GMV source', async () => {
+  it('GET /v1/financeiro/resumo deriva GMV de lives + video_registros (fonte única)', async () => {
+    // Novo contrato: GMV vem de lives (+ vídeos), não de vendas_atribuidas. gmv_total = gmv_lives + gmv_videos.
     const queryMock = vi.fn().mockResolvedValueOnce({
       rows: [{
-        gmv_total: '1142.00',
-        receita_liquida: '114.20',
+        gmv_lives: '1000.00',
+        pedidos_lives: '10',
+        total_lives: '3',
+        comissao_franquia_lives: '114.20',
         comissao_configurada: '1',
         comissao_faltante_count: '0',
+        gmv_videos: '142.00',
+        pedidos_videos: '2',
+        total_videos: '1',
         total_custos: '20.00',
       }],
     })
@@ -566,15 +574,18 @@ describe('LIVELAB operational routes', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json()).toMatchObject({
       gmv_total: 1142,
+      gmv_lives: 1000,
+      gmv_videos: 142,
       receita_liquida: 114.2,
       comissao_configurada: 1,
       comissao_faltante_count: 0,
     })
-    expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
+    expect(queryMock.mock.calls[0][0]).toContain('FROM lives l')
+    expect(queryMock.mock.calls[0][0]).not.toContain('FROM vendas_atribuidas va')
     await app.close()
   })
 
-  it('GET /v1/financeiro/fluxo-caixa uses vendas_atribuidas for entradas', async () => {
+  it('GET /v1/financeiro/fluxo-caixa deriva entradas de lives + video_registros', async () => {
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [{ dia: '2026-05-19', valor: '1142.00' }] })
       .mockResolvedValueOnce({ rows: [{ dia: '2026-05-19', valor: '100.00' }] })
@@ -585,7 +596,8 @@ describe('LIVELAB operational routes', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json().items[0]).toMatchObject({ dia: '2026-05-19', entradas: 1142, saidas: 100 })
-    expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
+    expect(queryMock.mock.calls[0][0]).toContain('FROM lives l')
+    expect(queryMock.mock.calls[0][0]).not.toContain('va.data_referencia')
     await app.close()
   })
 

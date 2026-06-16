@@ -123,4 +123,74 @@ describe('commission engine', () => {
       { apresentadora_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', gmv: 1000, comissao_apresentadora: 20, comissao_franquia: 100, comissao_franqueadora: 20 },
     ])
   })
+
+  it('grava pedidos 100% no principal e reconcilia lives.comissao_calculada = Σ comissao_franquia', async () => {
+    const insertedRows = []
+    let comissaoCalculadaPersistida = null
+    const queryMock = vi.fn(async (sql, values) => {
+      if (sql.includes('FROM lives l')) {
+        return {
+          rows: [{
+            id: 'live-1', cliente_id: 'cliente-1', live_marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            apresentador_id: 'user-1', iniciado_em: '2026-05-20T18:00:00.000Z',
+            contrato_id: 'contrato-1', comissao_pct: '10',
+            marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            comissao_franquia_pct: '10', comissao_franqueadora_pct: '2', valor_fixo_minimo: '0',
+          }],
+        }
+      }
+      if (sql.includes('SELECT DISTINCT ap.id AS apresentadora_id')) {
+        return {
+          rows: [
+            { apresentadora_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', comissao_live_pct: '0.5', percentual_rateio: null },
+            { apresentadora_id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', comissao_live_pct: '0.5', percentual_rateio: null },
+          ],
+        }
+      }
+      if (sql.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: '0' }] }
+      if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [] }
+      if (sql.includes('INSERT INTO vendas_atribuidas')) {
+        const row = { apresentadora_id: values[3], gmv: values[5], pedidos: values[6], comissao_franquia: values[8] }
+        insertedRows.push(row)
+        return { rows: [row] }
+      }
+      if (sql.includes('UPDATE lives SET comissao_calculada')) {
+        comissaoCalculadaPersistida = values[0]
+        return { rows: [] }
+      }
+      return { rows: [] }
+    })
+
+    await calcularComissoesDaLive({ query: queryMock }, {
+      tenantId: 'tenant-1', liveId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', gmv: 2000, pedidos: 10,
+    })
+
+    // pedidos 100% na 1ª linha (principal), 0 nas demais
+    expect(insertedRows.map(r => r.pedidos)).toEqual([10, 0])
+    // dia útil, gmv 2000 × 10% = franquia total 200, rateada 100+100
+    expect(insertedRows.map(r => r.comissao_franquia)).toEqual([100, 100])
+    // INVARIANTE: comissao_calculada = soma das linhas (200) → Financeiro == Comissões
+    expect(comissaoCalculadaPersistida).toBe(200)
+  })
+
+  it('marca não resolvida → retorna [] e zera lives.comissao_calculada (faltante visível)', async () => {
+    let zerouComissaoCalculada = false
+    const queryMock = vi.fn(async (sql, values) => {
+      if (sql.includes('FROM lives l')) {
+        return { rows: [{ id: 'live-x', cliente_id: null, live_marca_id: null, marca_id: null }] }
+      }
+      if (sql.includes('UPDATE lives SET comissao_calculada = 0')) {
+        zerouComissaoCalculada = true
+        return { rows: [] }
+      }
+      return { rows: [] }
+    })
+
+    const r = await calcularComissoesDaLive({ query: queryMock }, {
+      tenantId: 'tenant-1', liveId: 'live-x', gmv: 1000, pedidos: 5,
+    })
+
+    expect(r).toEqual([])
+    expect(zerouComissaoCalculada).toBe(true)
+  })
 })

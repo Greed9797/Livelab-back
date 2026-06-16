@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
-import { liveGmvSql } from '../lib/metric-sql.js'
+import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
 
 const custoSchema = z.object({
   descricao:   z.string().min(1),
@@ -57,68 +57,64 @@ export async function financeiroRoutes(app) {
     const visao = (isMaster && scopeParam === 'franqueadora') ? 'franqueadora' : 'unidade'
 
     return app.withTenant(tenant_id, async (db) => {
+      // FONTE ÚNICA DA VERDADE: GMV/pedidos/comissão derivam de `lives` (cadastro do
+      // franqueado em Conteúdo/Operacional) + `video_registros`. NÃO dependemos mais de
+      // vendas_atribuidas (ponte condicional) — lives sem marca também entram aqui.
+      // receita_liquida = comissão de franquia já gravada por live (lives.comissao_calculada).
       const result = await db.query(`
-        WITH vendas_periodo AS (
+        WITH live_periodo AS (
           SELECT
-            COALESCE(SUM(va.gmv), 0) AS gmv_total,
-            COALESCE(SUM(
-              CASE
-                WHEN COALESCE(m.comissao_franquia_pct, 0) > 0 THEN va.gmv * m.comissao_franquia_pct / 100.0
-                WHEN COALESCE(ct.comissao_pct, 0) > 0 THEN va.gmv * ct.comissao_pct / 100.0
-                ELSE COALESCE(va.comissao_franquia, 0)
-              END
-            ), 0) AS receita_liquida,
-            COUNT(*) FILTER (
-              WHERE COALESCE(m.comissao_franquia_pct, 0) > 0
-                 OR COALESCE(ct.comissao_pct, 0) > 0
-                 OR COALESCE(va.comissao_franquia, 0) > 0
-            )::int AS comissao_configurada,
-            COUNT(*) FILTER (
-              WHERE COALESCE(m.comissao_franquia_pct, 0) = 0
-                AND COALESCE(ct.comissao_pct, 0) = 0
-                AND COALESCE(va.comissao_franquia, 0) = 0
-            )::int AS comissao_faltante_count
-          FROM vendas_atribuidas va
-          JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
-          LEFT JOIN LATERAL (
-            SELECT comissao_pct
-            FROM contratos
-            WHERE tenant_id = va.tenant_id
-              AND cliente_id = m.cliente_id
-              AND status = 'ativo'
-            ORDER BY ativado_em DESC NULLS LAST
-            LIMIT 1
-          ) ct ON true
-          WHERE va.tenant_id = $3::uuid
-            AND va.data >= $1::date
-            AND va.data < ($2::date + interval '1 day')
+            COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_lives,
+            COALESCE(SUM(${liveOrdersSql('l')}), 0)::int AS pedidos_lives,
+            COUNT(*)::int AS total_lives,
+            COALESCE(SUM(l.comissao_calculada), 0) AS comissao_franquia_lives,
+            COALESCE(SUM(CASE WHEN COALESCE(l.comissao_calculada, 0) > 0 THEN 1 ELSE 0 END), 0)::int AS comissao_configurada,
+            COALESCE(SUM(CASE WHEN COALESCE(l.comissao_calculada, 0) = 0 THEN 1 ELSE 0 END), 0)::int AS comissao_faltante_count
+          FROM lives l
+          WHERE l.tenant_id = $3::uuid
+            AND l.status = 'encerrada'
+            AND l.iniciado_em::date >= $1::date
+            AND l.iniciado_em::date <= $2::date
+        ),
+        video_periodo AS (
+          SELECT
+            COALESCE(SUM(vr.gmv_atribuido), 0) AS gmv_videos,
+            COALESCE(SUM(vr.pedidos_atribuidos), 0)::int AS pedidos_videos,
+            COUNT(*)::int AS total_videos
+          FROM video_registros vr
+          WHERE vr.tenant_id = $3::uuid
+            AND vr.data >= $1::date
+            AND vr.data <= $2::date
         ),
         custos_periodo AS (
           SELECT COALESCE(SUM(valor), 0) AS total_custos
           FROM custos
           WHERE tenant_id = $3::uuid
             AND competencia >= $1::date
-            AND competencia <  ($2::date + interval '1 day')
+            AND competencia <= $2::date
         )
-        SELECT
-          vp.gmv_total,
-          vp.receita_liquida,
-          vp.comissao_configurada,
-          vp.comissao_faltante_count,
-          cu.total_custos
-        FROM vendas_periodo vp
-        CROSS JOIN custos_periodo cu
+        SELECT lp.gmv_lives, lp.pedidos_lives, lp.total_lives,
+               lp.comissao_franquia_lives, lp.comissao_configurada, lp.comissao_faltante_count,
+               vp.gmv_videos, vp.pedidos_videos, vp.total_videos,
+               cu.total_custos
+        FROM live_periodo lp, video_periodo vp, custos_periodo cu
       `, [startDate, endDate, tenant_id])
 
       const r = result.rows[0]
-      const fat_bruto = toNum(r.gmv_total)
-      const fat_liquido = Math.max(0, toNum(r.receita_liquida) - toNum(r.total_custos))
+      const fat_bruto = toNum(r.gmv_lives) + toNum(r.gmv_videos)
+      const receita_liquida = toNum(r.comissao_franquia_lives)
+      const fat_liquido = Math.max(0, receita_liquida - toNum(r.total_custos))
       return {
         visao,
         fat_bruto,
         fat_liquido,
         gmv_total: fat_bruto,
-        receita_liquida: toNum(r.receita_liquida),
+        gmv_lives: toNum(r.gmv_lives),
+        gmv_videos: toNum(r.gmv_videos),
+        pedidos: toNum(r.pedidos_lives) + toNum(r.pedidos_videos),
+        total_lives: toNum(r.total_lives),
+        total_videos: toNum(r.total_videos),
+        receita_liquida,
         comissao_configurada: toNum(r.comissao_configurada),
         comissao_faltante_count: toNum(r.comissao_faltante_count),
         total_custos: toNum(r.total_custos),
@@ -136,29 +132,47 @@ export async function financeiroRoutes(app) {
   app.get('/v1/financeiro/franqueadora', {
     preHandler: app.requirePapel(['franqueador_master']),
   }, async (request, reply) => {
+    // Zerados por ora — o usuário vai configurar depois (devem vir de contrato/config da franqueadora).
+    const ROYALTY_PCT = 0
+    const MARKETING_PCT = 0
+    // Respeita o período informado (inicio/fim ou mes/ano); default = mês corrente.
+    const { startDate, endDate } = resolveRange(request.query)
     const result = await app.db.query(`
       SELECT
-        t.id                                                    AS tenant_id,
-        t.nome                                                  AS franqueado_nome,
+        t.id                                                              AS tenant_id,
+        t.nome                                                            AS franqueado_nome,
         t.cidade,
         t.uf,
         t.plano,
-        COALESCE(SUM(${liveGmvSql('l')}), 0)::float            AS gmv_total,
-        COALESCE(COUNT(l.id), 0)::int                          AS total_lives,
-        COALESCE(SUM(${liveGmvSql('l')}) * 0.05, 0)::float     AS royalties_estimados,
-        COALESCE(SUM(${liveGmvSql('l')}) * 0.02, 0)::float     AS taxa_marketing_estimada
+        COALESCE(SUM(${liveGmvSql('l')}), 0)::float                       AS gmv_total,
+        COALESCE(COUNT(l.id), 0)::int                                     AS total_lives,
+        COALESCE(SUM(${liveGmvSql('l')}) * ${ROYALTY_PCT}, 0)::float      AS royalties_estimados,
+        COALESCE(SUM(${liveGmvSql('l')}) * ${MARKETING_PCT}, 0)::float    AS taxa_marketing_estimada
       FROM tenants t
       -- Filtra apenas tenants cujo dono tem papel 'franqueado' (não franqueador_master)
       INNER JOIN users u ON u.tenant_id = t.id AND u.papel = 'franqueado'
       LEFT JOIN lives l ON l.tenant_id = t.id
         AND l.status = 'encerrada'
-        AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
+        AND l.iniciado_em::date >= $1::date
+        AND l.iniciado_em::date <= $2::date
       GROUP BY t.id, t.nome, t.cidade, t.uf, t.plano
       ORDER BY gmv_total DESC
-    `)
+    `, [startDate, endDate])
+
+    const franqueados = result.rows
+    // Agregados de topo que o frontend lê nos cards (antes inexistentes → cards zerados).
+    const total_gmv = franqueados.reduce((s, r) => s + toNum(r.gmv_total), 0)
+    const total_royalties = franqueados.reduce((s, r) => s + toNum(r.royalties_estimados), 0)
+    const total_marketing = franqueados.reduce((s, r) => s + toNum(r.taxa_marketing_estimada), 0)
     return {
-      franqueados: result.rows,
-      periodo: new Date().toISOString().slice(0, 7),
+      franqueados,
+      total_gmv,
+      total_royalties,
+      total_marketing,
+      total_franqueados: franqueados.length,
+      periodo: startDate,
+      inicio: startDate,
+      fim: endDate,
     }
   })
 
@@ -174,45 +188,49 @@ export async function financeiroRoutes(app) {
     const { startDate, endDate } = resolveRange(q)
 
     return app.withTenant(tenant_id, async (db) => {
+      // Agrupa por cliente (ou pela própria marca, quando afiliada sem cliente).
+      // Lives e vídeos reais; live sem marca mas com cliente é atribuída ao cliente.
       const porCliente = await db.query(`
-        WITH vendas AS (
-          SELECT va.*, m.cliente_id, m.nome AS marca_nome, m.tipo AS marca_tipo,
-                 m.comissao_franquia_pct, ct.comissao_pct AS contrato_comissao_pct
-          FROM vendas_atribuidas va
-          JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
-          LEFT JOIN LATERAL (
-            SELECT comissao_pct
-            FROM contratos
-            WHERE tenant_id = va.tenant_id
-              AND cliente_id = m.cliente_id
-              AND status = 'ativo'
-            ORDER BY ativado_em DESC NULLS LAST
-            LIMIT 1
-          ) ct ON true
-          WHERE va.tenant_id = $3::uuid
-            AND va.data >= $1::date
-            AND va.data < ($2::date + interval '1 day')
+        WITH base AS (
+          SELECT l.cliente_id, l.marca_id,
+                 ${liveGmvSql('l')} AS gmv,
+                 COALESCE(l.comissao_calculada, 0) AS comissao_franquia,
+                 1 AS is_live, 0 AS is_video
+          FROM lives l
+          WHERE l.tenant_id = $3::uuid
+            AND l.status = 'encerrada'
+            AND l.iniciado_em::date >= $1::date
+            AND l.iniciado_em::date <= $2::date
+          UNION ALL
+          SELECT m.cliente_id, vr.marca_id,
+                 vr.gmv_atribuido AS gmv,
+                 0 AS comissao_franquia,
+                 0 AS is_live, 1 AS is_video
+          FROM video_registros vr
+          JOIN marcas m ON m.id = vr.marca_id AND m.tenant_id = vr.tenant_id
+          WHERE vr.tenant_id = $3::uuid
+            AND vr.data >= $1::date
+            AND vr.data <= $2::date
+        ),
+        agg AS (
+          SELECT COALESCE(cliente_id, marca_id) AS group_id,
+                 COALESCE(SUM(gmv), 0) AS total,
+                 COALESCE(SUM(comissao_franquia), 0) AS receita_liquida,
+                 COALESCE(SUM(is_live), 0)::int AS lives_mes,
+                 COALESCE(SUM(is_video), 0)::int AS videos_mes
+          FROM base
+          GROUP BY COALESCE(cliente_id, marca_id)
         )
         SELECT
-          COALESCE(cl.id, va.marca_id) AS id,
-          COALESCE(cl.nome, va.marca_nome) AS nome,
-          COALESCE(cl.nicho, va.marca_tipo) AS nicho,
-          CASE WHEN cl.id IS NULL THEN va.marca_tipo ELSE 'cliente_ecommerce' END AS tipo_operacional,
-          COALESCE(SUM(va.gmv), 0) AS total,
-          COALESCE(SUM(
-            CASE
-              WHEN COALESCE(va.comissao_franquia_pct, 0) > 0 THEN va.gmv * va.comissao_franquia_pct / 100.0
-              WHEN COALESCE(va.contrato_comissao_pct, 0) > 0 THEN va.gmv * va.contrato_comissao_pct / 100.0
-              ELSE COALESCE(va.comissao_franquia, 0)
-            END
-          ), 0) AS receita_liquida,
-          COUNT(*) FILTER (WHERE va.origem = 'live')::int AS lives_mes,
-          COUNT(*) FILTER (WHERE va.origem = 'video')::int AS videos_mes
-        FROM vendas va
-        LEFT JOIN clientes cl ON cl.id = va.cliente_id AND cl.tenant_id = $3::uuid
-        GROUP BY COALESCE(cl.id, va.marca_id), COALESCE(cl.nome, va.marca_nome),
-                 COALESCE(cl.nicho, va.marca_tipo), CASE WHEN cl.id IS NULL THEN va.marca_tipo ELSE 'cliente_ecommerce' END
-        ORDER BY total DESC
+          agg.group_id AS id,
+          COALESCE(cl.nome, m.nome, 'Sem marca') AS nome,
+          COALESCE(cl.nicho, m.tipo) AS nicho,
+          CASE WHEN cl.id IS NOT NULL THEN 'cliente_ecommerce' ELSE COALESCE(m.tipo, 'sem_marca') END AS tipo_operacional,
+          agg.total, agg.receita_liquida, agg.lives_mes, agg.videos_mes
+        FROM agg
+        LEFT JOIN clientes cl ON cl.id = agg.group_id AND cl.tenant_id = $3::uuid
+        LEFT JOIN marcas m ON m.id = agg.group_id AND m.tenant_id = $3::uuid
+        ORDER BY agg.total DESC
       `, [startDate, endDate, tenant_id])
 
       return {
@@ -237,16 +255,25 @@ export async function financeiroRoutes(app) {
     const { startDate, endDate } = resolveRange(request.query)
 
     return app.withTenant(tenant_id, async (db) => {
+      // Entradas = GMV real por dia (lives encerradas + vídeos), não mais vendas_atribuidas
+      // (que referenciava colunas inexistentes va.data_referencia/va.status → 500).
       const entradas = await db.query(`
-        SELECT date_trunc('day', va.data_referencia) AS dia,
-               SUM(va.gmv)::numeric AS valor
-        FROM vendas_atribuidas va
-        WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND va.data_referencia >= $1::date
-          AND va.data_referencia <  ($2::date + interval '1 day')
-          AND COALESCE(va.status, 'aprovada') <> 'cancelada'
-        GROUP BY 1 ORDER BY 1
-      `, [startDate, endDate])
+        SELECT dia, SUM(valor)::numeric AS valor FROM (
+          SELECT l.iniciado_em::date AS dia, ${liveGmvSql('l')} AS valor
+          FROM lives l
+          WHERE l.tenant_id = $3::uuid
+            AND l.status = 'encerrada'
+            AND l.iniciado_em::date >= $1::date
+            AND l.iniciado_em::date <= $2::date
+          UNION ALL
+          SELECT vr.data AS dia, vr.gmv_atribuido AS valor
+          FROM video_registros vr
+          WHERE vr.tenant_id = $3::uuid
+            AND vr.data >= $1::date
+            AND vr.data <= $2::date
+        ) t
+        GROUP BY dia ORDER BY dia
+      `, [startDate, endDate, tenant_id])
 
       const saidas = await db.query(`
         SELECT competencia AS dia, SUM(valor) AS valor

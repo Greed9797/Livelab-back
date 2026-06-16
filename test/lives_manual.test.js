@@ -306,7 +306,10 @@ describe('POST /v1/lives/manual', () => {
 
     expect(res.statusCode).toBe(201)
     expect(insertArgs[2]).toBeNull()
-    expect(vendaArgs).toContain(marcaId)
+    // Afiliada aceita: marca_id direto na live, cliente_id null. A atribuição de comissão
+    // agora é feita pelo commission-engine pós-commit (escritor único de origem='live'),
+    // que resolve a marca por l.marca_id (EXTRA-6) — não mais por upsert inline aqui.
+    expect(vendaArgs).toBeNull()
   })
 
   it('creates a linked agenda event for manual lives with marca_id', async () => {

@@ -13,6 +13,7 @@
 
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { NIL_UUID, resolvePresenterCommissionPct } from './presenter-commission.js'
+import { calcularComissaoFranquia } from './comissao.js'
 
 /**
  * Calcula e persiste comissões para uma live encerrada.
@@ -22,46 +23,62 @@ import { NIL_UUID, resolvePresenterCommissionPct } from './presenter-commission.
  * @param {string} opts.liveId    - UUID da live
  * @param {string} opts.tenantId  - UUID do tenant
  * @param {number} opts.gmv       - GMV final (fat_gerado ou manual_gmv, prioridade de quem chamar)
+ * @param {number} [opts.pedidos] - pedidos oficiais da live (atribuídos 100% à apresentadora principal)
  * @returns {Promise<Array>}      - array de vendas_atribuidas upsertadas (uma por apresentadora)
  */
-export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
-  // 1. Busca dados da live + contrato + marca
+export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedidos }) {
+  // 1. Busca dados da live + contrato + marca.
+  //    EXTRA-6: resolve a marca por l.marca_id (afiliada/teste tem marca direta e
+  //    cliente_id NULL); só cai para cliente_id quando a live não tem marca_id.
   const liveQ = await db.query(
     `SELECT
        l.id,
        l.cliente_id,
+       l.marca_id    AS live_marca_id,
        l.apresentador_id,
        l.iniciado_em,
        c.id          AS contrato_id,
        c.comissao_pct,
-       c.valor_fixo AS valor_fixo_comissao,
        m.id          AS marca_id,
        m.comissao_franquia_pct,
-       m.comissao_franqueadora_pct
+       m.comissao_franqueadora_pct,
+       m.valor_fixo_minimo
      FROM lives l
      LEFT JOIN cabines cab ON cab.id = l.cabine_id
      LEFT JOIN contratos c  ON c.id = cab.contrato_id AND c.status = 'ativo'
      LEFT JOIN marcas m     ON m.tenant_id = $1::uuid
-                            AND m.cliente_id = l.cliente_id
                             AND m.status = 'ativa'
+                            AND (m.id = l.marca_id OR (l.marca_id IS NULL AND m.cliente_id = l.cliente_id))
      WHERE l.id = $2 AND l.tenant_id = $1::uuid
      ORDER BY m.criado_em ASC
      LIMIT 1`,
     [tenantId, liveId],
   )
   const live = liveQ.rows[0]
-  if (!live || !live.marca_id) return []
+  if (!live) return []
+  if (!live.marca_id) {
+    // P1-2: marca não resolvida → comissão não pode ser calculada. Em vez de falhar
+    // calado, zera lives.comissao_calculada para que a live apareça como "comissão
+    // faltante" (gmv>0 e comissao_calculada=0) no Financeiro e na UI.
+    await db.query(
+      `UPDATE lives SET comissao_calculada = 0 WHERE id = $1 AND tenant_id = $2::uuid`,
+      [liveId, tenantId],
+    ).catch(() => {})
+    return []
+  }
 
   const gmvNum = Number(gmv ?? 0)
   const data = saoPauloDateInput(live.iniciado_em ?? new Date())
 
-  // 2. Comissão franquia = MAX(valor_fixo, gmv * pct)
+  // 2. Comissão franquia/franqueadora = MAX(valor_fixo_minimo da marca, gmv * pct).
+  //    Fonte ÚNICA via calcularComissaoFranquia (comissao.js) — mesma regra usada para
+  //    lives.comissao_calculada, garantindo Financeiro == Comissões.
   const franquiaPct      = Number(live.comissao_franquia_pct ?? 0)
   const franqueadoraPct  = Number(live.comissao_franqueadora_pct ?? 0)
-  const valorFixo        = Number(live.valor_fixo_comissao ?? 0)
+  const valorFixo        = Number(live.valor_fixo_minimo ?? 0)
 
-  const comissaoFranquiaTotal    = Math.max(valorFixo, gmvNum * (franquiaPct / 100))
-  const comissaoFranqueadoraTotal = Math.max(valorFixo, gmvNum * (franqueadoraPct / 100))
+  const comissaoFranquiaTotal     = calcularComissaoFranquia({ gmv: gmvNum, pct: franquiaPct, valorFixo })
+  const comissaoFranqueadoraTotal = calcularComissaoFranquia({ gmv: gmvNum, pct: franqueadoraPct, valorFixo })
 
   // 3. Resolve apresentadoras da live (principal + live_apresentadoras)
   const apresentadorasQ = await db.query(
@@ -115,8 +132,11 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
 
   const resultados = []
 
-  for (const ap of linhas) {
+  for (const [index, ap] of linhas.entries()) {
     const apresentadoraId = ap.apresentadora_id ?? null
+    // P1-1: pedidos reais (antes era literal 0). Atribuídos 100% à apresentadora
+    // principal (primeira linha) — evita rateio com arredondamento que não soma o total.
+    const pedidosLinha = index === 0 ? Math.round(Number(pedidos ?? 0)) : 0
     const rateio      = ap.percentual_rateio !== null && ap.percentual_rateio !== undefined && ap.percentual_rateio !== ''
       ? Number(ap.percentual_rateio) / 100
       : rateioPadrao
@@ -149,6 +169,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
            marca_id               = EXCLUDED.marca_id,
            data                   = EXCLUDED.data,
            gmv                    = EXCLUDED.gmv,
+           pedidos                = EXCLUDED.pedidos,
            comissao_apresentadora = EXCLUDED.comissao_apresentadora,
            comissao_franquia      = EXCLUDED.comissao_franquia,
            comissao_franqueadora  = EXCLUDED.comissao_franqueadora,
@@ -159,7 +180,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
        RETURNING *`,
       [
         tenantId, liveId, live.marca_id, apresentadoraId, data,
-        gmvRateado, 0, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
+        gmvRateado, pedidosLinha, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
       ],
     )
 
@@ -183,6 +204,16 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
 
     resultados.push(row)
   }
+
+  // S5: comissao_calculada = soma EXATA das linhas persistidas em vendas_atribuidas
+  // (comissao_franquia). Garante o invariante lives.comissao_calculada ==
+  // SUM(vendas_atribuidas.comissao_franquia) → Financeiro (lê comissao_calculada) ==
+  // aba Comissões (lê vendas_atribuidas), independente de rateio/arredondamento.
+  const comissaoFranquiaPersistida = resultados.reduce((s, r) => s + Number(r?.comissao_franquia ?? 0), 0)
+  await db.query(
+    `UPDATE lives SET comissao_calculada = $1 WHERE id = $2 AND tenant_id = $3::uuid`,
+    [comissaoFranquiaPersistida, liveId, tenantId],
+  )
 
   return resultados
 }

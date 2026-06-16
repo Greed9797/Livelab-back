@@ -432,7 +432,7 @@ export async function comissoesRoutes(app) {
            va.comissao_apresentadora,
            va.comissao_franquia,
            va.comissao_franqueadora,
-           va.status
+           va.status_aprovacao AS status
          FROM vendas_atribuidas va
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
          LEFT JOIN marcas m         ON m.id = va.marca_id         AND m.tenant_id = va.tenant_id

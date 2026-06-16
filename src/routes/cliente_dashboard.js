@@ -301,9 +301,9 @@ export async function clienteDashboardRoutes(app) {
         )
         SELECT
           COALESCE(SUM(CASE WHEN l.iniciado_em >= p.inicio AND l.iniciado_em < p.inicio + INTERVAL '1 month'
-                            THEN COALESCE(l.manual_gmv, l.fat_gerado) END), 0) AS mes_atual,
+                            THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado) END), 0) AS mes_atual,
           COALESCE(SUM(CASE WHEN l.iniciado_em >= p.inicio - INTERVAL '1 month' AND l.iniciado_em < p.inicio
-                            THEN COALESCE(l.manual_gmv, l.fat_gerado) END), 0) AS mes_anterior
+                            THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado) END), 0) AS mes_anterior
         FROM lives l
         CROSS JOIN periodo p
         WHERE l.tenant_id = $1
@@ -400,8 +400,8 @@ export async function clienteDashboardRoutes(app) {
         ), ranked AS (
           SELECT
             l.cliente_id,
-            SUM(COALESCE(l.manual_gmv, l.fat_gerado)) AS total,
-            RANK() OVER (ORDER BY SUM(COALESCE(l.manual_gmv, l.fat_gerado)) DESC) AS posicao,
+            SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado)) AS total,
+            RANK() OVER (ORDER BY SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado)) DESC) AS posicao,
             COUNT(*) OVER() AS total_participantes
           FROM lives l
           CROSS JOIN periodo p
@@ -429,7 +429,7 @@ export async function clienteDashboardRoutes(app) {
           SELECT
             l.cliente_id,
             c.nicho,
-            COALESCE(SUM(COALESCE(l.manual_gmv, l.fat_gerado)), 0) AS gmv_total,
+            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado)), 0) AS gmv_total,
             COUNT(l.id) AS total_lives
           FROM lives l
           JOIN clientes c ON c.id = l.cliente_id
@@ -602,7 +602,7 @@ export async function clienteDashboardRoutes(app) {
           m.ano,
           m.mes,
           COUNT(l.id) AS total_lives,
-          COALESCE(SUM(COALESCE(l.manual_gmv, l.fat_gerado)), 0) AS gmv_total,
+          COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado)), 0) AS gmv_total,
           COALESCE(SUM(prod.itens), 0) AS itens_vendidos,
           COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 3600, 0)), 0) AS horas_live
         FROM meses m

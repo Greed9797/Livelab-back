@@ -78,6 +78,7 @@ export async function financeiroRoutes(app) {
           FROM vendas_atribuidas va
           WHERE va.data >= $1::date
             AND va.data <  ($2::date + interval '1 day')
+            AND va.tenant_id = $3::uuid
         ),
         custos_periodo AS (
           SELECT COALESCE(SUM(valor), 0) AS total_custos
@@ -92,7 +93,7 @@ export async function financeiroRoutes(app) {
         FROM contratos_periodo cm
         CROSS JOIN comissoes_periodo co
         CROSS JOIN custos_periodo cu
-      `, [startDate, endDate])
+      `, [startDate, endDate, tenant_id])
 
       const r = result.rows[0]
       const fat_bruto  = toNum(r.fat_bruto_fixo) + toNum(r.fat_bruto_comissao)

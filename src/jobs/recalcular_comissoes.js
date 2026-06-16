@@ -89,7 +89,8 @@ export async function runRecalcularComissoesTick(app) {
     try {
       const livesOrfas = await app.db.query(
         `SELECT l.id, l.tenant_id, l.marca_id,
-                COALESCE(l.manual_gmv, l.fat_gerado, 0) AS gmv
+                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
+                COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos
            FROM lives l
           WHERE l.status_publicacao = 'publicado'
             AND l.marca_id IS NOT NULL
@@ -109,6 +110,7 @@ export async function runRecalcularComissoesTick(app) {
             liveId: live.id,
             tenantId: live.tenant_id,
             gmv: Number(live.gmv),
+            pedidos: Number(live.pedidos),
           })
           await lc.query('COMMIT')
           if (Array.isArray(r) && r.length > 0) {

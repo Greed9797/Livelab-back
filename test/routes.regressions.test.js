@@ -46,10 +46,15 @@ describe('Route regressions: SQL and RBAC', () => {
     const app = Fastify()
     const queryMock = vi.fn().mockResolvedValue({
       rows: [{
-        gmv_total: '1500',
-        receita_liquida: '300',
+        gmv_lives: '1500',
+        pedidos_lives: '15',
+        total_lives: '2',
+        comissao_franquia_lives: '300',
         comissao_configurada: '1',
         comissao_faltante_count: '0',
+        gmv_videos: '0',
+        pedidos_videos: '0',
+        total_videos: '0',
         total_custos: '400',
       }],
     })
@@ -87,11 +92,11 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(queryMock).toHaveBeenCalledTimes(1)
 
     const sql = queryMock.mock.calls[0][0]
-    expect(sql).toContain('WITH vendas_periodo')
-    expect(sql).toContain('FROM vendas_atribuidas va')
+    expect(sql).toContain('WITH live_periodo')
+    expect(sql).toContain('FROM lives l')
+    expect(sql).toContain('video_periodo')
     expect(sql).toContain('custos_periodo')
-    expect(sql).toContain('CROSS JOIN custos_periodo')
-    expect(sql).not.toContain('COALESCE(cu.total_custos, 0)')
+    expect(sql).not.toContain('FROM vendas_atribuidas va')
     expect(releaseMock).toHaveBeenCalledTimes(1)
 
     await app.close()

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { READ_MARCAS, WRITE_MARCAS } from '../config/role_groups.js'
 import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
+import { liveGmvSql } from '../lib/metric-sql.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 
 const marcaCols = `
@@ -94,8 +95,16 @@ export async function marcasRoutes(app) {
         addFilter(filters, values, 'm.nome ILIKE ?')
       }
 
+      // GMV/lives/vídeos do mês corrente derivados da fonte da verdade (lives + video_registros).
+      const { startDate: mStart, endDate: mEnd } = resolveMonthRange({})
+      const startIdx = values.push(mStart)
+      const endIdx = values.push(mEnd)
+
       const result = await db.query(
-        `SELECT ${marcaCols}
+        `SELECT ${marcaCols},
+                COALESCE(mtr.gmv_mes, 0) AS gmv_mes,
+                COALESCE(mtr.lives_mes, 0) AS lives_mes,
+                COALESCE(mtr.videos_mes, 0) AS videos_mes
          FROM marcas m
          LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
          LEFT JOIN LATERAL (
@@ -112,6 +121,22 @@ export async function marcasRoutes(app) {
              AND am.tenant_id = m.tenant_id
              AND am.ativo = true
          ) am_agg ON true
+         LEFT JOIN (
+           SELECT id, COALESCE(SUM(gmv), 0) AS gmv_mes,
+                  COALESCE(SUM(is_live), 0)::int AS lives_mes,
+                  COALESCE(SUM(is_video), 0)::int AS videos_mes
+           FROM (
+             SELECT l.marca_id AS id, ${liveGmvSql('l')} AS gmv, 1 AS is_live, 0 AS is_video
+             FROM lives l
+             WHERE l.tenant_id = $1::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
+               AND l.iniciado_em::date >= $${startIdx}::date AND l.iniciado_em::date <= $${endIdx}::date
+             UNION ALL
+             SELECT vr.marca_id AS id, vr.gmv_atribuido AS gmv, 0 AS is_live, 1 AS is_video
+             FROM video_registros vr
+             WHERE vr.tenant_id = $1::uuid
+               AND vr.data >= $${startIdx}::date AND vr.data <= $${endIdx}::date
+           ) t GROUP BY id
+         ) mtr ON mtr.id = m.id
          WHERE ${filters.join(' AND ')}
          ORDER BY m.status = 'ativa' DESC, m.nome ASC`,
         values,

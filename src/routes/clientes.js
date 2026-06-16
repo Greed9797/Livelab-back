@@ -258,13 +258,20 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       // Defesa em profundidade: WHERE cl.tenant_id explícito porque role
       // postgres do Supabase tem rolbypassrls=true (ADR 0003).
+      // GMV/lives/vídeos do mês corrente derivados da fonte da verdade (lives + video_registros).
+      const now = new Date()
+      const mStart = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-01`
+      const mEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).toISOString().slice(0, 10)
       const result = await db.query(
         `SELECT cl.id, cl.nome, cl.celular, cl.email, cl.status, cl.lat, cl.lng,
                 cl.fat_anual, cl.nicho, cl.score, cl.cep, cl.cidade, cl.estado,
                 cl.siga, cl.criado_em, cl.meta_diaria_gmv, cl.logo_url, cl.tiktok_username,
                 cl.user_id, u.email AS acesso_email, u.ativo AS acesso_ativo,
                 c.horas_contratadas, c.horas_consumidas,
-                (c.horas_contratadas - c.horas_consumidas) AS horas_restantes
+                (c.horas_contratadas - c.horas_consumidas) AS horas_restantes,
+                COALESCE(mtr.gmv_mes, 0) AS gmv_mes,
+                COALESCE(mtr.lives_mes, 0) AS lives_mes,
+                COALESCE(mtr.videos_mes, 0) AS videos_mes
          FROM clientes cl
          LEFT JOIN users u ON u.id = cl.user_id AND u.tenant_id = cl.tenant_id AND u.papel = 'cliente_parceiro'
          LEFT JOIN LATERAL (
@@ -274,11 +281,28 @@ export async function clientesRoutes(app) {
            ORDER BY ativado_em DESC NULLS LAST
            LIMIT 1
          ) c ON true
+         LEFT JOIN (
+           SELECT id, COALESCE(SUM(gmv), 0) AS gmv_mes,
+                  COALESCE(SUM(is_live), 0)::int AS lives_mes,
+                  COALESCE(SUM(is_video), 0)::int AS videos_mes
+           FROM (
+             SELECT l.cliente_id AS id, ${liveGmvSql('l')} AS gmv, 1 AS is_live, 0 AS is_video
+             FROM lives l
+             WHERE l.tenant_id = $1::uuid AND l.status = 'encerrada' AND l.cliente_id IS NOT NULL
+               AND l.iniciado_em::date >= $2::date AND l.iniciado_em::date <= $3::date
+             UNION ALL
+             SELECT m.cliente_id AS id, vr.gmv_atribuido AS gmv, 0 AS is_live, 1 AS is_video
+             FROM video_registros vr
+             JOIN marcas m ON m.id = vr.marca_id AND m.tenant_id = vr.tenant_id
+             WHERE vr.tenant_id = $1::uuid AND m.cliente_id IS NOT NULL
+               AND vr.data >= $2::date AND vr.data <= $3::date
+           ) t GROUP BY id
+         ) mtr ON mtr.id = cl.id
          WHERE cl.tenant_id = $1::uuid
            AND cl.status IN ('ativo', 'inadimplente', 'cancelado')
            AND cl.deleted_at IS NULL
          ORDER BY cl.criado_em DESC`,
-        [tenant_id]
+        [tenant_id, mStart, mEnd]
       )
       return result.rows
     })

@@ -116,7 +116,6 @@ export async function getPerformanceRanking(db, {
         ) live_commission ON true
         WHERE l.tenant_id = $1::uuid
           AND l.status = 'encerrada'
-          AND l.marca_id IS NOT NULL
           AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $2::date
           AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date < $3::date
           AND ($5::uuid IS NULL OR l.cliente_id = $5::uuid)
@@ -169,7 +168,7 @@ export async function getPerformanceRanking(db, {
         COALESCE(SUM(combined.comissao_franqueadora), 0) AS comissao_franqueadora,
         COUNT(*)::int AS registros
       FROM combined
-      JOIN marcas m ON m.id = combined.marca_id AND m.tenant_id = $1::uuid
+      LEFT JOIN marcas m ON m.id = combined.marca_id AND m.tenant_id = $1::uuid
       LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
       GROUP BY combined.marca_id, m.nome, COALESCE(m.logo_url, c.logo_url), COALESCE(m.site, c.site)
       HAVING COALESCE(SUM(combined.gmv), 0) <> 0 OR COALESCE(SUM(combined.pedidos), 0) <> 0

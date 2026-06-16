@@ -2,7 +2,6 @@ import { z } from 'zod'
 import { has as managerHas, stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
 import { READ_CABINES, WRITE_LIVES } from '../config/role_groups.js'
 import { notify } from '../services/mailer.js'
-import { upsertVendaAtribuida } from './vendas_atribuidas.js'
 import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { calcularComissaoApresentadora, isFimDeSemanaSP } from '../services/comissao.js'
@@ -973,21 +972,22 @@ export async function livesRoutes(app) {
           }) ?? finalAgendaEventoId
         }
 
-        if (resolvedMarcaId) {
-          await upsertVendaAtribuida(db, {
-            tenantId: tenant_id,
-            origem: 'live',
-            origemId: liveId,
-            marcaId: resolvedMarcaId,
-            apresentadoraId: d.apresentador_id ?? null,
-            data: d.data,
-            gmv: officialGmvFromPayload(d),
-            pedidos: officialOrdersFromPayload(d),
-            comissaoApresentadora: comissao,
-          })
+        await db.query('COMMIT')
+
+        // Escritor ÚNICO de vendas_atribuidas (origem='live'): commission-engine pós-commit.
+        // (antes havia um upsert aqui que competia com o engine na mesma chave única — P1-1).
+        {
+          const gmvManual = officialGmvFromPayload(d)
+          const pedidosManual = officialOrdersFromPayload(d)
+          app.withTenant(tenant_id, async (db2) => {
+            try {
+              await calcularComissoesDaLive(db2, { liveId, tenantId: tenant_id, gmv: gmvManual, pedidos: pedidosManual })
+            } catch (commErr) {
+              app.log.warn({ err: commErr, liveId }, 'commission-engine: falha no cálculo da live manual (soft)')
+            }
+          }).catch(err => app.log.warn({ err, liveId }, 'commission-engine: withTenant falhou'))
         }
 
-        await db.query('COMMIT')
         return reply.code(201).send({ id: liveId, agenda_evento_id: finalAgendaEventoId })
       } catch (e) {
         await db.query('ROLLBACK')
@@ -1211,18 +1211,8 @@ export async function livesRoutes(app) {
           }
         }
 
-        if (d.marca_id) {
-          await upsertVendaAtribuida(db, {
-            tenantId: tenant_id,
-            origem: 'live',
-            origemId: request.params.id,
-            marcaId: d.marca_id,
-            apresentadoraId: d.apresentador_id ?? null,
-            data: (d.data ?? new Date(live.iniciado_em).toISOString().slice(0, 10)),
-            gmv: officialGmvFromPayload(d, live),
-            pedidos: officialOrdersFromPayload(d, live),
-          })
-        }
+        // (removido: upsert direto em vendas_atribuidas — o commission-engine pós-commit
+        //  é o escritor único de origem='live'. P1-1)
 
         // Rastreia mudanças em fat_gerado e manual_gmv na tabela live_metric_revisions
         if (d.fat_gerado !== undefined && d.fat_gerado !== live.fat_gerado) {
@@ -1306,15 +1296,17 @@ export async function livesRoutes(app) {
 
         await db.query('COMMIT')
 
-        // Recalcula comissões se a base oficial de GMV mudou (fire-and-forget).
-        if (gmvMudou) {
+        // Recalcula comissões (escritor único) se mudou GMV, marca ou apresentadora (fire-and-forget).
+        if (gmvMudou || d.marca_id !== undefined || d.apresentador_id !== undefined) {
           const gmvAtualizado = officialGmvFromPayload(d, live)
+          const pedidosAtualizado = officialOrdersFromPayload(d, live)
           app.withTenant(tenant_id, async (db2) => {
             try {
               await calcularComissoesDaLive(db2, {
                 liveId: request.params.id,
                 tenantId: tenant_id,
                 gmv: gmvAtualizado,
+                pedidos: pedidosAtualizado,
               })
             } catch (commErr) {
               app.log.warn({ err: commErr, liveId: request.params.id }, 'commission-engine: falha no recálculo pós-edição (soft)')
@@ -1977,55 +1969,9 @@ export async function livesRoutes(app) {
                LIMIT 1`,
               [tenant_id, live.cliente_id],
             )
-        if (marcaQ.rows[0]) {
-          const apresentadoraQ = await db.query(
-            `SELECT COALESCE(v2.apresentadora_id, agenda.apresentadora_id, user_ap.id) AS id
-             FROM (SELECT 1) base
-             LEFT JOIN LATERAL (
-               SELECT lav.apresentadora_id
-               FROM live_apresentadoras_v2 lav
-               WHERE lav.live_id = $2
-                 AND lav.tenant_id = $1::uuid
-               ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
-               LIMIT 1
-             ) v2 ON true
-             LEFT JOIN LATERAL (
-               SELECT ae.apresentadora_id
-               FROM agenda_eventos ae
-               WHERE ae.tenant_id = $1::uuid
-                 AND (
-                   ae.live_id = $2::uuid
-                   OR ($6::uuid IS NOT NULL AND ae.id = $6::uuid)
-                   OR (
-                     ae.cabine_id = $4
-                     AND ae.tipo = 'live'
-                     AND ae.data_inicio::date = $5::date
-                   )
-                 )
-               ORDER BY ABS(EXTRACT(EPOCH FROM (ae.data_inicio - $5::timestamptz)))
-               LIMIT 1
-             ) agenda ON true
-             LEFT JOIN LATERAL (
-               SELECT a.id
-               FROM apresentadoras a
-               WHERE a.user_id = $3
-                 AND a.tenant_id = $1::uuid
-               LIMIT 1
-             ) user_ap ON true`,
-            [tenant_id, live.id, live.apresentador_id, live.cabine_id, live.iniciado_em, live.agenda_evento_id ?? null],
-          )
-          await upsertVendaAtribuida(db, {
-            tenantId: tenant_id,
-            origem: 'live',
-            origemId: live.id,
-            marcaId: marcaQ.rows[0].id,
-            apresentadoraId: parsed.data.apresentadora_id ?? apresentadoraQ.rows[0]?.id ?? null,
-            data: (encerradoEm ?? new Date()).toISOString().slice(0, 10),
-            gmv: parsed.data.fat_gerado,
-            pedidos: parsed.data.qtd_pedidos ?? 0,
-            comissaoApresentadora: comissao,
-          })
-        }
+        // (removido: resolução de apresentadora + upsert direto em vendas_atribuidas.
+        //  O commission-engine pós-commit é o escritor único de origem='live'. P1-1.
+        //  marcaQ permanece — é usado abaixo para sincronizar a agenda.)
 
         // Deduct live duration from contrato's horas_consumidas
         if (contrato && live.iniciado_em) {
@@ -2124,12 +2070,14 @@ export async function livesRoutes(app) {
 
         // Motor de comissões — recalcula variável da apresentadora; fixo entra no ranking consolidado.
         const gmvFinal = officialGmvFromPayload(parsed.data)
+        const pedidosFinal = officialOrdersFromPayload(parsed.data)
         app.withTenant(tenant_id, async (db2) => {
           try {
             await calcularComissoesDaLive(db2, {
               liveId: live.id,
               tenantId: tenant_id,
               gmv: gmvFinal,
+              pedidos: pedidosFinal,
             })
           } catch (commErr) {
             app.log.warn({ err: commErr, liveId: live.id }, 'commission-engine: falha no cálculo pós-encerramento (soft)')
@@ -2266,12 +2214,14 @@ export async function livesRoutes(app) {
         // já validada acima.
         if (status_publicacao === 'publicado') {
           const gmvFinal = officialGmvFromPayload({}, live)
+          const pedidosFinal = officialOrdersFromPayload({}, live)
           app.withTenant(tenant_id, async (db2) => {
             try {
               await calcularComissoesDaLive(db2, {
                 liveId: request.params.id,
                 tenantId: tenant_id,
                 gmv: gmvFinal,
+                pedidos: pedidosFinal,
               })
             } catch (err) {
               app.log.warn({ err, liveId: request.params.id }, 'commission-engine: falha pós-publicar (soft)')

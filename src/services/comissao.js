@@ -84,3 +84,26 @@ export function calcularComissaoLivelab({ fatGerado, contratoPct }) {
   const valor = fatGerado * (pct / 100)
   return { pct, valor }
 }
+
+/**
+ * FÓRMULA ÚNICA da comissão de franquia (decisão do produto, 2ª onda).
+ *
+ * comissao_franquia = MAX(valorFixo, gmv * pct / 100)
+ *
+ * Onde `pct` = marcas.comissao_franquia_pct e `valorFixo` = marcas.valor_fixo_minimo
+ * (os campos editados no Comercial). Esta é a fonte ÚNICA usada tanto pelo
+ * commission-engine (vendas_atribuidas, rateado por apresentadora) quanto por
+ * lives.comissao_calculada (total), garantindo Financeiro == Comissões.
+ *
+ * Float puro (sem Math.round) — o Postgres (NUMERIC 15,2) é a fonte de arredondamento,
+ * mesma convenção de calcularComissaoLivelab acima.
+ *
+ * @param {{ gmv: number, pct: number | null, valorFixo: number | null }} params
+ * @returns {number}
+ */
+export function calcularComissaoFranquia({ gmv, pct, valorFixo }) {
+  const g = Number(gmv ?? 0)
+  const p = Number(pct ?? 0)
+  const piso = Number(valorFixo ?? 0)
+  return Math.max(piso, g * (p / 100))
+}

@@ -148,7 +148,7 @@ export async function applyMigration(client, fileName) {
       for (const statement of splitSqlStatements(sql)) {
         await client.query(statement)
       }
-      await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
+      await client.query(`INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`, [fileName])
       console.log(`[migrations] ✅ ${fileName}`)
       return
     } catch (err) {

@@ -7,7 +7,7 @@ import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername }
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
   ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username, m.site, m.marketplace_url, m.logo_url,
-  m.comissao_franquia_pct, m.comissao_franqueadora_pct,
+  m.comissao_franquia_pct, m.comissao_franqueadora_pct, m.valor_fixo_minimo,
   m.observacoes, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
   COALESCE(am_agg.apresentadoras, '[]'::json) AS apresentadoras
@@ -24,6 +24,10 @@ const marcaBaseSchema = z.object({
   logo_url: z.string().url().nullable().optional(),
   comissao_franquia_pct: z.number().min(0).max(100).default(0),
   comissao_franqueadora_pct: z.number().min(0).max(100).default(0),
+  // Piso (R$) da comissão de franquia/franqueadora — MAX(piso, gmv×pct). O engine
+  // já lê marcas.valor_fixo_minimo (commission-engine.js); aqui passa a ser
+  // exposto no GET e persistível no POST/PATCH (antes era invisível/imutável).
+  valor_fixo_minimo: z.number().min(0).optional(),
   observacoes: z.string().nullable().optional(),
 })
 
@@ -163,15 +167,15 @@ export async function marcasRoutes(app) {
         `INSERT INTO marcas (
            tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
            marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
-           observacoes, logo_url
+           observacoes, logo_url, valor_fixo_minimo
          )
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          RETURNING *`,
         [
           tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
           d.tipo === 'cliente' ? null : d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
           d.comissao_franquia_pct, d.comissao_franqueadora_pct,
-          d.observacoes ?? null, d.logo_url ?? null,
+          d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
         ],
         )
         if (d.tiktok_username !== undefined) {

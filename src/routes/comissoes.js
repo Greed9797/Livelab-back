@@ -415,6 +415,125 @@ export async function comissoesRoutes(app) {
     })
   })
 
+  // GET /v1/comissoes/por-apresentadora/:id?data_inicio=&data_fim= — comissão por
+  // LIVE de uma apresentadora (agregada por live), p/ a coluna "Comissão" do
+  // histórico no drill /apresentadoras/:id. Uma query → mapeada por live no front
+  // (sem N+1). Lives sem venda atribuída simplesmente não aparecem aqui (comissão 0).
+  app.get('/v1/comissoes/por-apresentadora/:id', { preHandler: readAccess }, async (request) => {
+    const { tenant_id } = request.user
+    const { id: apresentadoraId } = request.params
+    const { data_inicio = null, data_fim = null } = request.query ?? {}
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT
+           va.origem_id AS live_id,
+           SUM(va.gmv) AS gmv,
+           SUM(va.comissao_apresentadora) AS comissao_apresentadora,
+           CASE WHEN SUM(va.gmv) > 0
+             THEN ROUND((SUM(va.comissao_apresentadora) / SUM(va.gmv) * 100)::numeric, 2)
+             ELSE 0 END AS pct_aplicado
+         FROM vendas_atribuidas va
+         WHERE va.tenant_id = $1::uuid
+           AND va.origem = 'live'
+           AND va.apresentadora_id = $2::uuid
+           AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+           AND ($3::date IS NULL OR va.data >= $3::date)
+           AND ($4::date IS NULL OR va.data <= $4::date)
+         GROUP BY va.origem_id`,
+        [tenant_id, apresentadoraId, data_inicio, data_fim],
+      )
+      return {
+        apresentadora_id: apresentadoraId,
+        lives: result.rows.map((r) => ({
+          live_id: r.live_id,
+          gmv: Number(r.gmv ?? 0),
+          comissao_apresentadora: Number(r.comissao_apresentadora ?? 0),
+          pct_aplicado: Number(r.pct_aplicado ?? 0),
+        })),
+      }
+    })
+  })
+
+  // GET /v1/comissoes/memoria?apresentadora_id=&data_inicio=&data_fim= — memória de
+  // cálculo da comissão da apresentadora: por LINHA de venda, expõe a base de GMV do
+  // mês, a FAIXA da escada aplicada e o override de 2% de fim de semana — detalhe que
+  // presenter-commission.js calcula e DESCARTA. Reusa o LATERAL provado de /pendentes,
+  // mas serve TODAS as linhas (não só pendente_aprovacao) com READ_COMISSOES.
+  app.get('/v1/comissoes/memoria', { preHandler: readAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const apresentadoraId = request.query?.apresentadora_id
+    if (!apresentadoraId) {
+      return reply.code(400).send({ error: 'Parâmetro "apresentadora_id" obrigatório' })
+    }
+    const { data_inicio = null, data_fim = null } = request.query ?? {}
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT
+           va.id, va.data, va.origem, va.gmv,
+           va.comissao_apresentadora,
+           CASE WHEN va.gmv > 0
+             THEN ROUND((va.comissao_apresentadora / va.gmv * 100)::numeric, 2)
+             ELSE 0 END AS pct_aplicado,
+           m.nome AS marca_nome,
+           month_gmv.gmv_mes AS base_gmv_mes,
+           faixa.gmv_inicio AS faixa_gmv_inicio,
+           faixa.gmv_fim    AS faixa_gmv_fim,
+           faixa.comissao_pct AS faixa_pct,
+           (va.origem = 'live' AND EXTRACT(DOW FROM va.data) IN (0, 6)) AS fim_de_semana
+         FROM vendas_atribuidas va
+         LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(SUM(va_mes.gmv), 0) + COALESCE(va.gmv, 0) AS gmv_mes
+           FROM vendas_atribuidas va_mes
+           WHERE va_mes.tenant_id = va.tenant_id
+             AND va_mes.apresentadora_id = va.apresentadora_id
+             AND date_trunc('month', va_mes.data::timestamp) = date_trunc('month', va.data::timestamp)
+             AND va_mes.id <> va.id
+         ) month_gmv ON true
+         LEFT JOIN LATERAL (
+           SELECT f.gmv_inicio, f.gmv_fim, f.comissao_pct
+           FROM apresentadora_comissao_faixas f
+           WHERE f.tenant_id = va.tenant_id
+             AND f.apresentadora_id = va.apresentadora_id
+             AND f.ativo = true
+             AND f.gmv_inicio <= COALESCE(month_gmv.gmv_mes, va.gmv, 0)
+             AND (f.gmv_fim IS NULL OR f.gmv_fim >= COALESCE(month_gmv.gmv_mes, va.gmv, 0))
+           ORDER BY f.gmv_inicio DESC
+           LIMIT 1
+         ) faixa ON true
+         WHERE va.tenant_id = $1::uuid
+           AND va.apresentadora_id = $2::uuid
+           AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+           AND ($3::date IS NULL OR va.data >= $3::date)
+           AND ($4::date IS NULL OR va.data <= $4::date)
+         ORDER BY va.data DESC, va.criado_em DESC
+         LIMIT 500`,
+        [tenant_id, apresentadoraId, data_inicio, data_fim],
+      )
+      const linhas = result.rows.map((r) => ({
+        id: r.id,
+        data: r.data,
+        origem: r.origem,
+        marca_nome: r.marca_nome,
+        gmv: Number(r.gmv ?? 0),
+        comissao_apresentadora: Number(r.comissao_apresentadora ?? 0),
+        pct_aplicado: Number(r.pct_aplicado ?? 0),
+        base_gmv_mes: Number(r.base_gmv_mes ?? 0),
+        faixa: r.faixa_pct == null ? null : {
+          gmv_inicio: Number(r.faixa_gmv_inicio ?? 0),
+          gmv_fim: r.faixa_gmv_fim == null ? null : Number(r.faixa_gmv_fim),
+          comissao_pct: Number(r.faixa_pct ?? 0),
+        },
+        fim_de_semana: Boolean(r.fim_de_semana),
+      }))
+      return {
+        apresentadora_id: apresentadoraId,
+        total_variavel: linhas.reduce((s, l) => s + l.comissao_apresentadora, 0),
+        linhas,
+      }
+    })
+  })
+
   // GET /v1/comissoes/export-csv — relatório completo de comissionamento.
   // Filtros (via buildComissaoFilters): mes=YYYY-MM, marca_id, apresentadora_id,
   // data_inicio, data_fim, origem.

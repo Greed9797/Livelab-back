@@ -73,7 +73,9 @@ describe('analytics diario', () => {
         total_videos: 1,
         horas_live: 5.5,
         gmv_por_live: 600.38,
-        gmv_por_hora: 218.32,
+        // GMV/hora = gmv_lives / horas (1000.50 / 5.5), NÃO gmv_total — vídeo tem
+        // horas=0 e inflaria. Antes (errado): 1200.75/5.5 = 218.32.
+        gmv_por_hora: 181.91,
         pedidos: 12,
         ticket_medio: 100.06,
       }],

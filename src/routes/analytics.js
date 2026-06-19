@@ -810,7 +810,9 @@ export async function analyticsRoutes(app) {
         const horasLive = round1(liveOps.horas_live)
         const pedidosLives = toInt(sales.pedidos_lives)
         const gmvPorLive = totalLives > 0 ? round2(gmvTotal / totalLives) : 0
-        const gmvPorHora = horasLive > 0 ? round2(gmvTotal / horasLive) : 0
+        // GMV/hora = GMV de LIVES ÷ horas de live (exclui vídeo, que tem horas=0 e
+        // inflaria o indicador). Mesma convenção do rollup (performance-rollups) e do funil.
+        const gmvPorHora = horasLive > 0 ? round2(gmvLives / horasLive) : 0
         const ticketMedioLive = pedidosLives > 0 ? round2(gmvLives / pedidosLives) : 0
         const hoursRows = hoursQ.rows
         const monthlyRows = monthlyQ.rows.map((row) => ({
@@ -1229,7 +1231,8 @@ export async function analyticsRoutes(app) {
               total_videos: toInt(row.total_videos),
               horas_live: horasLive,
               gmv_por_live: totalLives > 0 ? round2(gmvTotal / totalLives) : 0,
-              gmv_por_hora: horasLive > 0 ? round2(gmvTotal / horasLive) : 0,
+              // GMV/hora = GMV de lives ÷ horas (exclui vídeo); padroniza com o rollup/funil.
+              gmv_por_hora: horasLive > 0 ? round2(gmvLives / horasLive) : 0,
               pedidos,
               ticket_medio: pedidos > 0 ? round2(gmvTotal / pedidos) : 0,
             }

@@ -159,7 +159,7 @@ export async function applyMigration(client, fileName) {
   await client.query('BEGIN')
   try {
     await client.query(sql)
-    await client.query(`INSERT INTO schema_migrations (version) VALUES ($1)`, [fileName])
+    await client.query(`INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING`, [fileName])
     await client.query('COMMIT')
     console.log(`[migrations] ✅ ${fileName}`)
   } catch (err) {

@@ -4,6 +4,7 @@ import crypto from 'node:crypto'
 import { resolveCepToGeo } from './cep.js'
 import { READ_CLIENTES, WRITE_CLIENTES } from '../config/role_groups.js'
 import { getClienteOperacional, resolveMonthRange } from '../lib/operacional.js'
+import { ensureClienteMarca } from '../services/client-brand.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
 import { SECURITY } from '../config/security.js'
@@ -175,6 +176,10 @@ export async function clientesRoutes(app) {
           cliente.acesso_email = user.email
           cliente.acesso_ativo = user.ativo
         }
+
+        // Invariante: todo cliente nasce com sua marca tipo='cliente' (onde vive a
+        // comissão). Sem isso, lives do cliente ficariam sem marca e sem comissão.
+        await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: cliente.id })
 
         await db.query('COMMIT')
         app.audit?.log?.(request, { action: 'cliente.create', entity_type: 'cliente', entity_id: cliente.id, metadata: { nome: d.nome, nicho: d.nicho ?? null, fat_anual: d.fat_anual, vende_tiktok: d.vende_tiktok, acesso_criado: Boolean(acesso) } })?.catch(err => app.log.error({ err }, 'audit log failed'))
@@ -524,6 +529,23 @@ export async function clientesRoutes(app) {
         [...vals, request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+
+      // Mantém a invariante cliente->marca também em updates (idempotente). Reativa a
+      // marca quando o cliente volta a ficar ativo; desativa quando é cancelado.
+      const clienteCancelado = updates.status === 'cancelado'
+      await ensureClienteMarca(db, {
+        tenantId: tenant_id,
+        clienteId: request.params.id,
+        activateExisting: !clienteCancelado,
+      })
+      if (clienteCancelado) {
+        await db.query(
+          `UPDATE marcas SET status = 'inativa', atualizado_em = NOW()
+           WHERE cliente_id = $1 AND tenant_id = $2::uuid AND tipo = 'cliente'`,
+          [request.params.id, tenant_id],
+        )
+      }
+
       if (Object.prototype.hasOwnProperty.call(updates, 'logo_url')) {
         await db.query(
           `UPDATE marcas

@@ -193,4 +193,45 @@ describe('commission engine', () => {
     expect(r).toEqual([])
     expect(zerouComissaoCalculada).toBe(true)
   })
+
+  it('auto-cura: persiste marca_id na live quando estava sem marca (live_marca_id null)', async () => {
+    const marcaUpdates = []
+    const queryMock = vi.fn(async (sql, values) => {
+      if (sql.includes('FROM lives l')) {
+        return {
+          rows: [{
+            id: 'live-9',
+            cliente_id: 'cliente-1',
+            live_marca_id: null,
+            apresentador_id: 'user-1',
+            iniciado_em: '2026-05-20T18:00:00.000Z',
+            comissao_pct: '10',
+            marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            comissao_franquia_pct: '10',
+            comissao_franqueadora_pct: '2',
+            valor_fixo_minimo: '0',
+          }],
+        }
+      }
+      if (sql.includes('UPDATE lives SET marca_id')) {
+        marcaUpdates.push(values)
+        return { rows: [] }
+      }
+      if (sql.includes('SELECT DISTINCT ap.id AS apresentadora_id')) {
+        return { rows: [{ apresentadora_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', comissao_live_pct: null, percentual_rateio: null }] }
+      }
+      if (sql.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: '0' }] }
+      if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [] }
+      if (sql.includes('INSERT INTO vendas_atribuidas')) return { rows: [{ comissao_franquia: 0 }] }
+      return { rows: [] }
+    })
+
+    await calcularComissoesDaLive({ query: queryMock }, {
+      tenantId: 'tenant-1', liveId: 'live-9', gmv: 1000,
+    })
+
+    // Deve persistir a marca resolvida na live (id da marca, liveId, tenantId).
+    expect(marcaUpdates).toHaveLength(1)
+    expect(marcaUpdates[0]).toEqual(['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'live-9', 'tenant-1'])
+  })
 })

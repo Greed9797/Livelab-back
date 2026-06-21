@@ -352,8 +352,11 @@ export async function comissoesRoutes(app) {
         [tenant_id, liveId],
       )
 
+      // Comissão ainda não calculada (live recém-encerrada / sem vendas_atribuidas) NÃO é
+      // erro: o "ver detalhes" deve renderizar vazio/zerado, não estourar. O job de
+      // reconciliação preenche em até 10min; aqui devolvemos 200 com lista vazia.
       if (result.rows.length === 0) {
-        return reply.code(404).send({ error: 'Nenhuma comissão encontrada para essa live' })
+        return { live_id: liveId, comissoes: [], pendente: true }
       }
 
       const rows = result.rows.map((r) => ({

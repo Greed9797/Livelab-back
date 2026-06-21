@@ -3,6 +3,7 @@ import { READ_AGENDA, WRITE_AGENDA } from '../config/role_groups.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 import { applyAgendaStatusFilter } from '../lib/filters.js'
+import { ensureClienteMarca } from '../services/client-brand.js'
 
 const activeAgendaStatuses = ['planejado', 'confirmado', 'ao_vivo']
 
@@ -100,38 +101,12 @@ async function ensureAgendaRefs(db, reply, { tenantId, marcaId, clienteId, cabin
 async function resolveAgendaMarcaId(db, tenantId, { marcaId, clienteId }) {
   if (marcaId) return marcaId
   if (!clienteId) return null
-
-  const existing = await db.query(
-    `SELECT id
-       FROM marcas
-      WHERE tenant_id = $1::uuid
-        AND cliente_id = $2::uuid
-        AND tipo = 'cliente'
-      ORDER BY status = 'ativa' DESC, atualizado_em DESC NULLS LAST
-      LIMIT 1`,
-    [tenantId, clienteId],
-  )
-  if (existing.rows[0]) return existing.rows[0].id
-
-  const cliente = await db.query(
-    `SELECT id, nome, site, logo_url
-       FROM clientes
-      WHERE id = $1::uuid
-        AND tenant_id = $2::uuid`,
-    [clienteId, tenantId],
-  )
-  const row = cliente.rows[0]
-  if (!row) return null
-
-  const inserted = await db.query(
-    `INSERT INTO marcas (
-       tenant_id, cliente_id, nome, tipo, status, tiktok_username, site, logo_url, observacoes
-     )
-     VALUES ($1,$2,$3,'cliente','ativa',NULL,$4,$5,'Criada automaticamente ao agendar uma cabine para cliente.')
-     RETURNING id`,
-    [tenantId, row.id, row.nome, row.site ?? null, row.logo_url ?? null],
-  )
-  return inserted.rows[0]?.id ?? null
+  // Caminho ÚNICO de criação/resolução da marca-espelho do cliente.
+  return ensureClienteMarca(db, {
+    tenantId,
+    clienteId,
+    observacoes: 'Criada automaticamente ao agendar uma cabine para cliente.',
+  })
 }
 
 async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId }) {

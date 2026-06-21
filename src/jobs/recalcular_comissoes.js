@@ -84,21 +84,26 @@ export async function runRecalcularComissoesTick(app) {
     }
     results.tenants = seenTenants.size
 
-    // Etapa 2: lives publicadas órfãs (sem vendas_atribuidas).
-    // Cobre lives publicadas antes do fix em lives.js PATCH publicar.
+    // Etapa 2: TODA live encerrada com GMV>0 e SEM vendas_atribuidas (órfã de comissão).
+    // Antes restringia a status_publicacao='publicado' E marca_id IS NOT NULL — justamente
+    // o filtro que deixava lives recentes/sem-marca permanentemente fora da soma. Agora
+    // cobre qualquer encerrada com faturamento: o engine resolve a marca (via cliente,
+    // pós-invariante 115) e auto-cura lives.marca_id. Alinha a reconciliação ao que as
+    // telas de comissão exibem (performance-rollups filtra status='encerrada').
     try {
       const livesOrfas = await app.db.query(
         `SELECT l.id, l.tenant_id, l.marca_id,
                 COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
                 COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos
            FROM lives l
-          WHERE l.status_publicacao = 'publicado'
-            AND l.marca_id IS NOT NULL
+          WHERE l.status = 'encerrada'
+            AND COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) > 0
             AND NOT EXISTS (
               SELECT 1 FROM vendas_atribuidas va
                WHERE va.origem = 'live' AND va.origem_id = l.id
             )
-          LIMIT 50`,
+          ORDER BY l.encerrado_em DESC NULLS LAST
+          LIMIT 100`,
       )
       for (const live of livesOrfas.rows) {
         const lc = await app.db.pool.connect()

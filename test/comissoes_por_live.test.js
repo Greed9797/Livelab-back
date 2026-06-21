@@ -74,7 +74,7 @@ describe('GET /v1/lives/:id/comissoes', () => {
     expect(sql).toContain('pct_apresentadora')
   })
 
-  it('returns 404 when no comissoes exist for live', async () => {
+  it('returns 200 with empty/pendente when no comissoes exist yet (não é erro)', async () => {
     const queryMock = vi.fn().mockResolvedValue({ rows: [] })
     const app = buildApp(queryMock)
     await app.register(comissoesRoutes)
@@ -84,8 +84,9 @@ describe('GET /v1/lives/:id/comissoes', () => {
       url: '/v1/lives/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb/comissoes',
     })
 
-    expect(response.statusCode).toBe(404)
-    expect(response.json()).toMatchObject({ error: expect.stringContaining('Nenhuma comissão') })
+    // Comissão ainda não calculada não deve quebrar o "ver detalhes": 200 + lista vazia.
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ comissoes: [], pendente: true })
   })
 })
 

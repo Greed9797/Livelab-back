@@ -3,6 +3,7 @@ import { READ_MARCAS, WRITE_MARCAS } from '../config/role_groups.js'
 import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
+import { ensureClienteMarca } from '../services/client-brand.js'
 
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
@@ -163,21 +164,44 @@ export async function marcasRoutes(app) {
 
       await db.query('BEGIN')
       try {
-        const result = await db.query(
-        `INSERT INTO marcas (
-           tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
-           marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
-           observacoes, logo_url, valor_fixo_minimo
-         )
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-         RETURNING *`,
-        [
-          tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
-          d.tipo === 'cliente' ? null : d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
-          d.comissao_franquia_pct, d.comissao_franqueadora_pct,
-          d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
-        ],
-        )
+        // Invariante cliente->marca: já existe (ou garantimos) UMA marca tipo='cliente'
+        // por cliente. Em vez de inserir uma 2ª (que violaria uniq_marca_cliente_por_tenant),
+        // reusamos a existente e aplicamos os campos enviados (upsert idempotente).
+        let createdMarcaId = null
+        if (d.tipo === 'cliente' && d.cliente_id) {
+          createdMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: d.cliente_id })
+        }
+
+        const result = createdMarcaId
+          ? await db.query(
+              `UPDATE marcas SET
+                 nome = $3, status = $4, site = $5, marketplace_url = $6,
+                 comissao_franquia_pct = $7, comissao_franqueadora_pct = $8,
+                 observacoes = $9, logo_url = COALESCE($10, logo_url), valor_fixo_minimo = $11,
+                 atualizado_em = NOW()
+               WHERE id = $1 AND tenant_id = $2::uuid
+               RETURNING *`,
+              [
+                createdMarcaId, tenant_id, d.nome, d.status, d.site ?? null, d.marketplace_url ?? null,
+                d.comissao_franquia_pct, d.comissao_franqueadora_pct,
+                d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
+              ],
+            )
+          : await db.query(
+              `INSERT INTO marcas (
+                 tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
+                 marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
+                 observacoes, logo_url, valor_fixo_minimo
+               )
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+               RETURNING *`,
+              [
+                tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
+                d.tipo === 'cliente' ? null : d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
+                d.comissao_franquia_pct, d.comissao_franqueadora_pct,
+                d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
+              ],
+            )
         if (d.tiktok_username !== undefined) {
           await updateCanonicalTikTokUsername(db, {
             tenantId: tenant_id,

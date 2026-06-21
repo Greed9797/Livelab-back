@@ -67,6 +67,16 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
     return []
   }
 
+  // Auto-cura: se a live estava sem marca_id mas a marca foi resolvida (via cliente),
+  // persiste na live para que GMV (lido de lives.marca_id) e comissão (vendas_atribuidas)
+  // fiquem na MESMA marca nas telas por-marca. Sem isto, a live cairia no balde "Sem marca".
+  if (!live.live_marca_id) {
+    await db.query(
+      `UPDATE lives SET marca_id = $1 WHERE id = $2 AND tenant_id = $3::uuid AND marca_id IS NULL`,
+      [live.marca_id, liveId, tenantId],
+    ).catch(() => {})
+  }
+
   const gmvNum = Number(gmv ?? 0)
   const data = saoPauloDateInput(live.iniciado_em ?? new Date())
 

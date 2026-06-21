@@ -197,18 +197,12 @@ export async function getMarcaOperacional(db, { tenantId, marcaId, startDate, en
     [marcaId, tenantId, startDate, endDate],
   )
 
+  // Lista TODAS as lives da marca direto por l.marca_id (não via vendas_atribuidas).
+  // Antes o JOIN com vendas_atribuidas escondia lives recentes (GMV>0, comissão ainda
+  // pendente) do "ver detalhes". Pós-invariante 115 + auto-cura, l.marca_id está sempre
+  // preenchido, então a live aparece assim que encerra — mesmo antes do engine rodar.
   const lives = await db.query(
-    `WITH venda_live_marca AS (
-       SELECT DISTINCT ON (va.origem_id)
-              va.origem_id AS live_id,
-              va.marca_id
-       FROM vendas_atribuidas va
-       WHERE va.tenant_id = $2::uuid
-         AND va.origem = 'live'
-         AND va.marca_id = $1
-       ORDER BY va.origem_id, va.atualizado_em DESC
-     )
-     SELECT l.id, l.cabine_id, l.cliente_id, vl.marca_id, l.iniciado_em, l.encerrado_em,
+    `SELECT l.id, l.cabine_id, l.cliente_id, l.marca_id, l.iniciado_em, l.encerrado_em,
             l.status, l.status_publicacao,
             ${liveGmvSql('l')} AS gmv,
             ${liveOrdersSql('l')} AS pedidos,
@@ -216,12 +210,11 @@ export async function getMarcaOperacional(db, { tenantId, marcaId, startDate, en
             c.numero AS cabine_numero,
             COALESCE(a.nome, u.nome) AS apresentadora_nome
      FROM lives l
-     JOIN venda_live_marca vl ON vl.live_id = l.id
      LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
      LEFT JOIN live_apresentadoras_v2 lav ON lav.live_id = l.id AND lav.tenant_id = l.tenant_id AND lav.papel = 'principal'
      LEFT JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = l.tenant_id
      LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
-     WHERE l.tenant_id = $2::uuid
+     WHERE l.tenant_id = $2::uuid AND l.marca_id = $1
      ORDER BY COALESCE(l.encerrado_em, l.iniciado_em) DESC NULLS LAST
      LIMIT 50`,
     [marcaId, tenantId],

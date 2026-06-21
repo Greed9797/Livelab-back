@@ -28,6 +28,7 @@ export function mapPerformanceRows(rows, { groupBy, mes } = {}) {
       comissao_variavel: num(row.comissao_variavel ?? row.comissao_apresentadora),
       comissao_franquia: num(row.comissao_franquia),
       comissao_franqueadora: num(row.comissao_franqueadora),
+      comissao_fixo: num(row.comissao_fixo),
       fixo: num(row.fixo),
       total_recebido: num(row.total_recebido),
       registros: num(row.registros),
@@ -175,6 +176,8 @@ export async function getPerformanceRanking(db, {
         COALESCE(SUM(combined.comissao_franqueadora), 0)
           + COALESCE(MAX(CASE WHEN m.tipo = 'cliente' THEN m.valor_fixo_minimo ELSE 0 END), 0)
             * COUNT(DISTINCT combined.mes) FILTER (WHERE combined.gmv > 0 OR combined.pedidos > 0) AS comissao_franqueadora,
+        COALESCE(MAX(CASE WHEN m.tipo = 'cliente' THEN m.valor_fixo_minimo ELSE 0 END), 0)
+          * COUNT(DISTINCT combined.mes) FILTER (WHERE combined.gmv > 0 OR combined.pedidos > 0) AS comissao_fixo,
         COUNT(*)::int AS registros
       FROM combined
       LEFT JOIN marcas m ON m.id = combined.marca_id AND m.tenant_id = $1::uuid

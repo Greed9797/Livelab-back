@@ -164,3 +164,20 @@ describe('GET /v1/comissoes/por-live', () => {
     expect(response.statusCode).toBe(400)
   })
 })
+
+describe('POST /v1/comissoes/reprocessar', () => {
+  it('sem lives órfãs retorna diagnóstico zerado', async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+    const app = buildApp(queryMock)
+    await app.register(comissoesRoutes)
+
+    const response = await app.inject({ method: 'POST', url: '/v1/comissoes/reprocessar' })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      lives_sem_comissao_encontradas: 0,
+      recalculadas_com_comissao: 0,
+      ainda_zeradas: [],
+    })
+  })
+})

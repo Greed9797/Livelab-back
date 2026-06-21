@@ -1,6 +1,7 @@
 import { READ_COMISSOES } from '../config/role_groups.js'
 import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
+import { calcularComissoesDaLive } from '../services/commission-engine.js'
 
 const APROVADORES = ['franqueador_master', 'franqueado']
 
@@ -55,6 +56,73 @@ function csvEscape(value) {
 export async function comissoesRoutes(app) {
   const readAccess  = [app.authenticate, app.requirePapel(READ_COMISSOES)]
   const writeAccess = [app.authenticate, app.requirePapel(APROVADORES)]
+
+  // POST /v1/comissoes/reprocessar — força AGORA o recálculo das comissões das lives
+  // encerradas do tenant que estão sem vendas_atribuidas (não espera o cron de 10min)
+  // e devolve um diagnóstico das que continuam zeradas e por quê. Ferramenta de
+  // self-service pro admin (sem precisar de acesso ao banco).
+  app.post('/v1/comissoes/reprocessar', { preHandler: writeAccess }, async (request) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const orfas = await db.query(
+        `SELECT l.id,
+                to_char(l.iniciado_em, 'YYYY-MM-DD') AS dia,
+                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
+                COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos,
+                l.marca_id, l.cliente_id,
+                COALESCE(cl.nome, mc.nome) AS nome
+           FROM lives l
+           LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
+           LEFT JOIN marcas mc   ON mc.id = l.marca_id   AND mc.tenant_id = l.tenant_id
+          WHERE l.tenant_id = $1::uuid
+            AND l.status = 'encerrada'
+            AND COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) > 0
+            AND NOT EXISTS (
+              SELECT 1 FROM vendas_atribuidas va
+               WHERE va.origem = 'live' AND va.origem_id = l.id
+            )
+          ORDER BY l.encerrado_em DESC NULLS LAST
+          LIMIT 500`,
+        [tenant_id],
+      )
+
+      let recalculadas = 0
+      const aindaZeradas = []
+      for (const live of orfas.rows) {
+        let rows = []
+        try {
+          rows = await calcularComissoesDaLive(db, {
+            liveId: live.id,
+            tenantId: tenant_id,
+            gmv: Number(live.gmv),
+            pedidos: Number(live.pedidos),
+          })
+        } catch (err) {
+          app.log.warn({ err, liveId: live.id }, '[reprocessar] falha em live')
+        }
+        const totalFranquia = (rows ?? []).reduce((s, r) => s + Number(r?.comissao_franquia ?? 0), 0)
+        if (rows && rows.length > 0 && totalFranquia > 0) {
+          recalculadas += 1
+        } else {
+          aindaZeradas.push({
+            live_id: live.id,
+            nome: live.nome ?? 'Sem marca',
+            dia: live.dia,
+            gmv: Number(live.gmv),
+            motivo: (!rows || rows.length === 0)
+              ? 'Marca não resolvida (cliente sem marca ativa, ou live sem cliente/marca)'
+              : 'Comissão 0 — % de comissão da marca está zerado',
+          })
+        }
+      }
+
+      return {
+        lives_sem_comissao_encontradas: orfas.rows.length,
+        recalculadas_com_comissao: recalculadas,
+        ainda_zeradas: aindaZeradas,
+      }
+    })
+  })
 
   app.get('/v1/comissoes/resumo', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user

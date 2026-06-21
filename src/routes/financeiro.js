@@ -92,17 +92,43 @@ export async function financeiroRoutes(app) {
           WHERE tenant_id = $3::uuid
             AND competencia >= $1::date
             AND competencia <= $2::date
+        ),
+        -- Fixo mensal das marcas tipo='cliente': soma valor_fixo_minimo uma vez por mês COM
+        -- comissionamento gerado (GMV/pedidos > 0), MESMA definição do rollup de Comissões
+        -- (performance-rollups.js) — garante Financeiro == Comissões no fixo.
+        fixo_periodo AS (
+          SELECT COALESCE(SUM(m.valor_fixo_minimo * am.meses_ativos), 0) AS fixo_mensal_total
+          FROM marcas m
+          JOIN (
+            SELECT marca_id, COUNT(DISTINCT mes) AS meses_ativos
+            FROM (
+              SELECT l.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes
+              FROM lives l
+              WHERE l.tenant_id = $3::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
+                AND l.iniciado_em::date >= $1::date AND l.iniciado_em::date <= $2::date
+                AND (${liveGmvSql('l')} > 0 OR ${liveOrdersSql('l')} > 0)
+              UNION
+              SELECT vr.marca_id, date_trunc('month', vr.data::timestamp) AS mes
+              FROM video_registros vr
+              WHERE vr.tenant_id = $3::uuid
+                AND vr.data >= $1::date AND vr.data <= $2::date
+                AND (vr.gmv_atribuido > 0 OR vr.pedidos_atribuidos > 0)
+            ) ativ
+            GROUP BY marca_id
+          ) am ON am.marca_id = m.id
+          WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente'
         )
         SELECT lp.gmv_lives, lp.pedidos_lives, lp.total_lives,
                lp.comissao_franquia_lives, lp.comissao_configurada, lp.comissao_faltante_count,
                vp.gmv_videos, vp.pedidos_videos, vp.total_videos,
-               cu.total_custos
-        FROM live_periodo lp, video_periodo vp, custos_periodo cu
+               cu.total_custos, fx.fixo_mensal_total
+        FROM live_periodo lp, video_periodo vp, custos_periodo cu, fixo_periodo fx
       `, [startDate, endDate, tenant_id])
 
       const r = result.rows[0]
       const fat_bruto = toNum(r.gmv_lives) + toNum(r.gmv_videos)
-      const receita_liquida = toNum(r.comissao_franquia_lives)
+      // receita_liquida = comissão variável por live (lives.comissao_calculada) + fixo mensal das marcas.
+      const receita_liquida = toNum(r.comissao_franquia_lives) + toNum(r.fixo_mensal_total)
       const fat_liquido = Math.max(0, receita_liquida - toNum(r.total_custos))
       return {
         visao,
@@ -115,6 +141,7 @@ export async function financeiroRoutes(app) {
         total_lives: toNum(r.total_lives),
         total_videos: toNum(r.total_videos),
         receita_liquida,
+        fixo_mensal: toNum(r.fixo_mensal_total),
         comissao_configurada: toNum(r.comissao_configurada),
         comissao_faltante_count: toNum(r.comissao_faltante_count),
         total_custos: toNum(r.total_custos),

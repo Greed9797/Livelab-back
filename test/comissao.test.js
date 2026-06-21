@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   calcularComissaoApresentadora,
+  calcularComissaoFranquia,
   calcularComissaoLivelab,
   isFimDeSemanaSP,
 } from '../src/services/comissao.js'
@@ -162,5 +163,24 @@ describe('calcularComissaoLivelab', () => {
     // 333.33 * 3% = 9.9999 — o banco arredonda para 10.00
     const result = calcularComissaoLivelab({ fatGerado: 333.33, contratoPct: 3 })
     expect(result.valor).toBeCloseTo(10, 1)
+  })
+})
+
+describe('calcularComissaoFranquia (por live = só variável; sem piso)', () => {
+  it('é gmv * pct / 100 (parte variável)', () => {
+    expect(calcularComissaoFranquia({ gmv: 1000, pct: 10 })).toBe(100)
+    expect(calcularComissaoFranquia({ gmv: 2500, pct: 4 })).toBe(100)
+  })
+
+  it('NÃO aplica mais piso por live (fixo virou mensal, somado na agregação)', () => {
+    // gmv baixo: antes MAX(piso, gmv*pct) inflava; agora é só gmv*pct.
+    expect(calcularComissaoFranquia({ gmv: 100, pct: 10 })).toBe(10)
+    // valorFixo é ignorado mesmo se passado (compat).
+    expect(calcularComissaoFranquia({ gmv: 100, pct: 10, valorFixo: 500 })).toBe(10)
+  })
+
+  it('pct/gmv nulos → 0', () => {
+    expect(calcularComissaoFranquia({ gmv: null, pct: null })).toBe(0)
+    expect(calcularComissaoFranquia({ gmv: 1000, pct: null })).toBe(0)
   })
 })

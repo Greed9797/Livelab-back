@@ -25,9 +25,9 @@ const marcaBaseSchema = z.object({
   logo_url: z.string().url().nullable().optional(),
   comissao_franquia_pct: z.number().min(0).max(100).default(0),
   comissao_franqueadora_pct: z.number().min(0).max(100).default(0),
-  // Piso (R$) da comissão de franquia/franqueadora — MAX(piso, gmv×pct). O engine
-  // já lê marcas.valor_fixo_minimo (commission-engine.js); aqui passa a ser
-  // exposto no GET e persistível no POST/PATCH (antes era invisível/imutável).
+  // Fixo mensal (R$) da marca tipo=cliente — SOMA ao comissionamento gerado uma vez
+  // por mês com atividade, em franquia e franqueadora (ver performance-rollups.js e
+  // financeiro.js). Não é mais piso por live. Afiliadas ignoram este campo.
   valor_fixo_minimo: z.number().min(0).optional(),
   observacoes: z.string().nullable().optional(),
 })

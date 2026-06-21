@@ -110,6 +110,7 @@ export const MIGRATIONS_LIST = [
   '113_analytics_import_batches.sql',
   '114_painel_operacional.sql',
   '115_cliente_marca_invariant_backfill.sql',
+  '116_marca_fixo_mensal_semantica.sql',
 ]
 
 async function ensureMigrationsTable(client) {

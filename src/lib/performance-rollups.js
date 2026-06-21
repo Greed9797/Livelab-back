@@ -93,7 +93,8 @@ export async function getPerformanceRanking(db, {
             WHEN COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
               THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
             ELSE 0
-          END AS horas
+          END AS horas,
+          date_trunc('month', (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')) AS mes
         FROM lives l
         LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
         LEFT JOIN LATERAL (
@@ -133,7 +134,8 @@ export async function getPerformanceRanking(db, {
           va.comissao_apresentadora,
           va.comissao_franquia,
           va.comissao_franqueadora,
-          0 AS horas
+          0 AS horas,
+          date_trunc('month', va.data::timestamp) AS mes
         FROM vendas_atribuidas va
         JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
         WHERE va.tenant_id = $1::uuid
@@ -164,8 +166,15 @@ export async function getPerformanceRanking(db, {
         COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'live')::int AS total_lives,
         COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'video')::int AS total_videos,
         COALESCE(SUM(combined.comissao_apresentadora), 0) AS comissao_apresentadora,
-        COALESCE(SUM(combined.comissao_franquia), 0) AS comissao_franquia,
-        COALESCE(SUM(combined.comissao_franqueadora), 0) AS comissao_franqueadora,
+        -- Fixo mensal (marcas.valor_fixo_minimo) SOMA ao comissionamento da marca tipo='cliente',
+        -- uma vez por mês COM comissionamento gerado (GMV/pedidos > 0), em franquia E franqueadora.
+        -- O FILTER alinha com o HAVING (gmv/pedidos <> 0) e com o financeiro: as duas telas concordam.
+        COALESCE(SUM(combined.comissao_franquia), 0)
+          + COALESCE(MAX(CASE WHEN m.tipo = 'cliente' THEN m.valor_fixo_minimo ELSE 0 END), 0)
+            * COUNT(DISTINCT combined.mes) FILTER (WHERE combined.gmv > 0 OR combined.pedidos > 0) AS comissao_franquia,
+        COALESCE(SUM(combined.comissao_franqueadora), 0)
+          + COALESCE(MAX(CASE WHEN m.tipo = 'cliente' THEN m.valor_fixo_minimo ELSE 0 END), 0)
+            * COUNT(DISTINCT combined.mes) FILTER (WHERE combined.gmv > 0 OR combined.pedidos > 0) AS comissao_franqueadora,
         COUNT(*)::int AS registros
       FROM combined
       LEFT JOIN marcas m ON m.id = combined.marca_id AND m.tenant_id = $1::uuid

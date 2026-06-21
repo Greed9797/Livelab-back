@@ -86,24 +86,27 @@ export function calcularComissaoLivelab({ fatGerado, contratoPct }) {
 }
 
 /**
- * FÓRMULA ÚNICA da comissão de franquia (decisão do produto, 2ª onda).
+ * FÓRMULA ÚNICA da comissão de franquia POR LIVE (parte variável).
  *
- * comissao_franquia = MAX(valorFixo, gmv * pct / 100)
+ * comissao_franquia (por live) = gmv * pct / 100
  *
- * Onde `pct` = marcas.comissao_franquia_pct e `valorFixo` = marcas.valor_fixo_minimo
- * (os campos editados no Comercial). Esta é a fonte ÚNICA usada tanto pelo
- * commission-engine (vendas_atribuidas, rateado por apresentadora) quanto por
- * lives.comissao_calculada (total), garantindo Financeiro == Comissões.
+ * Onde `pct` = marcas.comissao_franquia_pct. NÃO aplica mais piso por live:
+ * o `marcas.valor_fixo_minimo` deixou de ser um piso (MAX) e passou a ser um
+ * FIXO MENSAL que SOMA ao comissionamento gerado — adicionado UMA vez por marca
+ * por mês ativo na AGREGAÇÃO (performance-rollups e financeiro), não por live.
+ *
+ * Usada pelo commission-engine (vendas_atribuidas, rateado por apresentadora) e por
+ * lives.comissao_calculada (total) — ambos a parte variável; o fixo mensal entra
+ * só nas telas que agregam por mês.
  *
  * Float puro (sem Math.round) — o Postgres (NUMERIC 15,2) é a fonte de arredondamento,
  * mesma convenção de calcularComissaoLivelab acima.
  *
- * @param {{ gmv: number, pct: number | null, valorFixo: number | null }} params
+ * @param {{ gmv: number, pct: number | null }} params
  * @returns {number}
  */
-export function calcularComissaoFranquia({ gmv, pct, valorFixo }) {
+export function calcularComissaoFranquia({ gmv, pct }) {
   const g = Number(gmv ?? 0)
   const p = Number(pct ?? 0)
-  const piso = Number(valorFixo ?? 0)
-  return Math.max(piso, g * (p / 100))
+  return g * (p / 100)
 }

@@ -80,15 +80,15 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
   const gmvNum = Number(gmv ?? 0)
   const data = saoPauloDateInput(live.iniciado_em ?? new Date())
 
-  // 2. Comissão franquia/franqueadora = MAX(valor_fixo_minimo da marca, gmv * pct).
-  //    Fonte ÚNICA via calcularComissaoFranquia (comissao.js) — mesma regra usada para
-  //    lives.comissao_calculada, garantindo Financeiro == Comissões.
+  // 2. Comissão franquia/franqueadora POR LIVE = gmv * pct (parte variável).
+  //    O fixo mensal (marcas.valor_fixo_minimo) NÃO entra aqui: é somado uma vez por
+  //    marca/mês ativo na agregação (performance-rollups e financeiro). Fonte ÚNICA via
+  //    calcularComissaoFranquia (comissao.js) — mesma regra de lives.comissao_calculada.
   const franquiaPct      = Number(live.comissao_franquia_pct ?? 0)
   const franqueadoraPct  = Number(live.comissao_franqueadora_pct ?? 0)
-  const valorFixo        = Number(live.valor_fixo_minimo ?? 0)
 
-  const comissaoFranquiaTotal     = calcularComissaoFranquia({ gmv: gmvNum, pct: franquiaPct, valorFixo })
-  const comissaoFranqueadoraTotal = calcularComissaoFranquia({ gmv: gmvNum, pct: franqueadoraPct, valorFixo })
+  const comissaoFranquiaTotal     = calcularComissaoFranquia({ gmv: gmvNum, pct: franquiaPct })
+  const comissaoFranqueadoraTotal = calcularComissaoFranquia({ gmv: gmvNum, pct: franqueadoraPct })
 
   // 3. Resolve apresentadoras da live (principal + live_apresentadoras)
   const apresentadorasQ = await db.query(

@@ -37,6 +37,7 @@ describe('POST /v1/lives — agenda link unificada', () => {
     const clienteId = '22222222-2222-4222-8222-222222222222'
     const liveId = '33333333-3333-4333-8333-333333333333'
     const agendaId = '44444444-4444-4444-8444-444444444444'
+    const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const previstoFim = '2026-05-20T22:00:00.000Z'
     let liveInsertArgs = null
 
@@ -58,6 +59,10 @@ describe('POST /v1/lives — agenda link unificada', () => {
         return { rows: [{ id: 'ct-1', cliente_id: clienteId, status: 'ativo' }] }
       }
       if (sql.includes('SELECT status FROM clientes')) return { rows: [{ status: 'ativo' }] }
+      // ensureClienteMarca: resolve existing marca for the cliente
+      if (sql.includes('FROM marcas') && sql.includes("AND tipo = 'cliente'")) {
+        return { rows: [{ id: marcaId, status: 'ativa' }] }
+      }
       if (sql.includes('UPDATE contratos SET tiktok_username')) return { rows: [] }
       if (sql.includes('INSERT INTO lives')) {
         liveInsertArgs = args

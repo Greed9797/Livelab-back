@@ -8,6 +8,7 @@ import { calcularComissaoApresentadora, isFimDeSemanaSP } from '../services/comi
 import { moneySchema } from '../lib/money.js'
 import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
+import { ensureClienteMarca } from '../services/client-brand.js'
 
 function parseIntegerMetric(value) {
   if (typeof value === 'number') return value
@@ -594,6 +595,19 @@ export async function livesRoutes(app) {
           resolvedMarcaId = marcaSistema.id
         }
         // ── fim fallback marca sistema ───────────────────────────────────────────
+
+        // ── Marca obrigatória: toda live tem marca (exige-ou-erra) ──
+        if (!resolvedMarcaId && resolvedTipo === 'cliente' && resolvedClienteId) {
+          resolvedMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: resolvedClienteId })
+        }
+        if (!resolvedMarcaId) {
+          await db.query('ROLLBACK')
+          return reply.code(422).send({
+            error: 'Live sem marca: cadastre/vincule a marca do cliente antes de iniciar a live',
+            code: 'MARCA_OBRIGATORIA',
+          })
+        }
+        // ── fim marca obrigatória ──
 
         if (hasTikTokUpdate) {
           await updateCanonicalTikTokUsername(db, {

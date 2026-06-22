@@ -35,18 +35,20 @@ describe('POST /v1/lives', () => {
     const cabineId = '11111111-1111-4111-8111-111111111111'
     const clienteId = '22222222-2222-4222-8222-222222222222'
     const liveId = '33333333-3333-4333-8333-333333333333'
+    const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })                                    // BEGIN
       .mockResolvedValueOnce({
         rows: [{ id: cabineId, numero: 1, status: 'disponivel', contrato_id: null, live_atual_id: null }],
-      })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })
-      .mockResolvedValueOnce({ rows: [] })
+      })                                                                       // SELECT cabines
+      .mockResolvedValueOnce({ rows: [] })                                    // SELECT agenda_eventos
+      .mockResolvedValueOnce({ rows: [] })                                    // SELECT contratos (auto-reserve)
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // SELECT clientes status
+      .mockResolvedValueOnce({ rows: [{ id: marcaId, status: 'ativa' }] })   // ensureClienteMarca: SELECT marcas
+      .mockResolvedValueOnce({ rows: [] })                                    // UPDATE clientes tiktok_username
       .mockResolvedValueOnce({
           rows: [{ id: liveId, cabine_id: cabineId, iniciado_em: '2026-05-15T18:00:00.000Z', cliente_id: clienteId, apresentador_id: null }],
-      })
+      })                                                                       // INSERT INTO lives
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -64,7 +66,7 @@ describe('POST /v1/lives', () => {
     expect(response.json()).toMatchObject({ id: liveId, cabine_id: cabineId, cliente_id: clienteId })
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo'),
-      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null, null],
+      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null, marcaId],
     )
   })
 

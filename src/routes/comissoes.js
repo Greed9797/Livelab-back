@@ -2,8 +2,25 @@ import { READ_COMISSOES } from '../config/role_groups.js'
 import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
+import { performance } from 'node:perf_hooks'
+import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
 
 const APROVADORES = ['franqueador_master', 'franqueado']
+
+const COMISSOES_CACHE_TTL_MS = Number(process.env.COMISSOES_CACHE_TTL_MS ?? 45_000)
+
+// Chave de cache derivada do range resolvido + todos os filtros que mudam o
+// resultado. range.{start,end} já normalizam data_inicio/data_fim/mes.
+function comissoesCacheKey(tenantId, range, query = {}, extra = {}) {
+  return buildCacheKey(tenantId, {
+    start: range.start,
+    end: range.end,
+    marca_id: query?.marca_id ?? null,
+    apresentadora_id: query?.apresentadora_id ?? null,
+    origem: query?.origem ?? null,
+    ...extra,
+  })
+}
 
 function buildComissaoFilters(query, tenantId) {
   const values = [tenantId]
@@ -116,6 +133,10 @@ export async function comissoesRoutes(app) {
         }
       }
 
+      // Recompôs comissões → invalida os dashboards cacheados (comissões/financeiro/analytics)
+      // deste tenant para refletir imediatamente, sem esperar o TTL.
+      invalidateTenant(tenant_id)
+
       return {
         lives_sem_comissao_encontradas: orfas.rows.length,
         recalculadas_com_comissao: recalculadas,
@@ -124,10 +145,15 @@ export async function comissoesRoutes(app) {
     })
   })
 
-  app.get('/v1/comissoes/resumo', { preHandler: readAccess }, async (request) => {
+  app.get('/v1/comissoes/resumo', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     const range = performanceRangeFromComissaoQuery(request.query)
-    return app.withTenant(tenant_id, async (db) => {
+    const startedAt = performance.now()
+    const { value, state } = await withCache({
+      namespace: 'comissoes:resumo',
+      key: comissoesCacheKey(tenant_id, range, request.query),
+      ttlMs: COMISSOES_CACHE_TTL_MS,
+      computeFn: () => app.withTenant(tenant_id, async (db) => {
       const rows = await getPerformanceRanking(db, {
         tenantId: tenant_id,
         range,
@@ -167,24 +193,35 @@ export async function comissoesRoutes(app) {
           registros: Number(row.registros ?? 0),
         },
       }
+      }),
     })
+    setCacheControl(reply, state, startedAt)
+    return value
   })
 
-  app.get('/v1/comissoes/apresentadoras', { preHandler: readAccess }, async (request) => {
+  app.get('/v1/comissoes/apresentadoras', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     const range = performanceRangeFromComissaoQuery(request.query)
     const limit = limitFromQuery(request.query, 100)
-    return app.withTenant(tenant_id, async (db) => {
-      return getPerformanceRanking(db, {
-        tenantId: tenant_id,
-        range,
-        limit,
-        groupBy: 'apresentadora',
-        marcaId: request.query?.marca_id ?? null,
-        apresentadoraId: request.query?.apresentadora_id ?? null,
-        origem: request.query?.origem ?? null,
-      })
+    const startedAt = performance.now()
+    const { value, state } = await withCache({
+      namespace: 'comissoes:apresentadoras',
+      key: comissoesCacheKey(tenant_id, range, request.query, { limit }),
+      ttlMs: COMISSOES_CACHE_TTL_MS,
+      computeFn: () => app.withTenant(tenant_id, async (db) => {
+        return getPerformanceRanking(db, {
+          tenantId: tenant_id,
+          range,
+          limit,
+          groupBy: 'apresentadora',
+          marcaId: request.query?.marca_id ?? null,
+          apresentadoraId: request.query?.apresentadora_id ?? null,
+          origem: request.query?.origem ?? null,
+        })
+      }),
     })
+    setCacheControl(reply, state, startedAt)
+    return value
   })
 
   app.get('/v1/ranking/apresentadoras', { preHandler: readAccess }, async (request) => {
@@ -224,21 +261,29 @@ export async function comissoesRoutes(app) {
     })
   })
 
-  app.get('/v1/comissoes/marcas', { preHandler: readAccess }, async (request) => {
+  app.get('/v1/comissoes/marcas', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     const range = performanceRangeFromComissaoQuery(request.query)
     const limit = limitFromQuery(request.query, 100)
-    return app.withTenant(tenant_id, async (db) => {
-      return getPerformanceRanking(db, {
-        tenantId: tenant_id,
-        range,
-        limit,
-        groupBy: 'marca',
-        marcaId: request.query?.marca_id ?? null,
-        apresentadoraId: request.query?.apresentadora_id ?? null,
-        origem: request.query?.origem ?? null,
-      })
+    const startedAt = performance.now()
+    const { value, state } = await withCache({
+      namespace: 'comissoes:marcas',
+      key: comissoesCacheKey(tenant_id, range, request.query, { limit }),
+      ttlMs: COMISSOES_CACHE_TTL_MS,
+      computeFn: () => app.withTenant(tenant_id, async (db) => {
+        return getPerformanceRanking(db, {
+          tenantId: tenant_id,
+          range,
+          limit,
+          groupBy: 'marca',
+          marcaId: request.query?.marca_id ?? null,
+          apresentadoraId: request.query?.apresentadora_id ?? null,
+          origem: request.query?.origem ?? null,
+        })
+      }),
     })
+    setCacheControl(reply, state, startedAt)
+    return value
   })
 
   // GET /v1/comissoes/pendentes — lista comissões aguardando aprovação
@@ -342,6 +387,9 @@ export async function comissoesRoutes(app) {
         metadata: { aprovado_por: sub, papel },
       })?.catch(err => app.log.error({ err }, 'audit log failed'))
 
+      // Aprovação muda quais vendas contam nos rankings → invalida o cache do tenant.
+      invalidateTenant(tenant_id)
+
       return result.rows[0]
     })
   })
@@ -383,6 +431,9 @@ export async function comissoesRoutes(app) {
         entity_id: request.params.id,
         metadata: { reprovado_por: sub, papel, motivo },
       })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+      // Reprovação remove a venda dos rankings (filtram 'reprovada') → invalida o cache.
+      invalidateTenant(tenant_id)
 
       return result.rows[0]
     })

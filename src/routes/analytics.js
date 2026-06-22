@@ -7,6 +7,11 @@ import {
 } from '../services/analytics-import.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { performance } from 'node:perf_hooks'
+import { withCache, buildCacheKey, setCacheControl } from '../lib/dashboard-cache.js'
+
+const ANALYTICS_DASHBOARD_CACHE_TTL_MS = Number(process.env.ANALYTICS_DASHBOARD_CACHE_TTL_MS ?? 60_000)
+const ANALYTICS_DIARIO_CACHE_TTL_MS = Number(process.env.ANALYTICS_DIARIO_CACHE_TTL_MS ?? 60_000)
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -513,8 +518,15 @@ export async function analyticsRoutes(app) {
     const params = cliente_id ? [fromDate, toDate, cliente_id] : [fromDate, toDate]
     const prevParams = cliente_id ? [prevFrom, prevTo, cliente_id] : [prevFrom, prevTo]
 
+    const startedAt = performance.now()
+    const cacheKey = buildCacheKey(tenant_id, { from: fromDate, to: toDate, cliente_id: cliente_id ?? null })
+
     try {
-      return await app.withTenant(tenant_id, async (db) => {
+      const { value, state } = await withCache({
+        namespace: 'analytics:dashboard',
+        key: cacheKey,
+        ttlMs: ANALYTICS_DASHBOARD_CACHE_TTL_MS,
+        computeFn: () => app.withTenant(tenant_id, async (db) => {
         const rankingRange = { start: fromDate, end: addDays(toDate, 1), mes: mesAno }
         const clienteSalesJoin = cliente_id
           ? 'JOIN marcas m_cliente ON m_cliente.id = va.marca_id AND m_cliente.tenant_id = va.tenant_id AND m_cliente.cliente_id = $3::uuid'
@@ -532,9 +544,13 @@ export async function analyticsRoutes(app) {
           AND va.data >= $1::date
           AND va.data <= $2::date
         `
+        // Sargável: range cru no timestamptz com semântica de dia em São Paulo
+        // IDÊNTICA ao cast ::date (dia inclusivo). Upper bound = dia seguinte
+        // (exclusivo) para preservar a inclusão de $2. Usa o índice btree em
+        // lives(tenant_id, status, iniciado_em) em vez de seq scan.
         const liveRange = `
-          AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
-          AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
+          AND l.iniciado_em >= ($1::date) AT TIME ZONE '${ANALYTICS_TZ}'
+          AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE '${ANALYTICS_TZ}'
         `
         const videoRange = `
           AND vr.data >= $1::date
@@ -591,8 +607,8 @@ export async function analyticsRoutes(app) {
               FROM lives l
               WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
                 AND l.status = 'encerrada'
-                AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
-                AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
+                AND l.iniciado_em >= ($1::date) AT TIME ZONE '${ANALYTICS_TZ}'
+                AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE '${ANALYTICS_TZ}'
                 ${clienteLiveFilter}
             ),
             video_sales AS (
@@ -952,7 +968,10 @@ export async function analyticsRoutes(app) {
             lives: toInt(row.lives),
           })),
         }
+        }),
       })
+      setCacheControl(reply, state, startedAt)
+      return value
     } catch (err) {
       request.log.error({ err }, 'analytics/dashboard error')
       return reply.code(500).send({ error: err.message })
@@ -1108,8 +1127,19 @@ export async function analyticsRoutes(app) {
     if (apresentadoraId && !UUID_RE.test(apresentadoraId)) return reply.code(400).send({ error: 'apresentadora_id must be a valid UUID' })
 
     const { fromDate, toDate, mesAno } = period
+    const startedAt = performance.now()
+    const cacheKey = buildCacheKey(tenant_id, {
+      from: fromDate,
+      to: toDate,
+      marca_id: marcaId,
+      apresentadora_id: apresentadoraId,
+    })
     try {
-      return await app.withTenant(tenant_id, async (db) => {
+      const { value, state } = await withCache({
+        namespace: 'analytics:diario',
+        key: cacheKey,
+        ttlMs: ANALYTICS_DIARIO_CACHE_TTL_MS,
+        computeFn: () => app.withTenant(tenant_id, async (db) => {
         const result = await db.query(`
           WITH live_base AS (
             SELECT
@@ -1140,8 +1170,8 @@ export async function analyticsRoutes(app) {
             ) ap_v2 ON true
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
-              AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
-              AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
+              AND l.iniciado_em >= ($1::date) AT TIME ZONE '${ANALYTICS_TZ}'
+              AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE '${ANALYTICS_TZ}'
               AND ($3::uuid IS NULL OR l.marca_id = $3::uuid)
               AND ($4::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $4::uuid)
           ),
@@ -1238,7 +1268,10 @@ export async function analyticsRoutes(app) {
             }
           }),
         }
+        }),
       })
+      setCacheControl(reply, state, startedAt)
+      return value
     } catch (err) {
       request.log.error({ err }, 'analytics/diario error')
       return reply.code(500).send({ error: err.message })

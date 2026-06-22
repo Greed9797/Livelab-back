@@ -30,6 +30,11 @@ async function authPlugin(app) {
   // no payload (JWT antigo emitido antes do deploy), trata como version 1
   // (compatibilidade durante rollout — JWTs anteriores expiram em 15min).
   async function _verifyTokenVersion(request, reply) {
+    // Dedup por request: rotas que empilham [authenticate, requirePapel(...)]
+    // chamariam este check 2× (1 SELECT token_version + 1 jwtVerify redundante
+    // cada). Após a 1ª verificação bem-sucedida na request, marcamos a flag e
+    // pulamos a 2ª — segurança idêntica (verifica exatamente 1× por request).
+    if (request._tokenVersionChecked) return
     const userId = request.user?.sub
     if (!userId) return // sem sub: outros checks vão recusar
     const jwtVersion = Number.isInteger(request.user?.token_version)
@@ -47,6 +52,9 @@ async function authPlugin(app) {
     } catch (err) {
       app.log.warn({ err }, 'token_version check falhou — permitindo (fail-open)')
     }
+    // Sucesso (ou fail-open): marca para que o 2º middleware da mesma request
+    // não repita o SELECT. Em caso de 401 acima já retornamos — a request morre.
+    request._tokenVersionChecked = true
   }
 
   // preHandler reutilizável: app.authenticate
@@ -57,6 +65,10 @@ async function authPlugin(app) {
       app.log.warn({ msg: err.message, code: err.code }, 'JWT verification failed')
       return reply.code(401).send({ error: 'Token inválido ou expirado' })
     }
+    // Marca o JWT como já verificado nesta request — permite que requirePapel,
+    // quando empilhado depois, pule o 2º jwtVerify redundante (segurança igual:
+    // o token já foi validado por jwtVerify aqui).
+    request._jwtVerified = true
     // Sentry breadcrumb — observabilidade sem PII (apenas user_id e papel)
     if (process.env.SENTRY_DSN) {
       try {
@@ -78,11 +90,16 @@ async function authPlugin(app) {
     const papeis = Array.isArray(requiredPapeis) ? requiredPapeis : [requiredPapeis]
 
     // S-04: SEMPRE valida JWT — nunca confia em request.user pré-existente
-    // (evita bypass se outro plugin popular request.user antes).
-    try {
-      await request.jwtVerify()
-    } catch {
-      return reply.code(401).send({ error: 'Não autenticado' })
+    // (evita bypass se outro plugin popular request.user antes). Exceção segura:
+    // se app.authenticate JÁ rodou jwtVerify nesta MESMA request (flag setada por
+    // nós, não pelo payload do JWT), o token já está provado — não revalidamos.
+    if (!request._jwtVerified) {
+      try {
+        await request.jwtVerify()
+      } catch {
+        return reply.code(401).send({ error: 'Não autenticado' })
+      }
+      request._jwtVerified = true
     }
 
     if (!papeis.includes(request.user.papel)) {

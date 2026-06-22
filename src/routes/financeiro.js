@@ -3,6 +3,10 @@ import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
 import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { marcaResolveLateralSql, MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
+import { performance } from 'node:perf_hooks'
+import { withCache, buildCacheKey, setCacheControl } from '../lib/dashboard-cache.js'
+
+const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
 
 const custoSchema = z.object({
   descricao:   z.string().min(1),
@@ -48,7 +52,7 @@ function resolveRange({ inicio, fim, mes, ano }) {
 export async function financeiroRoutes(app) {
   // GET /v1/financeiro/resumo?mes=&ano=  OR  ?inicio=YYYY-MM&fim=YYYY-MM
   // Query param opcional: ?scope=unidade|franqueadora  (só franqueador_master pode usar franqueadora)
-  app.get('/v1/financeiro/resumo', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
+  app.get('/v1/financeiro/resumo', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
     const { tenant_id, papel } = request.user
     const { startDate, endDate } = resolveRange(request.query)
 
@@ -57,7 +61,13 @@ export async function financeiroRoutes(app) {
     const isMaster = papel === 'franqueador_master'
     const visao = (isMaster && scopeParam === 'franqueadora') ? 'franqueadora' : 'unidade'
 
-    return app.withTenant(tenant_id, async (db) => {
+    const startedAt = performance.now()
+    const cacheKey = buildCacheKey(tenant_id, { start: startDate, end: endDate, visao })
+    const { value, state } = await withCache({
+      namespace: 'financeiro:resumo',
+      key: cacheKey,
+      ttlMs: FINANCEIRO_RESUMO_CACHE_TTL_MS,
+      computeFn: () => app.withTenant(tenant_id, async (db) => {
       // FONTE ÚNICA DA VERDADE: GMV/pedidos/comissão derivam de `lives` (cadastro do
       // franqueado em Conteúdo/Operacional) + `video_registros`. NÃO dependemos mais de
       // vendas_atribuidas (ponte condicional) — lives sem marca também entram aqui.
@@ -82,8 +92,8 @@ export async function financeiroRoutes(app) {
           ${marcaResolveLateralSql('$3')}
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
-            AND l.iniciado_em::date >= $1::date
-            AND l.iniciado_em::date <= $2::date
+            AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
+            AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
         ),
         video_periodo AS (
           SELECT
@@ -114,7 +124,8 @@ export async function financeiroRoutes(app) {
               SELECT l.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes
               FROM lives l
               WHERE l.tenant_id = $3::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
-                AND l.iniciado_em::date >= $1::date AND l.iniciado_em::date <= $2::date
+                AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
+                AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
                 AND (${liveGmvSql('l')} > 0 OR ${liveOrdersSql('l')} > 0)
               UNION
               SELECT vr.marca_id, date_trunc('month', vr.data::timestamp) AS mes
@@ -158,7 +169,10 @@ export async function financeiroRoutes(app) {
         inicio: startDate,
         fim: endDate,
       }
+      }),
     })
+    setCacheControl(reply, state, startedAt)
+    return value
   })
 
   // GET /v1/financeiro/franqueadora — apenas franqueador_master

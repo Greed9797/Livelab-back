@@ -118,8 +118,8 @@ export async function getPerformanceRanking(db, {
         ) live_commission ON true
         WHERE l.tenant_id = $1::uuid
           AND l.status = 'encerrada'
-          AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $2::date
-          AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date < $3::date
+          AND l.iniciado_em >= ($2::date) AT TIME ZONE '${ANALYTICS_TZ}'
+          AND l.iniciado_em < ($3::date) AT TIME ZONE '${ANALYTICS_TZ}'
           AND ($5::uuid IS NULL OR l.cliente_id = $5::uuid)
           AND ($6::uuid IS NULL OR l.marca_id = $6::uuid)
           AND ($7::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $7::uuid)
@@ -226,8 +226,8 @@ export async function getPerformanceRanking(db, {
       ) live_commission ON true
       WHERE l.tenant_id = $1::uuid
         AND l.status = 'encerrada'
-        AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $2::date
-        AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date < $3::date
+        AND l.iniciado_em >= ($2::date) AT TIME ZONE '${ANALYTICS_TZ}'
+        AND l.iniciado_em < ($3::date) AT TIME ZONE '${ANALYTICS_TZ}'
         AND ($5::uuid IS NULL OR l.cliente_id = $5::uuid)
         AND ($6::uuid IS NULL OR l.marca_id = $6::uuid)
         AND ($7::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $7::uuid)

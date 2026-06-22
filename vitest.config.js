@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.js'],
     exclude: ['e2e/**', 'node_modules/**', 'dist/**'],
+    setupFiles: ['./test/_setup.js'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'json-summary'],

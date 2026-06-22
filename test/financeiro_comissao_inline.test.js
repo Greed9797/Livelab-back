@@ -56,7 +56,8 @@ describe('financeiro — comissão de franquia calculada INLINE (não da coluna 
     expect(sql).not.toContain('comissao_calculada')
     // Deve calcular inline: gmv × pct da marca, resolvendo a marca como o engine.
     expect(sql).toContain('comissao_franquia_pct')
-    expect(sql).toContain("m.status = 'ativa'")
+    // Task 1: status nunca filtra dinheiro — o resolvedor compartilhado não tem m.status='ativa'
+    expect(sql).not.toContain("m.status = 'ativa'")
     expect(sql).toContain('m.cliente_id = l.cliente_id')
 
     // Período expande pro mês inteiro (já era assim) — sanity.
@@ -97,6 +98,21 @@ describe('financeiro — comissão de franquia calculada INLINE (não da coluna 
     expect(sql).not.toContain('comissao_calculada')
     expect(sql).toContain('comissao_franquia_pct')
     expect(sql).toContain('m.cliente_id = l.cliente_id')
+    await app.close()
+  })
+
+  it('resumo e faturamento NÃO filtram marca por status (status não apaga dinheiro)', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [{}] })
+    const { app } = buildApp({ queryMock: query })
+    await app.register(financeiroRoutes)
+
+    for (const url of ['/v1/financeiro/resumo?inicio=2026-06&fim=2026-06',
+                       '/v1/financeiro/faturamento?inicio=2026-06&fim=2026-06']) {
+      await app.inject({ method: 'GET', url })
+    }
+    for (const [sql] of query.mock.calls) {
+      expect(String(sql)).not.toContain("m.status = 'ativa'")
+    }
     await app.close()
   })
 })

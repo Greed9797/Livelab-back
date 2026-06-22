@@ -194,6 +194,17 @@ describe('commission engine', () => {
     expect(zerouComissaoCalculada).toBe(true)
   })
 
+  it('resolve marca independentemente do status (status não zera comissão)', async () => {
+    const calls = []
+    const db = { query: async (sql, params) => { calls.push(String(sql));
+      if (String(sql).includes('FROM lives l')) return { rows: [{ id: 'L', marca_id: 'M', comissao_franquia_pct: 10 }] }
+      return { rows: [] } } }
+    await calcularComissoesDaLive(db, { liveId: 'L', tenantId: 'T', gmv: 1000, pedidos: 1 }).catch(() => {})
+    const joinSql = calls.find(s => s.includes('LEFT JOIN marcas m'))
+    expect(joinSql).toBeTruthy()
+    expect(joinSql).not.toContain("m.status = 'ativa'")
+  })
+
   it('auto-cura: persiste marca_id na live quando estava sem marca (live_marca_id null)', async () => {
     const marcaUpdates = []
     const queryMock = vi.fn(async (sql, values) => {

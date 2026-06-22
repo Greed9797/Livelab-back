@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
 import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
+import { marcaResolveLateralSql, MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
 
 const custoSchema = z.object({
   descricao:   z.string().min(1),
@@ -78,17 +79,7 @@ export async function financeiroRoutes(app) {
             -- config), não mais um artefato de timing do motor de comissão.
             COALESCE(SUM(CASE WHEN ${liveGmvSql('l')} > 0 AND (mc.id IS NULL OR COALESCE(mc.comissao_franquia_pct, 0) = 0) THEN 1 ELSE 0 END), 0)::int AS comissao_faltante_count
           FROM lives l
-          LEFT JOIN LATERAL (
-            -- resolve UMA marca por live igual ao commission-engine: status ativa; marca direta
-            -- (l.marca_id) ou, sem marca_id, a marca-espelho do cliente; mais antiga primeiro.
-            SELECT m.id, m.comissao_franquia_pct
-            FROM marcas m
-            WHERE m.tenant_id = $3::uuid
-              AND m.status = 'ativa'
-              AND (m.id = l.marca_id OR (l.marca_id IS NULL AND m.cliente_id = l.cliente_id))
-            ORDER BY m.criado_em ASC
-            LIMIT 1
-          ) mc ON true
+          ${marcaResolveLateralSql('$3')}
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND l.iniciado_em::date >= $1::date
@@ -245,15 +236,7 @@ export async function financeiroRoutes(app) {
                  ${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0 AS comissao_franquia,
                  1 AS is_live, 0 AS is_video
           FROM lives l
-          LEFT JOIN LATERAL (
-            SELECT m.comissao_franquia_pct
-            FROM marcas m
-            WHERE m.tenant_id = $3::uuid
-              AND m.status = 'ativa'
-              AND (m.id = l.marca_id OR (l.marca_id IS NULL AND m.cliente_id = l.cliente_id))
-            ORDER BY m.criado_em ASC
-            LIMIT 1
-          ) mc ON true
+          ${marcaResolveLateralSql('$3')}
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND l.iniciado_em::date >= $1::date

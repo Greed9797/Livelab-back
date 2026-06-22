@@ -14,6 +14,7 @@
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { NIL_UUID, resolvePresenterCommissionPct } from './presenter-commission.js'
 import { calcularComissaoFranquia } from './comissao.js'
+import { MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
 
 /**
  * Calcula e persiste comissões para uma live encerrada.
@@ -47,8 +48,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
      LEFT JOIN cabines cab ON cab.id = l.cabine_id
      LEFT JOIN contratos c  ON c.id = cab.contrato_id AND c.status = 'ativo'
      LEFT JOIN marcas m     ON m.tenant_id = $1::uuid
-                            AND m.status = 'ativa'
-                            AND (m.id = l.marca_id OR (l.marca_id IS NULL AND m.cliente_id = l.cliente_id))
+                            AND ${MARCA_RESOLVE_PREDICATE}
      WHERE l.id = $2 AND l.tenant_id = $1::uuid
      ORDER BY m.criado_em ASC
      LIMIT 1`,

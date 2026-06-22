@@ -60,17 +60,35 @@ export async function financeiroRoutes(app) {
       // FONTE ÚNICA DA VERDADE: GMV/pedidos/comissão derivam de `lives` (cadastro do
       // franqueado em Conteúdo/Operacional) + `video_registros`. NÃO dependemos mais de
       // vendas_atribuidas (ponte condicional) — lives sem marca também entram aqui.
-      // receita_liquida = comissão de franquia já gravada por live (lives.comissao_calculada).
+      // receita_liquida = comissão de franquia VARIÁVEL calculada INLINE (gmv × pct da marca
+      // resolvida) + fixo mensal das marcas. NÃO depende mais da coluna pré-calculada
+      // lives.comissao_calculada (ficava 0 em lives recentes ainda não processadas pelo motor
+      // → Financeiro "parava" no meio do mês enquanto o GMV/Analytics mostravam o mês inteiro).
       const result = await db.query(`
         WITH live_periodo AS (
           SELECT
             COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_lives,
             COALESCE(SUM(${liveOrdersSql('l')}), 0)::int AS pedidos_lives,
             COUNT(*)::int AS total_lives,
-            COALESCE(SUM(l.comissao_calculada), 0) AS comissao_franquia_lives,
-            COALESCE(SUM(CASE WHEN COALESCE(l.comissao_calculada, 0) > 0 THEN 1 ELSE 0 END), 0)::int AS comissao_configurada,
-            COALESCE(SUM(CASE WHEN COALESCE(l.comissao_calculada, 0) = 0 THEN 1 ELSE 0 END), 0)::int AS comissao_faltante_count
+            -- comissão de franquia variável = gmv × pct da marca resolvida (MESMA regra de
+            -- comissao.js/commission-engine), calculada na hora — sem coluna estagnada.
+            COALESCE(SUM(${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0), 0) AS comissao_franquia_lives,
+            COALESCE(SUM(CASE WHEN mc.id IS NOT NULL AND COALESCE(mc.comissao_franquia_pct, 0) > 0 THEN 1 ELSE 0 END), 0)::int AS comissao_configurada,
+            -- "faltante" agora = live COM gmv mas SEM marca/pct resolvível (problema real de
+            -- config), não mais um artefato de timing do motor de comissão.
+            COALESCE(SUM(CASE WHEN ${liveGmvSql('l')} > 0 AND (mc.id IS NULL OR COALESCE(mc.comissao_franquia_pct, 0) = 0) THEN 1 ELSE 0 END), 0)::int AS comissao_faltante_count
           FROM lives l
+          LEFT JOIN LATERAL (
+            -- resolve UMA marca por live igual ao commission-engine: status ativa; marca direta
+            -- (l.marca_id) ou, sem marca_id, a marca-espelho do cliente; mais antiga primeiro.
+            SELECT m.id, m.comissao_franquia_pct
+            FROM marcas m
+            WHERE m.tenant_id = $3::uuid
+              AND m.status = 'ativa'
+              AND (m.id = l.marca_id OR (l.marca_id IS NULL AND m.cliente_id = l.cliente_id))
+            ORDER BY m.criado_em ASC
+            LIMIT 1
+          ) mc ON true
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND l.iniciado_em::date >= $1::date
@@ -127,7 +145,7 @@ export async function financeiroRoutes(app) {
 
       const r = result.rows[0]
       const fat_bruto = toNum(r.gmv_lives) + toNum(r.gmv_videos)
-      // receita_liquida = comissão variável por live (lives.comissao_calculada) + fixo mensal das marcas.
+      // receita_liquida = comissão variável inline (gmv × pct da marca resolvida) + fixo mensal das marcas.
       const receita_liquida = toNum(r.comissao_franquia_lives) + toNum(r.fixo_mensal_total)
       const fat_liquido = Math.max(0, receita_liquida - toNum(r.total_custos))
       return {
@@ -221,9 +239,21 @@ export async function financeiroRoutes(app) {
         WITH base AS (
           SELECT l.cliente_id, l.marca_id,
                  ${liveGmvSql('l')} AS gmv,
-                 COALESCE(l.comissao_calculada, 0) AS comissao_franquia,
+                 -- comissão de franquia inline (gmv × pct da marca resolvida), não da coluna
+                 -- pré-calculada/estagnada do motor — mantém o breakdown por cliente coerente
+                 -- com /resumo e com a aba Comissões.
+                 ${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0 AS comissao_franquia,
                  1 AS is_live, 0 AS is_video
           FROM lives l
+          LEFT JOIN LATERAL (
+            SELECT m.comissao_franquia_pct
+            FROM marcas m
+            WHERE m.tenant_id = $3::uuid
+              AND m.status = 'ativa'
+              AND (m.id = l.marca_id OR (l.marca_id IS NULL AND m.cliente_id = l.cliente_id))
+            ORDER BY m.criado_em ASC
+            LIMIT 1
+          ) mc ON true
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND l.iniciado_em::date >= $1::date

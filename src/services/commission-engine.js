@@ -57,24 +57,9 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
   const live = liveQ.rows[0]
   if (!live) return []
   if (!live.marca_id) {
-    // P1-2: marca não resolvida → comissão não pode ser calculada. Em vez de falhar
-    // calado, zera lives.comissao_calculada para que a live apareça como "comissão
-    // faltante" (gmv>0 e comissao_calculada=0) no Financeiro e na UI.
-    await db.query(
-      `UPDATE lives SET comissao_calculada = 0 WHERE id = $1 AND tenant_id = $2::uuid`,
-      [liveId, tenantId],
-    ).catch(() => {})
-    return []
-  }
-
-  // Auto-cura: se a live estava sem marca_id mas a marca foi resolvida (via cliente),
-  // persiste na live para que GMV (lido de lives.marca_id) e comissão (vendas_atribuidas)
-  // fiquem na MESMA marca nas telas por-marca. Sem isto, a live cairia no balde "Sem marca".
-  if (!live.live_marca_id) {
-    await db.query(
-      `UPDATE lives SET marca_id = $1 WHERE id = $2 AND tenant_id = $3::uuid AND marca_id IS NULL`,
-      [live.marca_id, liveId, tenantId],
-    ).catch(() => {})
+    // Invariante pós-117: toda live tem marca. Se chegou aqui sem marca, é erro real
+    // (não zerar em silêncio) — vira erro observável no log/limite.
+    throw new Error(`comissao: live ${liveId} sem marca resolvível (tenant ${tenantId})`)
   }
 
   const gmvNum = Number(gmv ?? 0)

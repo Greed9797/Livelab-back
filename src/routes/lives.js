@@ -672,50 +672,35 @@ export async function livesRoutes(app) {
 
         // ── Evento automático de agenda (se nenhum evento foi encontrado/vinculado) ──
         // Executado dentro da transação; falha é soft (nunca bloqueia a live).
+        // Marca é invariante (NOT NULL) — usa resolvedMarcaId diretamente.
         let finalAgendaEventoId = resolvedAgendaEventoId
         if (!resolvedAgendaEventoId && !agendaWarning) {
           try {
-            // Usa marca já resolvida do payload; fallback busca por cliente.
-            let marcaId = resolvedMarcaId ?? null
-            if (!marcaId && resolvedClienteId) {
-              const marcaQ = await db.query(
-                `SELECT id FROM marcas
-                 WHERE tenant_id = $1::uuid AND cliente_id = $2::uuid AND status = 'ativa'
-                 ORDER BY criado_em ASC LIMIT 1`,
-                [tenant_id, resolvedClienteId]
+            const marcaId = resolvedMarcaId
+            // previsto_fim informado pelo operador toma precedência; fallback de 4h só se nada foi enviado.
+            const dataFimSql = resolvedPrevistoFim ? '$6::timestamptz' : "NOW() + interval '4 hours'"
+            const params = resolvedPrevistoFim
+              ? [tenant_id, cabine_id, marcaId, sub, live.id, resolvedPrevistoFim]
+              : [tenant_id, cabine_id, marcaId, sub, live.id]
+            const autoEvQ = await db.query(
+              `INSERT INTO agenda_eventos
+                 (tenant_id, cabine_id, tipo, status, marca_id, data_inicio, data_fim, observacoes, criado_por, live_id)
+               VALUES ($1, $2, 'live', 'ao_vivo', $3, NOW(), ${dataFimSql},
+                       'Live iniciada sem agenda', $4, $5)
+               RETURNING id`,
+              params
+            )
+            finalAgendaEventoId = autoEvQ.rows[0]?.id ?? null
+            // Persiste vínculo na live recém-criada
+            if (finalAgendaEventoId) {
+              await db.query(
+                `UPDATE lives
+                 SET agenda_evento_id = $1
+                 WHERE id = $2 AND tenant_id = $3::uuid`,
+                [finalAgendaEventoId, live.id, tenant_id]
               )
-              marcaId = marcaQ.rows[0]?.id ?? null
             }
-
-            if (marcaId) {
-              // previsto_fim informado pelo operador toma precedência; fallback de 4h só se nada foi enviado.
-              const dataFimSql = resolvedPrevistoFim ? '$6::timestamptz' : "NOW() + interval '4 hours'"
-              const params = resolvedPrevistoFim
-                ? [tenant_id, cabine_id, marcaId, sub, live.id, resolvedPrevistoFim]
-                : [tenant_id, cabine_id, marcaId, sub, live.id]
-              const autoEvQ = await db.query(
-                `INSERT INTO agenda_eventos
-                   (tenant_id, cabine_id, tipo, status, marca_id, data_inicio, data_fim, observacoes, criado_por, live_id)
-                 VALUES ($1, $2, 'live', 'ao_vivo', $3, NOW(), ${dataFimSql},
-                         'Live iniciada sem agenda', $4, $5)
-                 RETURNING id`,
-                params
-              )
-              finalAgendaEventoId = autoEvQ.rows[0]?.id ?? null
-              // Persiste vínculo na live recém-criada
-              if (finalAgendaEventoId) {
-                await db.query(
-                  `UPDATE lives
-                   SET agenda_evento_id = $1,
-                       marca_id = COALESCE(marca_id, $4::uuid)
-                   WHERE id = $2 AND tenant_id = $3::uuid`,
-                  [finalAgendaEventoId, live.id, tenant_id, marcaId]
-                )
-              }
-              app.log.info({ liveId: live.id, agendaEventoId: finalAgendaEventoId }, 'agenda: evento automático criado')
-            } else {
-              app.log.info({ liveId: live.id, resolvedClienteId }, 'agenda: sem marca_id disponível, evento automático omitido')
-            }
+            app.log.info({ liveId: live.id, agendaEventoId: finalAgendaEventoId }, 'agenda: evento automático criado')
           } catch (autoEvErr) {
             // Falha no evento automático nunca bloqueia a live
             app.log.warn({ err: autoEvErr, liveId: live.id }, 'agenda: falha ao criar evento automático (soft)')
@@ -959,28 +944,6 @@ export async function livesRoutes(app) {
              VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
             [tenant_id, liveId, apresentador2UserId]
           )
-        }
-
-        if (!resolvedMarcaId && resolvedClienteId) {
-          const marcaQ = await db.query(
-            `SELECT id
-             FROM marcas
-             WHERE tenant_id = $1::uuid
-               AND cliente_id = $2::uuid
-               AND status = 'ativa'
-             ORDER BY criado_em ASC
-             LIMIT 1`,
-            [tenant_id, resolvedClienteId],
-          )
-          resolvedMarcaId = marcaQ.rows[0]?.id ?? null
-          if (resolvedMarcaId) {
-            await db.query(
-              `UPDATE lives
-               SET marca_id = $1
-               WHERE id = $2 AND tenant_id = $3::uuid AND marca_id IS NULL`,
-              [resolvedMarcaId, liveId, tenant_id],
-            )
-          }
         }
 
         if (resolvedMarcaId) {

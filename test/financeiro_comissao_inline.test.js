@@ -58,7 +58,8 @@ describe('financeiro — comissão de franquia calculada INLINE (não da coluna 
     expect(sql).toContain('comissao_franquia_pct')
     // Task 1: status nunca filtra dinheiro — o resolvedor compartilhado não tem m.status='ativa'
     expect(sql).not.toContain("m.status = 'ativa'")
-    expect(sql).toContain('m.cliente_id = l.cliente_id')
+    // Task 6: predicado simplificado — marca_id NOT NULL, braço cliente_id IS NULL morto
+    expect(sql).toContain('m.id = l.marca_id')
 
     // Período expande pro mês inteiro (já era assim) — sanity.
     expect(call[1]).toContain('2026-06-01')
@@ -97,7 +98,8 @@ describe('financeiro — comissão de franquia calculada INLINE (não da coluna 
     const sql = String(call[0])
     expect(sql).not.toContain('comissao_calculada')
     expect(sql).toContain('comissao_franquia_pct')
-    expect(sql).toContain('m.cliente_id = l.cliente_id')
+    // Task 6: predicado simplificado — marca_id NOT NULL, braço cliente_id IS NULL morto
+    expect(sql).toContain('m.id = l.marca_id')
     await app.close()
   })
 

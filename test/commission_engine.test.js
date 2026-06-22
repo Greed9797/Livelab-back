@@ -173,25 +173,10 @@ describe('commission engine', () => {
     expect(comissaoCalculadaPersistida).toBe(200)
   })
 
-  it('marca não resolvida → retorna [] e zera lives.comissao_calculada (faltante visível)', async () => {
-    let zerouComissaoCalculada = false
-    const queryMock = vi.fn(async (sql, values) => {
-      if (sql.includes('FROM lives l')) {
-        return { rows: [{ id: 'live-x', cliente_id: null, live_marca_id: null, marca_id: null }] }
-      }
-      if (sql.includes('UPDATE lives SET comissao_calculada = 0')) {
-        zerouComissaoCalculada = true
-        return { rows: [] }
-      }
-      return { rows: [] }
-    })
-
-    const r = await calcularComissoesDaLive({ query: queryMock }, {
-      tenantId: 'tenant-1', liveId: 'live-x', gmv: 1000, pedidos: 5,
-    })
-
-    expect(r).toEqual([])
-    expect(zerouComissaoCalculada).toBe(true)
+  it('lança erro (não zera silenciosamente) quando a live não resolve marca', async () => {
+    const db = { query: async (sql) => String(sql).includes('FROM lives l') ? { rows: [{ id: 'L', marca_id: null }] } : { rows: [] } }
+    await expect(calcularComissoesDaLive(db, { liveId: 'L', tenantId: 'T', gmv: 1000 }))
+      .rejects.toThrow(/marca/i)
   })
 
   it('resolve marca independentemente do status (status não zera comissão)', async () => {
@@ -205,7 +190,7 @@ describe('commission engine', () => {
     expect(joinSql).not.toContain("m.status = 'ativa'")
   })
 
-  it('auto-cura: persiste marca_id na live quando estava sem marca (live_marca_id null)', async () => {
+  it('não persiste auto-heal de marca_id (bloco removido: marca é NOT NULL por invariante)', async () => {
     const marcaUpdates = []
     const queryMock = vi.fn(async (sql, values) => {
       if (sql.includes('FROM lives l')) {
@@ -213,7 +198,7 @@ describe('commission engine', () => {
           rows: [{
             id: 'live-9',
             cliente_id: 'cliente-1',
-            live_marca_id: null,
+            live_marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
             apresentador_id: 'user-1',
             iniciado_em: '2026-05-20T18:00:00.000Z',
             comissao_pct: '10',
@@ -241,8 +226,7 @@ describe('commission engine', () => {
       tenantId: 'tenant-1', liveId: 'live-9', gmv: 1000,
     })
 
-    // Deve persistir a marca resolvida na live (id da marca, liveId, tenantId).
-    expect(marcaUpdates).toHaveLength(1)
-    expect(marcaUpdates[0]).toEqual(['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'live-9', 'tenant-1'])
+    // Auto-heal removido: o engine não deve mais emitir UPDATE lives SET marca_id.
+    expect(marcaUpdates).toHaveLength(0)
   })
 })

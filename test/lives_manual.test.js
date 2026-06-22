@@ -122,7 +122,8 @@ describe('POST /v1/lives/manual', () => {
     const liveId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })                                   // BEGIN
-      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status
+      .mockResolvedValueOnce({ rows: [{ id: 'marca-id-1', status: 'ativa' }] }) // ensureClienteMarca: SELECT marcas tipo='cliente'
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status (inadimplência)
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '10' }] })            // cabine/contrato
       .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })          // apresentadoras lookup ap1 (user_id + comissao_pct)
       .mockResolvedValueOnce({ rows: [{ id: liveId }] })                    // INSERT lives
@@ -147,7 +148,8 @@ describe('POST /v1/lives/manual', () => {
     let insertArgs = null
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })                                   // BEGIN
-      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status
+      .mockResolvedValueOnce({ rows: [{ id: 'marca-id-1', status: 'ativa' }] }) // ensureClienteMarca: SELECT marcas tipo='cliente'
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status (inadimplência)
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '20' }] })            // cabine/contrato
       .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })          // apresentadoras lookup ap1
       .mockImplementationOnce((sql, args) => { insertArgs = args; return { rows: [{ id: 'id-1' }] } }) // INSERT lives
@@ -172,7 +174,8 @@ describe('POST /v1/lives/manual', () => {
     let insertArgs = null
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })                                   // BEGIN
-      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status
+      .mockResolvedValueOnce({ rows: [{ id: 'marca-id-1', status: 'ativa' }] }) // ensureClienteMarca: SELECT marcas tipo='cliente'
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status (inadimplência)
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '10' }] })            // cabine/contrato
       .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })          // apresentadoras lookup ap1
       .mockImplementationOnce((sql, args) => { insertArgs = args; return { rows: [{ id: 'id-1' }] } }) // INSERT lives
@@ -196,7 +199,8 @@ describe('POST /v1/lives/manual', () => {
     let insertArgs = null
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })                                   // BEGIN
-      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status
+      .mockResolvedValueOnce({ rows: [{ id: 'marca-id-1', status: 'ativa' }] }) // ensureClienteMarca: SELECT marcas tipo='cliente'
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status (inadimplência)
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '10' }] })            // cabine/contrato
       .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })          // apresentadoras lookup ap1
       .mockImplementationOnce((sql, args) => { insertArgs = args; return { rows: [{ id: 'id-1' }] } }) // INSERT lives
@@ -230,7 +234,8 @@ describe('POST /v1/lives/manual', () => {
     let insertArgs = null
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })                                   // BEGIN
-      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status
+      .mockResolvedValueOnce({ rows: [{ id: 'marca-id-1', status: 'ativa' }] }) // ensureClienteMarca: SELECT marcas tipo='cliente'
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status (inadimplência)
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '0' }] })             // cabine/contrato
       .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })          // apresentadoras lookup ap1
       .mockImplementationOnce((sql, args) => { insertArgs = args; return { rows: [{ id: 'id-counters' }] } }) // INSERT lives
@@ -374,7 +379,8 @@ describe('POST /v1/lives/manual', () => {
     const ap2UserId = '66666666-6666-4666-8666-666666666666'
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [] })                               // BEGIN
-      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })            // cliente status
+      .mockResolvedValueOnce({ rows: [{ id: 'marca-id-1', status: 'ativa' }] }) // ensureClienteMarca: SELECT marcas tipo='cliente'
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })            // cliente status (inadimplência)
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '0' }] })         // cabine/contrato
       .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })      // ap1 lookup (user_id + comissao_pct)
       .mockResolvedValueOnce({ rows: [{ user_id: ap2UserId }] })         // ap2 lookup
@@ -403,6 +409,7 @@ describe('POST /v1/lives/manual', () => {
     let insertArgs = null
     const queryMock = vi.fn(async (sql, args = []) => {
       if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (sql.includes('FROM marcas')) return { rows: [{ id: 'marca-id-1', status: 'ativa' }] } // ensureClienteMarca
       if (sql.includes('FROM clientes')) return { rows: [{ status: 'ativo' }] }
       if (sql.includes('FROM cabines')) return { rows: [{ comissao_pct: '0' }] }
       if (sql.includes('SELECT user_id FROM apresentadoras')) return { rows: [{ user_id: 'user-ap-1' }] }

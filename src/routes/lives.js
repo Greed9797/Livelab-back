@@ -835,6 +835,19 @@ export async function livesRoutes(app) {
           })
         }
 
+        // ── Marca obrigatória (exige-ou-erra) ──
+        if (!resolvedMarcaId && d.tipo === 'cliente' && resolvedClienteId) {
+          resolvedMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: resolvedClienteId })
+        }
+        if (!resolvedMarcaId) {
+          await db.query('ROLLBACK')
+          return reply.code(422).send({
+            error: 'Live sem marca: cadastre/vincule a marca do cliente antes de registrar a live',
+            code: 'MARCA_OBRIGATORIA',
+          })
+        }
+        // ── fim marca obrigatória ──
+
         // Bloqueio de inadimplência — apenas para tipo 'cliente'
         if (d.tipo === 'cliente' && resolvedClienteId) {
           const clienteQ = await db.query(

@@ -34,6 +34,61 @@ function buildApp({ queryMock, papel = 'franqueado' } = {}) {
 const cabineId = '11111111-1111-4111-8111-111111111111'
 const clienteId = '22222222-2222-4222-8222-222222222222'
 
+const cabineManualId = '11111111-1111-4111-8111-111111111111'
+const clienteManualId = '22222222-2222-4222-8222-222222222222'
+
+describe('Marca obrigatória — POST /v1/lives/manual', () => {
+  it('POST /v1/lives/manual (cliente) sem marca resolvível responde 422 MARCA_OBRIGATORIA', async () => {
+    // Query sequence for tipo='cliente' with clienteId but NO resolvable marca:
+    // 1. BEGIN
+    // 2. (no marca_id provided, skips marca lookup)
+    // 3. (tipo='cliente', not afiliado/teste, skips marca-sistema fallback)
+    // 4. (resolvedClienteId is set, skips CLIENTE_REQUIRED)
+    // 5. After implementation: ensureClienteMarca's marca lookup → rows: []
+    // 6. After implementation: ensureClienteMarca's client lookup → rows: [] (returns null)
+    // → ROLLBACK + 422 MARCA_OBRIGATORIA
+    const queryMock = vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'ROLLBACK' || sql === 'COMMIT') return { rows: [] }
+      // Inadimplência check
+      if (sql.includes('FROM clientes') && sql.includes('SELECT status')) {
+        return { rows: [{ status: 'ativo' }] }
+      }
+      // All marca lookups (ensureClienteMarca) → empty (no marca resolvível)
+      if (sql.includes('FROM marcas')) return { rows: [] }
+      // Client lookup inside ensureClienteMarca → empty (returns null)
+      if (sql.includes('FROM clientes')) return { rows: [] }
+      // cabine/contrato fallback
+      if (sql.includes('FROM cabines')) return { rows: [{ comissao_pct: '10' }] }
+      // apresentadoras
+      if (sql.includes('FROM apresentadoras')) return { rows: [{ user_id: 'user-ap-1' }] }
+      return { rows: [] }
+    })
+
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/lives/manual',
+      payload: {
+        cabine_id:   cabineManualId,
+        cliente_id:  clienteManualId,
+        tipo:        'cliente',
+        data:        '2026-06-10',
+        hora_inicio: '10:00',
+        hora_fim:    '11:00',
+        fat_gerado:  1000,
+        qtd_pedidos: 1,
+      },
+    })
+
+    expect(res.statusCode).toBe(422)
+    expect(res.json().code).toBe('MARCA_OBRIGATORIA')
+
+    await app.close()
+  })
+})
+
 describe('Marca obrigatória — POST /v1/lives', () => {
   it('POST /v1/lives (cliente) sem marca resolvível responde 422 MARCA_OBRIGATORIA', async () => {
     // Query sequence for tipo='cliente' with clienteId but NO resolvable marca:

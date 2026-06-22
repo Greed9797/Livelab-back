@@ -1,7 +1,10 @@
 import Fastify from 'fastify'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { homeRoutes } from '../src/routes/home.js'
+
+// Qualquer teste que congele o relógio (fake timers) deve restaurar depois.
+afterEach(() => { vi.useRealTimers() })
 
 // ── Helpers para os testes de GMV intradia ────────────────────────────────────
 
@@ -356,7 +359,11 @@ describe('home dashboard', () => {
   })
 
   it('gmv_intraday: hora 8 (passada) tem v preenchido; hora 23 respeitado', async () => {
-    // hora 8 é sempre passada (execução ocorre depois das 0h).
+    // Determinístico: fixa o relógio às 18h locais → hora 8 sempre passada e
+    // hora 23 futura, removendo a flakiness de hora-do-dia (home.js usa
+    // agora.getHours(), que no CI em UTC de madrugada tornava a hora 8 "futura").
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(2026, 5, 22, 18, 0, 0))
     // hora 23 pode ser futura ou passada: testamos apenas o tipo.
     const mock = vi.fn(async (sql) => {
       if (sql.includes('hoje_sp') && sql.includes('prev_day')) {

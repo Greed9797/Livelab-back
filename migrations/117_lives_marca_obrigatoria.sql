@@ -52,7 +52,8 @@ BEGIN
     JOIN information_schema.referential_constraints rc
       ON rc.constraint_name = tc.constraint_name
       AND rc.constraint_schema = tc.table_schema
-   WHERE tc.table_name      = 'lives'
+   WHERE tc.table_schema    = 'public'
+     AND tc.table_name      = 'lives'
      AND tc.constraint_type = 'FOREIGN KEY'
      AND kcu.column_name    = 'marca_id'
      AND rc.delete_rule     = 'SET NULL'

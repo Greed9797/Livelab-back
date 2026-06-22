@@ -24,3 +24,6 @@ graphify-out/
 # Sessões IA / contexto interno
 PROMPT_*.md
 .claude/
+
+# SDD scratch (ledger, reports, review packages)
+.superpowers/

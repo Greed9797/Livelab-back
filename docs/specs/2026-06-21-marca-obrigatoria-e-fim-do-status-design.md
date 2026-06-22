@@ -54,7 +54,7 @@ Com `marca_id` garantido não-nulo, **apagar** o código que só existia pra com
 
 ### 4.5 Reprocessar tudo (histórico)
 - Job/migration recalcula `vendas_atribuidas` + `lives.comissao_calculada` de **todas** as lives finalizadas sob as regras novas. Comissões e Financeiro passam a refletir o histórico correto.
-- **Ressalva (a confirmar — ver §6):** boletos **já emitidos** (`faturado_em` setado) **NÃO são re-emitidos**. O recálculo atualiza dados/relatório; diferenças em períodos já cobrados ficam visíveis pra ajuste manual. Re-emitir cobrança a cliente não é feito no automático.
+- **Boletos:** não há boletos emitidos em produção ainda (`billing_engine`/`faturado_em` é código **inerte**). Logo o reprocessamento é **livre** — sem risco de re-cobrança. `faturado_em` permanece como está (não usado).
 
 ---
 
@@ -86,7 +86,7 @@ Trocar o enum por sinais que já existem (coordenado com as mesmas queries de di
 ---
 
 ## 6. O que NÃO muda
-- `lives.faturado_em` — carimbo de cobrança ("finalizado" é isso, não um status). Mantido.
+- `lives.faturado_em` / `billing_engine` — carimbo de cobrança ("finalizado" é isso, não um status). **Inerte** (boletos não estão em uso ainda). Mantido como está.
 - `marcas.status` — mantido como sinal operacional/UI (sem poder sobre dinheiro).
 - `status_publicacao` (rascunho/revisado/publicado) — mantido (escopo focado).
 - `contratos.status`, `clientes.status` — gates **loud** (já erram), fora de escopo.
@@ -102,16 +102,16 @@ Trocar o enum por sinais que já existem (coordenado com as mesmas queries de di
 1. `marca_id NOT NULL` falha se sobrar nulo → backfill + pré-check antes (§4.2).
 2. Remover o gate `status='ativa'` **muda números históricos** (reativa comissão de clientes cancelados) — decisão já tomada (reprocessar tudo); aval é do dono.
 3. FK `ON DELETE RESTRICT`: marca com lives não pode ser hard-deletada (o endpoint já é soft-delete, então sem conflito).
-4. Reprocessar não deve re-emitir boletos já emitidos (§4.5 / §6 open question).
+4. ~~Reprocessar não deve re-emitir boletos~~ — **N/A**: não há boletos emitidos (billing inerte), reprocessamento é livre.
 5. Marca-sistema precisa existir em **todo** tenant (migration 104) antes de exigir marca, senão afiliado/teste erram na criação.
 6. Os 3+ resolvedores de comissão duplicados (motor + financeiro x2 + chaveamento do fixo) mudam **juntos** — divergência re-introduz erro silencioso. (Considerar extrair pra um único helper SQL — ver §10.)
 7. Fase 2 toca ~todos os rollups + front/portais; mudança coordenada back+front.
 8. Remover `status` exige garantir `encerrado_em` em 100% das finalizadas (backfill) — senão finalizada vira "em andamento".
 
-## 9. Questões em aberto (bater o martelo na revisão)
-1. **Boletos já emitidos:** confirmar que o reprocessamento **não** re-emite cobranças (só recalcula dados). [proposto: confirmado]
-2. **Lives que não resolverem marca no backfill** (sem cliente e sem marca): apagar, atribuir marca-sistema, ou listar pra correção manual? [proposto: listar pra correção manual; não apagar]
-3. **Remoção das `cancelada` antigas:** confirmar hard-delete dessas linhas (não contam em dinheiro hoje; remoção é financeiramente neutra). [proposto: confirmado]
+## 9. Decisões resolvidas
+1. **Boletos:** ✅ não existem boletos em prod (billing inerte) → reprocessamento livre, sem re-cobrança.
+2. **Lives órfãs no backfill** (sem cliente e sem marca): ✅ **listar pra correção manual** (migration falha de forma controlada listando-as; não apaga, não inventa marca).
+3. **Linhas `cancelada` antigas:** ✅ **hard-delete** no backfill da Fase 2 (financeiramente neutro — nunca contaram).
 
 ## 10. Oportunidade (fora do escopo imediato, mas recomendado)
 Extrair a resolução de marca + cálculo de comissão de franquia para **um único helper** (SQL/JS) reusado por motor, financeiro (resumo + faturamento) e rollups — elimina a duplicação que causa drift (risco #6). Pode entrar como passo da Fase 1.

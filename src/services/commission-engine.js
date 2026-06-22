@@ -159,7 +159,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
           gmv, pedidos, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
           status_aprovacao)
        VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,$9,$10,'pendente_aprovacao')
-       ON CONFLICT ON CONSTRAINT idx_vendas_atribuidas_origem_unique
+       ON CONFLICT (tenant_id, origem, origem_id, COALESCE(apresentadora_id, '00000000-0000-0000-0000-000000000000'::uuid))
        DO UPDATE SET
            marca_id               = EXCLUDED.marca_id,
            data                   = EXCLUDED.data,

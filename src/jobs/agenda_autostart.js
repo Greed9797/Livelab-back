@@ -136,6 +136,13 @@ async function startOneEvent(app, ev) {
       clienteId = mQ.rows[0]?.cliente_id ?? null
     }
 
+    if (!locked.marca_id) {
+      await client.query('ROLLBACK')
+      app.log?.warn?.({ agenda_evento_id: ev.id, cabine_id: cab.id },
+        '[agenda autostart] evento de live sem marca — live NÃO criada (marca obrigatória)')
+      return { skipped: true, reason: 'sem_marca' }
+    }
+
     let apresentadorUserId = null
     if (locked.apresentadora_id) {
       const apQ = await client.query(

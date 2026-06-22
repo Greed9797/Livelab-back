@@ -137,6 +137,45 @@ describe('agenda_autostart job', () => {
     expect(insertCall).toBeFalsy()
   })
 
+  it('não cria live quando o evento não tem marca (skip + log)', async () => {
+    const candidate = {
+      id: eventId,
+      tenant_id: tenantId,
+      cabine_id: cabineId,
+      data_inicio: new Date(Date.now() - 5 * 60_000).toISOString(),
+      data_fim: new Date(Date.now() + 60_000).toISOString(),
+      minutos_atraso: 5,
+    }
+    const clientQuery = vi.fn(async (sql) => {
+      const s = String(sql)
+      if (s.includes('SELECT id, live_id') && s.includes('FOR UPDATE')) {
+        return {
+          rows: [{
+            id: eventId,
+            live_id: null,
+            cabine_id: cabineId,
+            marca_id: null,
+            apresentadora_id: null,
+            data_fim: candidate.data_fim,
+          }],
+        }
+      }
+      if (s.includes('FROM cabines') && s.includes('FOR UPDATE')) {
+        return { rows: [{ id: cabineId, status: 'disponivel', ativo: true, live_atual_id: null, contrato_id: null }] }
+      }
+      return { rows: [] }
+    })
+    const app = makeApp({ candidates: [candidate], clientQueryMock: clientQuery })
+    const result = await runAgendaAutostartTick(app)
+
+    const insertCall = clientQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO lives')
+    )
+    expect(insertCall).toBeFalsy()
+    expect(result.started).toBe(0)
+    expect(result.skipped).toBeGreaterThanOrEqual(1)
+  })
+
   it('pula quando live_id já está preenchido (race com manual start)', async () => {
     const candidate = {
       id: eventId,

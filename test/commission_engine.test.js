@@ -65,6 +65,13 @@ describe('commission engine', () => {
     expect(insertedRows).toEqual([
       { apresentadora_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', gmv: 1000, comissao_apresentadora: 10 },
     ])
+
+    // Retro-lift do cliff: após gravar a venda, o engine recalcula o MÊS da venda
+    // da apresentadora (vendas anteriores podem subir de faixa com o GMV novo).
+    const retroLift = queryMock.mock.calls.find(([sql]) =>
+      sql.includes("= 'pendente_aprovacao'") && sql.includes("date_trunc('month', $3::date)"))
+    expect(retroLift).toBeTruthy()
+    expect(retroLift[1]).toContain('2026-05-01')
   })
 
   it('splits weekend live GMV and presenter commission across two presenters', async () => {

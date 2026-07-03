@@ -15,6 +15,7 @@ import { saoPauloDateInput } from '../lib/timezone.js'
 import { NIL_UUID, resolvePresenterCommissionPct } from './presenter-commission.js'
 import { calcularComissaoFranquia } from './comissao.js'
 import { MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
+import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
 
 /**
  * Calcula e persiste comissões para uma live encerrada.
@@ -209,6 +210,27 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
     `UPDATE lives SET comissao_calculada = $1 WHERE id = $2 AND tenant_id = $3::uuid`,
     [comissaoFranquiaPersistida, liveId, tenantId],
   )
+
+  // 6. Retro-lift do cliff: a escada usa o GMV MENSAL acumulado, então esta venda
+  //    pode ter empurrado a apresentadora para uma faixa maior — e as vendas
+  //    anteriores do mês (gravadas quando o GMV era menor) ficariam presas no %
+  //    antigo. Recalcula o mês da venda para cada apresentadora afetada (só
+  //    pendentes; aprovadas intocadas). Mesmas fórmulas dos dois caminhos
+  //    (resolvePresenterCommissionPct + gmv*pct de franquia) → idempotente.
+  //    Falha aqui não pode derrubar a escrita da venda (nem a transação do cron):
+  //    o botão "Fechamento do mês" corrige depois.
+  const mesDaVenda = typeof data === 'string' ? data.slice(0, 7) : null
+  for (const apresentadoraId of new Set(resultados.map((r) => r?.apresentadora_id).filter(Boolean))) {
+    try {
+      await recalcularVendasAtribuidasApresentadora(db, {
+        tenantId,
+        apresentadoraId,
+        ...(mesDaVenda ? { mesReferencia: mesDaVenda } : {}),
+      })
+    } catch (err) {
+      console.warn(`comissao: retro-lift do mes falhou (apresentadora ${apresentadoraId}, live ${liveId}):`, err?.message ?? err)
+    }
+  }
 
   return resultados
 }

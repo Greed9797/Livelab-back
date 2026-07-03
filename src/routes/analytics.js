@@ -1210,6 +1210,25 @@ export async function analyticsRoutes(app) {
               AND ($3::uuid IS NULL OR va.marca_id = $3::uuid)
               AND ($4::uuid IS NULL OR va.apresentadora_id = $4::uuid)
             GROUP BY va.data::date, va.marca_id, COALESCE(m.nome, 'Sem marca'), va.apresentadora_id, COALESCE(a.nome, 'Sem apresentadora')
+          ),
+          comissao_daily AS (
+            -- Comissão da apresentadora por (dia, marca, apresentadora), da fonte
+            -- autoritativa (vendas_atribuidas). gmv_base = GMV que gerou a comissão,
+            -- usado como denominador do % aplicado (consistente com /comissoes/*).
+            SELECT
+              va.data::date AS dia,
+              va.marca_id,
+              va.apresentadora_id,
+              COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao,
+              COALESCE(SUM(va.gmv), 0) AS gmv_base
+            FROM vendas_atribuidas va
+            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+              AND va.data >= $1::date
+              AND va.data <= $2::date
+              AND ($3::uuid IS NULL OR va.marca_id = $3::uuid)
+              AND ($4::uuid IS NULL OR va.apresentadora_id = $4::uuid)
+            GROUP BY va.data::date, va.marca_id, va.apresentadora_id
           )
           SELECT
             COALESCE(ld.dia, vd.dia) AS dia,
@@ -1222,12 +1241,18 @@ export async function analyticsRoutes(app) {
             COALESCE(ld.gmv_lives, 0) AS gmv_lives,
             COALESCE(vd.gmv_videos, 0) AS gmv_videos,
             COALESCE(ld.horas_live, 0) AS horas_live,
-            (COALESCE(ld.pedidos_lives, 0) + COALESCE(vd.pedidos_videos, 0))::int AS pedidos
+            (COALESCE(ld.pedidos_lives, 0) + COALESCE(vd.pedidos_videos, 0))::int AS pedidos,
+            COALESCE(cd.comissao, 0) AS comissao_apresentadora,
+            COALESCE(cd.gmv_base, 0) AS comissao_gmv_base
           FROM live_daily ld
           FULL OUTER JOIN video_daily vd
             ON vd.dia = ld.dia
            AND vd.marca_id IS NOT DISTINCT FROM ld.marca_id
            AND vd.apresentadora_id IS NOT DISTINCT FROM ld.apresentadora_id
+          LEFT JOIN comissao_daily cd
+            ON cd.dia = COALESCE(ld.dia, vd.dia)
+           AND cd.marca_id IS NOT DISTINCT FROM COALESCE(ld.marca_id, vd.marca_id)
+           AND cd.apresentadora_id IS NOT DISTINCT FROM COALESCE(ld.apresentadora_id, vd.apresentadora_id)
           WHERE
             COALESCE(ld.total_lives, 0) > 0
             OR COALESCE(vd.total_videos, 0) > 0
@@ -1248,6 +1273,9 @@ export async function analyticsRoutes(app) {
             const totalLives = toInt(row.total_lives)
             const horasLive = round1(row.horas_live)
             const pedidos = toInt(row.pedidos)
+            const comissao = round2(row.comissao_apresentadora)
+            const comissaoBase = round2(row.comissao_gmv_base)
+            const comissaoPct = comissaoBase > 0 ? round2((comissao / comissaoBase) * 100) : 0
             return {
               dia: typeof row.dia === 'string' ? row.dia : row.dia.toISOString().slice(0, 10),
               marca_id: row.marca_id ?? null,
@@ -1265,6 +1293,8 @@ export async function analyticsRoutes(app) {
               gmv_por_hora: horasLive > 0 ? round2(gmvLives / horasLive) : 0,
               pedidos,
               ticket_medio: pedidos > 0 ? round2(gmvTotal / pedidos) : 0,
+              comissao_apresentadora: comissao,
+              comissao_pct: comissaoPct,
             }
           }),
         }

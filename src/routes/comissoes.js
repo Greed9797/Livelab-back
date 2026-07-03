@@ -1,7 +1,10 @@
-import { READ_COMISSOES } from '../config/role_groups.js'
+import { z } from 'zod'
+import { READ_COMISSOES, READ_APRESENTADORAS, WRITE_APRESENTADORAS } from '../config/role_groups.js'
 import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
+import { getTenantDefaultCommissionTiers } from '../config/presenter_defaults.js'
+import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
 import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
 
@@ -68,6 +71,109 @@ function csvEscape(value) {
   const s = String(value)
   if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
   return s
+}
+
+// ─── Escada padrão do tenant (/v1/comissoes/faixas-default) ─────────────────
+// Fonte EDITÁVEL da escada de comissão; cada apresentadora continua com linhas
+// materializadas em apresentadora_comissao_faixas (JOINs de diagnóstico intactos).
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// Teto do NUMERIC(15,2): acima disso o INSERT estoura overflow no Postgres e o
+// request viraria 500 em vez de 400.
+const GMV_MAX = 9999999999999.99
+
+// z.null() antes do coerce: senão null viraria Number(null) = 0 e perderia o
+// significado de "faixa aberta" (sem limite superior).
+const gmvFimSchema = z.union([z.null(), z.coerce.number().max(GMV_MAX, 'gmv_fim acima do limite')])
+
+const faixaDefaultCreateSchema = z.object({
+  gmv_inicio: z.coerce.number().min(0, 'gmv_inicio deve ser maior ou igual a 0').max(GMV_MAX, 'gmv_inicio acima do limite'),
+  gmv_fim: gmvFimSchema.optional().default(null),
+  comissao_pct: z.coerce.number().min(0, 'comissao_pct deve estar entre 0 e 100').max(100, 'comissao_pct deve estar entre 0 e 100'),
+}).refine((d) => d.gmv_fim === null || d.gmv_fim > d.gmv_inicio, {
+  message: 'gmv_fim deve ser nulo (sem limite) ou maior que gmv_inicio',
+})
+
+const faixaDefaultPatchSchema = z.object({
+  gmv_inicio: z.coerce.number().min(0, 'gmv_inicio deve ser maior ou igual a 0').max(GMV_MAX, 'gmv_inicio acima do limite').optional(),
+  gmv_fim: gmvFimSchema.optional(),
+  comissao_pct: z.coerce.number().min(0, 'comissao_pct deve estar entre 0 e 100').max(100, 'comissao_pct deve estar entre 0 e 100').optional(),
+}).refine((d) => Object.keys(d).length > 0, { message: 'Nenhum campo para atualizar' })
+
+function serializeFaixaDefault(row) {
+  return {
+    id: row.id,
+    gmv_inicio: Number(row.gmv_inicio),
+    gmv_fim: row.gmv_fim === null || row.gmv_fim === undefined ? null : Number(row.gmv_fim),
+    comissao_pct: Number(row.comissao_pct),
+    criado_em: row.criado_em,
+    atualizado_em: row.atualizado_em,
+  }
+}
+
+// Propagação do padrão: apresentadoras NÃO personalizadas (conjunto ATIVO de
+// faixas exatamente igual ao padrão ANTIGO) recebem o padrão NOVO via
+// DELETE+INSERT set-based. Personalizadas nunca são tocadas — quem tem
+// qualquer faixa diferente do padrão antigo fica de fora do SELECT.
+// Retorna os ids das apresentadoras substituídas (para recálculo posterior).
+async function substituirEscadasNaoPersonalizadas(db, tenantId, conjuntoAntigo, conjuntoNovo) {
+  if (JSON.stringify(conjuntoAntigo) === JSON.stringify(conjuntoNovo)) return []
+
+  const afetadasQ = await db.query(
+    `WITH antigo AS (
+       SELECT DISTINCT t.gmv_inicio, t.gmv_fim, t.comissao_pct
+         FROM unnest($2::numeric[], $3::numeric[], $4::numeric[]) AS t(gmv_inicio, gmv_fim, comissao_pct)
+     ),
+     ativas AS (
+       SELECT DISTINCT f.apresentadora_id, f.gmv_inicio, f.gmv_fim, f.comissao_pct
+         FROM apresentadora_comissao_faixas f
+        WHERE f.tenant_id = $1::uuid
+          AND f.ativo = true
+     )
+     SELECT a.apresentadora_id
+       FROM ativas a
+       LEFT JOIN antigo an
+         ON an.gmv_inicio = a.gmv_inicio
+        AND an.gmv_fim IS NOT DISTINCT FROM a.gmv_fim
+        AND an.comissao_pct = a.comissao_pct
+      GROUP BY a.apresentadora_id
+     HAVING COUNT(*) = (SELECT COUNT(*) FROM antigo)
+        AND COUNT(an.gmv_inicio) = COUNT(*)`,
+    [
+      tenantId,
+      conjuntoAntigo.map((f) => f.gmv_inicio),
+      conjuntoAntigo.map((f) => f.gmv_fim),
+      conjuntoAntigo.map((f) => f.comissao_pct),
+    ],
+  )
+  const afetadas = afetadasQ.rows.map((r) => r.apresentadora_id)
+  if (afetadas.length === 0) return []
+
+  // Substitui só o conjunto ATIVO (linhas inativas ficam como histórico).
+  await db.query(
+    `DELETE FROM apresentadora_comissao_faixas
+      WHERE tenant_id = $1::uuid
+        AND apresentadora_id = ANY($2::uuid[])
+        AND ativo = true`,
+    [tenantId, afetadas],
+  )
+  await db.query(
+    `INSERT INTO apresentadora_comissao_faixas (
+       tenant_id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo
+     )
+     SELECT $1::uuid, ap.apresentadora_id, novo.gmv_inicio, novo.gmv_fim, novo.comissao_pct, true
+       FROM unnest($2::uuid[]) AS ap(apresentadora_id)
+      CROSS JOIN unnest($3::numeric[], $4::numeric[], $5::numeric[]) AS novo(gmv_inicio, gmv_fim, comissao_pct)`,
+    [
+      tenantId,
+      afetadas,
+      conjuntoNovo.map((f) => f.gmv_inicio),
+      conjuntoNovo.map((f) => f.gmv_fim),
+      conjuntoNovo.map((f) => f.comissao_pct),
+    ],
+  )
+  return afetadas
 }
 
 export async function comissoesRoutes(app) {
@@ -705,5 +811,252 @@ export async function comissoesRoutes(app) {
       reply.header('Content-Disposition', `attachment; filename="comissoes-${mesParam}.csv"`)
       return lines.join('\n')
     })
+  })
+
+  // ─── CRUD da escada padrão do tenant (/v1/comissoes/faixas-default) ────────
+  const faixasDefaultRead  = [app.authenticate, app.requirePapel(READ_APRESENTADORAS)]
+  const faixasDefaultWrite = [app.authenticate, app.requirePapel(WRITE_APRESENTADORAS)]
+
+  // Recálculo fire-and-forget das apresentadoras cuja escada foi substituída
+  // (padrão lives.js: nova conexão via withTenant, erro vira warn — nunca
+  // derruba a resposta já enviada ao cliente).
+  function dispararRecalculoApresentadoras(tenantId, apresentadoraIds, mesReferencia) {
+    if (!apresentadoraIds?.length) return
+    app.withTenant(tenantId, async (db) => {
+      for (const apresentadoraId of apresentadoraIds) {
+        try {
+          await recalcularVendasAtribuidasApresentadora(db, { tenantId, apresentadoraId, mesReferencia })
+        } catch (err) {
+          app.log.warn({ err, apresentadoraId }, '[faixas-default] recálculo da apresentadora falhou (soft)')
+        }
+      }
+      // Comissões mudaram → dashboards cacheados do tenant recomputam.
+      invalidateTenant(tenantId)
+    }).catch(err => app.log.warn({ err, tenantId }, '[faixas-default] withTenant do recálculo falhou'))
+  }
+
+  // GET /v1/comissoes/faixas-default — escada padrão editável do tenant.
+  // Lista vazia = tenant ainda usa a escada do código (fallback do helper).
+  app.get('/v1/comissoes/faixas-default', { preHandler: faixasDefaultRead }, async (request) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT id, gmv_inicio, gmv_fim, comissao_pct, criado_em, atualizado_em
+           FROM tenant_comissao_faixas_default
+          WHERE tenant_id = $1::uuid
+          ORDER BY gmv_inicio ASC`,
+        [tenant_id],
+      )
+      return result.rows.map(serializeFaixaDefault)
+    })
+  })
+
+  // POST /v1/comissoes/faixas-default — cria faixa e propaga o padrão novo
+  // para as apresentadoras não personalizadas (mesma transação).
+  app.post('/v1/comissoes/faixas-default', { preHandler: faixasDefaultWrite }, async (request, reply) => {
+    const parsed = faixaDefaultCreateSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const d = parsed.data
+    const { tenant_id } = request.user
+
+    return app.withTenant(tenant_id, async (db) => {
+      let row
+      let afetadas = []
+      try {
+        await db.query('BEGIN')
+        const conjuntoAntigo = await getTenantDefaultCommissionTiers(db, tenant_id)
+        const inserted = await db.query(
+          `INSERT INTO tenant_comissao_faixas_default (tenant_id, gmv_inicio, gmv_fim, comissao_pct)
+           VALUES ($1::uuid, $2::numeric, $3::numeric, $4::numeric)
+           RETURNING id, gmv_inicio, gmv_fim, comissao_pct, criado_em, atualizado_em`,
+          [tenant_id, d.gmv_inicio, d.gmv_fim, d.comissao_pct],
+        )
+        row = inserted.rows[0]
+        const conjuntoNovo = await getTenantDefaultCommissionTiers(db, tenant_id)
+        afetadas = await substituirEscadasNaoPersonalizadas(db, tenant_id, conjuntoAntigo, conjuntoNovo)
+        await db.query('COMMIT')
+      } catch (e) {
+        await db.query('ROLLBACK')
+        if (e?.code === '23505') {
+          return reply.code(409).send({ error: 'Já existe uma faixa padrão começando neste gmv_inicio' })
+        }
+        throw e
+      }
+
+      app.audit?.log?.(request, {
+        action: 'comissao.faixas_default.create',
+        entity_type: 'tenant_comissao_faixa_default',
+        entity_id: row.id,
+        metadata: { gmv_inicio: d.gmv_inicio, gmv_fim: d.gmv_fim, comissao_pct: d.comissao_pct, apresentadoras_propagadas: afetadas.length },
+      })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+      dispararRecalculoApresentadoras(tenant_id, afetadas)
+      return reply.code(201).send(serializeFaixaDefault(row))
+    })
+  })
+
+  // PATCH /v1/comissoes/faixas-default/:faixaId — edita faixa e propaga.
+  app.patch('/v1/comissoes/faixas-default/:faixaId', { preHandler: faixasDefaultWrite }, async (request, reply) => {
+    const { faixaId } = request.params
+    if (!UUID_REGEX.test(String(faixaId))) return reply.code(404).send({ error: 'Faixa padrão não encontrada' })
+    const parsed = faixaDefaultPatchSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const d = parsed.data
+    const { tenant_id } = request.user
+
+    return app.withTenant(tenant_id, async (db) => {
+      let row
+      let afetadas = []
+      try {
+        await db.query('BEGIN')
+        const currentQ = await db.query(
+          `SELECT id, gmv_inicio, gmv_fim, comissao_pct
+             FROM tenant_comissao_faixas_default
+            WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+          [faixaId, tenant_id],
+        )
+        const current = currentQ.rows[0]
+        if (!current) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Faixa padrão não encontrada' })
+        }
+
+        // Valida o cross-field no estado FINAL (payload parcial + linha atual).
+        const merged = {
+          gmv_inicio: d.gmv_inicio ?? Number(current.gmv_inicio),
+          gmv_fim: d.gmv_fim !== undefined ? d.gmv_fim : (current.gmv_fim === null ? null : Number(current.gmv_fim)),
+          comissao_pct: d.comissao_pct ?? Number(current.comissao_pct),
+        }
+        if (merged.gmv_fim !== null && merged.gmv_fim <= merged.gmv_inicio) {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: 'gmv_fim deve ser nulo (sem limite) ou maior que gmv_inicio' })
+        }
+
+        const conjuntoAntigo = await getTenantDefaultCommissionTiers(db, tenant_id)
+        const updated = await db.query(
+          `UPDATE tenant_comissao_faixas_default
+              SET gmv_inicio = $1::numeric,
+                  gmv_fim = $2::numeric,
+                  comissao_pct = $3::numeric,
+                  atualizado_em = NOW()
+            WHERE id = $4::uuid AND tenant_id = $5::uuid
+            RETURNING id, gmv_inicio, gmv_fim, comissao_pct, criado_em, atualizado_em`,
+          [merged.gmv_inicio, merged.gmv_fim, merged.comissao_pct, faixaId, tenant_id],
+        )
+        row = updated.rows[0]
+        const conjuntoNovo = await getTenantDefaultCommissionTiers(db, tenant_id)
+        afetadas = await substituirEscadasNaoPersonalizadas(db, tenant_id, conjuntoAntigo, conjuntoNovo)
+        await db.query('COMMIT')
+      } catch (e) {
+        await db.query('ROLLBACK')
+        if (e?.code === '23505') {
+          return reply.code(409).send({ error: 'Já existe uma faixa padrão começando neste gmv_inicio' })
+        }
+        throw e
+      }
+
+      app.audit?.log?.(request, {
+        action: 'comissao.faixas_default.update',
+        entity_type: 'tenant_comissao_faixa_default',
+        entity_id: faixaId,
+        metadata: { ...d, apresentadoras_propagadas: afetadas.length },
+      })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+      dispararRecalculoApresentadoras(tenant_id, afetadas)
+      return serializeFaixaDefault(row)
+    })
+  })
+
+  // DELETE /v1/comissoes/faixas-default/:faixaId — delete físico + propagação.
+  // Apagar a última faixa volta o tenant para a escada do código (fallback do
+  // helper) — e é ELA que passa a ser propagada às não personalizadas.
+  app.delete('/v1/comissoes/faixas-default/:faixaId', { preHandler: faixasDefaultWrite }, async (request, reply) => {
+    const { faixaId } = request.params
+    if (!UUID_REGEX.test(String(faixaId))) return reply.code(404).send({ error: 'Faixa padrão não encontrada' })
+    const { tenant_id } = request.user
+
+    return app.withTenant(tenant_id, async (db) => {
+      let removida
+      let afetadas = []
+      try {
+        await db.query('BEGIN')
+        const conjuntoAntigo = await getTenantDefaultCommissionTiers(db, tenant_id)
+        const deleted = await db.query(
+          `DELETE FROM tenant_comissao_faixas_default
+            WHERE id = $1::uuid AND tenant_id = $2::uuid
+            RETURNING id, gmv_inicio, gmv_fim, comissao_pct`,
+          [faixaId, tenant_id],
+        )
+        removida = deleted.rows[0]
+        if (!removida) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Faixa padrão não encontrada' })
+        }
+        const conjuntoNovo = await getTenantDefaultCommissionTiers(db, tenant_id)
+        afetadas = await substituirEscadasNaoPersonalizadas(db, tenant_id, conjuntoAntigo, conjuntoNovo)
+        await db.query('COMMIT')
+      } catch (e) {
+        await db.query('ROLLBACK')
+        throw e
+      }
+
+      app.audit?.log?.(request, {
+        action: 'comissao.faixas_default.delete',
+        entity_type: 'tenant_comissao_faixa_default',
+        entity_id: faixaId,
+        metadata: {
+          gmv_inicio: Number(removida.gmv_inicio),
+          gmv_fim: removida.gmv_fim === null ? null : Number(removida.gmv_fim),
+          comissao_pct: Number(removida.comissao_pct),
+          apresentadoras_propagadas: afetadas.length,
+        },
+      })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+      dispararRecalculoApresentadoras(tenant_id, afetadas)
+      return reply.code(204).send()
+    })
+  })
+
+  // POST /v1/comissoes/recalcular-mes — fechamento: recalcula as comissões
+  // PENDENTES de um mês específico (ex.: junho, antes de consolidar e pagar)
+  // com a escada vigente. Vendas aprovadas nunca são tocadas. Responde 202 e
+  // roda em background (fire-and-forget) — mesma proteção anti-timeout dos
+  // endpoints de faixa.
+  app.post('/v1/comissoes/recalcular-mes', { preHandler: faixasDefaultWrite }, async (request, reply) => {
+    const parsed = z.object({
+      mes: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'mes deve estar no formato YYYY-MM'),
+    }).safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { mes } = parsed.data
+    const { tenant_id } = request.user
+
+    if (mes > new Date().toISOString().slice(0, 7)) {
+      return reply.code(400).send({ error: 'Não é possível recalcular um mês futuro' })
+    }
+
+    const alvos = await app.withTenant(tenant_id, async (db) => {
+      const result = await db.query(
+        `SELECT DISTINCT apresentadora_id
+           FROM vendas_atribuidas
+          WHERE tenant_id = $1::uuid
+            AND apresentadora_id IS NOT NULL
+            AND origem IN ('live', 'video')
+            AND COALESCE(status_aprovacao, 'pendente_aprovacao') = 'pendente_aprovacao'
+            AND data >= date_trunc('month', $2::date)::date
+            AND data < (date_trunc('month', $2::date) + interval '1 month')::date`,
+        [tenant_id, `${mes}-01`],
+      )
+      return result.rows.map((r) => r.apresentadora_id)
+    })
+
+    app.audit?.log?.(request, {
+      action: 'comissao.recalcular_mes',
+      entity_type: 'vendas_atribuidas',
+      entity_id: tenant_id,
+      metadata: { mes, apresentadoras: alvos.length },
+    })?.catch(err => app.log.error({ err }, 'audit log failed'))
+
+    dispararRecalculoApresentadoras(tenant_id, alvos, mes)
+    return reply.code(202).send({ mes, apresentadoras: alvos.length })
   })
 }

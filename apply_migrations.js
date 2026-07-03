@@ -112,6 +112,7 @@ export const MIGRATIONS_LIST = [
   '115_cliente_marca_invariant_backfill.sql',
   '116_marca_fixo_mensal_semantica.sql',
   '117_lives_marca_obrigatoria.sql',
+  '118_tenant_comissao_faixas_default.sql',
 ]
 
 async function ensureMigrationsTable(client) {

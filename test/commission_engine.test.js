@@ -12,7 +12,7 @@ describe('commission engine', () => {
     expect(source).not.toContain('function isWeekendSaoPaulo')
   })
 
-  it('uses the 0.5% minimum live commission when weekday presenter has no configured tier', async () => {
+  it('uses the 1% minimum live commission when weekday presenter has no configured tier', async () => {
     const insertedRows = []
     const queryMock = vi.fn(async (sql, values) => {
       if (sql.includes('FROM lives l')) {
@@ -63,7 +63,7 @@ describe('commission engine', () => {
     })
 
     expect(insertedRows).toEqual([
-      { apresentadora_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', gmv: 1000, comissao_apresentadora: 5 },
+      { apresentadora_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', gmv: 1000, comissao_apresentadora: 10 },
     ])
   })
 

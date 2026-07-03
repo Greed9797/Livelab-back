@@ -115,8 +115,19 @@ export async function upsertVendaAtribuida(db, payload) {
   return inserted.rows[0]
 }
 
-export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, apresentadoraId }) {
+// mesReferencia opcional ('YYYY-MM'): default é o mês corrente — meses passados
+// estão fechados/aprovados e recálculo retroativo implícito é proibido. Um mês
+// explícito (ex.: fechamento de junho via POST /v1/comissoes/recalcular-mes)
+// recalcula APENAS aquele mês. Sempre 1 mês por chamada: o limite é o que
+// mantém o loop barato (root cause do 5xx de 15/06).
+export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, apresentadoraId, mesReferencia }) {
   if (!tenantId || !apresentadoraId) return { updated: 0 }
+
+  const mesInicioSql = mesReferencia
+    ? `date_trunc('month', $3::date)::date`
+    : `date_trunc('month', CURRENT_DATE)::date`
+  const params = [tenantId, apresentadoraId]
+  if (mesReferencia) params.push(`${mesReferencia}-01`)
 
   const vendas = await db.query(
     `SELECT id, origem, origem_id, marca_id, apresentadora_id, data, gmv, pedidos
@@ -125,8 +136,10 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
        AND apresentadora_id = $2::uuid
        AND origem IN ('live', 'video')
        AND COALESCE(status_aprovacao, 'pendente_aprovacao') = 'pendente_aprovacao'
+       AND data >= ${mesInicioSql}
+       AND data < (${mesInicioSql} + interval '1 month')
      ORDER BY data ASC, criado_em ASC`,
-    [tenantId, apresentadoraId],
+    params,
   )
 
   let updated = 0

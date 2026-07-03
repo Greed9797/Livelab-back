@@ -40,7 +40,6 @@ const faixaSchema = z.object({
   gmv_inicio: moneySchema.default(0),
   gmv_fim: moneySchema.nullable().optional(),
   comissao_pct: z.coerce.number().min(0).max(100),
-  ativo: z.boolean().default(true),
 })
 
 const faixaPatchSchema = faixaSchema.partial()
@@ -179,26 +178,33 @@ export async function apresentadorasRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const { tenant_id } = request.user
     const d = parsed.data
-    return app.withTenant(tenant_id, async (db) => {
+    const created = await app.withTenant(tenant_id, async (db) => {
       const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
-      if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      if (!apresentadoraId) return null
       const result = await db.query(
         `INSERT INTO apresentadora_comissao_faixas (
            tenant_id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo
          )
-         VALUES ($1,$2,$3,$4,$5,$6)
+         VALUES ($1,$2,$3,$4,$5,true)
          RETURNING id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo, criado_em, atualizado_em`,
-        [tenant_id, apresentadoraId, d.gmv_inicio, d.gmv_fim ?? null, d.comissao_pct, d.ativo],
+        [tenant_id, apresentadoraId, d.gmv_inicio, d.gmv_fim ?? null, d.comissao_pct],
       )
-      await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
-      app.audit?.log?.(request, {
-        action: 'presenter.faixas.create',
-        entity_type: 'apresentadora_comissao_faixa',
-        entity_id: result.rows[0].id,
-        metadata: { apresentadora_id: apresentadoraId, gmv_inicio: d.gmv_inicio, gmv_fim: d.gmv_fim ?? null, comissao_pct: d.comissao_pct },
-      })?.catch?.(err => app.log.error({ err }, 'audit log presenter.faixas.create failed'))
-      return reply.code(201).send(result.rows[0])
+      return { apresentadoraId, row: result.rows[0] }
     })
+    if (!created) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+
+    // Recálculo fire-and-forget FORA do withTenant da resposta — síncrono estourava
+    // o timeout do request quando a apresentadora tinha muitas vendas.
+    app.withTenant(tenant_id, (db2) => recalcularVendasAtribuidasApresentadora(db2, { tenantId: tenant_id, apresentadoraId: created.apresentadoraId }))
+      .catch(err => app.log.warn({ err, apresentadoraId: created.apresentadoraId }, 'recalculo pos-faixa (create) falhou (soft)'))
+
+    app.audit?.log?.(request, {
+      action: 'presenter.faixas.create',
+      entity_type: 'apresentadora_comissao_faixa',
+      entity_id: created.row.id,
+      metadata: { apresentadora_id: created.apresentadoraId, gmv_inicio: d.gmv_inicio, gmv_fim: d.gmv_fim ?? null, comissao_pct: d.comissao_pct },
+    })?.catch?.(err => app.log.error({ err }, 'audit log presenter.faixas.create failed'))
+    return reply.code(201).send(created.row)
   })
 
   // PATCH /v1/apresentadoras/:id/faixas-comissao/:faixaId
@@ -211,9 +217,9 @@ export async function apresentadorasRoutes(app) {
     if (!fields.length) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
     const { tenant_id } = request.user
-    return app.withTenant(tenant_id, async (db) => {
+    const updated = await app.withTenant(tenant_id, async (db) => {
       const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
-      if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      if (!apresentadoraId) return { error: 'Apresentadora não encontrada' }
 
       const set = fields.map((field, index) => `${field} = $${index + 4}`).concat('atualizado_em = NOW()').join(', ')
       const values = [apresentadoraId, request.params.faixaId, tenant_id, ...fields.map((field) => updates[field])]
@@ -224,42 +230,56 @@ export async function apresentadorasRoutes(app) {
          RETURNING id, apresentadora_id, gmv_inicio, gmv_fim, comissao_pct, ativo, criado_em, atualizado_em`,
         values,
       )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Faixa não encontrada' })
-      await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
-      app.audit?.log?.(request, {
-        action: 'presenter.faixas.update',
-        entity_type: 'apresentadora_comissao_faixa',
-        entity_id: request.params.faixaId,
-        metadata: { apresentadora_id: apresentadoraId, changed_fields: fields, after: result.rows[0] },
-      })?.catch?.(err => app.log.error({ err }, 'audit log presenter.faixas.update failed'))
-      return result.rows[0]
+      if (!result.rows[0]) return { error: 'Faixa não encontrada' }
+      return { apresentadoraId, row: result.rows[0] }
     })
+    if (updated.error) return reply.code(404).send({ error: updated.error })
+
+    // Recálculo fire-and-forget FORA do withTenant da resposta — síncrono estourava
+    // o timeout do request quando a apresentadora tinha muitas vendas.
+    app.withTenant(tenant_id, (db2) => recalcularVendasAtribuidasApresentadora(db2, { tenantId: tenant_id, apresentadoraId: updated.apresentadoraId }))
+      .catch(err => app.log.warn({ err, apresentadoraId: updated.apresentadoraId }, 'recalculo pos-faixa (update) falhou (soft)'))
+
+    app.audit?.log?.(request, {
+      action: 'presenter.faixas.update',
+      entity_type: 'apresentadora_comissao_faixa',
+      entity_id: request.params.faixaId,
+      metadata: { apresentadora_id: updated.apresentadoraId, changed_fields: fields, after: updated.row },
+    })?.catch?.(err => app.log.error({ err }, 'audit log presenter.faixas.update failed'))
+    return updated.row
   })
 
-  // DELETE /v1/apresentadoras/:id/faixas-comissao/:faixaId
+  // DELETE /v1/apresentadoras/:id/faixas-comissao/:faixaId — DELETE físico
+  // (linha presente = vale; soft-delete via ativo=false foi aposentado).
   app.delete('/v1/apresentadoras/:id/faixas-comissao/:faixaId', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
-    return app.withTenant(tenant_id, async (db) => {
+    const deleted = await app.withTenant(tenant_id, async (db) => {
       const apresentadoraId = await resolveApresentadoraId(db, tenant_id, request.params.id)
-      if (!apresentadoraId) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      if (!apresentadoraId) return { error: 'Apresentadora não encontrada' }
 
       const result = await db.query(
-        `UPDATE apresentadora_comissao_faixas
-         SET ativo = false, atualizado_em = NOW()
+        `DELETE FROM apresentadora_comissao_faixas
          WHERE apresentadora_id = $1 AND id = $2 AND tenant_id = $3::uuid
          RETURNING id`,
         [apresentadoraId, request.params.faixaId, tenant_id],
       )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Faixa não encontrada' })
-      await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
-      app.audit?.log?.(request, {
-        action: 'presenter.faixas.delete',
-        entity_type: 'apresentadora_comissao_faixa',
-        entity_id: request.params.faixaId,
-        metadata: { apresentadora_id: apresentadoraId, soft_delete: true },
-      })?.catch?.(err => app.log.error({ err }, 'audit log presenter.faixas.delete failed'))
-      return reply.code(204).send()
+      if (!result.rows[0]) return { error: 'Faixa não encontrada' }
+      return { apresentadoraId }
     })
+    if (deleted.error) return reply.code(404).send({ error: deleted.error })
+
+    // Recálculo fire-and-forget FORA do withTenant da resposta — síncrono estourava
+    // o timeout do request quando a apresentadora tinha muitas vendas.
+    app.withTenant(tenant_id, (db2) => recalcularVendasAtribuidasApresentadora(db2, { tenantId: tenant_id, apresentadoraId: deleted.apresentadoraId }))
+      .catch(err => app.log.warn({ err, apresentadoraId: deleted.apresentadoraId }, 'recalculo pos-faixa (delete) falhou (soft)'))
+
+    app.audit?.log?.(request, {
+      action: 'presenter.faixas.delete',
+      entity_type: 'apresentadora_comissao_faixa',
+      entity_id: request.params.faixaId,
+      metadata: { apresentadora_id: deleted.apresentadoraId, hard_delete: true },
+    })?.catch?.(err => app.log.error({ err }, 'audit log presenter.faixas.delete failed'))
+    return reply.code(204).send()
   })
 
   // GET /v1/apresentadoras/:id

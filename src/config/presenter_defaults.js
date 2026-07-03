@@ -6,11 +6,13 @@ export function presenterFixedSql(alias = 'a') {
   return `CASE WHEN COALESCE(${column}, 0) <= 0 OR ${column} > ${MAX_APRESENTADORA_FIXO} THEN ${DEFAULT_APRESENTADORA_FIXO} ELSE ${column} END`
 }
 
+// Fallback de ÚLTIMO recurso — a fonte EDITÁVEL da escada padrão é a tabela
+// tenant_comissao_faixas_default (endpoints /v1/comissoes/faixas-default).
+// Este array só vale quando o tenant ainda não tem nenhuma linha lá.
 export const DEFAULT_APRESENTADORA_COMISSAO_FAIXAS = [
-  { gmv_inicio: 0, gmv_fim: 50000, comissao_pct: 0.5 },
-  { gmv_inicio: 50000.01, gmv_fim: 150000, comissao_pct: 1 },
-  { gmv_inicio: 150000.01, gmv_fim: 500000, comissao_pct: 1.5 },
-  { gmv_inicio: 500000.01, gmv_fim: null, comissao_pct: 2 },
+  { gmv_inicio: 0, gmv_fim: 70000, comissao_pct: 1 },
+  { gmv_inicio: 70000.01, gmv_fim: 150000, comissao_pct: 1.5 },
+  { gmv_inicio: 150000.01, gmv_fim: null, comissao_pct: 2 },
 ]
 
 export function defaultPresenterCommissionPct(gmv) {
@@ -21,6 +23,25 @@ export function defaultPresenterCommissionPct(gmv) {
     return startOk && endOk
   })
   return tier?.comissao_pct ?? 0
+}
+
+// Escada padrão do tenant (tenant_comissao_faixas_default) — fonte editável.
+// Sem linha no banco → escada do código (DEFAULT_APRESENTADORA_COMISSAO_FAIXAS).
+export async function getTenantDefaultCommissionTiers(db, tenantId) {
+  if (!tenantId) return DEFAULT_APRESENTADORA_COMISSAO_FAIXAS
+  const result = await db.query(
+    `SELECT gmv_inicio, gmv_fim, comissao_pct
+     FROM tenant_comissao_faixas_default
+     WHERE tenant_id = $1::uuid
+     ORDER BY gmv_inicio ASC`,
+    [tenantId],
+  )
+  if (!result.rows.length) return DEFAULT_APRESENTADORA_COMISSAO_FAIXAS
+  return result.rows.map((row) => ({
+    gmv_inicio: Number(row.gmv_inicio),
+    gmv_fim: row.gmv_fim === null ? null : Number(row.gmv_fim),
+    comissao_pct: Number(row.comissao_pct),
+  }))
 }
 
 export async function ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId) {
@@ -37,8 +58,10 @@ export async function ensureDefaultPresenterCommissionTiers(db, tenantId, aprese
   )
   if (existing.rows[0]) return
 
+  // Semeia a partir do padrão do tenant (não mais do array hardcoded).
+  const tiers = await getTenantDefaultCommissionTiers(db, tenantId)
   const values = [tenantId, apresentadoraId]
-  const tuples = DEFAULT_APRESENTADORA_COMISSAO_FAIXAS.map((faixa) => {
+  const tuples = tiers.map((faixa) => {
     const base = values.length
     values.push(faixa.gmv_inicio, faixa.gmv_fim, faixa.comissao_pct)
     return `($1::uuid, $2::uuid, $${base + 1}::numeric, $${base + 2}::numeric, $${base + 3}::numeric, true)`

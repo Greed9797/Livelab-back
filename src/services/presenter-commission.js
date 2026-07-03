@@ -18,7 +18,9 @@ function toNumber(value, fallback = 0) {
  *      (vendas_atribuidas do mês atual, exceto a venda em cálculo) + GMV desta venda:
  *        SELECT da faixa onde gmv_inicio <= base_gmv AND (gmv_fim IS NULL OR gmv_fim >= base_gmv)
  *   3) Vídeo segue a MESMA escada — comissão da apresentadora não muda por marca.
- *   4) Sem faixa configurada → fallback `defaultPresenterCommissionPct(baseGmv)` (escada do código).
+ *   4) Cadeia de resolução da faixa: faixa própria (apresentadora_comissao_faixas)
+ *      → padrão do tenant (tenant_comissao_faixas_default, banco)
+ *      → escada do código (`defaultPresenterCommissionPct(baseGmv)`).
  *
  * O override antigo via `apresentadora_marcas.comissao_*_pct` foi APOSENTADO:
  * comissão da apresentadora é sempre por GMV mensal, jamais por marca. O que
@@ -66,6 +68,19 @@ export async function resolvePresenterCommissionPct(db, {
   )
   if (faixaQ.rows[0]) return toNumber(faixaQ.rows[0].comissao_pct)
 
-  // Sem faixa cadastrada → escada padrão do código (não bloqueia comissão).
+  // Sem faixa própria → padrão do tenant (tenant_comissao_faixas_default), mesmo predicado.
+  const defaultQ = await db.query(
+    `SELECT comissao_pct
+     FROM tenant_comissao_faixas_default
+     WHERE tenant_id = $1::uuid
+       AND gmv_inicio <= $2::numeric
+       AND (gmv_fim IS NULL OR gmv_fim >= $2::numeric)
+     ORDER BY gmv_inicio DESC
+     LIMIT 1`,
+    [tenantId, baseGmv],
+  )
+  if (defaultQ.rows[0]) return toNumber(defaultQ.rows[0].comissao_pct)
+
+  // Sem padrão no banco → escada padrão do código (não bloqueia comissão).
   return toNumber(defaultPresenterCommissionPct(baseGmv))
 }

@@ -81,15 +81,16 @@ describe('apresentadoras permissions', () => {
   })
 
   it('resolves a presenter user id when listing commission tiers', async () => {
-    const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ id: 'user-2', nome: 'Jhemily', email: 'jhemily@example.com', papel: 'apresentador' }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'ap-1' }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ id: 'default-faixa' }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'faixa-1', apresentadora_id: 'ap-1', gmv_inicio: 0, gmv_fim: null, comissao_pct: 2, ativo: true }] })
+    // Mock por SQL (não posicional): o seed das faixas default agora consulta
+    // tenant_comissao_faixas_default antes de inserir.
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('FROM apresentadoras WHERE id =')) return { rows: [] }
+      if (sql.includes('FROM apresentadoras WHERE user_id')) return { rows: [] }
+      if (sql.includes('FROM users')) return { rows: [{ id: 'user-2', nome: 'Jhemily', email: 'jhemily@example.com', papel: 'apresentador' }] }
+      if (sql.includes('INSERT INTO apresentadoras (')) return { rows: [{ id: 'ap-1' }] }
+      if (sql.includes('ORDER BY ativo DESC')) return { rows: [{ id: 'faixa-1', apresentadora_id: 'ap-1', gmv_inicio: 0, gmv_fim: null, comissao_pct: 2, ativo: true }] }
+      return { rows: [] }
+    })
     const { app, query } = buildApp({ queryMock })
     await app.register(apresentadorasRoutes)
 

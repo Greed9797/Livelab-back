@@ -697,13 +697,13 @@ describe('LIVELAB operational routes', () => {
     })
   })
 
-  it('calcularComissoesAtribuidas falls back to presenter profile commission for videos', async () => {
+  it('calcularComissoesAtribuidas uses the tenant default tiers table for videos without own tiers', async () => {
     const queryMock = vi.fn(async (sql) => {
       if (sql.includes('FROM marcas')) return { rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '2' }] }
       if (sql.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: '0.00' }] }
       if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [] }
+      if (sql.includes('FROM tenant_comissao_faixas_default')) return { rows: [{ comissao_pct: '1.5' }] }
       if (sql.includes('FROM apresentadora_marcas')) return { rows: [{ comissao_live_pct: '0', comissao_video_pct: '0' }] }
-      if (sql.includes('FROM apresentadoras')) return { rows: [{ comissao_pct: '1.5' }] }
       return { rows: [] }
     })
 
@@ -780,7 +780,8 @@ describe('LIVELAB operational routes', () => {
 
     expect(result).toEqual({ updated: 1 })
     const updateCall = queryMock.mock.calls.find(([sql]) => sql.includes('UPDATE vendas_atribuidas'))
-    expect(updateCall?.[1]?.slice(0, 3)).toEqual([7500, 50000, 10000])
+    // 500k na escada nova do código (sem faixa própria nem default do tenant) → 2%
+    expect(updateCall?.[1]?.slice(0, 3)).toEqual([10000, 50000, 10000])
   })
 
   it('upsertVendaAtribuida does not overwrite approved sales', async () => {

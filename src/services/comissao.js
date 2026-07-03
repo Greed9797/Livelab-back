@@ -14,23 +14,21 @@
  * do cliente — reconciliação faixas×fds é responsabilidade do commission-engine.
  */
 
+import { isWeekendInSaoPaulo } from '../lib/timezone.js'
+
 /**
  * Retorna true se `date` cair em sábado ou domingo no fuso America/Sao_Paulo.
  *
- * Aceita Date, string ISO-8601 ou timestamp numérico.
+ * Aceita Date, string ISO-8601, 'YYYY-MM-DD' (data-calendário de SP) ou
+ * timestamp numérico. Delega para timezone.js — era uma cópia sem o guard
+ * de data-only, que interpretava 'YYYY-MM-DD' como UTC-midnight e voltava
+ * um dia em SP (segunda virava domingo).
  *
  * @param {Date | string | number} date
  * @returns {boolean}
  */
 export function isFimDeSemanaSP(date) {
-  const d = date instanceof Date ? date : new Date(date)
-  if (Number.isNaN(d.getTime())) return false
-  const weekday = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Sao_Paulo',
-    weekday: 'short',
-  }).format(d)
-  // 'Sat' ou 'Sun'
-  return weekday === 'Sat' || weekday === 'Sun'
+  return isWeekendInSaoPaulo(date)
 }
 
 /**

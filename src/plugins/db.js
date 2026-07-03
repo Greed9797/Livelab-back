@@ -2,6 +2,7 @@ import fp from 'fastify-plugin'
 import pg from 'pg'
 import 'dotenv/config'
 
+import '../lib/pg-date-string.js' // DATE → string 'YYYY-MM-DD' (nunca Date JS)
 import { resolveDbSslConfig } from '../utils/db-ssl.js'
 
 const { Pool } = pg

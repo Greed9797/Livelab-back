@@ -20,6 +20,7 @@
 // Falhas listam o live_id para investigação manual.
 
 import pg from 'pg'
+import '../src/lib/pg-date-string.js' // DATE → string (fix incidente 01/06: segunda≠domingo)
 import 'dotenv/config'
 import { calcularComissoesDaLive } from '../src/services/commission-engine.js'
 import { liveGmvSql, liveOrdersSql } from '../src/lib/metric-sql.js'

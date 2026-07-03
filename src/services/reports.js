@@ -23,9 +23,16 @@ function fmtBRL(value) {
   }).format(toNum(value))
 }
 
+// Coluna DATE chega como string 'YYYY-MM-DD' (parser em plugins/db.js);
+// parse como data-calendário de SP — new Date('YYYY-MM-DD') é UTC-midnight
+// e formatado em SP voltaria um dia.
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
+
 function fmtDate(value) {
   if (!value) return ''
-  const d = value instanceof Date ? value : new Date(value)
+  const d = value instanceof Date
+    ? value
+    : new Date(DATE_ONLY_RE.test(String(value)) ? `${value}T12:00:00-03:00` : value)
   if (Number.isNaN(d.getTime())) return String(value)
   return new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo' }).format(d)
 }

@@ -10,6 +10,7 @@
 // status_aprovacao='pendente_aprovacao' — não toca vendas aprovadas).
 
 import pg from 'pg'
+import '../src/lib/pg-date-string.js' // DATE → string (fix incidente 01/06: segunda≠domingo)
 import 'dotenv/config'
 import { recalcularVendasAtribuidasApresentadora } from '../src/routes/vendas_atribuidas.js'
 

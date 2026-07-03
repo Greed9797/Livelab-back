@@ -7,6 +7,7 @@
 // que filtra status_aprovacao='pendente_aprovacao' — não toca aprovadas.
 
 import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
+import { saoPauloDateInput } from '../lib/timezone.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
 
 const TICK_CRON = '*/10 * * * *' // a cada 10 minutos
@@ -14,12 +15,14 @@ const TICK_CRON = '*/10 * * * *' // a cada 10 minutos
 let _running = false
 
 function currentMonthRange() {
-  const now = new Date()
-  const y = now.getFullYear()
-  const m = now.getMonth() + 1
+  // Mês corrente no fuso de SP, não do processo (UTC no Railway): entre 21h e
+  // 24h SP do último dia do mês, o fuso do processo já virou o mês seguinte.
+  const hojeSP = saoPauloDateInput(new Date()) // 'YYYY-MM-DD'
+  const [y, m] = hojeSP.split('-').map(Number)
   const mm = String(m).padStart(2, '0')
   const fimMes = new Date(y, m, 0).getDate()
   return {
+    mes: `${y}-${mm}`,
     inicio: `${y}-${mm}-01`,
     fim: `${y}-${mm}-${String(fimMes).padStart(2, '0')}`,
   }
@@ -34,7 +37,7 @@ export async function runRecalcularComissoesTick(app) {
   const results = { tenants: 0, apresentadoras: 0, vendas: 0, errors: 0 }
 
   try {
-    const { inicio, fim } = currentMonthRange()
+    const { mes, inicio, fim } = currentMonthRange()
 
     const targets = await app.db.query(
       `SELECT DISTINCT va.tenant_id, va.apresentadora_id
@@ -65,6 +68,7 @@ export async function runRecalcularComissoesTick(app) {
         const res = await recalcularVendasAtribuidasApresentadora(client, {
           tenantId: tenant_id,
           apresentadoraId: apresentadora_id,
+          mesReferencia: mes, // mês de SP explícito (default usa CURRENT_DATE em UTC)
         })
         await client.query('COMMIT')
         const updated = res?.updated ?? 0

@@ -12,6 +12,7 @@
 //   railway run node scripts/backfill_comissoes_unificacao.js
 //
 import pg from 'pg'
+import '../src/lib/pg-date-string.js' // DATE → string (fix incidente 01/06: segunda≠domingo)
 import 'dotenv/config'
 import { calcularComissoesDaLive } from '../src/services/commission-engine.js'
 import { resolveDbSslConfig } from '../src/utils/db-ssl.js'

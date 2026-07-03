@@ -216,9 +216,13 @@ function _money(v) {
 
 function _fmtDate(d) {
   if (!d) return '—'
-  const dt = d instanceof Date ? d : new Date(d)
+  // Coluna DATE chega como string 'YYYY-MM-DD' (parser em plugins/db.js);
+  // trata como data-calendário de SP pra não voltar um dia na formatação.
+  const dt = d instanceof Date
+    ? d
+    : new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? `${d}T12:00:00-03:00` : d)
   if (Number.isNaN(dt.getTime())) return '—'
-  return dt.toLocaleDateString('pt-BR')
+  return dt.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
 }
 
 const _templates = {

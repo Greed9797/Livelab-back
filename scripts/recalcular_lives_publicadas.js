@@ -8,6 +8,7 @@
 // Idempotente: engine usa ON CONFLICT em vendas_atribuidas.
 
 import pg from 'pg'
+import '../src/lib/pg-date-string.js' // DATE → string (fix incidente 01/06: segunda≠domingo)
 import 'dotenv/config'
 import { calcularComissoesDaLive } from '../src/services/commission-engine.js'
 

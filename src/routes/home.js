@@ -141,7 +141,8 @@ export async function homeRoutes(app) {
         JOIN contratos c ON c.cliente_id = l.cliente_id AND c.status = 'ativo' AND c.tenant_id = l.tenant_id
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
-          AND date_trunc('month', l.iniciado_em) = date_trunc('month', $1::date)
+          AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+              = date_trunc('month', $1::date)
       `, [mesStart]),
         db.query(`
         SELECT COALESCE(SUM(valor), 0) AS valor
@@ -267,12 +268,18 @@ export async function homeRoutes(app) {
           AND status = 'ativo'
       `, [mesStart]),
         db.query(`
-        SELECT COUNT(id) AS lives_mes
+        SELECT
+          COUNT(id) FILTER (
+            WHERE date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                  = date_trunc('month', $1::date)
+          ) AS lives_mes,
+          COUNT(id) FILTER (
+            WHERE date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                  = date_trunc('month', $1::date - INTERVAL '1 month')
+          ) AS lives_mes_anterior
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND status = 'encerrada'
-          AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-              = date_trunc('month', $1::date)
       `, [mesStart]),
         db.query(`
         WITH live_metrics AS (
@@ -316,9 +323,18 @@ export async function homeRoutes(app) {
               WHERE vr.tenant_id = current_setting('app.tenant_id', true)::uuid
                 AND date_trunc('month', vr.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
                     = date_trunc('month', $1::date)
-            ) AS videos_mes
+            ) AS videos_mes,
+            (
+              SELECT COUNT(*)::int
+              FROM video_registros vr
+              WHERE vr.tenant_id = current_setting('app.tenant_id', true)::uuid
+                AND date_trunc('month', vr.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', $1::date - INTERVAL '1 month')
+            ) AS videos_mes_anterior
           FROM vendas_atribuidas va
           WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
+            -- mesma convenção do analytics.js: venda reprovada não conta GMV
+            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
         ),
         home_gmv_operacional AS (
         SELECT
@@ -332,7 +348,8 @@ export async function homeRoutes(app) {
           (lm.gmv_lives_mes_anterior + vm.gmv_videos_mes_anterior) AS gmv_mes_anterior,
           lm.gmv_lives_mes_anterior,
           vm.gmv_videos_mes_anterior,
-          vm.videos_mes
+          vm.videos_mes,
+          vm.videos_mes_anterior
         FROM live_metrics lm CROSS JOIN video_metrics vm
         )
         SELECT * FROM home_gmv_operacional
@@ -348,7 +365,8 @@ export async function homeRoutes(app) {
         SELECT COALESCE(AVG(viewer_count), 0) AS media
         FROM live_snapshots
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND date_trunc('month', captured_at) = date_trunc('month', $1::date)
+          AND date_trunc('month', captured_at AT TIME ZONE 'America/Sao_Paulo')
+              = date_trunc('month', $1::date)
       `, [mesStart]),
         db.query(`
         SELECT COUNT(*) AS pipeline_aberto, COALESCE(SUM(valor_oportunidade), 0) AS valor_pipeline
@@ -456,16 +474,24 @@ export async function homeRoutes(app) {
           limit: 10,
         }),
         db.query(`
-          SELECT COALESCE(SUM(
-            LEAST(EXTRACT(EPOCH FROM (COALESCE(encerrado_em, previsto_fim) - iniciado_em)) / 3600.0, 24.0)
-          ), 0) AS horas_live_mes
+          SELECT
+            COALESCE(SUM(
+              LEAST(EXTRACT(EPOCH FROM (COALESCE(encerrado_em, previsto_fim) - iniciado_em)) / 3600.0, 24.0)
+            ) FILTER (
+              WHERE date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', $1::date)
+            ), 0) AS horas_live_mes,
+            COALESCE(SUM(
+              LEAST(EXTRACT(EPOCH FROM (COALESCE(encerrado_em, previsto_fim) - iniciado_em)) / 3600.0, 24.0)
+            ) FILTER (
+              WHERE date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                    = date_trunc('month', $1::date - INTERVAL '1 month')
+            ), 0) AS horas_live_mes_anterior
           FROM lives
           WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
             AND status = 'encerrada'
             AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
             AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
-            AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-                = date_trunc('month', $1::date)
         `, [mesStart]),
       ])
 
@@ -725,7 +751,9 @@ export async function homeRoutes(app) {
       const pedidosVideosMes = Number(gmvOperacional.pedidos_videos_mes ?? 0)
       const pedidosTotalMes = Number(gmvOperacional.pedidos_total_mes ?? (pedidosLivesMes + pedidosVideosMes))
       const videosMes = Number(gmvOperacional.videos_mes ?? 0)
+      const videosMesAnterior = Number(gmvOperacional.videos_mes_anterior ?? 0)
       const livesMes = Number(livesMesQ.rows[0].lives_mes)
+      const livesMesAnterior = Number(livesMesQ.rows[0].lives_mes_anterior ?? 0)
       const gmvMesAnterior = round2(gmvOperacional.gmv_mes_anterior)
       const gmvLivesMesAnterior = round2(gmvOperacional.gmv_lives_mes_anterior)
 
@@ -796,9 +824,12 @@ export async function homeRoutes(app) {
       const liveCabinesAtivas = cabinesFormatadas.filter(c => c.status === 'ao_vivo')
       const gmvAoVivoAgora = round2(liveCabinesAtivas.reduce((acc, c) => acc + Number(c.gmv_atual ?? 0), 0))
       const horasLiveMes = parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0).toFixed(1))
+      const horasLiveMesAnterior = parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes_anterior ?? 0).toFixed(1))
       const gmvPorLiveMes = livesMes > 0 ? round2(gmvMes / livesMes) : 0
-      const gmvPorHoraMes = horasLiveMes > 0 ? round2(gmvMes / horasLiveMes) : 0
-      const gmvPorLivePrev = livesMes > 0 ? round2(gmvMesAnterior / livesMes) : 0
+      // GMV/hora exclui vídeos — mesma convenção do analytics.js (gmv_lives / horas)
+      const gmvPorHoraMes = horasLiveMes > 0 ? round2(gmvLivesMes / horasLiveMes) : 0
+      const gmvPorHoraPrev = horasLiveMesAnterior > 0 ? round2(gmvLivesMesAnterior / horasLiveMesAnterior) : 0
+      const gmvPorLivePrev = livesMesAnterior > 0 ? round2(gmvMesAnterior / livesMesAnterior) : 0
       const ticketMedioMes = pedidosTotalMes > 0 ? round2(gmvMes / pedidosTotalMes) : 0
       const ticketMedioLiveMes = pedidosLivesMes > 0 ? round2(gmvLivesMes / pedidosLivesMes) : 0
       const alertasOperacionais = [
@@ -859,7 +890,10 @@ export async function homeRoutes(app) {
         gmv_por_live_prev: gmvPorLivePrev,
         gmv_por_hora: gmvPorHoraMes,
         gmv_por_hora_mes: gmvPorHoraMes,
-        gmv_por_hora_prev: 0,
+        gmv_por_hora_prev: gmvPorHoraPrev,
+        lives_prev: livesMesAnterior,
+        horas_prev: horasLiveMesAnterior,
+        videos_prev: videosMesAnterior,
         variacao_gmv_mes_anterior_pct: growthPct(gmvMes, gmvMesAnterior),
         gmv_lives_mes_anterior: gmvLivesMesAnterior,
         gmv_mes_prev: gmvMesAnterior,

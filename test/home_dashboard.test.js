@@ -59,7 +59,7 @@ function createHomeQueryMock() {
       return { rows: [{ ao_vivo: '1', operacionais: '7' }] }
     }
     if (sql.includes('home_gmv_operacional')) {
-      return { rows: [{ gmv_total_mes: '1600.50', gmv_lives_mes: '1200.50', gmv_videos_mes: '400.00', pedidos_lives_mes: '2', pedidos_videos_mes: '4', pedidos_total_mes: '6', videos_mes: '4', gmv_mes_anterior: '1000.00' }] }
+      return { rows: [{ gmv_total_mes: '1600.50', gmv_lives_mes: '1200.50', gmv_videos_mes: '400.00', pedidos_lives_mes: '2', pedidos_videos_mes: '4', pedidos_total_mes: '6', videos_mes: '4', videos_mes_anterior: '3', gmv_mes_anterior: '1000.00', gmv_lives_mes_anterior: '800.00' }] }
     }
     if (sql.includes('FROM live_requests lr')) {
       throw new Error('Home operacional não deve usar live_requests')
@@ -97,7 +97,8 @@ function createHomeQueryMock() {
     }
     if (sql.includes('COUNT(*) AS total FROM clientes') && sql.includes('criado_em')) return { rows: [{ total: '1' }] }
     if (sql.includes('COUNT(*) AS total FROM clientes')) return { rows: [{ total: '3' }] }
-    if (sql.includes('COUNT(id) AS lives_mes')) return { rows: [{ lives_mes: '2' }] }
+    if (sql.includes('AS lives_mes')) return { rows: [{ lives_mes: '2', lives_mes_anterior: '1' }] }
+    if (sql.includes('AS horas_live_mes')) return { rows: [{ horas_live_mes: '10', horas_live_mes_anterior: '8' }] }
     if (sql.includes('gmv_lives_mes_anterior')) return { rows: [{ gmv_lives_mes_anterior: '1000.00' }] }
     if (sql.includes('COUNT(id) AS lives_hoje')) return { rows: [{ lives_hoje: '3' }] }
     if (sql.includes('AVG(viewer_count)')) return { rows: [{ media: '38' }] }
@@ -151,6 +152,15 @@ describe('home dashboard', () => {
     expect(payload.gmv_lives_mes).toBe(1200.5)
     expect(payload.gmv_videos_mes).toBe(400)
     expect(payload.videos_mes).toBe(4)
+    // Contrato dos deltas do KpiStrip (mês anterior real, não estático)
+    expect(payload.lives_prev).toBe(1)
+    expect(payload.horas_prev).toBe(8)
+    expect(payload.videos_prev).toBe(3)
+    // GMV/hora exclui vídeos (convenção analytics): 1200.5/10 e 800/8
+    expect(payload.gmv_por_hora).toBe(120.05)
+    expect(payload.gmv_por_hora_prev).toBe(100)
+    // GMV/live prev usa lives do mês anterior: 1000/1
+    expect(payload.gmv_por_live_prev).toBe(1000)
     expect(payload.gmv_ao_vivo_agora).toBe(350.25)
     expect(payload.lives_ativas_agora).toBe(1)
     expect(payload.lives_hoje).toBe(3)

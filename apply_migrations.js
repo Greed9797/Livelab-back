@@ -114,6 +114,7 @@ export const MIGRATIONS_LIST = [
   '117_lives_marca_obrigatoria.sql',
   '118_tenant_comissao_faixas_default.sql',
   '119_reset_escadas_apresentadoras_para_padrao.sql',
+  '120_grade_visual.sql',
 ]
 
 async function ensureMigrationsTable(client) {

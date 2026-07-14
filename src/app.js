@@ -48,6 +48,7 @@ import { notificacoesRoutes } from './routes/notificacoes.js'
 import { auditLogRoutes } from './routes/audit_log.js'
 import { marcasRoutes } from './routes/marcas.js'
 import { agendaRoutes } from './routes/agenda.js'
+import { gradeRoutes } from './routes/grade.js'
 import { videosRoutes } from './routes/videos.js'
 import { vendasAtribuidasRoutes } from './routes/vendas_atribuidas.js'
 import { comissoesRoutes } from './routes/comissoes.js'
@@ -244,6 +245,7 @@ export async function buildApp(opts = {}) {
   await app.register(auditLogRoutes)
   await app.register(marcasRoutes)
   await app.register(agendaRoutes)
+  await app.register(gradeRoutes)
   await app.register(videosRoutes)
   await app.register(vendasAtribuidasRoutes)
   await app.register(comissoesRoutes)

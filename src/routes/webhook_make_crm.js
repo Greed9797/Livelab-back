@@ -78,9 +78,10 @@ function buildLeadRow(payload, franqueadoraId) {
 }
 
 export async function webhookMakeCrmRoutes(app) {
-  // Secret obrigatório em produção — evita aceitar payload sem assinatura por config esquecida.
+  // Sem secret em produção, a rota responde 503 (abaixo) em vez de derrubar o boot —
+  // a env pode ser setada depois sem bloquear o deploy do resto da API.
   if (process.env.NODE_ENV === 'production' && !process.env.MAKE_CRM_WEBHOOK_SECRET) {
-    throw new Error('[boot] MAKE_CRM_WEBHOOK_SECRET é obrigatório em produção')
+    app.log.warn('[boot] MAKE_CRM_WEBHOOK_SECRET ausente — /v1/webhooks/make-crm responderá 503 até configurar')
   }
 
   app.post('/v1/webhooks/make-crm', {

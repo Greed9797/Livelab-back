@@ -43,6 +43,7 @@ import { clienteInsightsRoutes } from './routes/cliente_insights.js'
 import onboardingRoutes from './routes/onboarding.js'
 import { tenantsRoutes } from './routes/tenants.js'
 import { webhookBioCrmRoutes } from './routes/webhook_bio_crm.js'
+import { webhookMakeCrmRoutes } from './routes/webhook_make_crm.js'
 import { appmaxRoutes } from './routes/appmax.js'
 import { notificacoesRoutes } from './routes/notificacoes.js'
 import { auditLogRoutes } from './routes/audit_log.js'
@@ -240,6 +241,7 @@ export async function buildApp(opts = {}) {
   await app.register(onboardingRoutes)
   await app.register(tenantsRoutes)
   await app.register(webhookBioCrmRoutes)
+  await app.register(webhookMakeCrmRoutes)
   await app.register(appmaxRoutes)
   await app.register(notificacoesRoutes)
   await app.register(auditLogRoutes)

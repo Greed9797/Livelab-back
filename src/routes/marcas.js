@@ -18,7 +18,7 @@ const marcaBaseSchema = z.object({
   cliente_id: z.string().uuid().nullable().optional(),
   nome: z.string().min(1),
   tipo: z.enum(['cliente', 'afiliada', 'propria', 'parceira']).default('cliente'),
-  status: z.enum(['ativa', 'inativa', 'pausada']).default('ativa'),
+  status: z.enum(['ativa', 'inativa', 'pausada', 'arquivada']).default('ativa'),
   tiktok_username: tiktokUsernameField,
   site: z.string().nullable().optional(),
   marketplace_url: z.string().nullable().optional(),
@@ -85,7 +85,8 @@ export async function marcasRoutes(app) {
         values.push(status)
         addFilter(filters, values, 'm.status = ?')
       } else {
-        filters.push(`m.status <> 'inativa'`)
+        // Arquivadas (e inativas) somem por padrão; ?status=arquivada lista.
+        filters.push(`m.status NOT IN ('inativa', 'arquivada')`)
       }
       if (tipo && tipo !== 'all') {
         values.push(tipo)

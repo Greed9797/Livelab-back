@@ -260,6 +260,11 @@ export async function clientesRoutes(app) {
   // GET /v1/clientes
   app.get('/v1/clientes', { preHandler: app.requirePapel(READ_CLIENTES) }, async (request) => {
     const { tenant_id } = request.user
+    // ?status=arquivado lista só os arquivados; default = operacionais (arquivado oculto).
+    const soArquivados = String(request.query?.status ?? '') === 'arquivado'
+    const statusFilter = soArquivados
+      ? `cl.status = 'arquivado'`
+      : `cl.status IN ('ativo', 'inadimplente', 'cancelado')`
     return app.withTenant(tenant_id, async (db) => {
       // Defesa em profundidade: WHERE cl.tenant_id explícito porque role
       // postgres do Supabase tem rolbypassrls=true (ADR 0003).
@@ -304,7 +309,7 @@ export async function clientesRoutes(app) {
            ) t GROUP BY id
          ) mtr ON mtr.id = cl.id
          WHERE cl.tenant_id = $1::uuid
-           AND cl.status IN ('ativo', 'inadimplente', 'cancelado')
+           AND ${statusFilter}
            AND cl.deleted_at IS NULL
          ORDER BY cl.criado_em DESC`,
         [tenant_id, mStart, mEnd]

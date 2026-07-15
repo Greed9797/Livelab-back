@@ -55,6 +55,9 @@ function buildApp(queryMock, tenantId = 'tenant-a') {
 
 function createHomeQueryMock() {
   return vi.fn(async (sql, params = []) => {
+    // hojeSpQ (MTD cutoff): mes_corrente != mês efetivo do teste → cutoffDay=null
+    // → comparador do mês anterior fica cheio, valores esperados abaixo inalterados.
+    if (sql.includes('mes_corrente')) return { rows: [{ mes_corrente: '2000-01', dia: 15 }] }
     if (sql.includes('COUNT(*) FILTER') && sql.includes('FROM cabines')) {
       return { rows: [{ ao_vivo: '1', operacionais: '7' }] }
     }
@@ -180,6 +183,10 @@ describe('home dashboard', () => {
     const gmvSql = sqls.find((sql) => sql.includes('home_gmv_operacional'))
     expect(gmvSql).toContain('FROM vendas_atribuidas va')
     expect(gmvSql).toContain("va.origem = 'video'")
+    // MTD: comparador do mês anterior recortado pelo cutoffDay ($2)
+    expect(gmvSql).toContain('EXTRACT(day FROM l.iniciado_em')
+    const gmvCall = queryMock.mock.calls.find(([sql]) => sql.includes('home_gmv_operacional'))
+    expect(gmvCall[1]).toHaveLength(2) // [mesStart, cutoffDay]
 
     const rankingSql = sqls.find((sql) => sql.includes('combined.marca_id'))
     expect(rankingSql).toContain('FROM lives l')

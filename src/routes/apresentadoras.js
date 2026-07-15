@@ -34,6 +34,7 @@ const createSchema = z.object({
 
 const updateSchema = createSchema.partial().extend({
   ativo: z.boolean().optional(),
+  arquivada: z.boolean().optional(),
 })
 
 const faixaSchema = z.object({
@@ -44,7 +45,7 @@ const faixaSchema = z.object({
 
 const faixaPatchSchema = faixaSchema.partial()
 
-const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, ${presenterFixedSql('a')} AS fixo, comissao_pct, meta_diaria_gmv, foto_url, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
+const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, arquivada, ${presenterFixedSql('a')} AS fixo, comissao_pct, meta_diaria_gmv, foto_url, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
 
 // Resolve o id de apresentadora a partir de :id que pode ser:
 //  - id real da tabela apresentadoras, OU
@@ -113,10 +114,14 @@ export async function apresentadorasRoutes(app) {
   // de cada apresentadora sem precisar de chamada extra.
   app.get('/v1/apresentadoras', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
-    // Default: exclui ativo=false (soft-delete leakage fix).
-    // ?include_inactive=true → bypass.
+    // Default: exclui ativo=false (soft-delete) e arquivada=true.
+    // ?include_inactive=true → mostra inativas; ?include_archived=true → mostra arquivadas.
     const includeInactive = String(request.query?.include_inactive ?? '').toLowerCase() === 'true'
-    const activeFilter = includeInactive ? '' : 'AND a.ativo IS NOT FALSE'
+    const includeArchived = String(request.query?.include_archived ?? '').toLowerCase() === 'true'
+    const activeFilter = [
+      includeInactive ? '' : 'AND a.ativo IS NOT FALSE',
+      includeArchived ? '' : 'AND a.arquivada IS NOT TRUE',
+    ].join(' ')
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT ${COLS},

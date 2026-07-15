@@ -146,7 +146,7 @@ describe('Soft-delete leakage — GET listagens excluem soft-deletados por defau
       const res = await app.inject({ method: 'GET', url: '/v1/marcas' })
       expect(res.statusCode).toBe(200)
       const sql = getSqlFromLastCall(query)
-      expect(sql).toContain(`m.status <> 'inativa'`)
+      expect(sql).toContain(`NOT IN ('inativa', 'arquivada')`)
       await app.close()
     })
 
@@ -156,7 +156,7 @@ describe('Soft-delete leakage — GET listagens excluem soft-deletados por defau
       const res = await app.inject({ method: 'GET', url: '/v1/marcas?status=all' })
       expect(res.statusCode).toBe(200)
       const sql = getSqlFromLastCall(query)
-      expect(sql).not.toContain(`m.status <> 'inativa'`)
+      expect(sql).not.toContain(`NOT IN ('inativa', 'arquivada')`)
       await app.close()
     })
   })

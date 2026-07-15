@@ -35,6 +35,19 @@ describe('GET /v1/marcas — arquivadas', () => {
     expect(call[1]).toContain('arquivada')
     await app.close()
   })
+
+  it('PATCH aceita status=arquivada (não 400)', async () => {
+    const { app } = build(marcasRoutes)
+    await app.ready()
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/marcas/00000000-0000-4000-8000-000000000001',
+      payload: { status: 'arquivada' },
+    })
+    // Passou do parse Zod: não pode ser 400 de validação do enum
+    expect(res.statusCode).not.toBe(400)
+    await app.close()
+  })
 })
 
 describe('GET /v1/apresentadoras — arquivadas', () => {

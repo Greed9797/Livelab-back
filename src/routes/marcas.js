@@ -41,7 +41,7 @@ const marcaSchema = marcaBaseSchema.refine((data) => data.tipo !== 'cliente' || 
 // passa a exigir cliente_id em qualquer PATCH (ex: só atualizar comissão → 400).
 const marcaPatchSchema = marcaBaseSchema.partial().extend({
   tipo: z.enum(['cliente', 'afiliada', 'propria', 'parceira']).optional(),
-  status: z.enum(['ativa', 'inativa', 'pausada']).optional(),
+  status: z.enum(['ativa', 'inativa', 'pausada', 'arquivada']).optional(),
   comissao_franquia_pct: z.number().min(0).max(100).optional(),
   comissao_franqueadora_pct: z.number().min(0).max(100).optional(),
 }).refine((data) => {

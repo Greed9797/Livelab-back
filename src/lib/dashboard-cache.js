@@ -5,15 +5,14 @@ import { performance } from 'node:perf_hooks'
 //   - Map com TTL curto (30–60s) → absorve refresh rápido / múltiplas abas.
 //   - Dedup de requisições in-flight → 1 query no DB mesmo com N requests
 //     concorrentes para a MESMA chave (evita thundering herd).
-//   - Header Cache-Control: private, max-age=15, stale-while-revalidate=30 →
-//     o browser reaproveita por 15s e serve stale enquanto revalida por +30s.
+//   - Header Cache-Control: private, no-cache → o browser sempre pergunta ao
+//     servidor. Quem entrega a velocidade é o cache em memória acima (que a
+//     invalidação por evento mantém correto); um max-age no browser mascararia
+//     essa invalidação, servindo lista velha logo após um PATCH.
 //
 // IMPORTANTE: a chave de cache DEVE conter tenant_id + TODOS os parâmetros que
 // alteram o resultado (período, marca_id, apresentadora_id, scope, origem, …).
 // Caso contrário tenants/filtros se contaminariam. NUNCA usar em POST/PATCH.
-
-const BROWSER_MAX_AGE_SECONDS = 15
-const STALE_SECONDS = 30
 
 // Namespaces isolados por endpoint para evitar colisão de chaves entre rotas.
 // Cada namespace tem seu próprio Map de valores e de promessas in-flight.
@@ -51,7 +50,7 @@ export function buildCacheKey(tenantId, params = {}) {
  */
 export function setCacheControl(reply, cacheState, startedAt) {
   const totalMs = Math.max(performance.now() - startedAt, 0)
-  reply.header('Cache-Control', `private, max-age=${BROWSER_MAX_AGE_SECONDS}, stale-while-revalidate=${STALE_SECONDS}`)
+  reply.header('Cache-Control', 'private, no-cache')
   reply.header('X-Dashboard-Cache', cacheState)
   reply.header('Server-Timing', `cache;desc="${cacheState}", total;dur=${totalMs.toFixed(1)}`)
 }

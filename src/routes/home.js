@@ -38,8 +38,6 @@ function countWeekdaysUpTo(yyyy, mm, dayOfMonth) {
   }
   return count
 }
-const HOME_DASHBOARD_BROWSER_MAX_AGE_SECONDS = 15
-const HOME_DASHBOARD_STALE_SECONDS = 30
 const homeDashboardCache = new Map()
 const homeDashboardInFlight = new Map()
 
@@ -59,7 +57,7 @@ function getHomeDashboardCache(key, now = Date.now()) {
 
 function setHomeDashboardHeaders(reply, cacheState, startedAt) {
   const totalMs = Math.max(performance.now() - startedAt, 0)
-  reply.header('Cache-Control', `private, max-age=${HOME_DASHBOARD_BROWSER_MAX_AGE_SECONDS}, stale-while-revalidate=${HOME_DASHBOARD_STALE_SECONDS}`)
+  reply.header('Cache-Control', 'private, no-cache')
   reply.header('X-Home-Dashboard-Cache', cacheState)
   reply.header('Server-Timing', `cache;desc="${cacheState}", total;dur=${totalMs.toFixed(1)}`)
 }

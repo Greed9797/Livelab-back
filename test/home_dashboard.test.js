@@ -227,7 +227,10 @@ describe('home dashboard', () => {
     expect(first.statusCode).toBe(200)
     expect(first.headers['x-home-dashboard-cache']).toBe('MISS')
     expect(first.headers['cache-control']).toContain('private')
-    expect(first.headers['cache-control']).toContain('max-age=15')
+    // O browser NÃO pode cachear: um max-age aqui sobrevive à invalidação por
+    // evento e devolve dados velhos logo depois de uma escrita.
+    expect(first.headers['cache-control']).toContain('no-cache')
+    expect(first.headers['cache-control']).not.toContain('max-age')
     expect(first.headers['server-timing']).toContain('total;dur=')
     expect(second.statusCode).toBe(200)
     expect(second.headers['x-home-dashboard-cache']).toBe('HIT')

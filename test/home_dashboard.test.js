@@ -49,6 +49,13 @@ function buildApp(queryMock, tenantId = 'tenant-a') {
     const db = await app.dbTenant(tenantId)
     try { return await fn(db) } finally { db.release() }
   })
+  // O home usa tenantParallel (cada query numa conexão do pool) para não
+  // serializar os Promise.all. Aqui basta espelhar o escopo de tenant.
+  app.decorate('tenantParallel', (tenantId) => {
+    tenantIds.push(tenantId)
+    release() // mantém o contrato "conexão devolvida" dos testes de pool
+    return { query: queryMock }
+  })
 
   return { app, release, tenantIds }
 }

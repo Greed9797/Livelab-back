@@ -29,6 +29,37 @@ async function authPlugin(app) {
   // não bloqueia (cai pra comportamento atual). Se token_version não estiver
   // no payload (JWT antigo emitido antes do deploy), trata como version 1
   // (compatibilidade durante rollout — JWTs anteriores expiram em 15min).
+  // Cache curto do token_version por usuário.
+  //
+  // Este SELECT roda em TODA request autenticada. Com a API longe do banco
+  // (Railway us-west ↔ Supabase sa-east ≈ 180ms de RTT), ele sozinho somava
+  // ~180ms a cada chamada de página. O TTL curto mantém a invalidação de sessão
+  // (redefinir senha / force-logout) efetiva em poucos segundos.
+  const TOKEN_VERSION_TTL_MS = Number(process.env.TOKEN_VERSION_CACHE_TTL_MS ?? 10_000)
+  const tokenVersionCache = new Map() // userId -> { version, expiresAt }
+
+  async function _getTokenVersion(userId, fallback) {
+    const hit = tokenVersionCache.get(userId)
+    if (hit && hit.expiresAt > Date.now()) return hit.version
+    const { rows } = await app.db.query(
+      `SELECT token_version FROM users WHERE id = $1`,
+      [userId]
+    )
+    const version = rows[0]?.token_version ?? fallback
+    tokenVersionCache.set(userId, { version, expiresAt: Date.now() + TOKEN_VERSION_TTL_MS })
+    // Poda preguiçosa: evita crescer sem limite em tenants com muitos usuários.
+    if (tokenVersionCache.size > 5000) {
+      const now = Date.now()
+      for (const [key, value] of tokenVersionCache) {
+        if (value.expiresAt <= now) tokenVersionCache.delete(key)
+      }
+    }
+    return version
+  }
+
+  // Invalida o cache na hora quando a sessão é derrubada de propósito.
+  app.decorate('invalidateTokenVersionCache', (userId) => tokenVersionCache.delete(userId))
+
   async function _verifyTokenVersion(request, reply) {
     // Dedup por request: rotas que empilham [authenticate, requirePapel(...)]
     // chamariam este check 2× (1 SELECT token_version + 1 jwtVerify redundante
@@ -41,11 +72,7 @@ async function authPlugin(app) {
       ? request.user.token_version
       : 1
     try {
-      const { rows } = await app.db.query(
-        `SELECT token_version FROM users WHERE id = $1`,
-        [userId]
-      )
-      const dbVersion = rows[0]?.token_version ?? jwtVersion
+      const dbVersion = await _getTokenVersion(userId, jwtVersion)
       if (dbVersion > jwtVersion) {
         return reply.code(401).send({ error: 'Sessão expirada' })
       }

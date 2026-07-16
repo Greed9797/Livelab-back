@@ -358,6 +358,9 @@ export async function authRoutes(app) {
           WHERE id = $2 AND ativo = true`,
         [novoHash, userId]
       )
+      // Derruba o cache de token_version na hora (senão o JWT antigo seguiria
+      // válido até o TTL do cache expirar).
+      app.invalidateTokenVersionCache?.(userId)
 
       // Revoga TODAS as sessões existentes — força re-login.
       // Mitiga session fixation: se a senha vazou, todas as sessões antigas

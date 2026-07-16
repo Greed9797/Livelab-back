@@ -84,7 +84,11 @@ export async function homeRoutes(app) {
 
     let payloadPromise = homeDashboardInFlight.get(cacheKey)
     if (!payloadPromise) {
-      payloadPromise = app.withTenant(tenant_id, async (db) => {
+      // tenantParallel (não withTenant): este handler dispara ~20 queries em
+      // Promise.all. Num único client elas seriam enfileiradas e viravam 20
+      // round-trips sequenciais (~4s com a API longe do banco). Aqui cada uma
+      // usa sua própria conexão do pool e o Promise.all custa ~1 RTT.
+      payloadPromise = (async (db) => {
       try {
       const round2 = (value) => parseFloat(Number(value ?? 0).toFixed(2))
       const growthPct = (current, previous) => {
@@ -990,7 +994,7 @@ export async function homeRoutes(app) {
         app.log.error({ err: error }, 'ERRO NA ROTA /v1/home/dashboard')
         throw error
       }
-      })
+      })(app.tenantParallel(tenant_id))
       homeDashboardInFlight.set(cacheKey, payloadPromise)
       payloadPromise.finally(() => homeDashboardInFlight.delete(cacheKey)).catch(() => {})
     }

@@ -510,6 +510,8 @@ export async function usuariosRoutes(app) {
       if (result.rows.length === 0) {
         return reply.code(404).send({ error: 'Usuário não encontrado' })
       }
+      // Derruba o cache de token_version na hora — force-logout precisa valer já.
+      app.invalidateTokenVersionCache?.(request.params.id)
       // Revoga refresh tokens em paralelo (defesa em profundidade).
       await db.query(
         `UPDATE refresh_tokens SET revogado = true WHERE user_id = $1`,

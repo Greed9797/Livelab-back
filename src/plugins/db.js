@@ -55,6 +55,28 @@ async function dbPlugin(app) {
     }
   })
 
+  // Executor com RLS que roda queries REALMENTE em paralelo.
+  //
+  // Por que existe: `dbTenant` entrega UM client; várias `db.query()` dentro de
+  // um Promise.all são enfileiradas nele e viram round-trips SEQUENCIAIS. Com a
+  // API longe do banco (Railway us-west ↔ Supabase sa-east ≈ 180ms de RTT), um
+  // handler com 20 queries paga 20×RTT ≈ 4s. Aqui cada query pega sua própria
+  // conexão do pool, então o Promise.all custa ~1 RTT no total.
+  //
+  // Cada conexão recebe seu próprio set_config antes da query — nunca reusa o
+  // tenant de uma conexão anterior (evita vazamento entre tenants).
+  app.decorate('tenantParallel', (tenantId) => ({
+    query: async (text, params) => {
+      const client = await pool.connect()
+      try {
+        await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
+        return await client.query(text, params)
+      } finally {
+        client.release()
+      }
+    },
+  }))
+
   app.addHook('onClose', async () => pool.end())
 }
 

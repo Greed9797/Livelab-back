@@ -1,4 +1,10 @@
+import { performance } from 'node:perf_hooks'
 import { READ_LEADS } from '../config/role_groups.js'
+import { buildCacheKey, setCacheControl, withCache } from '../lib/dashboard-cache.js'
+
+// TTL longo: a invalidação por evento (hook global em app.js, disparado por
+// qualquer escrita — inclusive webhooks de lead) é quem mantém o CRM fresco.
+const CRM_CACHE_TTL_MS = Number(process.env.CRM_CACHE_TTL_MS ?? 300_000)
 
 const CRM_ETAPAS = [
   'lead_novo',
@@ -28,14 +34,21 @@ function mapMetricRow(row = {}) {
 export async function crmRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_LEADS)]
 
-  app.get('/v1/crm/summary', { preHandler: readAccess }, async (request) => {
+  app.get('/v1/crm/summary', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
 
-    // tenantParallel (não withTenant): as 4 agregações abaixo estão num
-    // Promise.all — num client único o driver pg as enfileira e elas viram 4
-    // idas sequenciais ao banco (~180ms cada, com a API longe do banco). Aqui
-    // cada uma usa sua própria conexão e o Promise.all custa ~1 ida.
-    return (async (db) => {
+    // Cache orientado a evento: as 4 agregações varrem os leads do tenant.
+    // Invalidação vem do hook global (app.js) em qualquer escrita — inclusive
+    // dos webhooks de lead (Make/bio). TTL só como rede de segurança.
+    const startedAt = performance.now()
+    const { value, state } = await withCache({
+      namespace: 'crm:summary',
+      key: buildCacheKey(tenant_id),
+      ttlMs: CRM_CACHE_TTL_MS,
+      // tenantParallel (não withTenant): as 4 agregações estão num Promise.all —
+      // num client único o driver pg as enfileira e elas viram 4 idas sequenciais
+      // ao banco. Aqui cada uma usa sua própria conexão: o Promise.all custa ~1 ida.
+      computeFn: () => (async (db) => {
       const baseWhere = `
         franqueadora_id = $1
         AND status != 'expirado'
@@ -125,6 +138,9 @@ export async function crmRoutes(app) {
           aguardando_assinatura: toNumber(alertasQ.rows[0]?.aguardando_assinatura),
         },
       }
-    })(app.tenantParallel(tenant_id))
+      })(app.tenantParallel(tenant_id)),
+    })
+    setCacheControl(reply, state, startedAt)
+    return value
   })
 }

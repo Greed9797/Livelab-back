@@ -1,9 +1,19 @@
 import { z } from 'zod'
+import { performance } from 'node:perf_hooks'
 import { READ_MARCAS, WRITE_MARCAS } from '../config/role_groups.js'
+import { buildCacheKey, invalidateTenant, setCacheControl, withCache } from '../lib/dashboard-cache.js'
 import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
+
+// TTL longo de propósito: a invalidação por evento (writes) é quem mantém a
+// listagem fresca. Este TTL é só o limite de quanto um dado poderia ficar velho
+// se algum caminho de escrita esquecer de invalidar.
+const MARCAS_CACHE_TTL_MS = Number(process.env.MARCAS_CACHE_TTL_MS ?? 300_000)
+
+/** Namespaces de cache afetados por qualquer escrita de marca/cliente. */
+export const LISTAGEM_NAMESPACES = ['marcas:list', 'clientes:list']
 
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
@@ -69,11 +79,22 @@ export async function marcasRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_MARCAS)]
   const writeAccess = [app.authenticate, app.requirePapel(WRITE_MARCAS)]
 
-  app.get('/v1/marcas', { preHandler: readAccess }, async (request) => {
+  app.get('/v1/marcas', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     const { status, tipo, cliente_id, q } = request.query ?? {}
 
-    return app.withTenant(tenant_id, async (db) => {
+    // Cache orientado a evento: a query agrega o mês inteiro de lives+vídeos a
+    // cada request. Quem invalida é o write (criar/editar/arquivar marca, e as
+    // vendas que entram por webhook) — o TTL longo é só rede de segurança para
+    // um caminho de escrita que porventura não invalide, nunca a fonte da verdade.
+    // A chave inclui os filtros: sem isso, uma listagem filtrada serviria outra.
+    const startedAt = performance.now()
+    const cacheKey = buildCacheKey(tenant_id, { status, tipo, cliente_id, q })
+    const { value, state } = await withCache({
+      namespace: 'marcas:list',
+      key: cacheKey,
+      ttlMs: MARCAS_CACHE_TTL_MS,
+      computeFn: () => app.withTenant(tenant_id, async (db) => {
       const values = [tenant_id]
       const filters = ['m.tenant_id = $1::uuid']
 
@@ -148,7 +169,10 @@ export async function marcasRoutes(app) {
         values,
       )
       return result.rows
+      }),
     })
+    setCacheControl(reply, state, startedAt)
+    return value
   })
 
   app.post('/v1/marcas', { preHandler: writeAccess }, async (request, reply) => {

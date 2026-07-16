@@ -1,8 +1,14 @@
 import { z } from 'zod'
 import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
+import { performance } from 'node:perf_hooks'
 import { resolveCepToGeo } from './cep.js'
 import { READ_CLIENTES, WRITE_CLIENTES } from '../config/role_groups.js'
+import { buildCacheKey, setCacheControl, withCache } from '../lib/dashboard-cache.js'
+
+// TTL longo: quem mantém a lista fresca é a invalidação por evento (hook global
+// em app.js). Este limite só existe como rede de segurança.
+const CLIENTES_CACHE_TTL_MS = Number(process.env.CLIENTES_CACHE_TTL_MS ?? 300_000)
 import { getClienteOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
@@ -258,14 +264,23 @@ export async function clientesRoutes(app) {
   })
 
   // GET /v1/clientes
-  app.get('/v1/clientes', { preHandler: app.requirePapel(READ_CLIENTES) }, async (request) => {
+  app.get('/v1/clientes', { preHandler: app.requirePapel(READ_CLIENTES) }, async (request, reply) => {
     const { tenant_id } = request.user
     // ?status=arquivado lista só os arquivados; default = operacionais (arquivado oculto).
     const soArquivados = String(request.query?.status ?? '') === 'arquivado'
     const statusFilter = soArquivados
       ? `cl.status = 'arquivado'`
       : `cl.status IN ('ativo', 'inadimplente', 'cancelado')`
-    return app.withTenant(tenant_id, async (db) => {
+
+    // Cache orientado a evento (ver comentário em marcas.js): a query agrega o
+    // mês inteiro de lives+vídeos. Invalidação vem do hook global de escrita.
+    const startedAt = performance.now()
+    const cacheKey = buildCacheKey(tenant_id, { arquivados: soArquivados })
+    const { value, state } = await withCache({
+      namespace: 'clientes:list',
+      key: cacheKey,
+      ttlMs: CLIENTES_CACHE_TTL_MS,
+      computeFn: () => app.withTenant(tenant_id, async (db) => {
       // Defesa em profundidade: WHERE cl.tenant_id explícito porque role
       // postgres do Supabase tem rolbypassrls=true (ADR 0003).
       // GMV/lives/vídeos do mês corrente derivados da fonte da verdade (lives + video_registros).
@@ -315,7 +330,10 @@ export async function clientesRoutes(app) {
         [tenant_id, mStart, mEnd]
       )
       return result.rows
+      }),
     })
+    setCacheControl(reply, state, startedAt)
+    return value
   })
 
   // POST /v1/clientes/merge-restrito

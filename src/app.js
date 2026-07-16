@@ -1,6 +1,7 @@
 import Fastify from 'fastify'
 import * as Sentry from '@sentry/node'
 import { timingSafeEqual } from 'crypto'
+import { invalidateTenant } from './lib/dashboard-cache.js'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import helmet from '@fastify/helmet'
@@ -189,6 +190,22 @@ export async function buildApp(opts = {}) {
   })
   await app.register(compress, { global: true })
   await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024 } })
+
+  // Cache das listagens é orientado a EVENTO: qualquer escrita bem-sucedida
+  // invalida o cache do tenant, então a próxima leitura já vê o dado novo (não
+  // esperamos TTL). Fica aqui, num único hook, em vez de espalhar chamadas por
+  // cada handler — é o que garante que uma rota nova nasça coberta, sem alguém
+  // lembrar de invalidar.
+  //
+  // Não cobre (de propósito): snapshots de live (não passam por HTTP — a tela ao
+  // vivo não usa cache) e jobs/cron (sem request); para esses, o TTL longo das
+  // rotas é a rede de segurança.
+  app.addHook('onResponse', async (request, reply) => {
+    if (request.method === 'GET' || request.method === 'HEAD') return
+    if (reply.statusCode >= 400) return // escrita falhou: nada mudou
+    const tenantId = request.user?.tenant_id ?? request.cacheInvalidateTenantId
+    if (tenantId) invalidateTenant(tenantId)
+  })
 
   // Captura rawBody em JSON pra validação HMAC de webhooks (bio-crm, tiktok).
   // Não muda comportamento de request.body — só anexa request.rawBody.

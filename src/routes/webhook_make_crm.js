@@ -157,6 +157,10 @@ export async function webhookMakeCrmRoutes(app) {
       })
       app.log.info({ leadId: lead.id, origem: lead.origem }, '[make-crm webhook] lead criado')
 
+      // Webhook não tem request.user — sinaliza o tenant para o hook global de
+      // invalidação (app.js), senão o CRM só veria o lead novo quando o TTL expirasse.
+      request.cacheInvalidateTenantId = franqueadoraId
+
       app.audit?.log?.(request, {
         action: 'webhook_received',
         entity_type: 'make_crm',

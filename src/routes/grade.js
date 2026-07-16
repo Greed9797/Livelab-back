@@ -12,8 +12,13 @@ const MAX_INTERVALO_DIAS = 62
 const horaSchema = z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, 'Hora inválida (HH:MM)')
 const dataSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Data inválida (YYYY-MM-DD)')
 
+const diaSemanaSchema = z.number().int().min(0).max(6)
+
+// `dias_semana` aplica a mesma célula a vários dias da semana numa só requisição
+// (usado pela aba "Seg–Sex" da grade). `dia_semana` single segue aceito.
 const padraoUpsertSchema = z.object({
-  dia_semana: z.number().int().min(0).max(6),
+  dia_semana: diaSemanaSchema.optional(),
+  dias_semana: z.array(diaSemanaSchema).min(1).optional(),
   cabine_id: z.string().uuid(),
   hora_inicio: horaSchema,
   hora_fim: horaSchema,
@@ -22,13 +27,30 @@ const padraoUpsertSchema = z.object({
   observacao: z.string().nullable().optional(),
 }).refine((d) => normalizeHora(d.hora_fim) > normalizeHora(d.hora_inicio), {
   message: 'hora_fim deve ser maior que hora_inicio',
+}).refine((d) => d.dia_semana !== undefined || (d.dias_semana?.length ?? 0) > 0, {
+  message: 'Informe dia_semana ou dias_semana',
 })
 
 const padraoDeleteSchema = z.object({
-  dia_semana: z.coerce.number().int().min(0).max(6),
+  dia_semana: z.coerce.number().int().min(0).max(6).optional(),
+  // Query string: ?dias_semana=1,2,3,4,5
+  dias_semana: z.string().optional(),
   cabine_id: z.string().uuid(),
   hora_inicio: horaSchema,
+}).refine((d) => d.dia_semana !== undefined || Boolean(d.dias_semana), {
+  message: 'Informe dia_semana ou dias_semana',
 })
+
+/** dia_semana single ou dias_semana[] → lista única e ordenada de dows. */
+function resolveDows({ dia_semana, dias_semana }) {
+  const raw = Array.isArray(dias_semana)
+    ? dias_semana
+    : typeof dias_semana === 'string' && dias_semana
+      ? dias_semana.split(',').map((v) => Number(v.trim()))
+      : []
+  const all = raw.length ? raw : [dia_semana]
+  return [...new Set(all.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
+}
 
 const excecaoUpsertSchema = z.object({
   data: dataSchema,
@@ -250,12 +272,15 @@ export async function gradeRoutes(app) {
     })
   })
 
-  // PUT /v1/grade/padrao — upsert de UMA célula do template
+  // PUT /v1/grade/padrao — upsert de uma célula do template em 1..N dias da semana
   app.put('/v1/grade/padrao', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = padraoUpsertSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const d = parsed.data
+    const dows = resolveDows(d)
+    if (dows.length === 0) return reply.code(400).send({ error: 'Informe dia_semana ou dias_semana' })
+
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const refsOk = await ensureGradeRefs(db, reply, {
@@ -266,9 +291,11 @@ export async function gradeRoutes(app) {
       })
       if (!refsOk) return reply
 
+      // unnest($2::int[]) grava todos os dows numa única query — sem estado parcial
+      // se um deles falhar (a aba "Seg–Sex" manda [1,2,3,4,5]).
       const result = await db.query(
         `INSERT INTO grade_padrao (tenant_id, dia_semana, cabine_id, hora_inicio, hora_fim, marca_id, apresentadora_id, observacao)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         SELECT $1, dow, $3, $4, $5, $6, $7, $8 FROM unnest($2::int[]) AS dow
          ON CONFLICT (tenant_id, dia_semana, cabine_id, hora_inicio)
          DO UPDATE SET hora_fim = EXCLUDED.hora_fim,
                        marca_id = EXCLUDED.marca_id,
@@ -276,24 +303,28 @@ export async function gradeRoutes(app) {
                        observacao = EXCLUDED.observacao,
                        atualizado_em = NOW()
          RETURNING *`,
-        [tenant_id, d.dia_semana, d.cabine_id, d.hora_inicio, d.hora_fim, d.marca_id, d.apresentadora_id ?? null, d.observacao ?? null],
+        [tenant_id, dows, d.cabine_id, d.hora_inicio, d.hora_fim, d.marca_id, d.apresentadora_id ?? null, d.observacao ?? null],
       )
-      return { celula: result.rows[0] }
+      return { celulas: result.rows, celula: result.rows[0] }
     })
   })
 
-  // DELETE /v1/grade/padrao — remove uma célula do template
+  // DELETE /v1/grade/padrao — remove a célula do template em 1..N dias da semana
   app.delete('/v1/grade/padrao', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = padraoDeleteSchema.safeParse(request.query ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
-    const { dia_semana, cabine_id, hora_inicio } = parsed.data
+    const { cabine_id, hora_inicio } = parsed.data
+    const dows = resolveDows(parsed.data)
+    if (dows.length === 0) return reply.code(400).send({ error: 'Informe dia_semana ou dias_semana' })
+
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `DELETE FROM grade_padrao
-         WHERE tenant_id = $1::uuid AND dia_semana = $2 AND cabine_id = $3::uuid AND hora_inicio = $4::time`,
-        [tenant_id, dia_semana, cabine_id, hora_inicio],
+         WHERE tenant_id = $1::uuid AND dia_semana = ANY($2::int[])
+           AND cabine_id = $3::uuid AND hora_inicio = $4::time`,
+        [tenant_id, dows, cabine_id, hora_inicio],
       )
       if ((result.rowCount ?? 0) === 0) return reply.code(404).send({ error: 'Célula não encontrada' })
       return reply.code(204).send()

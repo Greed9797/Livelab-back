@@ -116,6 +116,7 @@ export const MIGRATIONS_LIST = [
   '119_reset_escadas_apresentadoras_para_padrao.sql',
   '120_grade_visual.sql',
   '121_arquivamento.sql',
+  '122_grade_padrao_dias_uteis.sql',
 ]
 
 async function ensureMigrationsTable(client) {

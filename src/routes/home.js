@@ -592,32 +592,44 @@ export async function homeRoutes(app) {
         return []
       })
 
+      // GMV/pedidos por dia do mês + GMV do mesmo dia no mês anterior (série comparativa
+      // do gráfico da Home). `mes_offset` 0 = mês exibido, 1 = mês anterior.
       const gmvDiarioPromise = db.query(`
           WITH daily AS (
             SELECT
               EXTRACT(DAY FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS dia,
-              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv
+              CASE WHEN date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+                        = date_trunc('month', $1::date) THEN 0 ELSE 1 END AS mes_offset,
+              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv,
+              COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::int AS pedidos
             FROM lives l
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
               AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-                  = date_trunc('month', $1::date)
-            GROUP BY dia
+                  IN (date_trunc('month', $1::date),
+                      date_trunc('month', $1::date - INTERVAL '1 month'))
+            GROUP BY dia, mes_offset
             UNION ALL
             SELECT
               EXTRACT(DAY FROM va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')::int AS dia,
-              COALESCE(SUM(va.gmv), 0) AS gmv
+              CASE WHEN date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
+                        = date_trunc('month', $1::date) THEN 0 ELSE 1 END AS mes_offset,
+              COALESCE(SUM(va.gmv), 0) AS gmv,
+              COALESCE(SUM(va.pedidos), 0)::int AS pedidos
             FROM vendas_atribuidas va
             WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND va.origem = 'video'
               AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
               AND date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo')
-                  = date_trunc('month', $1::date)
-            GROUP BY dia
+                  IN (date_trunc('month', $1::date),
+                      date_trunc('month', $1::date - INTERVAL '1 month'))
+            GROUP BY dia, mes_offset
           )
           SELECT
             dia,
-            COALESCE(SUM(gmv), 0) AS gmv
+            COALESCE(SUM(gmv) FILTER (WHERE mes_offset = 0), 0) AS gmv,
+            COALESCE(SUM(pedidos) FILTER (WHERE mes_offset = 0), 0)::int AS pedidos,
+            COALESCE(SUM(gmv) FILTER (WHERE mes_offset = 1), 0) AS prev
           FROM daily
           GROUP BY dia
           ORDER BY dia
@@ -739,8 +751,18 @@ export async function homeRoutes(app) {
       const gmvDiario = (() => {
         const [anoRef, mesRef] = effectiveMonth.split('-').map(Number)
         const diasNoMes = new Date(anoRef, mesRef, 0).getDate()
-        const byDay = Object.fromEntries(gmvDiarioQ.rows.map(r => [Number(r.dia), parseFloat(Number(r.gmv).toFixed(2))]))
-        return Array.from({ length: diasNoMes }, (_, i) => ({ dia: i + 1, gmv: byDay[i + 1] ?? 0 }))
+        // Dias do mês anterior que não existem no mês exibido (ex.: 31 vs 30) ficam de fora —
+        // a série comparativa acompanha o eixo do mês exibido.
+        const byDay = Object.fromEntries(gmvDiarioQ.rows.map(r => [Number(r.dia), r]))
+        return Array.from({ length: diasNoMes }, (_, i) => {
+          const row = byDay[i + 1]
+          return {
+            dia: i + 1,
+            gmv: round2(row?.gmv ?? 0),
+            pedidos: Number(row?.pedidos ?? 0),
+            prev: round2(row?.prev ?? 0),
+          }
+        })
       })()
 
       const metaUnidade = metaQ.rows[0] ?? null

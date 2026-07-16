@@ -194,6 +194,45 @@ describe('PUT /v1/grade/padrao — upsert idempotente', () => {
     await app.close()
   })
 
+  it('dias_semana [1..5] grava os 5 dows numa única query (aba Seg–Sex)', async () => {
+    const { app, query } = buildApp()
+    await app.register(gradeRoutes)
+
+    const res = await app.inject({
+      method: 'PUT',
+      url: '/v1/grade/padrao',
+      body: {
+        dias_semana: [1, 2, 3, 4, 5],
+        cabine_id: cabine1,
+        hora_inicio: '08:00',
+        hora_fim: '11:00',
+        marca_id: marcaHaag,
+      },
+    })
+    expect(res.statusCode).toBe(200)
+
+    const upserts = query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO grade_padrao'))
+    expect(upserts).toHaveLength(1) // uma query só — sem estado parcial
+    expect(upserts[0][0]).toContain('unnest($2::int[])')
+    expect(upserts[0][1][1]).toEqual([1, 2, 3, 4, 5])
+    await app.close()
+  })
+
+  it('DELETE com dias_semana=1,2,3,4,5 remove os 5 dows', async () => {
+    const { app, query } = buildApp()
+    await app.register(gradeRoutes)
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/grade/padrao?dias_semana=1,2,3,4,5&cabine_id=${cabine1}&hora_inicio=08:00`,
+    })
+    expect(res.statusCode).toBe(204)
+    const del = query.mock.calls.find(([sql]) => String(sql).includes('DELETE FROM grade_padrao'))
+    expect(del[0]).toContain('dia_semana = ANY($2::int[])')
+    expect(del[1][1]).toEqual([1, 2, 3, 4, 5])
+    await app.close()
+  })
+
   it('valida hora_fim > hora_inicio', async () => {
     const { app } = buildApp()
     await app.register(gradeRoutes)

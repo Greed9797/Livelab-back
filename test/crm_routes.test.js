@@ -19,6 +19,12 @@ function buildCrmApp(queryMock) {
     const db = await app.dbTenant(tenantId)
     try { return await fn(db) } finally { db.release() }
   })
+  // A rota usa tenantParallel (cada query numa conexão do pool) para que o
+  // Promise.all das 4 agregações não serialize num client único.
+  app.decorate('tenantParallel', () => {
+    release() // mantém o contrato "conexão devolvida" dos testes
+    return { query: queryMock }
+  })
 
   return { app, release }
 }

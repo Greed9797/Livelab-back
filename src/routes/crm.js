@@ -31,7 +31,11 @@ export async function crmRoutes(app) {
   app.get('/v1/crm/summary', { preHandler: readAccess }, async (request) => {
     const { tenant_id } = request.user
 
-    return app.withTenant(tenant_id, async (db) => {
+    // tenantParallel (não withTenant): as 4 agregações abaixo estão num
+    // Promise.all — num client único o driver pg as enfileira e elas viram 4
+    // idas sequenciais ao banco (~180ms cada, com a API longe do banco). Aqui
+    // cada uma usa sua própria conexão e o Promise.all custa ~1 ida.
+    return (async (db) => {
       const baseWhere = `
         franqueadora_id = $1
         AND status != 'expirado'
@@ -121,6 +125,6 @@ export async function crmRoutes(app) {
           aguardando_assinatura: toNumber(alertasQ.rows[0]?.aguardando_assinatura),
         },
       }
-    })
+    })(app.tenantParallel(tenant_id))
   })
 }

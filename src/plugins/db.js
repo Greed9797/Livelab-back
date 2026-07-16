@@ -76,7 +76,7 @@ async function dbPlugin(app) {
   // Teto de conexões que UM handler pode tomar de uma vez. Sem isso, um único
   // /home/dashboard (~20 queries) tomaria o pool inteiro e faria os outros
   // usuários esperarem. As excedentes apenas aguardam uma vaga.
-  const PARALLEL_MAX = Number(process.env.DB_TENANT_PARALLEL_MAX ?? 8)
+  const PARALLEL_MAX = Number(process.env.DB_TENANT_PARALLEL_MAX ?? 12)
 
   app.decorate('tenantParallel', (tenantId) => {
     let ativos = 0

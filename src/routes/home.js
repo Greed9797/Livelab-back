@@ -103,9 +103,10 @@ export async function homeRoutes(app) {
       // Espelha o fallback latestPeriodWithData do Analytics: usa o mês
       // corrente se tiver GMV; senão, o último mês com dados. Calculado
       // 1× e propagado por parâmetro ($N::date) — evita MAX() por query.
-      let effectiveMonth = requestedMes
-      if (!effectiveMonth) {
-        const mesEfetivoQ = await db.query(`
+      // As duas pré-queries (mês efetivo e "hoje" em SP) são independentes entre
+      // si — vão juntas para custar 1 ida ao banco em vez de 2.
+      const [mesEfetivoQ, hojeSpQ] = await Promise.all([
+        requestedMes ? Promise.resolve(null) : db.query(`
           WITH meses AS (
             SELECT date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS m
             FROM lives l
@@ -128,18 +129,21 @@ export async function homeRoutes(app) {
               (SELECT MAX(m) FROM meses),
               date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
             ), 'YYYY-MM') AS mes
-        `)
-        effectiveMonth = mesEfetivoQ.rows[0]?.mes ?? new Date().toISOString().slice(0, 7)
-      }
+        `),
+        db.query(`
+          SELECT to_char(NOW() AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') AS mes_corrente,
+                 EXTRACT(day FROM NOW() AT TIME ZONE 'America/Sao_Paulo')::int AS dia
+        `),
+      ])
+
+      const effectiveMonth = requestedMes
+        ?? mesEfetivoQ?.rows[0]?.mes
+        ?? new Date().toISOString().slice(0, 7)
       const mesStart = `${effectiveMonth}-01`
 
       // MTD justo: quando o mês exibido é o corrente (parcial), o comparador do
       // mês anterior é recortado no mesmo dia (1..hoje vs 1..mesmo-dia-mês-anterior).
       // Mês passado → cutoffDay=null → mês anterior inteiro (mês cheio vs cheio).
-      const hojeSpQ = await db.query(`
-        SELECT to_char(NOW() AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') AS mes_corrente,
-               EXTRACT(day FROM NOW() AT TIME ZONE 'America/Sao_Paulo')::int AS dia
-      `)
       const cutoffDay = effectiveMonth === hojeSpQ.rows[0].mes_corrente
         ? Number(hojeSpQ.rows[0].dia)
         : null
@@ -147,7 +151,10 @@ export async function homeRoutes(app) {
       // ── Grupo 1: queries financeiras + cabines ──
       // Defesa em profundidade: tenant_id explícito em cada query
       // (role Postgres atual tem BYPASSRLS — RLS sozinha não filtra).
-      const [fixoQ, varQ, custosQ, cabinesQ] = await Promise.all([
+      // Sem await aqui de propósito: o Grupo 2 abaixo não depende destes
+      // resultados, então as duas levas viajam ao banco ao mesmo tempo.
+      // O await acontece só quando os dados são realmente usados (adiante).
+      const grupo1Promise = Promise.all([
         db.query(`SELECT COALESCE(SUM(valor_fixo), 0) AS valor FROM contratos
                   WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
                     AND status = 'ativo'`),
@@ -225,38 +232,6 @@ export async function homeRoutes(app) {
         ORDER BY c.numero
       `),
       ])
-
-      const fatFixo = Number(fixoQ.rows[0].valor)
-      const fatComissao = Number(varQ.rows[0].valor)
-      const totalCustos = Number(custosQ.rows[0].valor)
-      const fatBruto = fatFixo + fatComissao
-      const fatLiquido = fatBruto - totalCustos
-
-      const cabinesFormatadas = cabinesQ.rows.map(c => {
-        let duracaoMin = 0;
-        if (c.status === 'ao_vivo' && c.iniciado_em) {
-          const start = new Date(c.iniciado_em);
-          const now = new Date();
-          duracaoMin = Math.floor((now - start) / 1000 / 60);
-        }
-        return {
-          numero: c.numero,
-          id: c.id,
-          status: c.status,
-          live_atual_id: c.live_atual_id,
-          viewer_count: Number(c.viewer_count),
-          total_orders: Number(c.total_orders),
-          gmv_atual: parseFloat(Number(c.gmv_atual).toFixed(2)),
-          cliente_nome: c.cliente_nome,
-          apresentador: c.apresentador,
-          apresentador_nome: c.apresentador,
-          tiktok_username: c.tiktok_username,
-          duracao_min: duracaoMin,
-          horas_contratadas: parseFloat(Number(c.horas_contratadas).toFixed(2)),
-          horas_realizadas_hoje: parseFloat(Number(c.horas_realizadas_hoje).toFixed(2)),
-          apresentadores_extra: c.apresentadores_extra || []
-        }
-      });
 
       // ── Grupo 2: métricas, pipeline, alertas, ocupação, ranking (independentes) ──
       const [
@@ -515,6 +490,41 @@ export async function homeRoutes(app) {
             AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
         `, [mesStart, cutoffDay]),
       ])
+
+      // Grupo 1 já viajou junto com o Grupo 2 — aqui só colhemos o resultado.
+      const [fixoQ, varQ, custosQ, cabinesQ] = await grupo1Promise
+
+      const fatFixo = Number(fixoQ.rows[0].valor)
+      const fatComissao = Number(varQ.rows[0].valor)
+      const totalCustos = Number(custosQ.rows[0].valor)
+      const fatBruto = fatFixo + fatComissao
+      const fatLiquido = fatBruto - totalCustos
+
+      const cabinesFormatadas = cabinesQ.rows.map(c => {
+        let duracaoMin = 0;
+        if (c.status === 'ao_vivo' && c.iniciado_em) {
+          const start = new Date(c.iniciado_em);
+          const now = new Date();
+          duracaoMin = Math.floor((now - start) / 1000 / 60);
+        }
+        return {
+          numero: c.numero,
+          id: c.id,
+          status: c.status,
+          live_atual_id: c.live_atual_id,
+          viewer_count: Number(c.viewer_count),
+          total_orders: Number(c.total_orders),
+          gmv_atual: parseFloat(Number(c.gmv_atual).toFixed(2)),
+          cliente_nome: c.cliente_nome,
+          apresentador: c.apresentador,
+          apresentador_nome: c.apresentador,
+          tiktok_username: c.tiktok_username,
+          duracao_min: duracaoMin,
+          horas_contratadas: parseFloat(Number(c.horas_contratadas).toFixed(2)),
+          horas_realizadas_hoje: parseFloat(Number(c.horas_realizadas_hoje).toFixed(2)),
+          apresentadores_extra: c.apresentadores_extra || []
+        }
+      });
 
       const ganhos = Number(taxaConversaoQ.rows[0].ganhos)
       const totalFechados = Number(taxaConversaoQ.rows[0].total_fechados)

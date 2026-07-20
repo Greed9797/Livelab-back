@@ -3,6 +3,8 @@ import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
 import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { marcaResolveLateralSql, MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
+import { resolveMonthRange } from '../lib/operacional.js'
+import { presenterFixedSql } from '../config/presenter_defaults.js'
 import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl } from '../lib/dashboard-cache.js'
 
@@ -16,6 +18,44 @@ const custoSchema = z.object({
 })
 
 const toNum = (v) => Number(v ?? 0)
+
+// Fixo mensal das marcas tipo='cliente' (semântica migration 116): 1× por marca por mês
+// COM atividade (GMV/pedidos > 0 em lives ou vídeos). FONTE ÚNICA compartilhada entre
+// /resumo (soma agregada) e /operacional (1 lançamento por marca) — não duplicar.
+// Params posicionais fixos: $1=startDate, $2=endDate, $3=tenant_id.
+function marcaFixoMensalSql() {
+  return `
+    SELECT m.id AS marca_id, m.nome AS marca_nome, m.valor_fixo_minimo, am.meses_ativos
+    FROM marcas m
+    JOIN (
+      SELECT marca_id, COUNT(DISTINCT mes)::int AS meses_ativos
+      FROM (
+        SELECT l.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes
+        FROM lives l
+        WHERE l.tenant_id = $3::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
+          AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
+          AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
+          AND (${liveGmvSql('l')} > 0 OR ${liveOrdersSql('l')} > 0)
+        UNION
+        SELECT vr.marca_id, date_trunc('month', vr.data::timestamp) AS mes
+        FROM video_registros vr
+        WHERE vr.tenant_id = $3::uuid
+          AND vr.data >= $1::date AND vr.data <= $2::date
+          AND (vr.gmv_atribuido > 0 OR vr.pedidos_atribuidos > 0)
+      ) ativ
+      GROUP BY marca_id
+    ) am ON am.marca_id = m.id
+    WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente'`
+}
+
+// Vendas reprovadas NUNCA entram em soma financeira (mesmo predicado de lib/operacional.js).
+const VENDA_NAO_REPROVADA = `COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'`
+
+// Classificação fixa × variável dos totais do resultado operacional:
+//   despesas_fixas     = fixo_apresentadora + custos manuais tipo aluguel/salario/energia/internet
+//   despesas_variaveis = comissao_apresentadora + custos manuais tipo 'outros'
+// (comissao_franquia e fixo_marca são ENTRADAS — receita da operação)
+const CUSTO_TIPOS_FIXOS = new Set(['aluguel', 'salario', 'energia', 'internet'])
 
 /**
  * Resolve [inicio, fim] como datas YYYY-MM-DD a partir dos query params.
@@ -114,29 +154,10 @@ export async function financeiroRoutes(app) {
         ),
         -- Fixo mensal das marcas tipo='cliente': soma valor_fixo_minimo uma vez por mês COM
         -- comissionamento gerado (GMV/pedidos > 0), MESMA definição do rollup de Comissões
-        -- (performance-rollups.js) — garante Financeiro == Comissões no fixo.
+        -- (performance-rollups.js) e do /operacional — fonte compartilhada marcaFixoMensalSql().
         fixo_periodo AS (
-          SELECT COALESCE(SUM(m.valor_fixo_minimo * am.meses_ativos), 0) AS fixo_mensal_total
-          FROM marcas m
-          JOIN (
-            SELECT marca_id, COUNT(DISTINCT mes) AS meses_ativos
-            FROM (
-              SELECT l.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes
-              FROM lives l
-              WHERE l.tenant_id = $3::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
-                AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
-                AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
-                AND (${liveGmvSql('l')} > 0 OR ${liveOrdersSql('l')} > 0)
-              UNION
-              SELECT vr.marca_id, date_trunc('month', vr.data::timestamp) AS mes
-              FROM video_registros vr
-              WHERE vr.tenant_id = $3::uuid
-                AND vr.data >= $1::date AND vr.data <= $2::date
-                AND (vr.gmv_atribuido > 0 OR vr.pedidos_atribuidos > 0)
-            ) ativ
-            GROUP BY marca_id
-          ) am ON am.marca_id = m.id
-          WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente'
+          SELECT COALESCE(SUM(mf.valor_fixo_minimo * mf.meses_ativos), 0) AS fixo_mensal_total
+          FROM (${marcaFixoMensalSql()}) mf
         )
         SELECT lp.gmv_lives, lp.pedidos_lives, lp.total_lives,
                lp.comissao_franquia_lives, lp.comissao_configurada, lp.comissao_faltante_count,
@@ -359,6 +380,150 @@ export async function financeiroRoutes(app) {
         entradas: entradasRows,
         saidas: saidasRows,
         items: [...days.values()].sort((a, b) => a.dia.localeCompare(b.dia)),
+      }
+    })
+  })
+
+  // GET /v1/financeiro/operacional?inicio=YYYY-MM&fim=YYYY-MM (default: mês corrente SP)
+  // Resultado operacional automático: entradas (comissão de franquia + fixo de marca) −
+  // saídas (fixo/comissão de apresentadoras + custos manuais), com memória de cálculo
+  // por lançamento. Lançamentos AGREGADOS por entidade (marca/apresentadora), não por venda.
+  app.get('/v1/financeiro/operacional', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
+    const { tenant_id } = request.user
+    const { startDate, endDate } = resolveMonthRange(request.query)
+    const round2 = (v) => Math.round(v * 100) / 100
+    const pctMedio = (valor, gmv) => (gmv > 0 ? round2((valor / gmv) * 100) : 0)
+
+    return app.withTenant(tenant_id, async (db) => {
+      // ENTRADA: comissão de franquia por marca (vendas não-reprovadas do período)
+      const comissaoFranquia = await db.query(`
+        SELECT va.marca_id, m.nome AS marca_nome,
+               COALESCE(SUM(va.comissao_franquia), 0) AS valor,
+               COALESCE(SUM(va.gmv), 0) AS gmv,
+               COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives
+        FROM vendas_atribuidas va
+        JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+        WHERE va.tenant_id = $3::uuid
+          AND va.data >= $1::date AND va.data <= $2::date
+          AND ${VENDA_NAO_REPROVADA}
+        GROUP BY va.marca_id, m.nome
+        HAVING COALESCE(SUM(va.comissao_franquia), 0) <> 0
+        ORDER BY valor DESC
+      `, [startDate, endDate, tenant_id])
+
+      // ENTRADA: fixo mensal por marca tipo=cliente com atividade (mesma fonte do /resumo)
+      const fixoMarcas = await db.query(`
+        SELECT mf.marca_id, mf.marca_nome, mf.valor_fixo_minimo, mf.meses_ativos
+        FROM (${marcaFixoMensalSql()}) mf
+        WHERE mf.valor_fixo_minimo > 0
+        ORDER BY mf.valor_fixo_minimo DESC
+      `, [startDate, endDate, tenant_id])
+
+      // SAÍDA: comissão por apresentadora (vendas não-reprovadas do período)
+      const comissaoApresentadoras = await db.query(`
+        SELECT va.apresentadora_id, a.nome,
+               COALESCE(SUM(va.comissao_apresentadora), 0) AS valor,
+               COALESCE(SUM(va.gmv), 0) AS gmv
+        FROM vendas_atribuidas va
+        JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
+        WHERE va.tenant_id = $3::uuid
+          AND va.data >= $1::date AND va.data <= $2::date
+          AND ${VENDA_NAO_REPROVADA}
+        GROUP BY va.apresentadora_id, a.nome
+        HAVING COALESCE(SUM(va.comissao_apresentadora), 0) <> 0
+        ORDER BY valor DESC
+      `, [startDate, endDate, tenant_id])
+
+      // SAÍDA: fixo mensal (com cap padrão) das apresentadoras ativas não-arquivadas.
+      // ponytail: fixo conta 1× no período mesmo em range multi-mês — mesmo teto do rollup
+      // de performance (MAX fixo); multiplicar por mês se range longo virar caso real.
+      const fixoApresentadoras = await db.query(`
+        SELECT a.id AS apresentadora_id, a.nome, ${presenterFixedSql('a')} AS valor
+        FROM apresentadoras a
+        WHERE a.tenant_id = $1::uuid AND a.ativo IS TRUE AND COALESCE(a.arquivada, false) = false
+        ORDER BY valor DESC, a.nome ASC
+      `, [tenant_id])
+
+      // SAÍDA: custos manuais lançados na competência
+      const custosManuais = await db.query(`
+        SELECT id, descricao, valor, tipo, competencia
+        FROM custos
+        WHERE tenant_id = $3::uuid
+          AND competencia >= $1::date AND competencia <= $2::date
+        ORDER BY valor DESC
+      `, [startDate, endDate, tenant_id])
+
+      const entradas = [
+        ...comissaoFranquia.rows.map((r) => ({
+          categoria: 'comissao_franquia',
+          descricao: `Comissão de franquia — ${r.marca_nome}`,
+          valor: toNum(r.valor),
+          memoria: {
+            marca_id: r.marca_id,
+            marca_nome: r.marca_nome,
+            gmv: toNum(r.gmv),
+            lives: toNum(r.lives),
+            pct_medio: pctMedio(toNum(r.valor), toNum(r.gmv)),
+          },
+        })),
+        ...fixoMarcas.rows.map((r) => ({
+          categoria: 'fixo_marca',
+          descricao: `Fixo mensal — ${r.marca_nome}`,
+          valor: toNum(r.valor_fixo_minimo) * toNum(r.meses_ativos),
+          memoria: {
+            marca_id: r.marca_id,
+            marca_nome: r.marca_nome,
+            criterio: 'mes_com_atividade',
+            meses_ativos: toNum(r.meses_ativos),
+          },
+        })),
+      ]
+
+      const saidas = [
+        ...fixoApresentadoras.rows.map((r) => ({
+          categoria: 'fixo_apresentadora',
+          descricao: `Fixo mensal — ${r.nome}`,
+          valor: toNum(r.valor),
+          memoria: { apresentadora_id: r.apresentadora_id, nome: r.nome, criterio: 'fixo_mensal' },
+        })),
+        ...comissaoApresentadoras.rows.map((r) => ({
+          categoria: 'comissao_apresentadora',
+          descricao: `Comissão — ${r.nome}`,
+          valor: toNum(r.valor),
+          memoria: {
+            apresentadora_id: r.apresentadora_id,
+            nome: r.nome,
+            gmv_atribuido: toNum(r.gmv),
+            pct_medio: pctMedio(toNum(r.valor), toNum(r.gmv)),
+          },
+        })),
+        ...custosManuais.rows.map((r) => ({
+          categoria: 'custo_manual',
+          descricao: r.descricao,
+          valor: toNum(r.valor),
+          memoria: { custo_id: r.id, tipo: r.tipo },
+        })),
+      ]
+
+      const isFixa = (l) => l.categoria === 'fixo_apresentadora'
+        || (l.categoria === 'custo_manual' && CUSTO_TIPOS_FIXOS.has(l.memoria.tipo))
+      const totalEntradas = entradas.reduce((s, l) => s + l.valor, 0)
+      const despesasFixas = saidas.reduce((s, l) => s + (isFixa(l) ? l.valor : 0), 0)
+      const despesasVariaveis = saidas.reduce((s, l) => s + (isFixa(l) ? 0 : l.valor), 0)
+
+      return {
+        periodo: { inicio: startDate, fim: endDate },
+        entradas,
+        saidas,
+        totais: {
+          entradas: round2(totalEntradas),
+          despesas_fixas: round2(despesasFixas),
+          despesas_variaveis: round2(despesasVariaveis),
+          resultado: round2(totalEntradas - despesasFixas - despesasVariaveis),
+        },
+        // Pendência de schema: supervisor e demais integrantes da equipe não têm
+        // remuneração cadastrada — lançar manualmente em custos (tipo 'salario').
+        pendencias: ['equipe_sem_remuneracao_no_schema'],
       }
     })
   })

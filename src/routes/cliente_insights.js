@@ -62,6 +62,38 @@ async function getContratoAtivo(db, tenantId, clienteId) {
   return result.rows[0] ?? null
 }
 
+// Config operacional do cliente para o período.
+// Meta GMV/h com precedência: marca_metas_hora (marca-espelho do cliente,
+// mês do período — editável por mês/marca em Configurações > Metas) →
+// clientes.meta_gmv_hora (legado, sem dimensão temporal) → 500 (default histórico).
+async function getConfigOperacional(db, tenantId, clienteId, periodo) {
+  const anoMes = `${periodo.ano}-${String(periodo.mes).padStart(2, '0')}`
+  const [configQ, marcaMetaQ] = await Promise.all([
+    db.query(
+      `SELECT meta_gmv_hora, margem_pct FROM clientes WHERE id = $1 AND tenant_id = $2::uuid`,
+      [clienteId, tenantId],
+    ),
+    db.query(
+      `SELECT mmh.meta_gmv_hora
+         FROM marca_metas_hora mmh
+         JOIN marcas m ON m.id = mmh.marca_id AND m.tenant_id = mmh.tenant_id
+        WHERE mmh.tenant_id = $1::uuid
+          AND m.cliente_id = $2::uuid
+          AND m.tipo = 'cliente'
+          AND mmh.ano_mes = $3
+        LIMIT 1`,
+      [tenantId, clienteId, anoMes],
+    ),
+  ])
+  const configRow = configQ.rows[0] ?? {}
+  const marcaMeta = Number(marcaMetaQ.rows[0]?.meta_gmv_hora ?? 0)
+  const metaGmvHora = marcaMeta > 0
+    ? marcaMeta
+    : (configRow.meta_gmv_hora != null ? Number(configRow.meta_gmv_hora) : 500)
+  const margemPct = configRow.margem_pct != null ? Number(configRow.margem_pct) : null
+  return { metaGmvHora, margemPct }
+}
+
 function contratoDTO(contrato, valorFixo, comissaoPct) {
   if (!contrato) return null
   return {
@@ -362,14 +394,8 @@ export async function clienteInsightsRoutes(app) {
       }
       const cliente_id = clienteAtual.id
 
-      // 2. Config do cliente (meta_gmv_hora, margem_pct)
-      const configQ = await db.query(
-        `SELECT meta_gmv_hora, margem_pct FROM clientes WHERE id = $1 AND tenant_id = $2::uuid`,
-        [cliente_id, tenantId],
-      )
-      const configRow   = configQ.rows[0] ?? {}
-      const metaGmvHora = configRow.meta_gmv_hora != null ? Number(configRow.meta_gmv_hora) : 500
-      const margemPct   = configRow.margem_pct    != null ? Number(configRow.margem_pct)    : null
+      // 2. Config do cliente (meta GMV/h por mês/marca → legado → 500)
+      const { metaGmvHora, margemPct } = await getConfigOperacional(db, tenantId, cliente_id, periodo)
 
       // 3. Contrato ativo → comissao_livelab_pct
       const contratoAtivo      = await getContratoAtivo(db, tenantId, cliente_id)
@@ -453,13 +479,7 @@ export async function clienteInsightsRoutes(app) {
       const cliente_id = clienteAtual.id
 
       // Config para calcular status on-the-fly
-      const configQ = await db.query(
-        `SELECT meta_gmv_hora, margem_pct FROM clientes WHERE id = $1 AND tenant_id = $2::uuid`,
-        [cliente_id, tenantId],
-      )
-      const configRow   = configQ.rows[0] ?? {}
-      const metaGmvHora = configRow.meta_gmv_hora != null ? Number(configRow.meta_gmv_hora) : 500
-      const margemPct   = configRow.margem_pct    != null ? Number(configRow.margem_pct)    : null
+      const { metaGmvHora, margemPct } = await getConfigOperacional(db, tenantId, cliente_id, periodo)
 
       const contratoAtivo      = await getContratoAtivo(db, tenantId, cliente_id)
       const comissaoLivelabPct = contratoAtivo?.comissao_pct != null
@@ -497,13 +517,7 @@ export async function clienteInsightsRoutes(app) {
       }
       const cliente_id = clienteAtual.id
 
-      const configQ = await db.query(
-        `SELECT meta_gmv_hora, margem_pct FROM clientes WHERE id = $1 AND tenant_id = $2::uuid`,
-        [cliente_id, tenantId],
-      )
-      const configRow   = configQ.rows[0] ?? {}
-      const metaGmvHora = configRow.meta_gmv_hora != null ? Number(configRow.meta_gmv_hora) : 500
-      const margemPct   = configRow.margem_pct    != null ? Number(configRow.margem_pct)    : null
+      const { metaGmvHora, margemPct } = await getConfigOperacional(db, tenantId, cliente_id, periodo)
 
       const contratoAtivo      = await getContratoAtivo(db, tenantId, cliente_id)
       const comissaoLivelabPct = contratoAtivo?.comissao_pct != null

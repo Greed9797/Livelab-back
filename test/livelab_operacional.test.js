@@ -341,6 +341,31 @@ describe('LIVELAB operational routes', () => {
     expect(res.statusCode).toBe(200)
     expect(queryMock.mock.calls[0][0]).toContain('AND l.status = $2')
     expect(queryMock.mock.calls[0][1]).toEqual(['tenant-1', 'encerrada'])
+    // Sem `paginado`, o shape legado (array puro) permanece intacto
+    expect(res.json()).toEqual([])
+    await app.close()
+  })
+
+  it('GET /v1/lives?paginado=1 returns { items, total, page, limit } and applies q search', async () => {
+    const queryMock = vi.fn().mockResolvedValue({
+      rows: [{ id: 'live-1', total_count: '42' }],
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/lives?status=encerrada&paginado=1&page=2&limit=10&q=haag',
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ items: [{ id: 'live-1' }], total: 42, page: 2, limit: 10 })
+    const [sql, sqlParams] = queryMock.mock.calls[0]
+    expect(sql).toContain('COUNT(*) OVER() AS total_count')
+    expect(sql).toContain('cl.nome ILIKE $3')
+    expect(sql).toContain('va_marca.marca_nome ILIKE $3')
+    expect(sql).toContain('LIMIT 10 OFFSET 20')
+    expect(sqlParams).toEqual(['tenant-1', 'encerrada', '%haag%'])
     await app.close()
   })
 

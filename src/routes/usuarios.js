@@ -31,7 +31,6 @@ const convidarSchema = z.object({
   apresentadora_id: z.string().uuid().optional(),
   fixo: z.number().nonnegative().max(MAX_APRESENTADORA_FIXO, `Fixo não pode ultrapassar R$ ${MAX_APRESENTADORA_FIXO.toLocaleString('pt-BR')}`).optional(),
   comissao_pct: z.number().min(0).max(100).optional(),
-  meta_diaria_gmv: z.number().nonnegative().optional(),
   foto_url: imageUrlSchema,
   senha_temporaria: z.string().regex(SECURITY.PASSWORD_REGEX, 'Senha temporária deve ter no mínimo 8 caracteres, com letra e número.').optional(),
 }).refine(d => d.papel !== 'cliente_parceiro' || !!d.cliente_id, {
@@ -47,7 +46,6 @@ const atualizarSchema = z.object({
   ativo: z.boolean().optional(),
   fixo: z.number().nonnegative().max(MAX_APRESENTADORA_FIXO, `Fixo não pode ultrapassar R$ ${MAX_APRESENTADORA_FIXO.toLocaleString('pt-BR')}`).optional(),
   comissao_pct: z.number().min(0).max(100).optional(),
-  meta_diaria_gmv: z.number().nonnegative().optional(),
   foto_url: imageUrlSchema,
 })
 
@@ -64,11 +62,9 @@ async function ensurePresenterProfileForUser(db, {
   user,
   fixo,
   comissaoPct,
-  metaDiariaGmv,
   fotoUrl,
   hasFixo,
   hasComissaoPct,
-  hasMetaDiariaGmv,
   hasFotoUrl,
 }) {
   const existing = await db.query(
@@ -85,10 +81,9 @@ async function ensurePresenterProfileForUser(db, {
               ativo = $3,
               fixo = CASE WHEN $4::boolean THEN $5 ELSE fixo END,
               comissao_pct = CASE WHEN $6::boolean THEN $7 ELSE comissao_pct END,
-              meta_diaria_gmv = CASE WHEN $8::boolean THEN $9 ELSE meta_diaria_gmv END,
-              foto_url = CASE WHEN $10::boolean THEN $11 ELSE foto_url END
-        WHERE id = $12
-          AND tenant_id = $13::uuid
+              foto_url = CASE WHEN $8::boolean THEN $9 ELSE foto_url END
+        WHERE id = $10
+          AND tenant_id = $11::uuid
         RETURNING id`,
       [
         user.nome,
@@ -98,8 +93,6 @@ async function ensurePresenterProfileForUser(db, {
         fixo ?? null,
         hasComissaoPct,
         comissaoPct ?? null,
-        hasMetaDiariaGmv,
-        metaDiariaGmv ?? null,
         hasFotoUrl,
         fotoUrl ?? null,
         apresentadoraId,
@@ -112,9 +105,9 @@ async function ensurePresenterProfileForUser(db, {
 
   const created = await db.query(
     `INSERT INTO apresentadoras (
-       tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, foto_url, ativo
+       tenant_id, user_id, nome, email, fixo, comissao_pct, foto_url, ativo
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id`,
     [
       tenantId,
@@ -123,7 +116,6 @@ async function ensurePresenterProfileForUser(db, {
       user.email,
       hasFixo ? fixo : DEFAULT_APRESENTADORA_FIXO,
       hasComissaoPct ? comissaoPct : 0,
-      hasMetaDiariaGmv ? metaDiariaGmv : 0,
       hasFotoUrl ? fotoUrl : null,
       user.ativo !== false,
     ],
@@ -176,7 +168,6 @@ export async function usuariosRoutes(app) {
              ELSE a.fixo
            END AS fixo,
            a.comissao_pct,
-           a.meta_diaria_gmv,
            a.foto_url,
            (a.id IS NOT NULL OR u.papel IN ('apresentador', 'apresentadora')) AS pode_apresentar_live
          FROM users u
@@ -195,7 +186,7 @@ export async function usuariosRoutes(app) {
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0].message })
     }
-    const { nome, email, papel, cliente_id, apresentadora_id, fixo, comissao_pct, meta_diaria_gmv, foto_url, senha_temporaria } = parsed.data
+    const { nome, email, papel, cliente_id, apresentadora_id, fixo, comissao_pct, foto_url, senha_temporaria } = parsed.data
     const tenantId = request.user.tenant_id
     const presenterFixo = fixo ?? DEFAULT_APRESENTADORA_FIXO
     const presenterComissaoPct = comissao_pct ?? 0
@@ -285,14 +276,13 @@ export async function usuariosRoutes(app) {
                       email = $5,
                       fixo = $6,
                       comissao_pct = $7,
-                      meta_diaria_gmv = COALESCE($8, meta_diaria_gmv),
-                      foto_url = COALESCE($9, foto_url),
+                      foto_url = COALESCE($8, foto_url),
                       ativo = true
                 WHERE id = $2
                   AND tenant_id = $3
                   AND user_id IS NULL
                 RETURNING id`,
-              [newUser.id, apresentadora_id, tenantId, nome, email, presenterFixo, presenterComissaoPct, meta_diaria_gmv ?? null, foto_url ?? null]
+              [newUser.id, apresentadora_id, tenantId, nome, email, presenterFixo, presenterComissaoPct, foto_url ?? null]
             )
             if (linked.rowCount === 0) {
               await db.query('ROLLBACK')
@@ -302,10 +292,10 @@ export async function usuariosRoutes(app) {
             await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
           } else {
             const createdProfile = await db.query(
-              `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, foto_url, ativo)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+              `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, foto_url, ativo)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, true)
                RETURNING id`,
-              [tenantId, newUser.id, nome, email, presenterFixo, presenterComissaoPct, meta_diaria_gmv ?? 0, foto_url ?? null]
+              [tenantId, newUser.id, nome, email, presenterFixo, presenterComissaoPct, foto_url ?? null]
             )
             apresentadoraId = createdProfile.rows[0]?.id ?? null
             await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
@@ -348,14 +338,12 @@ export async function usuariosRoutes(app) {
     const {
       fixo,
       comissao_pct,
-      meta_diaria_gmv,
       foto_url,
       ...userFields
     } = fields
     const hasPresenterFields =
       hasOwn(fields, 'fixo') ||
       hasOwn(fields, 'comissao_pct') ||
-      hasOwn(fields, 'meta_diaria_gmv') ||
       hasOwn(fields, 'foto_url')
     const userFieldKeys = Object.keys(userFields)
 
@@ -431,11 +419,9 @@ export async function usuariosRoutes(app) {
             user: updatedUser,
             fixo,
             comissaoPct: comissao_pct,
-            metaDiariaGmv: meta_diaria_gmv,
             fotoUrl: foto_url,
             hasFixo: hasOwn(fields, 'fixo'),
             hasComissaoPct: hasOwn(fields, 'comissao_pct'),
-            hasMetaDiariaGmv: hasOwn(fields, 'meta_diaria_gmv'),
             hasFotoUrl: hasOwn(fields, 'foto_url'),
           })
         }

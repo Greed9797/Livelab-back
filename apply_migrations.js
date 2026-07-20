@@ -118,8 +118,8 @@ export const MIGRATIONS_LIST = [
   '121_arquivamento.sql',
   '122_grade_padrao_dias_uteis.sql',
   '123_leads_crm_summary_index.sql',
-  // 124/125 pertencem ao PR de metas/GMV-h e cor de marca; briefing pulou para 126
-  // para não colidir na mesma base (codex/blumenau-operational-fase1).
+  '124_metas_limpeza_e_marca_hora.sql',
+  '125_marca_cor.sql',
   '126_cliente_briefing.sql',
   '127_rls_tabelas_faltantes.sql',
   '128_performance_indexes.sql',

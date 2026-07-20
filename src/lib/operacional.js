@@ -1,11 +1,23 @@
 import { liveGmvSql, liveOrdersSql } from './metric-sql.js'
+import { saoPauloDateInput } from './timezone.js'
 
 const toNum = (value) => Number(value ?? 0)
 
+// Comissões do modal operacional: apenas o PERÍODO pedido e sem vendas reprovadas.
+// Antes somava a vida inteira da marca/cliente (sem filtro de data nem de status),
+// inflando o número mostrado no financeiro operacional (bug Posthaus).
+// $3 = startDate, $4 = endDate (mesmos params de gmv_mes nas duas queries).
+const COMISSAO_PERIODO_FILTER = `FILTER (WHERE v.data >= $3::date AND v.data < ($4::date + interval '1 day')
+           AND COALESCE(v.status_aprovacao, 'pendente_aprovacao') <> 'reprovada')`
+
 export function resolveMonthRange(query = {}) {
-  const periodo = typeof query.periodo === 'string' && /^\d{4}-\d{2}$/.test(query.periodo)
+  let periodo = typeof query.periodo === 'string' && /^\d{4}-\d{2}$/.test(query.periodo)
     ? query.periodo
     : null
+  // Compat: telas que mandam mes/ano numéricos (mesmo contrato do resolveRange do financeiro).
+  if (!periodo && query.mes && query.ano && /^\d{1,2}$/.test(String(query.mes)) && /^\d{4}$/.test(String(query.ano))) {
+    periodo = `${query.ano}-${String(query.mes).padStart(2, '0')}`
+  }
   const inicio = typeof query.inicio === 'string' && /^\d{4}-\d{2}$/.test(query.inicio)
     ? query.inicio
     : periodo
@@ -21,9 +33,9 @@ export function resolveMonthRange(query = {}) {
     }
   }
 
-  const now = new Date()
-  const y = now.getUTCFullYear()
-  const m = now.getUTCMonth() + 1
+  // Default: mês corrente no fuso operacional (America/Sao_Paulo), não UTC —
+  // na virada do mês (21h–00h BRT) o UTC já estaria no mês seguinte.
+  const [y, m] = saoPauloDateInput(new Date()).split('-').map(Number)
   return {
     startDate: `${y}-${String(m).padStart(2, '0')}-01`,
     endDate: new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10),
@@ -92,9 +104,9 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
        COUNT(DISTINCT v.origem_id) FILTER (WHERE v.origem = 'video')::int AS total_videos,
        COALESCE(SUM(v.pedidos) FILTER (WHERE v.data >= $3::date AND v.data < ($4::date + interval '1 day')), 0)
          + COALESCE(SUM(ll.pedidos) FILTER (WHERE ll.encerrado_em >= $3::date AND ll.encerrado_em < ($4::date + interval '1 day')), 0) AS pedidos_mes,
-       COALESCE(SUM(v.comissao_franquia), 0) AS comissao_franquia,
-       COALESCE(SUM(v.comissao_franqueadora), 0) AS comissao_franqueadora,
-       COALESCE(SUM(v.comissao_apresentadora), 0) AS comissao_apresentadora
+       COALESCE(SUM(v.comissao_franquia) ${COMISSAO_PERIODO_FILTER}, 0) AS comissao_franquia,
+       COALESCE(SUM(v.comissao_franqueadora) ${COMISSAO_PERIODO_FILTER}, 0) AS comissao_franqueadora,
+       COALESCE(SUM(v.comissao_apresentadora) ${COMISSAO_PERIODO_FILTER}, 0) AS comissao_apresentadora
      FROM vendas v
      FULL OUTER JOIN legacy_lives ll ON false`,
     [clienteId, tenantId, startDate, endDate],
@@ -190,9 +202,9 @@ export async function getMarcaOperacional(db, { tenantId, marcaId, startDate, en
        COUNT(DISTINCT v.origem_id) FILTER (WHERE v.origem = 'live')::int AS total_lives,
        COUNT(DISTINCT v.origem_id) FILTER (WHERE v.origem = 'video')::int AS total_videos,
        COALESCE(SUM(v.pedidos) FILTER (WHERE v.data >= $3::date AND v.data < ($4::date + interval '1 day')), 0) AS pedidos_mes,
-       COALESCE(SUM(v.comissao_franquia), 0) AS comissao_franquia,
-       COALESCE(SUM(v.comissao_franqueadora), 0) AS comissao_franqueadora,
-       COALESCE(SUM(v.comissao_apresentadora), 0) AS comissao_apresentadora
+       COALESCE(SUM(v.comissao_franquia) ${COMISSAO_PERIODO_FILTER}, 0) AS comissao_franquia,
+       COALESCE(SUM(v.comissao_franqueadora) ${COMISSAO_PERIODO_FILTER}, 0) AS comissao_franqueadora,
+       COALESCE(SUM(v.comissao_apresentadora) ${COMISSAO_PERIODO_FILTER}, 0) AS comissao_apresentadora
      FROM vendas v`,
     [marcaId, tenantId, startDate, endDate],
   )

@@ -1,6 +1,7 @@
-// Routes: metas apresentadoras + supervisor (GMV mensal)
-// Tables: metas_apresentadora, metas_supervisor (migration 090)
-// Audit: metas.apresentadora.update, metas.supervisor.update
+// Routes: metas apresentadoras + supervisor (GMV mensal) + GMV/h por marca
+// Tables: metas_apresentadora, metas_supervisor (migration 090),
+//         marca_metas_hora (migration 124)
+// Audit: metas.apresentadora.update, metas.supervisor.update, metas.marca_hora.update
 
 import { anoMesRange, anoMesToDate, parseAnoMes } from '../lib/ano-mes.js'
 
@@ -169,6 +170,79 @@ export async function metasRoutes(app) {
       entity_type: 'tenant',
       entity_id: tenant_id,
       metadata: { mes, gmv_meta_total: Number(gmv_meta_total) },
+    })
+
+    return result
+  })
+
+  // ── GET /v1/metas/marcas-hora?ano_mes=YYYY-MM ─────────────────────────────
+  // Lista marcas ativas com a meta de GMV/hora do mês.
+  // meta_legada = clientes.meta_gmv_hora (fallback usado enquanto o mês não
+  // tiver meta própria; consumido pelo status operacional do cliente).
+  app.get('/v1/metas/marcas-hora', {
+    preHandler: app.requirePapel(['franqueado', 'gerente']),
+  }, async (request) => {
+    const { tenant_id } = request.user
+    const anoMes = request.query.ano_mes || new Date().toISOString().slice(0, 7)
+
+    return app.withTenant(tenant_id, async (db) => {
+      const r = await db.query(`
+        SELECT
+          m.id                            AS marca_id,
+          m.nome,
+          m.tipo,
+          COALESCE(mmh.meta_gmv_hora, 0)  AS meta_gmv_hora,
+          cl.meta_gmv_hora                AS meta_legada
+        FROM marcas m
+        LEFT JOIN marca_metas_hora mmh
+          ON mmh.marca_id  = m.id
+         AND mmh.tenant_id = m.tenant_id
+         AND mmh.ano_mes   = $2
+        LEFT JOIN clientes cl
+          ON cl.id = m.cliente_id
+         AND cl.tenant_id = m.tenant_id
+        WHERE m.tenant_id = $1
+          AND m.status = 'ativa'
+        ORDER BY m.nome
+      `, [tenant_id, anoMes])
+
+      return r.rows
+    })
+  })
+
+  // ── PUT /v1/metas/marcas-hora/:marcaId?ano_mes=YYYY-MM ───────────────────
+  // Upsert meta de GMV/hora de uma marca para o mês
+  app.put('/v1/metas/marcas-hora/:marcaId', {
+    preHandler: app.requirePapel(['franqueado', 'gerente']),
+  }, async (request, reply) => {
+    const { tenant_id, sub: user_id } = request.user
+    const { marcaId } = request.params
+    const anoMes = request.query.ano_mes || new Date().toISOString().slice(0, 7)
+    const { meta_gmv_hora } = request.body ?? {}
+
+    if (meta_gmv_hora == null || isNaN(Number(meta_gmv_hora)) || Number(meta_gmv_hora) < 0) {
+      return reply.code(400).send({ error: 'meta_gmv_hora é obrigatório e deve ser numérico >= 0.' })
+    }
+
+    const result = await app.withTenant(tenant_id, async (db) => {
+      const r = await db.query(`
+        INSERT INTO marca_metas_hora
+          (tenant_id, marca_id, ano_mes, meta_gmv_hora, criado_por)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (tenant_id, marca_id, ano_mes) DO UPDATE SET
+          meta_gmv_hora = EXCLUDED.meta_gmv_hora,
+          atualizado_em = NOW()
+        RETURNING *
+      `, [tenant_id, marcaId, anoMes, Number(meta_gmv_hora), user_id])
+
+      return r.rows[0]
+    })
+
+    await app.audit.log(request, {
+      action: 'metas.marca_hora.update',
+      entity_type: 'marca',
+      entity_id: marcaId,
+      metadata: { ano_mes: anoMes, meta_gmv_hora: Number(meta_gmv_hora) },
     })
 
     return result

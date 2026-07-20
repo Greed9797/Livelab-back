@@ -10,6 +10,7 @@ import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribu
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { withAdvisoryLock } from './advisory_lock.js'
+import { scanPorTenant } from './tenant_scan.js'
 
 const TICK_CRON = '*/10 * * * *' // a cada 10 minutos
 const LOCK_KEY = 7421900119911236n
@@ -41,7 +42,11 @@ export async function runRecalcularComissoesTick(app) {
   try {
     const { mes, inicio, fim } = currentMonthRange()
 
-    const targets = await app.db.query(
+    // Varredura tenant a tenant com contexto RLS (ver src/jobs/tenant_scan.js):
+    // um SELECT cross-tenant via app.db devolveria zero linhas sob RLS, sem erro.
+    // LIMIT abaixo é POR TENANT.
+    const targets = await scanPorTenant(
+      app,
       `SELECT DISTINCT va.tenant_id, va.apresentadora_id
          FROM vendas_atribuidas va
         WHERE va.gmv > 0
@@ -51,15 +56,16 @@ export async function runRecalcularComissoesTick(app) {
           AND va.data <= $2::date
         LIMIT 200`,
       [inicio, fim],
+      '[recalc comissoes]',
     )
 
-    if (targets.rows.length === 0) {
+    if (targets.length === 0) {
       _running = false
       return results
     }
 
     const seenTenants = new Set()
-    for (const { tenant_id, apresentadora_id } of targets.rows) {
+    for (const { tenant_id, apresentadora_id } of targets) {
       const client = await app.db.pool.connect()
       try {
         // set_config(..., true) é transaction-local; sem BEGIN a GUC reverte
@@ -97,7 +103,8 @@ export async function runRecalcularComissoesTick(app) {
     // pós-invariante 115) e auto-cura lives.marca_id. Alinha a reconciliação ao que as
     // telas de comissão exibem (performance-rollups filtra status='encerrada').
     try {
-      const livesOrfas = await app.db.query(
+      const livesOrfas = await scanPorTenant(
+        app,
         `SELECT l.id, l.tenant_id, l.marca_id,
                 COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
                 COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos
@@ -110,8 +117,10 @@ export async function runRecalcularComissoesTick(app) {
             )
           ORDER BY l.encerrado_em DESC NULLS LAST
           LIMIT 100`,
+        [],
+        '[recalc comissoes lives orfas]',
       )
-      for (const live of livesOrfas.rows) {
+      for (const live of livesOrfas) {
         const lc = await app.db.pool.connect()
         try {
           // Mesma transação local para preservar o contexto RLS (ver acima).

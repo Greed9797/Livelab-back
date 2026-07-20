@@ -54,6 +54,37 @@ const createSchema = z.object({
   message: 'E-mail é obrigatório para criar acesso do cliente',
 })
 
+// Estados de funil que o código realmente grava/lê hoje. O CHECK do banco
+// (migration 042) lista 13 valores, mas 4 deles — 'enviado', 'em_analise',
+// 'aprovado', 'risco_assumido' — são status de CONTRATO que vazaram para o
+// CHECK de cliente na migration 016 e nunca são escritos nem lidos em clientes.
+// Quem escreve cada um dos vivos:
+//   negociacao                → DEFAULT da coluna (migration 003)
+//   ativo                     → POST /v1/clientes, contratos.js:304/446, assumir_risco
+//   onboarding                → PATCH aqui (alias 'ganho' → 'onboarding')
+//   pendencia_comercial       → contratos_auditoria.js (revisar)
+//   reprovado                 → contratos_auditoria.js (reprovar)
+//   arquivado                 → contratos_auditoria.js (arquivar) + filtro da listagem
+//   inadimplente              → bloqueia início de live (lives.js:574/842)
+//   cancelado                 → PATCH aqui (inativa as marcas do cliente)
+//   cancelado_automaticamente → jobs/cleanup_orphan_contracts.js
+// O CHECK do banco NÃO foi enxugado — ver migration 129.
+export const CLIENTE_STATUS_VIVOS = [
+  'negociacao',
+  'onboarding',
+  'ativo',
+  'pendencia_comercial',
+  'reprovado',
+  'arquivado',
+  'inadimplente',
+  'cancelado',
+  'cancelado_automaticamente',
+]
+
+// 'ganho' é alias de entrada vindo do funil de CRM — não é persistido: o handler
+// do PATCH o converte em 'onboarding' + onboarding_step = 1.
+const CLIENTE_STATUS_ACEITOS = [...CLIENTE_STATUS_VIVOS, 'ganho']
+
 const patchSchema = z.object({
   nome:             z.string().optional(),
   celular:          z.string().optional(),
@@ -64,7 +95,9 @@ const patchSchema = z.object({
   vende_tiktok:     z.boolean().optional(),
   lat:              z.number().optional(),
   lng:              z.number().optional(),
-  status:           z.string().optional(),
+  status:           z.enum(CLIENTE_STATUS_ACEITOS, {
+    error: `status inválido. Valores aceitos: ${CLIENTE_STATUS_ACEITOS.join(', ')}.`,
+  }).optional(),
   meta_diaria_gmv:  z.number().optional(),
   onboarding_step:  z.number().int().optional(),
   tiktok_username:  tiktokUsernameField,

@@ -28,18 +28,57 @@ async function dbPlugin(app) {
     keepAliveInitialDelayMillis: 5000,
   })
 
+  // Pool de SISTEMA — atende `app.db.query` (auth, /health, crons, webhooks).
+  //
+  // Por que separado: `dbTenant`/`tenantParallel` (e várias rotas que pegam client
+  // cru do pool) fazem `set_config('app.tenant_id', ..., false)` — escopo de
+  // SESSÃO — e devolvem a conexão ao pool SEM reset. Hoje é inofensivo porque o
+  // role tem BYPASSRLS. Com RLS ligada, `pool.query` de sistema pegaria uma
+  // conexão qualquer, possivelmente carregando o tenant de OUTRO request, e
+  // passaria a filtrar pelo tenant errado em silêncio.
+  //
+  // Alternativas descartadas (ambas pagam RTT no caminho quente — a API roda em
+  // Railway us-west e o banco em Supabase sa-east, ≈180ms por round-trip):
+  //   (b) RESET no release(): +1 RTT por request autenticado.
+  //   (c) BEGIN + set_config local: +2 RTT por aquisição de conexão.
+  // Um pool dedicado custa 0 RTT: a separação é estrutural, não runtime. Este
+  // pool NUNCA executa set_config('app.tenant_id') — é invariante do arquivo.
+  //
+  // Em produção aponte DATABASE_SYSTEM_URL para um role dedicado (o único com
+  // BYPASSRLS) e deixe DATABASE_URL no role NOBYPASSRLS da aplicação. Sem essa
+  // variável os dois pools usam a mesma credencial e o comportamento é o de hoje.
+  const systemConnectionString = process.env.DATABASE_SYSTEM_URL || process.env.DATABASE_URL
+  const systemPool = new Pool({
+    connectionString: systemConnectionString,
+    ssl: resolveDbSslConfig(systemConnectionString),
+    max: Number(process.env.DB_SYSTEM_POOL_MAX ?? 5),
+    min: Number(process.env.DB_SYSTEM_POOL_MIN ?? 1),
+    idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_MS ?? 600_000),
+    connectionTimeoutMillis: 8000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 5000,
+  })
+
   // Testa conexão na inicialização
   const client = await pool.connect()
   client.release()
+  await systemPool.query('SELECT 1')
   app.log.info('PostgreSQL conectado')
+  if (process.env.DATABASE_SYSTEM_URL) {
+    app.log.info('Pool de sistema usando credencial dedicada (DATABASE_SYSTEM_URL)')
+  }
   if (sslConfig && !sslRejectUnauthorized) {
     app.log.warn('DB SSL certificate verification is DISABLED (DB_SSL_REJECT_UNAUTHORIZED=false)')
   }
 
-  // Decorator para queries simples (sem tenant)
+  // Decorator para queries de sistema (sem tenant) — pool limpo, ver acima.
+  // `pool` (tenant pool) segue exposto em `.pool` porque rotas/jobs que pegam
+  // client cru setam o próprio tenant na aquisição; a "sujeira" de GUC fica
+  // contida ali e nunca alcança o caminho de sistema.
   app.decorate('db', {
-    query: (text, params) => pool.query(text, params),
+    query: (text, params) => systemPool.query(text, params),
     pool,
+    systemPool,
   })
 
   // Decorator para queries com RLS (com tenant_id do JWT)
@@ -105,7 +144,9 @@ async function dbPlugin(app) {
     }
   })
 
-  app.addHook('onClose', async () => pool.end())
+  app.addHook('onClose', async () => {
+    await Promise.all([pool.end(), systemPool.end()])
+  })
 }
 
 export default fp(dbPlugin, { name: 'db' })

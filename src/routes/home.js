@@ -250,6 +250,7 @@ export async function homeRoutes(app) {
         ocupacaoQ,
         rankingMarcasQ,
         horasLiveMesQ,
+        marcaMetasHoraQ,
       ] = await Promise.all([
         db.query(`SELECT COUNT(*) AS total FROM clientes
                   WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
@@ -492,6 +493,21 @@ export async function homeRoutes(app) {
             AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
             AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
         `, [mesStart, cutoffDay]),
+        // Meta de GMV/h por marca. Não existe tabela de meta por marca/mês no
+        // schema — a meta canônica é clientes.meta_gmv_hora (migration 114), a
+        // mesma fonte usada pelo painel do cliente e pelo PDF operacional.
+        // A marca herda a meta do cliente dono. INNER JOIN de propósito: marca
+        // sem cliente (afiliada/própria) não tem meta → badge omitido, em vez
+        // de inventar um 500 que ninguém configurou.
+        db.query(`
+          SELECT m.id AS marca_id,
+                 COALESCE(c.meta_gmv_hora, 500) AS meta_gmv_hora
+          FROM marcas m
+          JOIN clientes c
+            ON c.id = m.cliente_id
+           AND c.tenant_id = m.tenant_id
+          WHERE m.tenant_id = current_setting('app.tenant_id', true)::uuid
+        `),
       ])
 
       // Grupo 1 já viajou junto com o Grupo 2 — aqui só colhemos o resultado.
@@ -785,19 +801,39 @@ export async function homeRoutes(app) {
       const metaUnidade = metaQ.rows[0] ?? null
 
       const rankingMarcasRows = Array.isArray(rankingMarcasQ) ? rankingMarcasQ : (rankingMarcasQ.rows ?? [])
-      const rankingMarcasMes = rankingMarcasRows.map(r => ({
-        marca_id: r.marca_id,
-        nome: r.nome,
-        logo_url: r.logo_url,
-        site: r.site,
-        marca_nome: r.marca_nome ?? r.nome,
-        gmv: round2(r.gmv_total ?? r.gmv),
-        gmv_total: round2(r.gmv_total ?? r.gmv),
-        pedidos: Number(r.pedidos ?? 0),
-        lives: Number(r.lives ?? r.total_lives ?? 0),
-        total_lives: Number(r.total_lives ?? r.lives ?? 0),
-        total_videos: Number(r.total_videos ?? 0),
-      }))
+
+      const metaHoraPorMarca = new Map(
+        (marcaMetasHoraQ?.rows ?? []).map(r => [r.marca_id, Number(r.meta_gmv_hora)]),
+      )
+
+      const rankingMarcasMes = rankingMarcasRows.map(r => {
+        // gmv_por_hora e horas_live vêm prontos de mapPerformanceRows
+        // (lib/performance-rollups.js) — a mesma função que alimenta o
+        // Analytics. Repassados sem recálculo: qualquer transformação aqui
+        // criaria divergência entre Home e Analytics para a mesma marca/mês.
+        const gmvPorHora = Number(r.gmv_por_hora ?? 0)
+        const metaHora = metaHoraPorMarca.get(r.marca_id) ?? null
+        return {
+          marca_id: r.marca_id,
+          nome: r.nome,
+          logo_url: r.logo_url,
+          site: r.site,
+          marca_nome: r.marca_nome ?? r.nome,
+          gmv: round2(r.gmv_total ?? r.gmv),
+          gmv_total: round2(r.gmv_total ?? r.gmv),
+          // Faturamento da marca = GMV total (lives + vídeos).
+          faturamento: round2(r.gmv_total ?? r.gmv),
+          gmv_lives: round2(r.gmv_lives ?? 0),
+          horas_live: Number(r.horas_live ?? 0),
+          gmv_por_hora: gmvPorHora,
+          meta_gmv_hora: metaHora,
+          pct_meta_hora: metaHora > 0 ? round2((gmvPorHora / metaHora) * 100) : null,
+          pedidos: Number(r.pedidos ?? 0),
+          lives: Number(r.lives ?? r.total_lives ?? 0),
+          total_lives: Number(r.total_lives ?? r.lives ?? 0),
+          total_videos: Number(r.total_videos ?? 0),
+        }
+      })
 
       const gmvOperacional = gmvOperacionalQ.rows[0] ?? {}
       const gmvMes = round2(gmvOperacional.gmv_total_mes ?? gmvOperacional.gmv_mes)

@@ -28,11 +28,23 @@ const VALID_PAYLOAD = {
   metadata: { origin: 'https://livelab.app', referer: 'https://livelab.app/bio' },
 }
 
+// v1 legado: assina só o body.
 function sign(body, secret = SECRET) {
   return 'sha256=' + crypto.createHmac('sha256', secret).update(body).digest('hex')
 }
 
-async function buildApp({ insertFails = false } = {}) {
+// v2: assina `timestamp.nonce.body` e devolve os 3 headers prontos.
+function signV2(body, { ts, nonce = 'nonce-1234-abcd', secret = SECRET } = {}) {
+  const timestamp = String(ts ?? Math.floor(Date.now() / 1000))
+  const signed = `${timestamp}.${nonce}.${body}`
+  return {
+    'x-livelab-timestamp': timestamp,
+    'x-livelab-nonce': nonce,
+    'x-livelab-signature': 'sha256=' + crypto.createHmac('sha256', secret).update(signed).digest('hex'),
+  }
+}
+
+async function buildApp({ insertFails = false, replayInserted = 1 } = {}) {
   const app = Fastify()
   app.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
     req.rawBody = body
@@ -40,7 +52,8 @@ async function buildApp({ insertFails = false } = {}) {
     try { done(null, JSON.parse(body)) } catch (err) { done(err, undefined) }
   })
 
-  const queryMock = vi.fn(async () => {
+  const queryMock = vi.fn(async (sql) => {
+    if (String(sql).includes('webhook_replay_log')) return { rowCount: replayInserted, rows: [] }
     if (insertFails) throw new Error('boom')
     return { rows: [{ id: 'lead-uuid', nome: 'Maria Silva', origem: 'bio_cliente', criado_em: new Date() }] }
   })
@@ -60,6 +73,7 @@ describe('POST /v1/webhooks/bio-crm', () => {
   afterEach(() => {
     delete process.env.BIO_CRM_WEBHOOK_SECRET
     delete process.env.BIO_WEBHOOK_DEFAULT_FRANQUEADORA_ID
+    delete process.env.WEBHOOK_REPLAY_PROTECTION
   })
 
   it('aceita payload válido + HMAC correto e cria lead', async () => {
@@ -269,6 +283,100 @@ describe('POST /v1/webhooks/bio-crm', () => {
     })
     expect(res.statusCode).toBe(400)
     expect(queryMock).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  // ─── L3-2: assinatura v2 (timestamp.nonce.body) ────────────────────────────
+
+  const postBio = (app, body, headers) => app.inject({
+    method: 'POST',
+    url: '/v1/webhooks/bio-crm',
+    headers: { 'content-type': 'application/json', ...headers },
+    payload: body,
+  })
+
+  it('v2: aceita assinatura sobre timestamp.nonce.body', async () => {
+    const { app } = await buildApp()
+    const body = JSON.stringify(VALID_PAYLOAD)
+    const res = await postBio(app, body, signV2(body))
+    expect(res.statusCode).toBe(201)
+    await app.close()
+  })
+
+  it('v2: rejeita skew > 5min mesmo com WEBHOOK_REPLAY_PROTECTION desligado', async () => {
+    const { app, queryMock } = await buildApp()
+    const body = JSON.stringify(VALID_PAYLOAD)
+    const stale = Math.floor(Date.now() / 1000) - 6 * 60
+    const res = await postBio(app, body, signV2(body, { ts: stale }))
+    expect(res.statusCode).toBe(401)
+    expect(queryMock).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('v2: rejeita timestamp futuro além de 5min', async () => {
+    const { app } = await buildApp()
+    const body = JSON.stringify(VALID_PAYLOAD)
+    const future = Math.floor(Date.now() / 1000) + 6 * 60
+    const res = await postBio(app, body, signV2(body, { ts: future }))
+    expect(res.statusCode).toBe(401)
+    await app.close()
+  })
+
+  it('v2: nonce repetido (rowCount 0) → 409', async () => {
+    process.env.WEBHOOK_REPLAY_PROTECTION = 'true'
+    const { app } = await buildApp({ replayInserted: 0 })
+    const body = JSON.stringify(VALID_PAYLOAD)
+    const res = await postBio(app, body, signV2(body))
+    expect(res.statusCode).toBe(409)
+    await app.close()
+  })
+
+  it('v2: assinatura que cobre só o body é rejeitada quando ts/nonce vêm nos headers', async () => {
+    const { app } = await buildApp()
+    const body = JSON.stringify(VALID_PAYLOAD)
+    const res = await postBio(app, body, {
+      ...signV2(body),
+      'x-livelab-signature': sign(body), // v1 sig num request v2 → downgrade bloqueado
+    })
+    expect(res.statusCode).toBe(401)
+    await app.close()
+  })
+
+  it('v1 legado continua aceito enquanto WEBHOOK_REPLAY_PROTECTION não está ligado', async () => {
+    const { app } = await buildApp()
+    const body = JSON.stringify(VALID_PAYLOAD)
+    const res = await postBio(app, body, { 'x-livelab-signature': sign(body) })
+    expect(res.statusCode).toBe(201)
+    await app.close()
+  })
+
+  it('v1 legado passa a ser 401 com WEBHOOK_REPLAY_PROTECTION=true', async () => {
+    process.env.WEBHOOK_REPLAY_PROTECTION = 'true'
+    const { app, queryMock } = await buildApp()
+    const body = JSON.stringify(VALID_PAYLOAD)
+    const res = await postBio(app, body, { 'x-livelab-signature': sign(body) })
+    expect(res.statusCode).toBe(401)
+    expect(queryMock).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('v2: timestamp não numérico é rejeitado', async () => {
+    const { app } = await buildApp()
+    const body = JSON.stringify(VALID_PAYLOAD)
+    const res = await postBio(app, body, { ...signV2(body), 'x-livelab-timestamp': 'ontem' })
+    expect(res.statusCode).toBe(401)
+    await app.close()
+  })
+
+  it('v2: grava o nonce completo no replay log (sem truncar)', async () => {
+    process.env.WEBHOOK_REPLAY_PROTECTION = 'true'
+    const { app, queryMock } = await buildApp()
+    const body = JSON.stringify(VALID_PAYLOAD)
+    const nonce = 'n'.repeat(200)
+    const res = await postBio(app, body, signV2(body, { nonce }))
+    expect(res.statusCode).toBe(201)
+    const replay = queryMock.mock.calls.find(([sql]) => String(sql).includes('webhook_replay_log'))
+    expect(replay[1]).toEqual(['bio-crm', nonce])
     await app.close()
   })
 })

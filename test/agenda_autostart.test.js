@@ -14,10 +14,23 @@ const newLiveId = '66666666-6666-4666-8666-666666666666'
 const clienteId = '77777777-7777-4777-8777-777777777777'
 const apresentadorUserId = '88888888-8888-4888-8888-888888888888'
 
-function makeApp({ candidates, clientQueryMock }) {
+// A descoberta de candidatos roda tenant a tenant (scanPorTenant): app.db.query
+// só lista os tenants; o SELECT em agenda_eventos sai num client com contexto
+// RLS. O wrapper abaixo reflete isso e repassa o resto ao mock de cada teste.
+function makeApp({ candidates, clientQueryMock, tenants = [tenantId] }) {
   const release = vi.fn()
-  const clientQuery = clientQueryMock ?? vi.fn().mockResolvedValue({ rows: [] })
-  const poolQuery = vi.fn().mockResolvedValue({ rows: candidates ?? [] })
+  const inner = clientQueryMock ?? vi.fn().mockResolvedValue({ rows: [] })
+  const clientQuery = vi.fn(async (sql, params) => {
+    const s = String(sql)
+    if (s.includes('FROM agenda_eventos') && s.includes("status = 'planejado'")) {
+      return { rows: candidates ?? [] }
+    }
+    return inner(sql, params)
+  })
+  const poolQuery = vi.fn(async (sql) => {
+    if (String(sql).includes('FROM tenants')) return { rows: tenants.map((id) => ({ id })) }
+    return { rows: [] }
+  })
   return {
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     db: {

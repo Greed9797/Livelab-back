@@ -78,7 +78,15 @@ function createHomeQueryMock() {
       return { rows: [{ apresentadora_id: 'ap-1', apresentadora_nome: 'Edja', gmv_total: '800', gmv_lives: '800', gmv_videos: '0', total_lives: '1', pedidos: '8', fixo: '2700', comissao_variavel: '16', total_recebido: '2716' }] }
     }
     if (sql.includes('combined.marca_id')) {
-      return { rows: [{ marca_id: 'marca-1', marca_nome: 'Marca A', gmv_total: '1200.50', gmv_lives: '1200.50', gmv_videos: '0', pedidos: '12', total_lives: '2', total_videos: '0' }] }
+      return { rows: [
+        { marca_id: 'marca-1', marca_nome: 'Marca A', gmv_total: '1200.50', gmv_lives: '1200.50', gmv_videos: '0', horas_live: '5', pedidos: '12', total_lives: '2', total_videos: '0' },
+        // marca-2 = afiliada sem cliente dono → sem meta configurada
+        { marca_id: 'marca-2', marca_nome: 'Marca B', gmv_total: '600', gmv_lives: '400', gmv_videos: '200', horas_live: '2', pedidos: '4', total_lives: '1', total_videos: '1' },
+      ] }
+    }
+    // Meta de GMV/h por marca (herdada de clientes.meta_gmv_hora)
+    if (sql.includes('meta_gmv_hora') && sql.includes('FROM marcas m')) {
+      return { rows: [{ marca_id: 'marca-1', meta_gmv_hora: '500' }] }
     }
     if (sql.includes('FROM agenda_eventos ae')) {
       return { rows: [{ id: 'ag-1', tipo: 'live', status: 'confirmado', data_inicio: '2026-05-18T14:00:00.000Z', data_fim: '2026-05-18T16:00:00.000Z', cabine_numero: 2, cabine_nome: 'Cabine 02', marca_nome: 'Marca B', cliente_nome: 'Cliente B', apresentadora_nome: 'Ana' }] }
@@ -211,6 +219,46 @@ describe('home dashboard', () => {
     expect(rankingApSql).toContain('COALESCE(ap_v2.apresentadora_id, ap_user.id)')
     expect(rankingApSql).toContain('MAX(')
     expect(queryMock.mock.calls.some(([, params]) => Array.isArray(params) && params.includes('tenant-a'))).toBe(true)
+
+    await app.close()
+  })
+
+  it('exposes brand efficiency fields (GMV/h, horas, % meta) reusing the analytics rollup', async () => {
+    const queryMock = createHomeQueryMock()
+    const { app } = buildApp(queryMock, 'tenant-marcas')
+    await app.register(homeRoutes)
+
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard' })).json()
+    const [marcaA, marcaB] = payload.ranking_marcas_mes
+
+    // gmv_por_hora = gmv_lives / horas_live — idêntico ao mapPerformanceRows
+    // consumido pelo Analytics (lib/performance-rollups.js). 1200.50 / 5.
+    expect(marcaA).toMatchObject({
+      marca_id: 'marca-1',
+      nome: 'Marca A',
+      horas_live: 5,
+      gmv_por_hora: 240.1,
+      faturamento: 1200.5,   // GMV total = lives + vídeos
+      meta_gmv_hora: 500,
+      pct_meta_hora: 48.02,  // 240.10 / 500 * 100
+    })
+
+    // Faturamento soma lives + vídeos; GMV/h usa SÓ gmv_lives (400 / 2 = 200),
+    // que é exatamente a definição do Analytics — não gmv_total / horas.
+    expect(marcaB).toMatchObject({
+      marca_id: 'marca-2',
+      faturamento: 600,
+      gmv_por_hora: 200,
+      // Marca sem cliente dono não tem meta → badge omitido, não 500 chutado.
+      meta_gmv_hora: null,
+      pct_meta_hora: null,
+    })
+
+    // A meta vem de clientes.meta_gmv_hora (migration 114), a mesma fonte do
+    // painel do cliente e do PDF — não de uma tabela de meta por marca.
+    const metaSql = queryMock.mock.calls.map(([sql]) => sql).find(sql => sql.includes('meta_gmv_hora'))
+    expect(metaSql).toContain('FROM marcas m')
+    expect(metaSql).toContain('JOIN clientes c')
 
     await app.close()
   })

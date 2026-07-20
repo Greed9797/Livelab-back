@@ -74,6 +74,34 @@ function addFilter(filters, values, sql) {
   filters.push(sql.replace('?', `$${values.length}`))
 }
 
+export const MARCA_NOME_DUPLICADA = 'Já existe uma marca com este nome nesta unidade. Escolha outro nome.'
+
+/** Nome do índice único criado pela migration 129. */
+const UNIQ_NOME_INDEX = 'uniq_marca_nome_por_tenant'
+
+/**
+ * Marca duplicada por nome quebra o matching por nome do analytics-import.
+ * Checagem explícita (funciona mesmo se a migration 129 tiver pulado a criação
+ * do índice por já haver duplicata em produção) + o índice único como rede de
+ * segurança contra corrida entre transações — ver isNomeDuplicadoError.
+ */
+async function nomeMarcaJaExiste(db, { tenantId, nome, ignoreId = null }) {
+  const r = await db.query(
+    `SELECT 1 FROM marcas
+      WHERE tenant_id = $1::uuid
+        AND lower(nome) = lower($2)
+        AND ($3::uuid IS NULL OR id <> $3::uuid)
+      LIMIT 1`,
+    [tenantId, nome, ignoreId],
+  )
+  return Boolean(r.rows[0])
+}
+
+/** 23505 vindo do índice único de nome (e não de outra constraint da tabela). */
+function isNomeDuplicadoError(err) {
+  return err?.code === '23505' && err?.constraint === UNIQ_NOME_INDEX
+}
+
 export async function marcasRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_MARCAS)]
   const writeAccess = [app.authenticate, app.requirePapel(WRITE_MARCAS)]
@@ -195,6 +223,11 @@ export async function marcasRoutes(app) {
           createdMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: d.cliente_id })
         }
 
+        if (await nomeMarcaJaExiste(db, { tenantId: tenant_id, nome: d.nome, ignoreId: createdMarcaId })) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
+        }
+
         const result = createdMarcaId
           ? await db.query(
               `UPDATE marcas SET
@@ -238,6 +271,7 @@ export async function marcasRoutes(app) {
         return reply.code(201).send(result.rows[0])
       } catch (err) {
         await db.query('ROLLBACK')
+        if (isNomeDuplicadoError(err)) return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
         throw err
       }
     })
@@ -403,6 +437,15 @@ export async function marcasRoutes(app) {
         }
       }
 
+      if (updates.nome !== undefined && await nomeMarcaJaExiste(db, {
+        tenantId: request.user.tenant_id,
+        nome: updates.nome,
+        ignoreId: request.params.id,
+      })) {
+        await db.query('ROLLBACK')
+        return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
+      }
+
       const result = fields.length > 0
         ? await db.query(
             `UPDATE marcas SET ${set}
@@ -448,6 +491,7 @@ export async function marcasRoutes(app) {
       return result.rows[0]
       } catch (err) {
         await db.query('ROLLBACK')
+        if (isNomeDuplicadoError(err)) return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
         throw err
       }
     })

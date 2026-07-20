@@ -3,6 +3,7 @@
 // Idempotente: usa notification_log.ref_id pra evitar enviar 2x pro mesmo boleto.
 
 import { notify } from '../services/mailer.js'
+import { scanPorTenant } from './tenant_scan.js'
 
 /**
  * Para cada boleto com status='vencido', envia email — uma única vez.
@@ -10,8 +11,16 @@ import { notify } from '../services/mailer.js'
  */
 export async function notifyBoletosVencidos(app) {
   // Busca boletos vencidos que ainda não foram notificados.
-  // LEFT JOIN com notification_log filtrando enviados com sucesso.
-  const { rows } = await app.db.query(
+  // Varredura tenant a tenant com contexto RLS (ver src/jobs/tenant_scan.js):
+  // boletos, clientes e notification_log têm RLS, e um SELECT cross-tenant via
+  // app.db devolveria zero candidatos sob RLS — nenhum email sairia, sem erro.
+  //
+  // LIMIT passa a ser POR TENANT (antes global). Melhora o comportamento: com o
+  // limite global um único tenant com backlog de 200 boletos travava a fila de
+  // todos os outros. O dedupe é via notification_log (NOT EXISTS), então o
+  // excedente é reentregue no dia seguinte sem risco de email duplicado.
+  const rows = await scanPorTenant(
+    app,
     `SELECT b.id, b.tenant_id, b.cliente_id, b.valor, b.vencimento, b.tipo,
             b.gateway_url, c.nome AS cliente_nome, c.email AS cliente_email,
             t.email_contato AS tenant_email,
@@ -27,6 +36,8 @@ export async function notifyBoletosVencidos(app) {
            AND n.enviado_em IS NOT NULL
        )
      LIMIT 200`,
+    [],
+    '[notify_boletos_vencidos]',
   )
 
   let enviados = 0

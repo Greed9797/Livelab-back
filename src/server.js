@@ -69,7 +69,12 @@ connectorManager.init({ db: app.db, log: app.log })
 // Initialize Billing Engine for Batch Billing
 startBillingEngine(app.db.pool)
 
-// Snapshot mensal de métricas por cliente (rolling)
+// Snapshot mensal de métricas por cliente (rolling).
+// L4-12 levantou a hipótese de que este cron gravava numa tabela sem leitor.
+// NÃO é o caso: cliente_metricas_mensais é lida por
+// GET /v1/cliente/historico-mensal (src/routes/cliente_portal.js, registrada em
+// src/app.js). Desligar o cron faria o histórico do portal do cliente zerar
+// silenciosamente (a query é LEFT JOIN + COALESCE 0 — some sem erro).
 startClienteMetricasSnapshotCron(app)
 
 await app.listen({ port: Number(process.env.PORT ?? 3001), host: '0.0.0.0' })

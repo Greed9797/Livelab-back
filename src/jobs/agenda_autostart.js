@@ -20,6 +20,7 @@
 // (server.js:88) que roda a cada 60s.
 
 import { withAdvisoryLock } from './advisory_lock.js'
+import { scanPorTenant } from './tenant_scan.js'
 
 const AUTOSTART_INTERVAL_MS = 30_000
 const STALE_THRESHOLD_MINUTES = 60
@@ -36,9 +37,12 @@ export async function runAgendaAutostartTick(app) {
   const results = { started: 0, skipped: 0, stale: 0, errors: 0 }
 
   try {
-    // Busca eventos candidatos via pool (sem RLS — job é sistema, não tem
-    // tenant_id no contexto). Filtra por tenant nas operações subsequentes.
-    const candidatesQ = await app.db.query(
+    // Busca eventos candidatos tenant a tenant, cada varredura com seu contexto
+    // RLS (ver src/jobs/tenant_scan.js). Um SELECT cross-tenant via app.db
+    // devolveria zero linhas assim que a RLS for aplicada, em silêncio.
+    // LIMIT abaixo é POR TENANT.
+    const candidates = await scanPorTenant(
+      app,
       `SELECT id, tenant_id, cabine_id, marca_id, apresentadora_id,
               data_inicio, data_fim,
               EXTRACT(EPOCH FROM (NOW() - data_inicio)) / 60 AS minutos_atraso
@@ -50,9 +54,11 @@ export async function runAgendaAutostartTick(app) {
           AND data_fim > NOW()
         ORDER BY data_inicio ASC
         LIMIT 50`,
+      [],
+      '[agenda autostart]',
     )
 
-    for (const ev of candidatesQ.rows) {
+    for (const ev of candidates) {
       if (Number(ev.minutos_atraso) > STALE_THRESHOLD_MINUTES) {
         app.log?.warn?.({
           agenda_evento_id: ev.id,

@@ -2,7 +2,52 @@
 // Emissor: outro sistema (Codex). Payload assinado via HMAC SHA256 + secret compartilhado.
 // Ação: cria registro em `leads` linkado à franqueadora padrão (env BIO_WEBHOOK_DEFAULT_FRANQUEADORA_ID).
 //
-// Contrato (header):  X-Livelab-Signature: sha256=<hex>
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTRATO DE ASSINATURA — repassar isto pro emissor (Codex)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// FORMATO v2 (atual — usar este):
+//
+//   Headers:
+//     X-Livelab-Timestamp: <unix epoch em SEGUNDOS, inteiro, ex: 1782000000>
+//     X-Livelab-Nonce:     <string aleatória única por request, 8–200 chars>
+//     X-Livelab-Signature: sha256=<hex>
+//
+//   String assinada (concatenação literal, separador = ponto):
+//     <timestamp> + "." + <nonce> + "." + <corpo cru da request>
+//
+//   Ex. em pseudo-código:
+//     ts   = "1782000000"
+//     nonce= "b7f3a91c2d4e6f80"
+//     body = '{"event":"bio.form.submitted",...}'   // exatamente os bytes enviados
+//     sig  = "sha256=" + hmac_sha256_hex(SECRET, ts + "." + nonce + "." + body)
+//
+//   Regras:
+//     - Os headers entram na assinatura como STRING CRUA, sem trim/normalização.
+//       Não mande espaço em volta do timestamp ou do nonce.
+//     - `body` é o corpo cru, byte a byte. Não re-serializar o JSON.
+//     - Timestamp fora de ±5 minutos do relógio do servidor → 401 (sempre,
+//       independente de env). Sincronize o relógio do emissor (NTP).
+//     - Nonce deve ser único por request (UUID v4 serve).
+//
+// FORMATO v1 (LEGADO — aceito temporariamente, será removido):
+//
+//     X-Livelab-Signature: sha256=<hex do HMAC do corpo cru, sem timestamp/nonce>
+//
+//   Aceito apenas enquanto WEBHOOK_REPLAY_PROTECTION !== 'true'. Cada request v1
+//   recebida loga um warn de depreciação. v1 é replayável indefinidamente — é
+//   exatamente o motivo do v2 existir.
+//
+// MIGRAÇÃO (sem downtime):
+//   1. Deploy deste código  → v1 e v2 são aceitos simultaneamente.
+//   2. Emissor passa a enviar v2 → o warn de depreciação some do log.
+//   3. Setar WEBHOOK_REPLAY_PROTECTION=true → v1 passa a ser 401 e o nonce
+//      começa a ser deduplicado em `webhook_replay_log`.
+//
+//   Downgrade attack não é possível: uma request v2 capturada não pode ser
+//   convertida em v1 (a assinatura cobre ts+nonce e o atacante não tem o secret).
+// ─────────────────────────────────────────────────────────────────────────────
+//
 // Contrato (body):
 //   { event, persona, lead_name, contact_email, whatsapp, city,
 //     submitted_at, source_path, data: {...}, metadata: {...} }
@@ -17,7 +62,9 @@ const PERSONA_CRM_TYPE = {
   apresentador: 'Creator',
 }
 
-function verifySignature(rawBody, signatureHeader, secret) {
+const MAX_SKEW_MS = 5 * 60 * 1000
+
+function verifySignature(signedString, signatureHeader, secret) {
   if (!signatureHeader || typeof signatureHeader !== 'string') {
     return { ok: false, reason: 'missing_signature' }
   }
@@ -25,7 +72,7 @@ function verifySignature(rawBody, signatureHeader, secret) {
   if (!match) return { ok: false, reason: 'invalid_signature_format' }
 
   const received = Buffer.from(match[1], 'hex')
-  const expected = crypto.createHmac('sha256', secret).update(rawBody).digest()
+  const expected = crypto.createHmac('sha256', secret).update(signedString).digest()
 
   if (received.length !== expected.length) {
     return { ok: false, reason: 'signature_length_mismatch' }
@@ -34,6 +81,36 @@ function verifySignature(rawBody, signatureHeader, secret) {
     return { ok: false, reason: 'signature_mismatch' }
   }
   return { ok: true }
+}
+
+// Decide se a request é v2 (ts+nonce assinados) ou v1 (só body) e devolve a
+// string que a assinatura deve cobrir. Ver contrato no topo do arquivo.
+//
+// Skew de timestamp é validado AQUI, sempre que a request for v2 — não fica
+// atrás de env flag: é uma comparação de inteiros, não depende de tabela.
+function resolveSignatureInput(headers, rawBody, strictV2) {
+  const ts = headers['x-livelab-timestamp']
+  const nonce = headers['x-livelab-nonce']
+
+  // Qualquer um dos dois presente ⇒ trata como v2. Impede que um atacante
+  // remova só um header pra cair no caminho legado.
+  if (ts === undefined && nonce === undefined) {
+    if (strictV2) return { ok: false, reason: 'missing_timestamp_or_nonce' }
+    return { ok: true, version: 'v1', signed: rawBody, nonce: null }
+  }
+
+  if (typeof ts !== 'string' || typeof nonce !== 'string') {
+    return { ok: false, reason: 'missing_timestamp_or_nonce' }
+  }
+  if (!/^\d{1,15}$/.test(ts)) return { ok: false, reason: 'invalid_timestamp' }
+  // Limite superior evita que dois nonces distintos colidam ao serem truncados
+  // na gravação do webhook_replay_log (falso 409).
+  if (nonce.length < 8 || nonce.length > 200) return { ok: false, reason: 'invalid_nonce' }
+  if (Math.abs(Date.now() - Number(ts) * 1000) > MAX_SKEW_MS) {
+    return { ok: false, reason: 'timestamp_skew' }
+  }
+
+  return { ok: true, version: 'v2', signed: `${ts}.${nonce}.${rawBody}`, nonce }
 }
 
 function pickFirstNonEmpty(...vals) {
@@ -174,27 +251,29 @@ export async function webhookBioCrmRoutes(app) {
       ? request.rawBody
       : JSON.stringify(request.body ?? {})
 
-    const sig = verifySignature(rawBody, request.headers['x-livelab-signature'], secret)
+    // v1 (só body) vs v2 (timestamp.nonce.body). Skew é checado dentro, sempre.
+    const parsed = resolveSignatureInput(request.headers, rawBody, replayProtect)
+    if (!parsed.ok) return reject(401, parsed.reason)
+
+    const sig = verifySignature(parsed.signed, request.headers['x-livelab-signature'], secret)
     if (!sig.ok) return reject(401, sig.reason)
 
-    // Replay protection (timestamp + nonce). Ativado via env quando sender pronto.
-    if (replayProtect) {
-      const tsHeader = request.headers['x-livelab-timestamp']
-      const nonce = request.headers['x-livelab-nonce']
-      const ts = Number(tsHeader)
-      if (!Number.isFinite(ts) || !nonce || typeof nonce !== 'string' || nonce.length < 8) {
-        return reject(401, 'missing_timestamp_or_nonce')
-      }
-      const skewMs = Math.abs(Date.now() - ts * 1000)
-      if (skewMs > 5 * 60 * 1000) return reject(401, 'timestamp_skew')
+    if (parsed.version === 'v1') {
+      app.log.warn(
+        '[bio-crm webhook] DEPRECATED: assinatura v1 (só body) — request é replayável. '
+        + 'Emissor deve migrar para X-Livelab-Timestamp + X-Livelab-Nonce (ver contrato no topo de webhook_bio_crm.js).',
+      )
+    }
 
+    // Camada adicional: nonce já visto. Depende de tabela, por isso fica atrás da flag.
+    if (replayProtect) {
       try {
         const inserted = await app.db.query(
           `INSERT INTO webhook_replay_log (source, nonce)
            VALUES ($1, $2)
            ON CONFLICT DO NOTHING
            RETURNING nonce`,
-          ['bio-crm', String(nonce).slice(0, 200)],
+          ['bio-crm', parsed.nonce],
         )
         if (inserted.rowCount === 0) return reject(409, 'replay_detected')
       } catch (err) {

@@ -7,14 +7,26 @@ vi.mock('../src/services/tiktok-connector-manager.js', () => ({
   stop: vi.fn().mockResolvedValue(undefined),
 }))
 
-function makeApp({ targets, clientQueryMock }) {
+// A descoberta de zumbis roda tenant a tenant (scanPorTenant): app.db.query só
+// lista os tenants; o SELECT em lives sai num client com contexto RLS.
+function makeApp({ targets, clientQueryMock, tenants = ['tenant-1'] }) {
   const release = vi.fn()
-  const clientQuery = clientQueryMock ?? vi.fn(async (sql) => {
+  const inner = clientQueryMock ?? vi.fn(async (sql) => {
     if (String(sql).includes('UPDATE lives')) return { rowCount: 1, rows: [{ id: 'live-1' }] }
     if (String(sql).includes('UPDATE cabines')) return { rowCount: 1, rows: [] }
     return { rows: [], rowCount: 0 }
   })
-  const poolQuery = vi.fn().mockResolvedValue({ rows: targets ?? [] })
+  const clientQuery = vi.fn(async (sql, params) => {
+    const s = String(sql)
+    if (s.includes('FROM lives l') && s.includes("l.status = 'em_andamento'")) {
+      return { rows: targets ?? [] }
+    }
+    return inner(sql, params)
+  })
+  const poolQuery = vi.fn(async (sql) => {
+    if (String(sql).includes('FROM tenants')) return { rows: tenants.map((id) => ({ id })) }
+    return { rows: [] }
+  })
   return {
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     db: {
@@ -51,10 +63,19 @@ describe('encerrar_lives_zumbi job', () => {
     const app = makeApp({ targets: [] })
     await runEncerrarLivesZumbiTick(app)
 
-    const sql = String(app._poolQuery.mock.calls[0][0])
+    // A varredura sai no client com contexto RLS, não no pool de sistema.
+    const scan = app._clientQuery.mock.calls.find(([s]) =>
+      String(s).includes("l.status = 'em_andamento'"))
+    expect(scan).toBeDefined()
+    const sql = String(scan[0])
     expect(sql).toContain("l.iniciado_em < NOW() - INTERVAL '24 hours'")
     expect(sql).toContain('SELECT MAX(captured_at)')
     expect(sql).not.toContain("< NOW() - INTERVAL '2 hours'")
+
+    // E precedida de set_config do tenant na mesma transação.
+    const setConfig = app._clientQuery.mock.calls.find(([s]) =>
+      String(s).includes('set_config'))
+    expect(setConfig?.[1]).toEqual(['tenant-1'])
   })
 
   it('retorna early quando não há targets', async () => {

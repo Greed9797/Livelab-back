@@ -123,6 +123,7 @@ export const MIGRATIONS_LIST = [
   '126_cliente_briefing.sql',
   '127_rls_tabelas_faltantes.sql',
   '128_performance_indexes.sql',
+  '129_marca_nome_unico_e_status_cliente.sql',
 ]
 
 async function ensureMigrationsTable(client) {

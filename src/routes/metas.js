@@ -2,9 +2,19 @@
 // Tables: metas_apresentadora, metas_supervisor (migration 090)
 // Audit: metas.apresentadora.update, metas.supervisor.update
 
-function mesReferenciaFromMes(mes) {
-  // mes = 'YYYY-MM' → DATE '20YY-MM-01'
-  return mes ? `${mes}-01` : `${new Date().toISOString().slice(0, 7)}-01`
+import { anoMesRange, anoMesToDate, parseAnoMes } from '../lib/ano-mes.js'
+
+/**
+ * Lê e valida ?mes (formato 'YYYY-MM'). Devolve null quando malformado, já
+ * tendo respondido 400 — o handler só precisa dar `return`.
+ */
+function lerMes(request, reply) {
+  try {
+    return parseAnoMes(request.query?.mes)
+  } catch (err) {
+    reply.code(err.statusCode ?? 400).send({ error: err.message })
+    return null
+  }
 }
 
 export async function metasRoutes(app) {
@@ -12,10 +22,15 @@ export async function metasRoutes(app) {
   // Lista todas apresentadoras ativas com meta_gmv do mês e gmv_realizado
   app.get('/v1/metas/apresentadoras', {
     preHandler: app.requirePapel(['franqueado', 'gerente']),
-  }, async (request) => {
+  }, async (request, reply) => {
     const { tenant_id } = request.user
-    const mes = request.query.mes || new Date().toISOString().slice(0, 7)
-    const mesRef = mesReferenciaFromMes(mes)
+    const mes = lerMes(request, reply)
+    if (mes === null) return reply
+    const mesRef = anoMesToDate(mes)
+    // Range em vez de to_char(va.data,'YYYY-MM') = mes: va.data é DATE
+    // (migration 080), então >= inicio AND < proximo é equivalência exata e
+    // aproveita idx_vendas_atribuidas (tenant_id, data DESC, origem).
+    const { inicio, proximo } = anoMesRange(mes)
 
     return app.withTenant(tenant_id, async (db) => {
       const r = await db.query(`
@@ -32,12 +47,13 @@ export async function metasRoutes(app) {
         LEFT JOIN vendas_atribuidas va
           ON va.apresentadora_id = a.id
          AND va.tenant_id        = a.tenant_id
-         AND to_char(va.data, 'YYYY-MM') = $3
+         AND va.data >= $3::date
+         AND va.data <  $4::date
         WHERE a.tenant_id = $1
           AND a.ativo = true
         GROUP BY a.id, a.nome, ma.gmv_meta
         ORDER BY a.nome
-      `, [tenant_id, mesRef, mes])
+      `, [tenant_id, mesRef, inicio, proximo])
 
       return r.rows
     })
@@ -50,8 +66,9 @@ export async function metasRoutes(app) {
   }, async (request, reply) => {
     const { tenant_id, sub: user_id } = request.user
     const { id } = request.params
-    const mes = request.query.mes || new Date().toISOString().slice(0, 7)
-    const mesRef = mesReferenciaFromMes(mes)
+    const mes = lerMes(request, reply)
+    if (mes === null) return reply
+    const mesRef = anoMesToDate(mes)
     const { gmv_meta } = request.body ?? {}
 
     if (gmv_meta == null || isNaN(Number(gmv_meta))) {
@@ -86,10 +103,12 @@ export async function metasRoutes(app) {
   // Retorna meta consolidada do supervisor para o tenant no mês
   app.get('/v1/metas/supervisor', {
     preHandler: app.requirePapel(['franqueado', 'gerente']),
-  }, async (request) => {
+  }, async (request, reply) => {
     const { tenant_id } = request.user
-    const mes = request.query.mes || new Date().toISOString().slice(0, 7)
-    const mesRef = mesReferenciaFromMes(mes)
+    const mes = lerMes(request, reply)
+    if (mes === null) return reply
+    const mesRef = anoMesToDate(mes)
+    const { inicio, proximo } = anoMesRange(mes)
 
     return app.withTenant(tenant_id, async (db) => {
       const metaRow = await db.query(`
@@ -102,8 +121,9 @@ export async function metasRoutes(app) {
         SELECT COALESCE(SUM(gmv), 0) AS gmv_realizado
         FROM vendas_atribuidas
         WHERE tenant_id = $1
-          AND to_char(data, 'YYYY-MM') = $2
-      `, [tenant_id, mes])
+          AND data >= $2::date
+          AND data <  $3::date
+      `, [tenant_id, inicio, proximo])
 
       return {
         meta_gmv: Number(metaRow.rows[0]?.gmv_meta_total ?? 0),
@@ -119,8 +139,9 @@ export async function metasRoutes(app) {
     preHandler: app.requirePapel(['franqueado', 'gerente']),
   }, async (request, reply) => {
     const { tenant_id, sub: user_id } = request.user
-    const mes = request.query.mes || new Date().toISOString().slice(0, 7)
-    const mesRef = mesReferenciaFromMes(mes)
+    const mes = lerMes(request, reply)
+    if (mes === null) return reply
+    const mesRef = anoMesToDate(mes)
     const { gmv_meta_total } = request.body ?? {}
 
     if (gmv_meta_total == null || isNaN(Number(gmv_meta_total))) {

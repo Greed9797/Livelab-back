@@ -8,6 +8,7 @@
 
 import * as connectorManager from '../services/tiktok-connector-manager.js'
 import { withAdvisoryLock } from './advisory_lock.js'
+import { scanPorTenant } from './tenant_scan.js'
 
 const TICK_CRON = '5 */1 * * *' // 5min após cada hora cheia
 const LOCK_KEY = 7421900119911237n
@@ -23,7 +24,12 @@ export async function runEncerrarLivesZumbiTick(app) {
   const results = { encerradas: 0, errors: 0 }
 
   try {
-    const targets = await app.db.query(
+    // Varredura tenant a tenant com contexto RLS (ver src/jobs/tenant_scan.js):
+    // um SELECT cross-tenant via app.db devolveria zero linhas sob RLS, sem erro.
+    // LIMIT abaixo é POR TENANT (antes era global): 100 zumbis/tenant/hora é
+    // folga de sobra pro volume real e o tick seguinte pega o resto.
+    const targets = await scanPorTenant(
+      app,
       `SELECT l.id,
               l.tenant_id,
               l.cabine_id,
@@ -36,9 +42,11 @@ export async function runEncerrarLivesZumbiTick(app) {
         WHERE l.status = 'em_andamento'
           AND l.iniciado_em < NOW() - INTERVAL '24 hours'
         LIMIT 100`,
+      [],
+      '[encerrar zumbi]',
     )
 
-    for (const live of targets.rows) {
+    for (const live of targets) {
       const client = await app.db.pool.connect()
       try {
         await client.query('BEGIN')

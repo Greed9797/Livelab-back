@@ -15,10 +15,20 @@ vi.mock('../src/routes/vendas_atribuidas.js', async (importOriginal) => {
 
 import { recalcularVendasAtribuidasApresentadora } from '../src/routes/vendas_atribuidas.js'
 
-function makeApp({ targets, clientQueryMock }) {
+// A varredura roda tenant a tenant (scanPorTenant): app.db.query só lista os
+// tenants; o SELECT em vendas_atribuidas sai num client com contexto RLS.
+function makeApp({ targets, clientQueryMock, tenants = ['tenant-1'] }) {
   const release = vi.fn()
-  const clientQuery = clientQueryMock ?? vi.fn().mockResolvedValue({ rows: [] })
-  const poolQuery = vi.fn().mockResolvedValue({ rows: targets ?? [] })
+  const inner = clientQueryMock ?? vi.fn().mockResolvedValue({ rows: [] })
+  const clientQuery = vi.fn(async (sql, params) => {
+    const s = String(sql)
+    if (s.includes('FROM vendas_atribuidas va')) return { rows: targets ?? [] }
+    return inner(sql, params)
+  })
+  const poolQuery = vi.fn(async (sql) => {
+    if (String(sql).includes('FROM tenants')) return { rows: tenants.map((id) => ({ id })) }
+    return { rows: [] }
+  })
   return {
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     db: {

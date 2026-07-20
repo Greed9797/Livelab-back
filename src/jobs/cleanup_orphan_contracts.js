@@ -1,9 +1,18 @@
 import { notify } from '../services/mailer.js'
+import { scanPorTenant } from './tenant_scan.js'
 
 export async function cleanupOrphanContracts(app) {
   const expirationDays = Number(process.env.CONTRACT_EXPIRATION_DAYS ?? 5)
 
-  const result = await app.db.query(
+  // Este CTE ESCREVE cross-tenant (UPDATE contratos + UPDATE clientes + INSERT
+  // contrato_eventos). Sob RLS, rodar via app.db.query não só deixaria de achar
+  // linhas: o WITH CHECK das policies de escrita rejeitaria (ou filtraria) as
+  // mutações silenciosamente. scanPorTenant roda o statement inteiro dentro de
+  // uma transação por tenant, então SELECT e as três escritas acontecem todos
+  // no contexto do tenant certo, e cada tenant commita isoladamente.
+  // Sem LIMIT: nada muda de semântica ao particionar por tenant.
+  const cancelados = await scanPorTenant(
+    app,
     `WITH expired AS (
        SELECT id, tenant_id, cliente_id
        FROM contratos
@@ -41,20 +50,24 @@ export async function cleanupOrphanContracts(app) {
         'system',
         jsonb_build_object('reason', 'prazo expirado sem decisão do franqueado')
       FROM updated_contratos uc
-      RETURNING contrato_id`,
-    [String(expirationDays)]
+      RETURNING contrato_id, tenant_id`,
+    [String(expirationDays)],
+    '[cleanup contratos orfaos]',
   )
 
-  const total = result.rowCount ?? 0
+  const total = cancelados.length
   if (total > 0) {
     app.log.info({ total, expirationDays }, 'Contratos órfãos cancelados automaticamente')
 
     // F1: notifica franqueado de cada contrato cancelado (fire-and-forget).
     ;(async () => {
       try {
-        const ids = result.rows.map(r => r.contrato_id)
+        const ids = cancelados.map(r => r.contrato_id)
         if (ids.length === 0) return
-        const { rows } = await app.db.query(
+        // Também sob RLS (contratos + clientes). Cada tenant enxerga só os seus
+        // ids; a união reconstrói a lista completa.
+        const rows = await scanPorTenant(
+          app,
           `SELECT c.id AS contrato_id, c.tenant_id, cl.nome AS cliente_nome, cl.email AS cliente_email,
                   t.email_contato AS tenant_email, t.notif_email_ativo, t.notif_contrato
            FROM contratos c
@@ -62,6 +75,7 @@ export async function cleanupOrphanContracts(app) {
            JOIN tenants t ON t.id = c.tenant_id
            WHERE c.id = ANY($1::uuid[])`,
           [ids],
+          '[cleanup contratos orfaos notify]',
         )
         for (const r of rows) {
           const settings = {

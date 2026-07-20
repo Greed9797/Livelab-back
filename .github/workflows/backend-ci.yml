@@ -60,6 +60,11 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
           JWT_SECRET: test-secret-32-chars-minimum-here
           NODE_ENV: test
+          # Habilita test/rls_isolation.test.js (cria role NOBYPASSRLS e prova o
+          # isolamento entre tenants contra este banco descartável). Sem esta
+          # variável o teste é pulado — é o que acontece no `npx vitest run` local
+          # de quem não tem Postgres. NUNCA apontar para produção.
+          RLS_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/livelab_test
         run: npx vitest run --coverage
 
       - name: Upload coverage report

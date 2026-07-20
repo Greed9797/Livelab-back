@@ -6,6 +6,8 @@
 
 import cron from 'node-cron'
 
+import { scanPorTenant } from './tenant_scan.js'
+
 const TZ = 'America/Sao_Paulo'
 
 /**
@@ -20,7 +22,21 @@ export async function snapshotMonth(app, ano, mes, { tenantId = null, log = true
     tenantFilter = `AND l.tenant_id = $3`
   }
 
-  const result = await app.db.query(
+  // Varredura + escrita tenant a tenant com contexto RLS (ver tenant_scan.js).
+  //
+  // Este é um INSERT..SELECT agregado, então vale conferir se particionar por
+  // tenant muda o resultado — não muda:
+  //   - `base` já agrupa por (tenant_id, cliente_id): os grupos nunca cruzam
+  //     tenant, logo rodar N vezes filtrado produz exatamente os mesmos grupos.
+  //   - `itens` agrupa só por cliente_id, mas cliente_id é PK global e pertence
+  //     a um único tenant, então também não há grupo cruzando fronteira.
+  //   - ON CONFLICT (cliente_id, ano, mes) idem: sem colisão entre tenants.
+  // Sem LIMIT na query, então não há limite virando por-tenant.
+  //
+  // O filtro $3 acima continua válido: quando `tenantId` é passado (backfill
+  // ad-hoc) os demais tenants do loop simplesmente não casam nenhuma linha.
+  const linhas = await scanPorTenant(
+    app,
     `
     WITH base AS (
       SELECT
@@ -95,15 +111,16 @@ export async function snapshotMonth(app, ano, mes, { tenantId = null, log = true
     RETURNING cliente_id
     `,
     params,
+    '[cliente_metricas_snapshot]',
   )
 
   if (log) {
     app.log.info(
-      { ano, mes, tenantId, snapshots: result.rowCount },
+      { ano, mes, tenantId, snapshots: linhas.length },
       '[cliente_metricas_snapshot] snapshot gerado',
     )
   }
-  return result.rowCount
+  return linhas.length
 }
 
 /**

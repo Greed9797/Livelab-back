@@ -1448,6 +1448,8 @@ export async function livesRoutes(app) {
     const fDataFim = dateRe.test(request.query?.data_fim ?? '') ? request.query.data_fim : null
     const fMarcaId = UUID_RE.test(request.query?.marca_id ?? '') ? request.query.marca_id : null
     const fApresentadoraId = UUID_RE.test(request.query?.apresentadora_id ?? '') ? request.query.apresentadora_id : null
+    const fQ = String(request.query?.q ?? '').trim().slice(0, 120)
+    const paginado = String(request.query?.paginado ?? '') === '1'
     return app.withTenant(tenant_id, async (db) => {
       const params = [tenant_id]
       let where = 'WHERE l.tenant_id = $1::uuid'
@@ -1472,6 +1474,19 @@ export async function livesRoutes(app) {
         params.push(fApresentadoraId)
         where += ` AND COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) = $${params.length}::uuid`
       }
+      if (fQ) {
+        // Busca textual server-side: marca, cliente, apresentadora, resumo da live
+        // e título/observações do evento de agenda. Os aliases dos LATERALs podem
+        // ser referenciados no WHERE externo (mesmo padrão dos filtros marca_id/
+        // apresentadora_id acima) — o plano segue dirigido pelos índices de lives.
+        params.push(`%${fQ.replace(/[\\%_]/g, '\\$&')}%`)
+        const qi = params.length
+        where += ` AND (cl.nome ILIKE $${qi}
+          OR va_marca.marca_nome ILIKE $${qi}
+          OR COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, u.nome) ILIKE $${qi}
+          OR l.resumo ILIKE $${qi}
+          OR ae.observacoes ILIKE $${qi})`
+      }
       // cliente_parceiro só enxerga lives publicadas e do seu próprio cliente
       if (papel === 'cliente_parceiro') {
         params.push(tenant_id)
@@ -1481,9 +1496,12 @@ export async function livesRoutes(app) {
         where += ` AND l.cliente_id = (SELECT id FROM clientes WHERE user_id = $${clienteSubIdx + 1} AND tenant_id = $${clienteSubIdx}::uuid LIMIT 1)`
       }
       const result = await db.query(
-        `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
+        `SELECT ${paginado ? 'COUNT(*) OVER() AS total_count,' : ''}
+                l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
                 l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
+                l.comissao_apresentadora_valor AS comissao_apresentadora,
+                l.comissao_apresentadora_pct AS pct_apresentadora,
                 l.final_orders_count, l.final_peak_viewers,
                 l.final_total_likes, l.final_total_comments,
                 l.final_total_shares, l.final_gifts_diamonds,
@@ -1578,7 +1596,11 @@ export async function livesRoutes(app) {
          ORDER BY l.iniciado_em DESC LIMIT ${reqLimit} OFFSET ${reqOffset}`,
         params
       )
-      return result.rows
+      // Sem `paginado`, o shape legado (array puro) fica intacto — há outros consumidores.
+      if (!paginado) return result.rows
+      const total = result.rows.length > 0 ? Number(result.rows[0].total_count ?? 0) : 0
+      const items = result.rows.map(({ total_count, ...rest }) => rest)
+      return { items, total, page: Math.floor(reqOffset / reqLimit), limit: reqLimit }
     })
   })
 

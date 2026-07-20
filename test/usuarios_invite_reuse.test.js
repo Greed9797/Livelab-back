@@ -35,7 +35,6 @@ const payload = {
   papel: 'apresentadora',
   fixo: 0,
   comissao_pct: 0,
-  meta_diaria_gmv: 0,
   senha_temporaria: 'senha123',
 }
 

@@ -333,6 +333,7 @@ export async function agendaRoutes(app) {
         `SELECT ae.*,
                 m.nome AS marca_nome,
                 m.cliente_id AS cliente_id,
+                m.cor AS marca_cor,
                 COALESCE(m.logo_url, cl.logo_url) AS marca_logo_url,
                 COALESCE(m.site, cl.site) AS marca_site,
                 cl.nome AS cliente_nome,

@@ -14,7 +14,18 @@ import { ensureClienteMarca } from '../services/client-brand.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
 import { SECURITY } from '../config/security.js'
-const imageUrlField = z.string().max(500000).nullable().optional()
+// Aceita só URL https:// ou data URI de imagem. Teto de 100KB evita que um
+// base64 gigante entre no banco por esse campo (upload real usa /upload).
+const MAX_IMAGE_FIELD_BYTES = 100 * 1024
+// O que precisa ser barrado aqui é blob gigante e esquema que executa script
+// (javascript:, data:text/html). http:// e caminho relativo não são vetor de
+// injeção e JÁ EXISTEM em linhas antigas — barrá-los faria um PATCH de cliente
+// legado voltar 400, já que o formulário reenvia todos os campos.
+const IMAGE_FIELD_RE = /^(https?:\/\/|\/|data:image\/(png|jpeg|webp|gif);base64,)/
+const imageUrlField = z.string()
+  .max(MAX_IMAGE_FIELD_BYTES, 'Imagem muito grande. Máximo 100 KB — envie o arquivo pelo upload de logo.')
+  .regex(IMAGE_FIELD_RE, 'Logo inválida. Use uma URL http(s):// ou uma imagem base64 (PNG, JPEG, WebP ou GIF).')
+  .nullable().optional()
 
 const createSchema = z.object({
   nome:            z.string().min(1),

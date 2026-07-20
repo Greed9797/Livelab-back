@@ -30,6 +30,7 @@ import { regionalManagersRoutes } from './routes/regional_managers.js'
 import { manuaisRoutes } from './routes/manuais.js'
 import { knowledgeRoutes } from './routes/knowledge.js'
 import { clienteNotasRoutes } from './routes/cliente_notas.js'
+import { clienteBriefingRoutes } from './routes/cliente_briefing.js'
 import { tiktokRoutes } from './routes/tiktok.js'
 import { cepRoutes } from './routes/cep.js'
 import { configuracoesRoutes } from './routes/configuracoes.js'
@@ -244,6 +245,7 @@ export async function buildApp(opts = {}) {
   await app.register(manuaisRoutes)
   await app.register(knowledgeRoutes)
   await app.register(clienteNotasRoutes)
+  await app.register(clienteBriefingRoutes)
   await app.register(tiktokRoutes)
   await app.register(cepRoutes)
   await app.register(configuracoesRoutes)
@@ -276,6 +278,13 @@ export async function buildApp(opts = {}) {
   // 404 (não 401) pra não confirmar existência do endpoint a scanners.
   app.get('/health', healthHandler)
   app.get('/healthcheck', healthHandler)
+
+  // Liveness para o healthcheck do Railway. Precisa ser SEPARADO do /health:
+  // o Railway não envia header customizado, então com HEALTH_CHECK_TOKEN setado
+  // o /health responde 404 e o deploy nunca seria promovido. Aqui não vai nada
+  // sensível (sem commit sha, sem estado de dependência) — só prova que o
+  // processo está de pé e aceitando conexão.
+  app.get('/healthz', async () => ({ ok: true }))
 
   app.setErrorHandler((error, request, reply) => {
     // Custom AppError subclasses: usa statusCode/sentryTag/reportable da classe

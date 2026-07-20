@@ -19,8 +19,11 @@
 // TikTok connector é pego automaticamente por connectorManager.syncLives()
 // (server.js:88) que roda a cada 60s.
 
+import { withAdvisoryLock } from './advisory_lock.js'
+
 const AUTOSTART_INTERVAL_MS = 30_000
 const STALE_THRESHOLD_MINUTES = 60
+const LOCK_KEY = 7421900119911238n
 
 let _running = false
 
@@ -222,7 +225,9 @@ async function startOneEvent(app, ev) {
 
 export function startAgendaAutostart(app, cron) {
   cron.schedule('*/30 * * * * *', async () => {
-    await runAgendaAutostartTick(app)
+    // Advisory lock além da flag _running: com 2 réplicas a flag não vê a outra.
+    await withAdvisoryLock(app.db.pool, LOCK_KEY, '[agenda autostart]', app.log, () =>
+      runAgendaAutostartTick(app))
   })
   app.log?.info?.({ interval_ms: AUTOSTART_INTERVAL_MS },
     '[agenda autostart] cron registrado (cada 30s)')

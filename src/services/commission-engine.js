@@ -78,7 +78,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
 
   // 3. Resolve apresentadoras da live (principal + live_apresentadoras)
   const apresentadorasQ = await db.query(
-    `SELECT DISTINCT ap.id AS apresentadora_id, am.comissao_live_pct, la.percentual_rateio
+    `SELECT DISTINCT ap.id AS apresentadora_id, la.percentual_rateio
      FROM (
        -- apresentadora principal (lives.apresentador_id → apresentadoras.user_id)
        SELECT ap2.id, ap2.user_id
@@ -97,16 +97,11 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
        JOIN apresentadoras ap4 ON ap4.id = lav.apresentadora_id AND ap4.tenant_id = $1::uuid
        WHERE lav.live_id = $3 AND lav.tenant_id = $1::uuid
      ) ap
-     LEFT JOIN apresentadora_marcas am
-       ON am.apresentadora_id = ap.id
-      AND am.marca_id = $4::uuid
-      AND am.tenant_id = $1::uuid
-      AND am.ativo = true
      LEFT JOIN live_apresentadoras_v2 la
        ON la.apresentadora_id = ap.id
       AND la.live_id = $3
       AND la.tenant_id = $1::uuid`,
-    [tenantId, live.apresentador_id ?? NIL_UUID, liveId, live.marca_id],
+    [tenantId, live.apresentador_id ?? NIL_UUID, liveId],
   )
 
   const apresentadoras = apresentadorasQ.rows.filter(r => r.apresentadora_id)
@@ -114,7 +109,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
   // 4. Se não há apresentadoras vinculadas, cria um registro "sem apresentadora"
   const linhas = apresentadoras.length > 0
     ? apresentadoras
-    : [{ apresentadora_id: null, comissao_live_pct: 0, percentual_rateio: null }]
+    : [{ apresentadora_id: null, percentual_rateio: null }]
   const rateiosExplicitados = linhas
     .map((ap) => ap.percentual_rateio)
     .filter((value) => value !== null && value !== undefined && value !== '')
@@ -145,7 +140,6 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
       origemId: liveId,
       data: live.iniciado_em ?? data,
       gmv: gmvRateado,
-      fallbackLivePct: ap.comissao_live_pct,
     })
     const comissao_apresentadora = gmvRateado * (apPct / 100)
     const comissao_franquia = comissaoFranquiaTotal * (Number.isFinite(rateio) ? rateio : 0)

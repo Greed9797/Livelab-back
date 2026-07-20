@@ -110,7 +110,46 @@ export async function authRoutes(app) {
     )
 
     const rt = result.rows[0]
-    if (!rt) return reply.code(401).send({ error: 'Refresh token inválido ou expirado' })
+    if (!rt) {
+      // Reuso de um refresh token JÁ revogado é o sinal clássico de token roubado:
+      // o atacante usa a cópia antiga depois que o legítimo já rotacionou.
+      // Não dá pra saber qual dos dois é o legítimo → derruba a família inteira
+      // e força novo login. Só custa uma query no caminho de falha.
+      const reused = await app.db.query(
+        `SELECT rt.user_id, u.tenant_id
+           FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id
+          WHERE rt.token_hash = $1 AND rt.revogado = true
+          LIMIT 1`,
+        [tokenHash]
+      )
+      const vitima = reused.rows[0]
+      if (vitima) {
+        // Janela de tolerância: duas abas com o mesmo refresh token disparam
+        // rotação quase junto — uma ganha, a outra chega aqui com o token já
+        // revogado. Isso é corrida legítima, não replay, e derrubar a família
+        // deslogaria o usuário de tudo em uso normal. Se existe token vivo
+        // criado há poucos segundos, foi a própria rotação: só nega esta
+        // chamada. Um atacante que replay nessa janela também só leva 401 —
+        // o token continua revogado e nenhuma sessão nova é emitida.
+        const corrida = await app.db.query(
+          `SELECT 1 FROM refresh_tokens
+            WHERE user_id = $1 AND revogado = false
+              AND criado_em > NOW() - interval '30 seconds'
+            LIMIT 1`,
+          [vitima.user_id]
+        )
+        if (corrida.rows[0]) {
+          return reply.code(401).send({ error: 'Refresh token inválido ou expirado' })
+        }
+        await app.db.query(
+          `UPDATE refresh_tokens SET revogado = true WHERE user_id = $1 AND revogado = false`,
+          [vitima.user_id]
+        )
+        // Rota não autenticada: request.user não existe, então user/tenant vão no metadata.
+        app.audit?.log?.(request, { action: 'auth.refresh_reuse', entity_type: 'user', entity_id: vitima.user_id, metadata: { user_id: vitima.user_id, tenant_id: vitima.tenant_id, familia_revogada: true } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      }
+      return reply.code(401).send({ error: 'Refresh token inválido ou expirado' })
+    }
     if (!rt.ativo) return reply.code(401).send({ error: 'Usuário inativo' })
 
     // Revogar o token usado (rotação — previne reuso após comprometimento)

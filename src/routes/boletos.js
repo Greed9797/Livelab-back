@@ -136,6 +136,7 @@ export async function boletosRoutes(app) {
         [request.params.id, tenant_id]
       )
       if (!result.rows[0]) return reply.code(400).send({ error: 'Boleto não encontrado ou já pago' })
+      app.audit?.log?.(request, { action: 'boletos.pagar', entity_type: 'boleto', entity_id: request.params.id, metadata: { status: result.rows[0].status, pago_em: result.rows[0].pago_em, manual: true } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })

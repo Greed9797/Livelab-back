@@ -7,8 +7,10 @@
 // reconectar a cada 60s e gera log spam UserOfflineError.
 
 import * as connectorManager from '../services/tiktok-connector-manager.js'
+import { withAdvisoryLock } from './advisory_lock.js'
 
 const TICK_CRON = '5 */1 * * *' // 5min após cada hora cheia
+const LOCK_KEY = 7421900119911237n
 
 let _running = false
 
@@ -113,7 +115,9 @@ export async function runEncerrarLivesZumbiTick(app) {
 
 export function startEncerrarLivesZumbi(app, cron) {
   cron.schedule(TICK_CRON, async () => {
-    await runEncerrarLivesZumbiTick(app)
+    // Advisory lock além da flag _running: com 2 réplicas a flag não vê a outra.
+    await withAdvisoryLock(app.db.pool, LOCK_KEY, '[encerrar zumbi]', app.log, () =>
+      runEncerrarLivesZumbiTick(app))
   })
   app.log?.info?.({ schedule: TICK_CRON }, '[encerrar zumbi] cron registrado (1h)')
 }

@@ -333,6 +333,7 @@ export async function analyticsRoutes(app) {
         )
 
         await db.query('COMMIT')
+        app.audit?.log?.(request, { action: 'analytics.import_apply', entity_type: 'analytics_import_batch', entity_id: batchId, metadata: { applied_rows: applied, live_ids: rowsQ.rows.map(r => r.matched_live_id) } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return { ok: true, batch_id: batchId, applied_rows: applied }
       } catch (err) {
         await db.query('ROLLBACK').catch(() => {})

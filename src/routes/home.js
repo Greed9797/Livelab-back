@@ -4,7 +4,12 @@ import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 
-const HOME_DASHBOARD_CACHE_TTL_MS = Number(process.env.HOME_DASHBOARD_CACHE_TTL_MS ?? 30_000)
+// 45s (e não 30s) de propósito: o front faz refetch do dashboard a cada 30s
+// (DashboardPage.tsx:124). Com TTL igual ao intervalo de poll os dois empatam e
+// quase toda chamada vira MISS — ~24 queries por poll, por usuário. Com o TTL
+// maior que o intervalo, os polls alternam HIT/MISS. O custo é o dado poder
+// ficar até 45s velho, aceitável para o painel.
+const HOME_DASHBOARD_CACHE_TTL_MS = Number(process.env.HOME_DASHBOARD_CACHE_TTL_MS ?? 45_000)
 
 // ── Dias úteis (seg–sex, sem feriados — simplificação documentada) ──────────
 // Não inclui feriados nacionais/estaduais. A precisão é suficiente para

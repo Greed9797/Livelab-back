@@ -9,8 +9,10 @@
 import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
+import { withAdvisoryLock } from './advisory_lock.js'
 
 const TICK_CRON = '*/10 * * * *' // a cada 10 minutos
+const LOCK_KEY = 7421900119911236n
 
 let _running = false
 
@@ -152,7 +154,9 @@ export async function runRecalcularComissoesTick(app) {
 
 export function startRecalcularComissoes(app, cron) {
   cron.schedule(TICK_CRON, async () => {
-    await runRecalcularComissoesTick(app)
+    // Advisory lock além da flag _running: com 2 réplicas a flag não vê a outra.
+    await withAdvisoryLock(app.db.pool, LOCK_KEY, '[recalc comissoes]', app.log, () =>
+      runRecalcularComissoesTick(app))
   })
   app.log?.info?.({ schedule: TICK_CRON }, '[recalc comissoes] cron registrado (10min)')
 }

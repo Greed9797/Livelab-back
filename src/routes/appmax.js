@@ -5,7 +5,25 @@
 
 import crypto from 'node:crypto'
 import { validateWebhook, validarWebhookToken } from '../services/appmax.js'
+import { encryptToken } from '../services/token-crypto.js'
 import { notify } from '../services/mailer.js'
+
+// client_secret é credencial do gateway — nunca em texto puro no banco.
+// Se TOKEN_ENCRYPTION_KEY faltar, grava NULL (nunca plaintext): perder o secret
+// é preferível a vazá-lo, e a linha de instalação continua sendo registrada.
+//
+// LEITURA (nenhum call site hoje): use decryptToken() de token-crypto.js, que já
+// devolve o valor como está quando não consegue decifrar. Isso mantém funcionando
+// as linhas gravadas em texto puro ANTES desta mudança — não há backfill.
+function encryptClientSecret(app, value) {
+  if (value == null) return null
+  try {
+    return encryptToken(value)
+  } catch (err) {
+    app.log.error({ err }, '[appmax] TOKEN_ENCRYPTION_KEY ausente/inválida — client_secret não será persistido')
+    return null
+  }
+}
 
 // Extrai um identificador único do payload pra prevenir replay.
 // Tenta usar IDs nativos do Appmax; fallback pra hash SHA256 do payload completo.
@@ -117,7 +135,7 @@ export async function appmaxRoutes(app) {
     if (!fixedExternalId) return reply.code(503).send({ error: 'APPMAX_EXTERNAL_ID não configurado' })
 
     // Persiste a instalação pra auditoria (best-effort, não bloqueia a resposta).
-    resolveAppmaxExternalId(app.db, { appId, clientId, clientSecret, externalKey })
+    resolveAppmaxExternalId(app.db, { appId, clientId, clientSecret: encryptClientSecret(app, clientSecret), externalKey })
       .catch((err) => app.log.error({ err }, '[appmax] validate: falha ao registrar instalação (auditoria)'))
 
     app.log.info({ appId, clientId, externalKey }, '[appmax] validate ok')

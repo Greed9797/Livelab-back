@@ -233,6 +233,7 @@ export async function vendasAtribuidasRoutes(app) {
         comissaoFranqueadora: d.comissao_franqueadora,
       })
       if (!venda) return reply.code(404).send({ error: 'Marca não encontrada' })
+      app.audit?.log?.(request, { action: 'vendas_atribuidas.create', entity_type: 'venda_atribuida', entity_id: venda.id, metadata: { origem: d.origem, origem_id: d.origem_id, marca_id: d.marca_id, apresentadora_id: d.apresentadora_id ?? null, data: d.data, gmv: d.gmv } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(201).send(venda)
     })
   })
@@ -283,6 +284,7 @@ export async function vendasAtribuidasRoutes(app) {
          RETURNING *`,
         values,
       )
+      app.audit?.log?.(request, { action: 'vendas_atribuidas.edit', entity_type: 'venda_atribuida', entity_id: request.params.id, metadata: { updated_fields: fields, marca_id: next.marca_id, apresentadora_id: next.apresentadora_id ?? null, data: next.data, gmv: next.gmv, ...comissoes } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })
   })

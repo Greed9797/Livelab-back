@@ -62,7 +62,6 @@ const marcaPatchSchema = marcaBaseSchema.partial().extend({
 const vinculoSchema = z.object({
   apresentadora_id: z.string().uuid(),
   papel: z.enum(['principal', 'apoio', 'reserva']).default('principal'),
-  comissao_live_pct: z.number().min(0).max(100).default(0),
   comissao_video_pct: z.number().min(0).max(100).default(0),
   ativo: z.boolean().default(true),
   inicio_em: z.string().nullable().optional(),
@@ -139,7 +138,6 @@ export async function marcasRoutes(app) {
              'id', am.apresentadora_id,
              'nome', a.nome,
              'papel', am.papel,
-             'comissao_live_pct', am.comissao_live_pct,
              'comissao_video_pct', am.comissao_video_pct
            ) ORDER BY am.papel, a.nome) AS apresentadoras
            FROM apresentadora_marcas am
@@ -280,12 +278,11 @@ export async function marcasRoutes(app) {
       const result = await db.query(
         `INSERT INTO apresentadora_marcas (
            tenant_id, marca_id, apresentadora_id, papel,
-           comissao_live_pct, comissao_video_pct, ativo, inicio_em, fim_em
+           comissao_video_pct, ativo, inicio_em, fim_em
          )
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (marca_id, apresentadora_id)
          DO UPDATE SET papel = EXCLUDED.papel,
-                       comissao_live_pct = EXCLUDED.comissao_live_pct,
                        comissao_video_pct = EXCLUDED.comissao_video_pct,
                        ativo = EXCLUDED.ativo,
                        inicio_em = EXCLUDED.inicio_em,
@@ -293,7 +290,7 @@ export async function marcasRoutes(app) {
          RETURNING *`,
         [
           tenant_id, request.params.id, d.apresentadora_id, d.papel,
-          d.comissao_live_pct, d.comissao_video_pct, d.ativo,
+          d.comissao_video_pct, d.ativo,
           d.inicio_em ?? null, d.fim_em ?? null,
         ],
       )
@@ -365,7 +362,6 @@ export async function marcasRoutes(app) {
              'id', am.apresentadora_id,
              'nome', a.nome,
              'papel', am.papel,
-             'comissao_live_pct', am.comissao_live_pct,
              'comissao_video_pct', am.comissao_video_pct
            ) ORDER BY am.papel, a.nome) AS apresentadoras
            FROM apresentadora_marcas am

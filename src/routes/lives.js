@@ -1436,6 +1436,44 @@ export async function livesRoutes(app) {
     })
   })
 
+  // Joins derivados usados pela listagem. Ficam em constantes porque a rota roda
+  // duas queries (página de ids + hidratação) e os filtros por marca/apresentadora
+  // são avaliados na primeira: se os textos divergirem, a live filtrada numa query
+  // resolveria marca/apresentadora diferente na outra.
+  const LIST_AP_USER_JOIN =
+    'LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id'
+  const LIST_AE_LATERAL = `LEFT JOIN LATERAL (
+           SELECT ae2.id, ae2.data_inicio, ae2.data_fim, ae2.observacoes, ae2.apresentadora_id
+           FROM agenda_eventos ae2
+           WHERE (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.cabine_id = l.cabine_id)
+             AND ae2.tenant_id = l.tenant_id
+             AND ae2.tipo = 'live'
+             AND (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.data_inicio::date = l.iniciado_em::date)
+           ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
+           LIMIT 1
+         ) ae ON true`
+  const LIST_AP_V2_LATERAL = `LEFT JOIN LATERAL (
+           SELECT lav.apresentadora_id, a.nome
+           FROM live_apresentadoras_v2 lav
+           JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
+           WHERE lav.live_id = l.id
+             AND lav.tenant_id = l.tenant_id
+           ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+           LIMIT 1
+         ) ap_v2 ON true`
+  const LIST_VA_MARCA_LATERAL = `LEFT JOIN LATERAL (
+           SELECT m.id, m.id AS marca_id, m.nome AS marca_nome, m.tipo, m.cliente_id, m.tiktok_username
+           FROM marcas m
+           LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id
+            AND va.tenant_id = m.tenant_id
+            AND va.origem = 'live'
+            AND va.origem_id = l.id
+           WHERE m.tenant_id = l.tenant_id
+             AND (m.id = l.marca_id OR va.id IS NOT NULL)
+           ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
+           LIMIT 1
+         ) va_marca ON true`
+
   // GET /v1/lives
   app.get('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request) => {
     const { tenant_id, papel, sub } = request.user
@@ -1456,13 +1494,18 @@ export async function livesRoutes(app) {
         where += ` AND l.status = $${params.length}`
       }
       // Filtros opcionais da barra de "Lives realizadas" (server-side).
+      // Range sargável (usa o índice em iniciado_em) equivalente a comparar
+      // (iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date: como essa conversão é
+      // monótona, "dia SP >= D" vira "instante >= meia-noite SP de D" e "dia SP <= D"
+      // vira "instante < meia-noite SP de D+1". iniciado_em é TIMESTAMPTZ e
+      // timezone(text, timestamp) é IMMUTABLE, então o limite é constante-dobrado.
       if (fDataInicio) {
         params.push(fDataInicio)
-        where += ` AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date >= $${params.length}::date`
+        where += ` AND l.iniciado_em >= ($${params.length}::date::timestamp AT TIME ZONE 'America/Sao_Paulo')`
       }
       if (fDataFim) {
         params.push(fDataFim)
-        where += ` AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date <= $${params.length}::date`
+        where += ` AND l.iniciado_em < (($${params.length}::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo')`
       }
       if (fMarcaId) {
         params.push(fMarcaId)
@@ -1480,6 +1523,28 @@ export async function livesRoutes(app) {
         where += ` AND l.status_publicacao = 'publicado'`
         where += ` AND l.cliente_id = (SELECT id FROM clientes WHERE user_id = $${clienteSubIdx + 1} AND tenant_id = $${clienteSubIdx}::uuid LIMIT 1)`
       }
+      // Passo 1 — página de ids. Query enxuta: só lives + cabines (INNER, filtra) e
+      // os joins que os filtros opcionais realmente consultam. Assim o ORDER BY e o
+      // LIMIT/OFFSET não arrastam os laterais pelo histórico inteiro.
+      const filterJoins = [
+        fApresentadoraId
+          ? `${LIST_AP_USER_JOIN}\n         ${LIST_AE_LATERAL}\n         ${LIST_AP_V2_LATERAL}`
+          : '',
+        fMarcaId ? LIST_VA_MARCA_LATERAL : '',
+      ].filter(Boolean).join('\n         ')
+      const pagina = await db.query(
+        `SELECT l.id
+         FROM lives l
+         JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+         ${filterJoins}
+         ${where}
+         ORDER BY l.iniciado_em DESC LIMIT ${reqLimit} OFFSET ${reqOffset}`,
+        params
+      )
+      const ids = pagina.rows.map((r) => r.id)
+      if (ids.length === 0) return []
+
+      // Passo 2 — laterais caros rodam só para os ids da página.
       const result = await db.query(
         `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
@@ -1516,27 +1581,10 @@ export async function livesRoutes(app) {
          LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
          LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
-         LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
-         LEFT JOIN LATERAL (
-           SELECT ae2.id, ae2.data_inicio, ae2.data_fim, ae2.observacoes, ae2.apresentadora_id
-           FROM agenda_eventos ae2
-           WHERE (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.cabine_id = l.cabine_id)
-             AND ae2.tenant_id = l.tenant_id
-             AND ae2.tipo = 'live'
-             AND (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.data_inicio::date = l.iniciado_em::date)
-           ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
-           LIMIT 1
-         ) ae ON true
+         ${LIST_AP_USER_JOIN}
+         ${LIST_AE_LATERAL}
          LEFT JOIN apresentadoras ap_agenda ON ap_agenda.id = ae.apresentadora_id AND ap_agenda.tenant_id = l.tenant_id
-         LEFT JOIN LATERAL (
-           SELECT lav.apresentadora_id, a.nome
-           FROM live_apresentadoras_v2 lav
-           JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
-           WHERE lav.live_id = l.id
-             AND lav.tenant_id = l.tenant_id
-           ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
-           LIMIT 1
-         ) ap_v2 ON true
+         ${LIST_AP_V2_LATERAL}
          LEFT JOIN LATERAL (
            SELECT ap_extra_profile.id AS apresentadora_id,
                   COALESCE(ap_extra_profile.nome, u_extra.nome) AS nome
@@ -1552,18 +1600,7 @@ export async function livesRoutes(app) {
            ORDER BY la_extra.criado_em ASC
            LIMIT 1
          ) ap_extra ON true
-         LEFT JOIN LATERAL (
-           SELECT m.id, m.id AS marca_id, m.nome AS marca_nome, m.tipo, m.cliente_id, m.tiktok_username
-           FROM marcas m
-           LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id
-            AND va.tenant_id = m.tenant_id
-            AND va.origem = 'live'
-            AND va.origem_id = l.id
-           WHERE m.tenant_id = l.tenant_id
-             AND (m.id = l.marca_id OR va.id IS NOT NULL)
-           ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
-           LIMIT 1
-         ) va_marca ON true
+         ${LIST_VA_MARCA_LATERAL}
          LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id
          LEFT JOIN LATERAL (
            SELECT viewer_count, total_viewers, total_orders, gmv,
@@ -1574,11 +1611,13 @@ export async function livesRoutes(app) {
            ORDER BY captured_at DESC
            LIMIT 1
          ) ls ON true
-         ${where}
-         ORDER BY l.iniciado_em DESC LIMIT ${reqLimit} OFFSET ${reqOffset}`,
-        params
+         WHERE l.tenant_id = $1::uuid
+           AND l.id = ANY($2::uuid[])`,
+        [tenant_id, ids]
       )
-      return result.rows
+      // Reordena pela ordem do passo 1 — o ANY() não preserva ordenação.
+      const byId = new Map(result.rows.map((r) => [r.id, r]))
+      return ids.map((id) => byId.get(id)).filter(Boolean)
     })
   })
 

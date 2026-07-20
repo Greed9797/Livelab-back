@@ -44,7 +44,10 @@ import { startAgendaAutostart } from './jobs/agenda_autostart.js'
 import { startRecalcularComissoes } from './jobs/recalcular_comissoes.js'
 import { startEncerrarLivesZumbi } from './jobs/encerrar_lives_zumbi.js'
 import { notifyBoletosVencidos } from './jobs/notify_boletos_vencidos.js'
+import { withAdvisoryLock } from './jobs/advisory_lock.js'
 import { runMigrations } from '../apply_migrations.js'
+
+const TIKTOK_POLL_LOCK_KEY = 7421900119911235n
 
 // Auto-create Supabase Storage bucket if not exists
 const _sbUrl = process.env.SUPABASE_URL
@@ -83,14 +86,21 @@ cron.schedule('*/60 * * * * *', async () => {
   }
   _pollRunning = true
   try {
-    await TikTokService.pollAllTenants(app.db)
+    // Advisory lock além da flag: com 2 réplicas a flag em memória não vê a outra.
+    await withAdvisoryLock(app.db.pool, TIKTOK_POLL_LOCK_KEY, '[TikTok cron]', app.log, async () => {
+      try {
+        await TikTokService.pollAllTenants(app.db)
+      } catch (err) {
+        app.log.error({ err }, 'TikTok polling falhou')
+      }
+      try {
+        await connectorManager.syncLives()
+      } catch (err) {
+        app.log.error({ err }, 'connectorManager.syncLives falhou')
+      }
+    })
   } catch (err) {
-    app.log.error({ err }, 'TikTok polling falhou')
-  }
-  try {
-    await connectorManager.syncLives()
-  } catch (err) {
-    app.log.error({ err }, 'connectorManager.syncLives falhou')
+    app.log.error({ err }, '[TikTok cron] falha ao adquirir/liberar advisory lock')
   } finally {
     _pollRunning = false
   }
@@ -173,4 +183,42 @@ if (process.env.NODE_ENV === 'production' && process.env.BACKUP_S3_BUCKET) {
     })
   }, { timezone: 'America/Sao_Paulo' })
   app.log.info('[backup] pg_dump_offsite cron agendado (03:00 SP diário)')
+}
+
+// Graceful shutdown: o redeploy do Railway manda SIGTERM. Sem handler o processo
+// morre no ato e mata requests em voo (5xx a cada deploy). app.close() para de
+// aceitar conexões novas, drena as em andamento e dispara o hook onClose, que
+// fecha o pool do Postgres (src/plugins/db.js).
+//
+// Este arquivo é o entrypoint do processo (faz app.listen no topo) e nunca é
+// importado pelos testes — os testes usam buildApp() de src/app.js. Por isso
+// registrar aqui já garante que os handlers não vazam pra dentro do Vitest.
+const SHUTDOWN_TIMEOUT_MS = 10_000
+let _shuttingDown = false
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, async () => {
+    if (_shuttingDown) return // idempotente: 2º sinal durante o drain é ignorado
+    _shuttingDown = true
+    app.log.info({ signal }, '[shutdown] sinal recebido, drenando conexões...')
+
+    // Rede de segurança: se app.close() travar (conexão SSE pendurada, query
+    // longa), o container ficaria pendurado até o Railway dar SIGKILL.
+    const forceExit = setTimeout(() => {
+      app.log.error({ signal, timeout_ms: SHUTDOWN_TIMEOUT_MS },
+        '[shutdown] timeout excedido — saída forçada')
+      process.exit(1)
+    }, SHUTDOWN_TIMEOUT_MS)
+
+    try {
+      await app.close()
+      clearTimeout(forceExit)
+      app.log.info({ signal }, '[shutdown] concluído')
+      process.exit(0)
+    } catch (err) {
+      clearTimeout(forceExit)
+      app.log.error({ err, signal }, '[shutdown] falha ao encerrar')
+      process.exit(1)
+    }
+  })
 }

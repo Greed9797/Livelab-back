@@ -118,6 +118,7 @@ describe('GET /v1/cliente/sessoes', () => {
     setQueryMock(seqMock([
       CLIENTE_ROW,
       CONFIG_LINHA,
+      NO_ROWS, // marca_metas_hora sem linha no mês
       CONTRATO_ATIVO,
       { rows: [sessaoRow()] },
     ]))
@@ -151,6 +152,7 @@ describe('GET /v1/cliente/sessoes', () => {
     setQueryMock(seqMock([
       CLIENTE_ROW,
       CONFIG_LINHA,
+      NO_ROWS, // marca_metas_hora sem linha no mês
       CONTRATO_ATIVO,
       { rows: [sessaoRow({ clicks: null })] },
     ]))
@@ -173,6 +175,7 @@ describe('GET /v1/cliente/sessoes', () => {
     setQueryMock(seqMock([
       CLIENTE_ROW,
       CONFIG_LINHA,
+      NO_ROWS, // marca_metas_hora sem linha no mês
       CONTRATO_ATIVO,
       { rows: [s1, s2] },
     ]))
@@ -214,6 +217,7 @@ describe('GET /v1/cliente/sessoes', () => {
     setQueryMock(seqMock([
       CLIENTE_ROW,
       CONFIG_LINHA,
+      NO_ROWS, // marca_metas_hora sem linha no mês
       CONTRATO_ATIVO,
       { rows: [sessaoRow({ status_operacional: 'atencao' })] },
     ]))

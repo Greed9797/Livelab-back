@@ -33,7 +33,6 @@ function baseInvitePayload() {
     papel: 'apresentador',
     fixo: 2700,
     comissao_pct: 1.5,
-    meta_diaria_gmv: 10000,
     senha_temporaria: 'senha123',
   }
 }
@@ -69,8 +68,7 @@ describe('usuarios presenter provisioning', () => {
       values[1] === userId &&
       values[2] === 'Jhemily' &&
       values[4] === 2700 &&
-      values[5] === 1.5 &&
-      values[6] === 10000
+      values[5] === 1.5
     )).toBe(true)
 
     await app.close()
@@ -102,8 +100,7 @@ describe('usuarios presenter provisioning', () => {
       values[0] === userId &&
       values[1] === apresentadoraId &&
       values[5] === 2700 &&
-      values[6] === 1.5 &&
-      values[7] === 10000
+      values[6] === 1.5
     )).toBe(true)
 
     await app.close()
@@ -136,7 +133,6 @@ describe('usuarios presenter provisioning', () => {
         ativo: true,
         fixo: 2700,
         comissao_pct: 1.5,
-        meta_diaria_gmv: 9000,
         foto_url: 'https://cdn.example.com/yasmin.jpg',
       },
     })
@@ -153,8 +149,7 @@ describe('usuarios presenter provisioning', () => {
       values[2] === 'Yasmin' &&
       values[4] === 2700 &&
       values[5] === 1.5 &&
-      values[6] === 9000 &&
-      values[7] === 'https://cdn.example.com/yasmin.jpg'
+      values[6] === 'https://cdn.example.com/yasmin.jpg'
     )).toBe(true)
 
     await app.close()
@@ -187,7 +182,6 @@ describe('usuarios presenter provisioning', () => {
         ativo: true,
         fixo: 3000,
         comissao_pct: 2,
-        meta_diaria_gmv: 12000,
       },
     })
 
@@ -198,8 +192,7 @@ describe('usuarios presenter provisioning', () => {
       values[0] === 'Jady' &&
       values[4] === 3000 &&
       values[6] === 2 &&
-      values[8] === 12000 &&
-      values[11] === apresentadoraId
+      values[9] === apresentadoraId
     )).toBe(true)
 
     await app.close()

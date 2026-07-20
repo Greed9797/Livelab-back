@@ -32,7 +32,7 @@ describe('apresentadoras permissions', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/apresentadoras',
-      payload: { nome: 'Jhemily', fixo: 0, comissao_pct: 0, meta_diaria_gmv: 0 },
+      payload: { nome: 'Jhemily', fixo: 0, comissao_pct: 0 },
     })
 
     expect(response.statusCode).toBe(410)

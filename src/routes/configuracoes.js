@@ -142,7 +142,8 @@ export async function configuracoesRoutes(app) {
         asaas_wallet_id:        conf.gateway_wallet_id,
         has_tiktok:             !!conf.tiktok_access_token,
         tiktok_shop_id:         conf.tiktok_shop_id,
-        meta_diaria_gmv:        conf.meta_diaria_gmv ? Number(conf.meta_diaria_gmv) : 10000,
+        // null = não configurada (o antigo default 10000 mascarava ausência de config)
+        meta_diaria_gmv:        conf.meta_diaria_gmv != null ? Number(conf.meta_diaria_gmv) : null,
         notif_email_ativo:      conf.notif_email_ativo ?? true,
         notif_live_meta:        conf.notif_live_meta ?? true,
         notif_boleto_vencido:   conf.notif_boleto_vencido ?? true,

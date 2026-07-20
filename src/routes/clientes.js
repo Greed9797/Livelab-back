@@ -54,7 +54,6 @@ const patchSchema = z.object({
   lat:              z.number().optional(),
   lng:              z.number().optional(),
   status:           z.string().optional(),
-  meta_diaria_gmv:  z.number().optional(),
   onboarding_step:  z.number().int().optional(),
   tiktok_username:  tiktokUsernameField,
   logo_url:         imageUrlField,
@@ -290,7 +289,7 @@ export async function clientesRoutes(app) {
       const result = await db.query(
         `SELECT cl.id, cl.nome, cl.celular, cl.email, cl.status, cl.lat, cl.lng,
                 cl.fat_anual, cl.nicho, cl.score, cl.cep, cl.cidade, cl.estado,
-                cl.siga, cl.criado_em, cl.meta_diaria_gmv, cl.logo_url, cl.tiktok_username,
+                cl.siga, cl.criado_em, cl.logo_url, cl.tiktok_username,
                 cl.user_id, u.email AS acesso_email, u.ativo AS acesso_ativo,
                 c.horas_contratadas, c.horas_consumidas,
                 (c.horas_contratadas - c.horas_consumidas) AS horas_restantes,
@@ -518,7 +517,7 @@ export async function clientesRoutes(app) {
   // PATCH /v1/clientes/:id
   app.patch('/v1/clientes/:id', { preHandler: app.requirePapel(WRITE_CLIENTES) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status','meta_diaria_gmv','onboarding_step','tiktok_username','logo_url']
+    const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status','onboarding_step','tiktok_username','logo_url']
 
     // Valida via Zod (especialmente o regex de tiktok_username); demais campos
     // continuam permissivos via passthrough pra preservar compat.

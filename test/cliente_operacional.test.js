@@ -78,6 +78,7 @@ describe('GET /v1/cliente/operacional', () => {
     setQueryMock(seqMock([
       CLIENTE_ROW,
       CONFIG_LINHA,
+      NO_ROWS, // marca_metas_hora sem linha no mês
       CONTRATO_ATIVO,
       {
         rows: [{
@@ -109,6 +110,7 @@ describe('GET /v1/cliente/operacional', () => {
     setQueryMock(seqMock([
       CLIENTE_ROW,
       CONFIG_LINHA,
+      NO_ROWS, // marca_metas_hora sem linha no mês
       CONTRATO_ATIVO,
       METRICS_COMPLETO,
     ]))
@@ -170,6 +172,7 @@ describe('GET /v1/cliente/operacional', () => {
     setQueryMock(seqMock([
       CLIENTE_ROW,
       CONFIG_LINHA,
+      NO_ROWS, // marca_metas_hora sem linha no mês
       NO_ROWS, // sem contrato
       METRICS_COMPLETO,
     ]))
@@ -190,6 +193,7 @@ describe('GET /v1/cliente/operacional', () => {
     setQueryMock(seqMock([
       CLIENTE_ROW,
       { rows: [{ meta_gmv_hora: null, margem_pct: null }] }, // sem config
+      NO_ROWS, // marca_metas_hora sem linha no mês
       CONTRATO_ATIVO,
       METRICS_COMPLETO,
     ]))
@@ -205,12 +209,34 @@ describe('GET /v1/cliente/operacional', () => {
     await app.close()
   })
 
+  // ── 6b. meta da marca no mês tem precedência sobre clientes.meta_gmv_hora ─
+  it('marca_metas_hora do mês → precede clientes.meta_gmv_hora', async () => {
+    const { app, setQueryMock } = buildApp()
+    setQueryMock(seqMock([
+      CLIENTE_ROW,
+      CONFIG_LINHA, // clientes.meta_gmv_hora = 500
+      { rows: [{ meta_gmv_hora: '800' }] }, // marca_metas_hora do mês
+      CONTRATO_ATIVO,
+      METRICS_COMPLETO,
+    ]))
+
+    await app.register(clienteInsightsRoutes)
+    await app.ready()
+
+    const res = await app.inject({ method: 'GET', url: '/v1/cliente/operacional' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().config.meta_gmv_hora).toBe(800)
+
+    await app.close()
+  })
+
   // ── 7. release é chamado mesmo quando a query falha ──────────────────────
   it('release é chamado mesmo quando a query falha', async () => {
     const { app, setQueryMock, releaseMock } = buildApp()
     setQueryMock(seqMock([
       CLIENTE_ROW,
       CONFIG_LINHA,
+      NO_ROWS, // marca_metas_hora sem linha no mês
       CONTRATO_ATIVO,
       Promise.reject(new Error('DB error')),
     ]))

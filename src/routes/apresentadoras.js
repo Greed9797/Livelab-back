@@ -4,14 +4,10 @@ import { DEFAULT_APRESENTADORA_FIXO, MAX_APRESENTADORA_FIXO, ensureDefaultPresen
 import { moneySchema } from '../lib/money.js'
 import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
 
-const APRESENTADORA_META_MAX = 100_000_000 // R$ 100 milhões — sanity cap pra meta diária
 const imageUrlSchema = z.string().max(500000).nullable().optional()
 
 const fixoSchema = moneySchema.refine((v) => v <= MAX_APRESENTADORA_FIXO, {
   message: `Fixo não pode ultrapassar R$ ${MAX_APRESENTADORA_FIXO.toLocaleString('pt-BR')}`,
-})
-const metaDiariaSchema = moneySchema.refine((v) => v <= APRESENTADORA_META_MAX, {
-  message: `Meta diária não pode ultrapassar R$ ${APRESENTADORA_META_MAX.toLocaleString('pt-BR')}`,
 })
 
 const createSchema = z.object({
@@ -23,7 +19,6 @@ const createSchema = z.object({
   cidade:          z.string().optional(),
   fixo:            fixoSchema.default(DEFAULT_APRESENTADORA_FIXO),
   comissao_pct:    z.number().min(0).max(100).default(0),
-  meta_diaria_gmv: metaDiariaSchema.default(0),
   foto_url:        imageUrlSchema,
   observacoes:     z.string().optional(),
   link_contrato:   z.string().optional(),
@@ -45,7 +40,7 @@ const faixaSchema = z.object({
 
 const faixaPatchSchema = faixaSchema.partial()
 
-const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, arquivada, ${presenterFixedSql('a')} AS fixo, comissao_pct, meta_diaria_gmv, foto_url, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
+const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, arquivada, ${presenterFixedSql('a')} AS fixo, comissao_pct, foto_url, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
 
 // Resolve o id de apresentadora a partir de :id que pode ser:
 //  - id real da tabela apresentadoras, OU
@@ -82,8 +77,8 @@ async function resolveApresentadoraId(db, tenantId, rawId) {
   // Em corrida, captura unique-violation e re-seleciona.
   try {
     const created = await db.query(
-      `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, meta_diaria_gmv, ativo)
-       VALUES ($1, $2, $3, $4, $5, 0, 0, true)
+      `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, ativo)
+       VALUES ($1, $2, $3, $4, $5, 0, true)
        RETURNING id`,
       [tenantId, u.id, u.nome ?? 'Apresentadora', u.email ?? null, DEFAULT_APRESENTADORA_FIXO],
     )

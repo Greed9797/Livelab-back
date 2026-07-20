@@ -3,41 +3,10 @@ import { getPresenterRanking, monthRangeFromQuery } from '../lib/presenter-ranki
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { countWeekdaysInMonth, countWeekdaysUpTo } from '../lib/dias_uteis.js'
 
 const HOME_DASHBOARD_CACHE_TTL_MS = Number(process.env.HOME_DASHBOARD_CACHE_TTL_MS ?? 30_000)
 
-// ── Dias úteis (seg–sex, sem feriados — simplificação documentada) ──────────
-// Não inclui feriados nacionais/estaduais. A precisão é suficiente para
-// projeção de ritmo intradia; se precisar de feriados, injetar calendário.
-function _isWeekday(date) {
-  const d = date.getDay() // 0=dom, 6=sab
-  return d !== 0 && d !== 6
-}
-
-/**
- * Conta dias úteis (seg–sex) no mês YYYY-MM.
- * Junho/2026 = 22 dias úteis, validado no teste.
- */
-function countWeekdaysInMonth(yyyy, mm) {
-  const total = new Date(yyyy, mm, 0).getDate() // dias no mês
-  let count = 0
-  for (let d = 1; d <= total; d++) {
-    if (_isWeekday(new Date(yyyy, mm - 1, d))) count++
-  }
-  return count
-}
-
-/**
- * Conta quantos dias úteis transcorreram até (e incluindo) `dayOfMonth`.
- * Se o próprio dia for útil, é contado; se for fim de semana, não conta.
- */
-function countWeekdaysUpTo(yyyy, mm, dayOfMonth) {
-  let count = 0
-  for (let d = 1; d <= dayOfMonth; d++) {
-    if (_isWeekday(new Date(yyyy, mm - 1, d))) count++
-  }
-  return count
-}
 const homeDashboardCache = new Map()
 const homeDashboardInFlight = new Map()
 
@@ -647,7 +616,7 @@ export async function homeRoutes(app) {
           ORDER BY dia
         `, [mesStart])
       const metaPromise = db.query(`
-          SELECT meta_gmv, m1_teto, m1_pct, m2_teto, m2_pct, m3_teto, m3_pct, m4_pct
+          SELECT meta_gmv
           FROM meta_unidade
           WHERE tenant_id = $1
             AND ano_mes = $2
@@ -813,17 +782,20 @@ export async function homeRoutes(app) {
       // 1. meta_mes: usa meta_unidade.meta_gmv (registro mensal explícito);
       //    senão deriva tenants.meta_diaria_gmv × dias úteis do mês (sem feriados).
       //    null se nenhuma configuração existir.
+      //    meta_origem diz de onde veio: 'mensal' | 'diaria_legada' | null.
+      // ponytail: fallback diaria_legada mantido só para tenants antigos sem
+      // meta_unidade; a UI edita apenas a mensal — remover quando todos migrarem.
       const [anoEf, mesEf] = effectiveMonth.split('-').map(Number)
-      const metaMes = (() => {
+      const { metaMes, metaOrigem } = (() => {
         if (metaUnidade && Number(metaUnidade.meta_gmv) > 0) {
-          return round2(metaUnidade.meta_gmv)
+          return { metaMes: round2(metaUnidade.meta_gmv), metaOrigem: 'mensal' }
         }
         const metaDiaria = Number(tenantMetaDiariaQ.rows[0]?.meta_diaria_gmv ?? 0)
         if (metaDiaria > 0) {
           // Derivação: meta_diaria_gmv × total de dias úteis (seg–sex) do mês
-          return round2(metaDiaria * countWeekdaysInMonth(anoEf, mesEf))
+          return { metaMes: round2(metaDiaria * countWeekdaysInMonth(anoEf, mesEf)), metaOrigem: 'diaria_legada' }
         }
-        return null
+        return { metaMes: null, metaOrigem: null }
       })()
 
       // 2. periodo: dia_util corrente e total de dias úteis do mês.
@@ -976,20 +948,15 @@ export async function homeRoutes(app) {
         // GMV diário e meta da unidade
         gmv_diario_mes: gmvDiario,
         meta_gmv: metaUnidade ? parseFloat(Number(metaUnidade.meta_gmv).toFixed(2)) : null,
-        meta_tiers: metaUnidade ? {
-          m1_teto: parseFloat(Number(metaUnidade.m1_teto).toFixed(2)),
-          m1_pct: parseFloat(Number(metaUnidade.m1_pct).toFixed(2)),
-          m2_teto: parseFloat(Number(metaUnidade.m2_teto).toFixed(2)),
-          m2_pct: parseFloat(Number(metaUnidade.m2_pct).toFixed(2)),
-          m3_teto: parseFloat(Number(metaUnidade.m3_teto).toFixed(2)),
-          m3_pct: parseFloat(Number(metaUnidade.m3_pct).toFixed(2)),
-          m4_pct: parseFloat(Number(metaUnidade.m4_pct).toFixed(2)),
-        } : null,
 
         // ── Painel "GMV — desempenho do mês" ──────────────────────────────
         // meta_mes: meta mensal explícita (meta_unidade) ou derivada
         //   (tenants.meta_diaria_gmv × dias úteis do mês). null = não configurada.
         meta_mes: metaMes,
+        // meta_origem: 'mensal' (meta_unidade) | 'diaria_legada' (fallback) | null.
+        meta_origem: metaOrigem,
+        // meta_diaria: derivada da mensal (meta_mes ÷ dias úteis). null se sem meta.
+        meta_diaria: (metaMes != null && diasUteisMes > 0) ? round2(metaMes / diasUteisMes) : null,
         // periodo: dia útil corrente e total de dias úteis do mês (seg–sex, sem feriados).
         periodo: { dia_util: diaUtilAtual, dias_uteis_total: diasUteisMes },
         // ritmo_projetado: extrapolação linear pelo ritmo até hoje. null se dia_util=0.

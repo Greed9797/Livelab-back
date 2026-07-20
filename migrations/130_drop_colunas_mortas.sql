@@ -1,0 +1,31 @@
+-- Migration 130 — DROP de duas colunas comprovadamente mortas.
+--
+-- DROP de coluna é IRREVERSÍVEL. As duas só entraram aqui depois de verificação
+-- em produção (2026-07-20), não por leitura de código:
+--
+--   SELECT count(*) FILTER (WHERE valor_fixo_mensal IS DISTINCT FROM 0)
+--     FROM apresentadoras;                    -> 0
+--   SELECT count(*) FILTER (WHERE comissao_live_pct IS DISTINCT FROM 0)
+--     FROM apresentadora_marcas;              -> 0
+--
+-- Ou seja: nenhum franqueado tem valor configurado em nenhuma das duas. É lixo
+-- estrutural, não dado do usuário. Se este arquivo for aplicado a um banco
+-- DIFERENTE do de produção, rode as duas contagens antes.
+--
+-- 1) apresentadoras.valor_fixo_mensal — "piso mensal garantido a apresentadora"
+--    (migration 090). Zero referências em src/. Duplicata nunca adotada da
+--    coluna viva `apresentadoras.fixo`.
+--
+-- 2) apresentadora_marcas.comissao_live_pct — aposentada do motor de comissão
+--    (ver src/services/presenter-commission.js) e removida do código nesta
+--    mesma branch: SELECT do engine, schema Zod, INSERT/ON CONFLICT e payload
+--    da rota de marcas, além da UI. O cálculo real é o cliff por GMV mensal.
+--
+-- Replay das migrations antigas: NÃO quebra. O runner aplica em ordem
+-- crescente, então 080 (cria) -> 099 (backfill que lê comissao_live_pct) ->
+-- 130 (drop). O consumidor sempre roda antes do drop. Idem 090 -> 130.
+--
+-- Idempotente via IF EXISTS.
+
+ALTER TABLE apresentadoras       DROP COLUMN IF EXISTS valor_fixo_mensal;
+ALTER TABLE apresentadora_marcas DROP COLUMN IF EXISTS comissao_live_pct;

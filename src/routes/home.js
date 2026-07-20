@@ -219,7 +219,7 @@ export async function homeRoutes(app) {
         ocupacaoQ,
         rankingMarcasQ,
         horasLiveMesQ,
-        marcaMetasHoraQ,
+        marcaMetaCorQ,
       ] = await Promise.all([
         db.query(`SELECT COUNT(*) AS total FROM clientes
                   WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
@@ -462,21 +462,33 @@ export async function homeRoutes(app) {
             AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
             AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
         `, [mesStart, cutoffDay]),
-        // Meta de GMV/h por marca. Não existe tabela de meta por marca/mês no
-        // schema — a meta canônica é clientes.meta_gmv_hora (migration 114), a
-        // mesma fonte usada pelo painel do cliente e pelo PDF operacional.
-        // A marca herda a meta do cliente dono. INNER JOIN de propósito: marca
-        // sem cliente (afiliada/própria) não tem meta → badge omitido, em vez
-        // de inventar um 500 que ninguém configurou.
+        // Meta de GMV/h + cor por marca, para o mês exibido.
+        // Precedência da meta (migration 124): marca_metas_hora do MESMO
+        // effectiveMonth → clientes.meta_gmv_hora (legado, migration 114) →
+        // null. Nada é fabricado: sem meta configurada o badge some, em vez
+        // de inventar um número que ninguém definiu.
+        // NULLIF(...,0): meta_gmv_hora é NOT NULL DEFAULT 0, então uma linha
+        // zerada significa "sem meta no mês", não "meta = zero" — cai no
+        // fallback do cliente, e se ele também for 0/null o resultado é null.
+        // LEFT JOIN em clientes: marca afiliada/própria (sem cliente dono)
+        // agora pode ter meta própria — INNER JOIN a excluiria da consulta.
+        // m.cor (migration 125) é CHAR(7) e pode ser NULL = cor automática;
+        // repassada crua, o hash de fallback é decisão do front.
         db.query(`
-          SELECT m.id AS marca_id,
-                 COALESCE(c.meta_gmv_hora, 500) AS meta_gmv_hora
+          SELECT m.id  AS marca_id,
+                 m.cor AS cor,
+                 NULLIF(COALESCE(NULLIF(mmh.meta_gmv_hora, 0), cl.meta_gmv_hora), 0)
+                   AS meta_gmv_hora
           FROM marcas m
-          JOIN clientes c
-            ON c.id = m.cliente_id
-           AND c.tenant_id = m.tenant_id
+          LEFT JOIN marca_metas_hora mmh
+            ON mmh.marca_id  = m.id
+           AND mmh.tenant_id = m.tenant_id
+           AND mmh.ano_mes   = $1
+          LEFT JOIN clientes cl
+            ON cl.id = m.cliente_id
+           AND cl.tenant_id = m.tenant_id
           WHERE m.tenant_id = current_setting('app.tenant_id', true)::uuid
-        `),
+        `, [effectiveMonth]),
       ])
 
       // Grupo 1 já viajou junto com o Grupo 2 — aqui só colhemos o resultado.
@@ -771,8 +783,12 @@ export async function homeRoutes(app) {
 
       const rankingMarcasRows = Array.isArray(rankingMarcasQ) ? rankingMarcasQ : (rankingMarcasQ.rows ?? [])
 
-      const metaHoraPorMarca = new Map(
-        (marcaMetasHoraQ?.rows ?? []).map(r => [r.marca_id, Number(r.meta_gmv_hora)]),
+      // cor: CHAR(7) — string vazia/branco vira null para o front cair no hash.
+      const metaCorPorMarca = new Map(
+        (marcaMetaCorQ?.rows ?? []).map(r => [r.marca_id, {
+          meta: r.meta_gmv_hora == null ? null : Number(r.meta_gmv_hora),
+          cor: typeof r.cor === 'string' && r.cor.trim() ? r.cor.trim() : null,
+        }]),
       )
 
       const rankingMarcasMes = rankingMarcasRows.map(r => {
@@ -781,12 +797,14 @@ export async function homeRoutes(app) {
         // Analytics. Repassados sem recálculo: qualquer transformação aqui
         // criaria divergência entre Home e Analytics para a mesma marca/mês.
         const gmvPorHora = Number(r.gmv_por_hora ?? 0)
-        const metaHora = metaHoraPorMarca.get(r.marca_id) ?? null
+        const marcaMeta = metaCorPorMarca.get(r.marca_id)
+        const metaHora = marcaMeta?.meta ?? null
         return {
           marca_id: r.marca_id,
           nome: r.nome,
           logo_url: r.logo_url,
           site: r.site,
+          cor: marcaMeta?.cor ?? null,
           marca_nome: r.marca_nome ?? r.nome,
           gmv: round2(r.gmv_total ?? r.gmv),
           gmv_total: round2(r.gmv_total ?? r.gmv),

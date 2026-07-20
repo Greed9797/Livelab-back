@@ -60,7 +60,7 @@ function buildApp(queryMock, tenantId = 'tenant-a') {
   return { app, release, tenantIds }
 }
 
-function createHomeQueryMock() {
+function createHomeQueryMock({ metaCorRows } = {}) {
   return vi.fn(async (sql, params = []) => {
     // hojeSpQ (MTD cutoff): mes_corrente != mês efetivo do teste → cutoffDay=null
     // → comparador do mês anterior fica cheio, valores esperados abaixo inalterados.
@@ -84,9 +84,14 @@ function createHomeQueryMock() {
         { marca_id: 'marca-2', marca_nome: 'Marca B', gmv_total: '600', gmv_lives: '400', gmv_videos: '200', horas_live: '2', pedidos: '4', total_lives: '1', total_videos: '1' },
       ] }
     }
-    // Meta de GMV/h por marca (herdada de clientes.meta_gmv_hora)
+    // Meta de GMV/h (marca_metas_hora do mês → clientes, migration 124) + cor
+    // manual (migration 125). marca-1: meta no mês, cor NULL (hash no front).
+    // marca-2: sem meta em nenhuma fonte, cor manual definida.
     if (sql.includes('meta_gmv_hora') && sql.includes('FROM marcas m')) {
-      return { rows: [{ marca_id: 'marca-1', meta_gmv_hora: '500' }] }
+      return { rows: metaCorRows ?? [
+        { marca_id: 'marca-1', meta_gmv_hora: '500', cor: null },
+        { marca_id: 'marca-2', meta_gmv_hora: null, cor: '#123456' },
+      ] }
     }
     if (sql.includes('FROM agenda_eventos ae')) {
       return { rows: [{ id: 'ag-1', tipo: 'live', status: 'confirmado', data_inicio: '2026-05-18T14:00:00.000Z', data_fim: '2026-05-18T16:00:00.000Z', cabine_numero: 2, cabine_nome: 'Cabine 02', marca_nome: 'Marca B', cliente_nome: 'Cliente B', apresentadora_nome: 'Ana' }] }
@@ -241,6 +246,8 @@ describe('home dashboard', () => {
       faturamento: 1200.5,   // GMV total = lives + vídeos
       meta_gmv_hora: 500,
       pct_meta_hora: 48.02,  // 240.10 / 500 * 100
+      // cor NULL no banco = automática: o front cai no hash por marca_id.
+      cor: null,
     })
 
     // Faturamento soma lives + vídeos; GMV/h usa SÓ gmv_lives (400 / 2 = 200),
@@ -249,16 +256,62 @@ describe('home dashboard', () => {
       marca_id: 'marca-2',
       faturamento: 600,
       gmv_por_hora: 200,
-      // Marca sem cliente dono não tem meta → badge omitido, não 500 chutado.
+      // Sem meta em nenhuma fonte → badge omitido, nada é chutado.
       meta_gmv_hora: null,
       pct_meta_hora: null,
+      // Cor manual repassada crua; o front prefere ela ao hash.
+      cor: '#123456',
     })
 
-    // A meta vem de clientes.meta_gmv_hora (migration 114), a mesma fonte do
-    // painel do cliente e do PDF — não de uma tabela de meta por marca.
-    const metaSql = queryMock.mock.calls.map(([sql]) => sql).find(sql => sql.includes('meta_gmv_hora'))
-    expect(metaSql).toContain('FROM marcas m')
-    expect(metaSql).toContain('JOIN clientes c')
+    await app.close()
+  })
+
+  it('meta/cor da marca: lê marca_metas_hora do mês exibido, com clientes como fallback', async () => {
+    const queryMock = createHomeQueryMock()
+    const { app } = buildApp(queryMock, 'tenant-marcas')
+    await app.register(homeRoutes)
+
+    await app.inject({ method: 'GET', url: '/v1/home/dashboard?mes=2026-03' })
+
+    const metaCall = queryMock.mock.calls.find(([sql]) => sql.includes('meta_gmv_hora') && sql.includes('FROM marcas m'))
+    const [metaSql, metaParams] = metaCall
+
+    // Fonte preferencial: marca_metas_hora (migration 124), casada pelo MESMO
+    // mês do ranking — nunca "a meta mais recente".
+    expect(metaSql).toContain('marca_metas_hora')
+    expect(metaSql).toContain('mmh.ano_mes   = $1')
+    expect(metaParams).toEqual(['2026-03'])
+
+    // Fallback legado clientes.meta_gmv_hora, e cor manual da migration 125.
+    expect(metaSql).toContain('cl.meta_gmv_hora')
+    expect(metaSql).toContain('m.cor')
+
+    // LEFT JOIN em clientes: marca afiliada/própria (sem cliente dono) precisa
+    // continuar na consulta para poder ter meta própria e cor.
+    expect(metaSql).toContain('LEFT JOIN clientes cl')
+    expect(metaSql).not.toMatch(/\n\s*JOIN clientes/)
+
+    await app.close()
+  })
+
+  it('meta da marca: linha zerada em marca_metas_hora cai no fallback do cliente', async () => {
+    // meta_gmv_hora é NOT NULL DEFAULT 0 — uma linha zerada significa "sem meta
+    // no mês", não "meta = zero". O NULLIF na query resolve isso no banco; aqui
+    // validamos o contrato de saída quando nada resta configurado.
+    const queryMock = createHomeQueryMock({
+      metaCorRows: [{ marca_id: 'marca-1', meta_gmv_hora: null, cor: null }],
+    })
+    // Tenant próprio: o dashboard tem cache por tenant+mês, e reusar
+    // 'tenant-marcas' devolveria o payload cacheado de outro teste.
+    const { app } = buildApp(queryMock, 'tenant-marcas-sem-meta')
+    await app.register(homeRoutes)
+
+    const payload = (await app.inject({ method: 'GET', url: '/v1/home/dashboard' })).json()
+    const marcaA = payload.ranking_marcas_mes.find(m => m.marca_id === 'marca-1')
+
+    expect(marcaA.gmv_por_hora).toBe(240.1)
+    expect(marcaA.meta_gmv_hora).toBeNull()
+    expect(marcaA.pct_meta_hora).toBeNull()
 
     await app.close()
   })

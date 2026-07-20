@@ -1495,9 +1495,108 @@ export async function livesRoutes(app) {
         where += ` AND l.status_publicacao = 'publicado'`
         where += ` AND l.cliente_id = (SELECT id FROM clientes WHERE user_id = $${clienteSubIdx + 1} AND tenant_id = $${clienteSubIdx}::uuid LIMIT 1)`
       }
+      // ── Split query: página enxuta (ids + total) → hidratação dos laterais caros ──
+      // Os LATERALs (ae, ap_v2, ap_extra, va_marca, ls) custam por linha do resultado.
+      // Rodá-los sobre o histórico inteiro fazia a latência crescer com o tamanho da
+      // tabela, não da página. Query 1 monta só os joins que os filtros ativos realmente
+      // consultam e resolve ORDER BY / LIMIT / OFFSET / COUNT; query 2 hidrata apenas os
+      // ids da página. Os fragmentos de join abaixo são compartilhados pelas duas queries,
+      // então a resolução de marca/apresentadora é literalmente a mesma string nas duas —
+      // uma live não pode casar o filtro por uma marca e exibir outra.
+      const joinCabines = `JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id`
+      const joinContratos = `LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id`
+      const joinClientes = `LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id`
+      const joinUsers = `LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id`
+      const joinApUser = `LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id`
+      const joinAe = `LEFT JOIN LATERAL (
+           SELECT ae2.id, ae2.data_inicio, ae2.data_fim, ae2.observacoes, ae2.apresentadora_id
+           FROM agenda_eventos ae2
+           WHERE (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.cabine_id = l.cabine_id)
+             AND ae2.tenant_id = l.tenant_id
+             AND ae2.tipo = 'live'
+             AND (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.data_inicio::date = l.iniciado_em::date)
+           ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
+           LIMIT 1
+         ) ae ON true`
+      const joinApAgenda = `LEFT JOIN apresentadoras ap_agenda ON ap_agenda.id = ae.apresentadora_id AND ap_agenda.tenant_id = l.tenant_id`
+      const joinApV2 = `LEFT JOIN LATERAL (
+           SELECT lav.apresentadora_id, a.nome
+           FROM live_apresentadoras_v2 lav
+           JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
+           WHERE lav.live_id = l.id
+             AND lav.tenant_id = l.tenant_id
+           ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+           LIMIT 1
+         ) ap_v2 ON true`
+      const joinApExtra = `LEFT JOIN LATERAL (
+           SELECT ap_extra_profile.id AS apresentadora_id,
+                  COALESCE(ap_extra_profile.nome, u_extra.nome) AS nome
+           FROM live_apresentadores la_extra
+           LEFT JOIN users u_extra
+             ON u_extra.id = la_extra.apresentador_id
+            AND u_extra.tenant_id = la_extra.tenant_id
+           LEFT JOIN apresentadoras ap_extra_profile
+             ON ap_extra_profile.user_id = la_extra.apresentador_id
+            AND ap_extra_profile.tenant_id = la_extra.tenant_id
+           WHERE la_extra.live_id = l.id
+             AND la_extra.tenant_id = l.tenant_id
+           ORDER BY la_extra.criado_em ASC
+           LIMIT 1
+         ) ap_extra ON true`
+      const joinVaMarca = `LEFT JOIN LATERAL (
+           SELECT m.id, m.id AS marca_id, m.nome AS marca_nome, m.tipo, m.cliente_id, m.tiktok_username
+           FROM marcas m
+           LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id
+            AND va.tenant_id = m.tenant_id
+            AND va.origem = 'live'
+            AND va.origem_id = l.id
+           WHERE m.tenant_id = l.tenant_id
+             AND (m.id = l.marca_id OR va.id IS NOT NULL)
+           ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
+           LIMIT 1
+         ) va_marca ON true`
+      const joinClTiktok = `LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id`
+      const joinLs = `LEFT JOIN LATERAL (
+           SELECT viewer_count, total_viewers, total_orders, gmv,
+                  likes_count, comments_count, gifts_diamonds, shares_count
+           FROM live_snapshots
+           WHERE live_id = l.id
+             AND tenant_id = l.tenant_id
+           ORDER BY captured_at DESC
+           LIMIT 1
+         ) ls ON true`
+
+      // `cabines` é INNER JOIN: descarta lives órfãs, então precisa estar na query 1 para
+      // que o COUNT bata. Os demais são 1:1 (PK ou LATERAL LIMIT 1; apresentadoras.user_id
+      // tem índice único — migration 048), logo só entram quando um filtro os referencia.
+      const needsApresentadora = Boolean(fApresentadoraId || fQ)
+      const needsMarca = Boolean(fMarcaId || fQ)
+      const pageJoins = [joinCabines]
+      if (fQ) pageJoins.push(joinClientes, joinUsers)
+      if (needsApresentadora) pageJoins.push(joinApUser, joinAe)
+      if (fQ) pageJoins.push(joinApAgenda)
+      if (needsApresentadora) pageJoins.push(joinApV2)
+      if (needsMarca) pageJoins.push(joinVaMarca)
+
+      const pageResult = await db.query(
+        `SELECT l.id${paginado ? ', COUNT(*) OVER() AS total_count' : ''}
+         FROM lives l
+         ${pageJoins.join('\n         ')}
+         ${where}
+         ORDER BY l.iniciado_em DESC LIMIT ${reqLimit} OFFSET ${reqOffset}`,
+        params
+      )
+
+      const pageIds = pageResult.rows.map((r) => r.id)
+      // Mesmo quirk do código anterior: página fora do intervalo devolve total 0.
+      const total = pageResult.rows.length > 0 ? Number(pageResult.rows[0].total_count ?? 0) : 0
+      if (pageIds.length === 0) {
+        if (!paginado) return []
+        return { items: [], total, page: Math.floor(reqOffset / reqLimit), limit: reqLimit }
+      }
+
       const result = await db.query(
-        `SELECT ${paginado ? 'COUNT(*) OVER() AS total_count,' : ''}
-                l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
+        `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
                 l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
                 l.comissao_apresentadora_valor AS comissao_apresentadora,
@@ -1530,76 +1629,30 @@ export async function livesRoutes(app) {
                 ls.gmv AS gmv_atual, ls.likes_count, ls.comments_count,
                 ls.gifts_diamonds, ls.shares_count
          FROM lives l
-         JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
-         LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
-         LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
-         LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
-         LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
-         LEFT JOIN LATERAL (
-           SELECT ae2.id, ae2.data_inicio, ae2.data_fim, ae2.observacoes, ae2.apresentadora_id
-           FROM agenda_eventos ae2
-           WHERE (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.cabine_id = l.cabine_id)
-             AND ae2.tenant_id = l.tenant_id
-             AND ae2.tipo = 'live'
-             AND (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.data_inicio::date = l.iniciado_em::date)
-           ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
-           LIMIT 1
-         ) ae ON true
-         LEFT JOIN apresentadoras ap_agenda ON ap_agenda.id = ae.apresentadora_id AND ap_agenda.tenant_id = l.tenant_id
-         LEFT JOIN LATERAL (
-           SELECT lav.apresentadora_id, a.nome
-           FROM live_apresentadoras_v2 lav
-           JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
-           WHERE lav.live_id = l.id
-             AND lav.tenant_id = l.tenant_id
-           ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
-           LIMIT 1
-         ) ap_v2 ON true
-         LEFT JOIN LATERAL (
-           SELECT ap_extra_profile.id AS apresentadora_id,
-                  COALESCE(ap_extra_profile.nome, u_extra.nome) AS nome
-           FROM live_apresentadores la_extra
-           LEFT JOIN users u_extra
-             ON u_extra.id = la_extra.apresentador_id
-            AND u_extra.tenant_id = la_extra.tenant_id
-           LEFT JOIN apresentadoras ap_extra_profile
-             ON ap_extra_profile.user_id = la_extra.apresentador_id
-            AND ap_extra_profile.tenant_id = la_extra.tenant_id
-           WHERE la_extra.live_id = l.id
-             AND la_extra.tenant_id = l.tenant_id
-           ORDER BY la_extra.criado_em ASC
-           LIMIT 1
-         ) ap_extra ON true
-         LEFT JOIN LATERAL (
-           SELECT m.id, m.id AS marca_id, m.nome AS marca_nome, m.tipo, m.cliente_id, m.tiktok_username
-           FROM marcas m
-           LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id
-            AND va.tenant_id = m.tenant_id
-            AND va.origem = 'live'
-            AND va.origem_id = l.id
-           WHERE m.tenant_id = l.tenant_id
-             AND (m.id = l.marca_id OR va.id IS NOT NULL)
-           ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
-           LIMIT 1
-         ) va_marca ON true
-         LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id
-         LEFT JOIN LATERAL (
-           SELECT viewer_count, total_viewers, total_orders, gmv,
-                  likes_count, comments_count, gifts_diamonds, shares_count
-           FROM live_snapshots
-           WHERE live_id = l.id
-             AND tenant_id = l.tenant_id
-           ORDER BY captured_at DESC
-           LIMIT 1
-         ) ls ON true
-         ${where}
-         ORDER BY l.iniciado_em DESC LIMIT ${reqLimit} OFFSET ${reqOffset}`,
-        params
+         ${joinCabines}
+         ${joinContratos}
+         ${joinClientes}
+         ${joinUsers}
+         ${joinApUser}
+         ${joinAe}
+         ${joinApAgenda}
+         ${joinApV2}
+         ${joinApExtra}
+         ${joinVaMarca}
+         ${joinClTiktok}
+         ${joinLs}
+         WHERE l.id = ANY($1::uuid[]) AND l.tenant_id = $2::uuid`,
+        [pageIds, tenant_id]
       )
+
+      // ANY() não preserva ordem — reordena pela ordem da query 1.
+      const byId = new Map(result.rows.map((row) => [row.id, row]))
+      const ordered = pageIds.map((id) => byId.get(id)).filter(Boolean)
+
       // Sem `paginado`, o shape legado (array puro) fica intacto — há outros consumidores.
-      if (!paginado) return result.rows
-      const total = result.rows.length > 0 ? Number(result.rows[0].total_count ?? 0) : 0
-      const items = result.rows.map(({ total_count, ...rest }) => rest)
+      if (!paginado) return ordered
+      // `total_count` vive só na query 1; o strip garante que ele nunca vaze no envelope.
+      const items = ordered.map(({ total_count, ...rest }) => rest)
       return { items, total, page: Math.floor(reqOffset / reqLimit), limit: reqLimit }
     })
   })

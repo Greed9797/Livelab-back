@@ -76,3 +76,67 @@ describe('marcas — valor_fixo_minimo (Onda 1 #3)', () => {
     expect(queryMock).not.toHaveBeenCalled()
   })
 })
+
+describe('POST /v1/marcas — upsert de marca cliente não re-zera comissões (bug Posthaus)', () => {
+  const clienteId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+
+  function upsertQueryMock(marcaRow) {
+    return vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('UPDATE marcas SET')) return { rows: [marcaRow] }
+      if (sql.includes('FROM clientes')) return { rows: [{ id: clienteId }] }
+      // ensureClienteMarca → marca tipo='cliente' já existe e está ativa
+      if (sql.includes('FROM marcas')) return { rows: [{ id: 'marca-1', status: 'ativa' }] }
+      return { rows: [] }
+    })
+  }
+
+  it('POST sem comissao_*_pct/valor_fixo_minimo preserva os valores existentes', async () => {
+    const queryMock = upsertQueryMock({
+      id: 'marca-1', tipo: 'cliente', cliente_id: clienteId, nome: 'Posthaus',
+      comissao_franquia_pct: '5.00', comissao_franqueadora_pct: '2.00', valor_fixo_minimo: '1500.00',
+    })
+    const app = buildApp(queryMock)
+    await app.register(marcasRoutes)
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/marcas',
+      payload: { nome: 'Posthaus', tipo: 'cliente', cliente_id: clienteId },
+    })
+
+    expect(response.statusCode).toBe(201)
+    // pct=5 configurado continua 5 — o upsert não regrava 0.
+    expect(response.json().comissao_franquia_pct).toBe('5.00')
+
+    const updateCall = queryMock.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE marcas SET'))
+    expect(updateCall[0]).toContain('comissao_franquia_pct = COALESCE($7, comissao_franquia_pct)')
+    expect(updateCall[0]).toContain('comissao_franqueadora_pct = COALESCE($8, comissao_franqueadora_pct)')
+    expect(updateCall[0]).toContain('valor_fixo_minimo = COALESCE($11, valor_fixo_minimo)')
+    // Campos ausentes viram null → COALESCE mantém o valor do banco.
+    expect(updateCall[1][6]).toBeNull()
+    expect(updateCall[1][7]).toBeNull()
+    expect(updateCall[1][10]).toBeNull()
+    await app.close()
+  })
+
+  it('POST com comissao_franquia_pct explícito aplica o novo valor', async () => {
+    const queryMock = upsertQueryMock({
+      id: 'marca-1', tipo: 'cliente', cliente_id: clienteId, nome: 'Posthaus',
+      comissao_franquia_pct: '7.00',
+    })
+    const app = buildApp(queryMock)
+    await app.register(marcasRoutes)
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/marcas',
+      payload: { nome: 'Posthaus', tipo: 'cliente', cliente_id: clienteId, comissao_franquia_pct: 7 },
+    })
+
+    expect(response.statusCode).toBe(201)
+    const updateCall = queryMock.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE marcas SET'))
+    expect(updateCall[1][6]).toBe(7)
+    await app.close()
+  })
+})

@@ -17,7 +17,7 @@ export const LISTAGEM_NAMESPACES = ['marcas:list', 'clientes:list']
 
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
-  ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username, m.site, m.marketplace_url, m.logo_url,
+  ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username, m.site, m.marketplace_url, m.logo_url, m.cor,
   m.comissao_franquia_pct, m.comissao_franqueadora_pct, m.valor_fixo_minimo,
   m.observacoes, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
@@ -33,8 +33,12 @@ const marcaBaseSchema = z.object({
   site: z.string().nullable().optional(),
   marketplace_url: z.string().nullable().optional(),
   logo_url: z.string().url().nullable().optional(),
-  comissao_franquia_pct: z.number().min(0).max(100).default(0),
-  comissao_franqueadora_pct: z.number().min(0).max(100).default(0),
+  // Cor manual da marca (hex #rrggbb). null explícito LIMPA a cor (volta à automática).
+  cor: z.string().regex(/^#[0-9a-fA-F]{6}$/, 'cor deve ser hex #rrggbb').nullable().optional(),
+  // SEM default(0): payload sem o campo = "não mexer". O default 0 fazia o upsert
+  // do POST re-zerar percentuais já configurados da marca (bug Posthaus).
+  comissao_franquia_pct: z.number().min(0).max(100).optional(),
+  comissao_franqueadora_pct: z.number().min(0).max(100).optional(),
   // Fixo mensal (R$) da marca tipo=cliente — SOMA ao comissionamento gerado uma vez
   // por mês com atividade, em franquia e franqueadora (ver performance-rollups.js e
   // financeiro.js). Não é mais piso por live. Afiliadas ignoram este campo.
@@ -52,8 +56,6 @@ const marcaSchema = marcaBaseSchema.refine((data) => data.tipo !== 'cliente' || 
 const marcaPatchSchema = marcaBaseSchema.partial().extend({
   tipo: z.enum(['cliente', 'afiliada', 'propria', 'parceira']).optional(),
   status: z.enum(['ativa', 'inativa', 'pausada', 'arquivada']).optional(),
-  comissao_franquia_pct: z.number().min(0).max(100).optional(),
-  comissao_franqueadora_pct: z.number().min(0).max(100).optional(),
 }).refine((data) => {
   if (data.tipo === 'cliente') return Boolean(data.cliente_id)
   return true
@@ -197,34 +199,41 @@ export async function marcasRoutes(app) {
           createdMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: d.cliente_id })
         }
 
+        // Upsert: campo de comissão ausente no payload NÃO sobrescreve o valor já
+        // configurado na marca (COALESCE com null quando o campo não veio).
         const result = createdMarcaId
           ? await db.query(
               `UPDATE marcas SET
                  nome = $3, status = $4, site = $5, marketplace_url = $6,
-                 comissao_franquia_pct = $7, comissao_franqueadora_pct = $8,
-                 observacoes = $9, logo_url = COALESCE($10, logo_url), valor_fixo_minimo = $11,
+                 comissao_franquia_pct = COALESCE($7, comissao_franquia_pct),
+                 comissao_franqueadora_pct = COALESCE($8, comissao_franqueadora_pct),
+                 observacoes = $9, logo_url = COALESCE($10, logo_url),
+                 valor_fixo_minimo = COALESCE($11, valor_fixo_minimo),
+                 cor = COALESCE($12, cor),
                  atualizado_em = NOW()
                WHERE id = $1 AND tenant_id = $2::uuid
                RETURNING *`,
               [
                 createdMarcaId, tenant_id, d.nome, d.status, d.site ?? null, d.marketplace_url ?? null,
-                d.comissao_franquia_pct, d.comissao_franqueadora_pct,
-                d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
+                d.comissao_franquia_pct ?? null, d.comissao_franqueadora_pct ?? null,
+                d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? null,
+                d.cor ?? null,
               ],
             )
           : await db.query(
               `INSERT INTO marcas (
                  tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
                  marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
-                 observacoes, logo_url, valor_fixo_minimo
+                 observacoes, logo_url, valor_fixo_minimo, cor
                )
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                RETURNING *`,
               [
                 tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
                 d.tipo === 'cliente' ? null : d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
-                d.comissao_franquia_pct, d.comissao_franqueadora_pct,
+                d.comissao_franquia_pct ?? 0, d.comissao_franqueadora_pct ?? 0,
                 d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
+                d.cor ?? null,
               ],
             )
         if (d.tiktok_username !== undefined) {

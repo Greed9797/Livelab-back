@@ -124,6 +124,7 @@ function celulaFromRow(row, origem) {
     hora_fim: normalizeHora(row.hora_fim),
     marca_id: row.marca_id,
     marca_nome: row.marca_nome,
+    marca_cor: row.marca_cor ?? null,
     marca_logo_url: row.marca_logo_url ?? null,
     apresentadora_id: row.apresentadora_id,
     apresentadora_nome: row.apresentadora_nome,
@@ -135,6 +136,7 @@ function celulaFromRow(row, origem) {
 const PADRAO_SELECT = `
   SELECT gp.*,
          m.nome AS marca_nome,
+         m.cor AS marca_cor,
          m.logo_url AS marca_logo_url,
          a.nome AS apresentadora_nome,
          c.numero AS cabine_numero
@@ -147,6 +149,7 @@ const PADRAO_SELECT = `
 const EXCECOES_SELECT = `
   SELECT ge.*,
          m.nome AS marca_nome,
+         m.cor AS marca_cor,
          m.logo_url AS marca_logo_url,
          a.nome AS apresentadora_nome,
          c.numero AS cabine_numero

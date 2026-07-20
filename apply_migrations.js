@@ -119,6 +119,7 @@ export const MIGRATIONS_LIST = [
   '122_grade_padrao_dias_uteis.sql',
   '123_leads_crm_summary_index.sql',
   '124_metas_limpeza_e_marca_hora.sql',
+  '125_marca_cor.sql',
 ]
 
 async function ensureMigrationsTable(client) {

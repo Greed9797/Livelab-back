@@ -177,6 +177,7 @@ export async function boletosRoutes(app) {
         ? crypto.createHash('sha256').update(nonceBase).digest('hex')
         : String(nonceBase).slice(0, 200)
       try {
+        // WEBHOOK: log de replay do webhook de pagamento (evento externo, sem tenant resolvido ainda).
         const inserted = await app.db.query(
           `INSERT INTO webhook_replay_log (source, nonce)
            VALUES ($1, $2)
@@ -197,6 +198,7 @@ export async function boletosRoutes(app) {
     if (status === 'paid') {
       // Lookup precisa cross-tenant pra detectar colisão de referência externa
       // (PK do gateway pode bater entre tenants). Defesa em profundidade.
+      // WEBHOOK: lookup cross-tenant deliberado no webhook de pagamento (resolve tenant pela referência externa).
       const lookup = await app.db.query(
         `SELECT id, tenant_id FROM boletos WHERE referencia_externa = $1 LIMIT 2`,
         [id]

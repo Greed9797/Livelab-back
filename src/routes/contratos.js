@@ -348,6 +348,7 @@ export async function contratosRoutes(app) {
       // F1: notificação por e-mail — fire-and-forget.
       ;(async () => {
         try {
+          // SYSTEM: lê config de notificação do próprio tenant (WHERE id = tenant_id do JWT). Filtro explícito.
           const tQ = await app.db.query(
             `SELECT email_contato, notif_email_ativo, notif_contrato
              FROM tenants WHERE id = $1`,
@@ -356,6 +357,7 @@ export async function contratosRoutes(app) {
           const tenant = tQ.rows[0]
 
           // Cliente
+          // SYSTEM: lê cliente filtrando por id + tenant_id do JWT. Filtro explícito.
           const clQ = await app.db.query(
             `SELECT nome, email FROM clientes WHERE id = $1 AND tenant_id = $2`,
             [contrato.cliente_id, tenant_id],
@@ -412,6 +414,7 @@ export async function contratosRoutes(app) {
     const { tenant_id, sub } = request.user
 
     // Valida senha do usuário
+    // AUTH: valida senha do próprio usuário autenticado (WHERE id = sub do JWT).
     const userQ = await app.db.query(
       `SELECT senha_hash FROM users WHERE id = $1`, [sub]
     )

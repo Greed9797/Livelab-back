@@ -1,3 +1,8 @@
+// WEBHOOK: endpoint de sistema sem usuário. As queries diretas em app.db tocam só
+// tabela de sistema (webhook_replay_log) e config do tenant de destino (tenants),
+// resolvido por env server-controlled (franqueadoraId), nunca pelo payload. A
+// escrita do lead vai por app.withTenant (RLS ativo). Bypass intencional.
+//
 // Receiver de webhook do Make (make.com) → cria lead no CRM.
 // Payload assinado via HMAC SHA256 + secret compartilhado (MAKE_CRM_WEBHOOK_SECRET).
 // Espelha o padrão de webhook_bio_crm.js (mesma família de segurança).

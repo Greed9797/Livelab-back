@@ -184,6 +184,7 @@ async function fetchUnitSummaries(
   status = 'todos',
   allowedTenantIds = null
 ) {
+  // MASTER: cross-tenant — agrega todas as unidades da rede (WHERE t.id <> $1); só rotas masterAccess
   const result = await app.db.query(
     `
       WITH clientes_ativos AS (
@@ -350,6 +351,7 @@ async function fetchUnitSummaries(
 }
 
 async function fetchHistoryRows(app, masterTenantId, periodInfo, allowedTenantIds = null) {
+  // MASTER: cross-tenant — histórico de todas as unidades (t.id <> $1); só rotas masterAccess
   const result = await app.db.query(
     `
       WITH months AS (
@@ -474,6 +476,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
     })
 
   try {
+    // MASTER: cross-tenant — clientes de todas as unidades (cl.tenant_id <> $1); só rotas masterAccess
     const result = await app.db.query(
       `
         WITH client_lives AS (
@@ -550,6 +553,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
   } catch (err) {
     app.log.warn({ err }, 'master/unidades: fallback sem boletos por cliente')
 
+    // MASTER: cross-tenant — fallback de clientes de todas as unidades (cl.tenant_id <> $1); só rotas masterAccess
     const fallback = await app.db.query(
       `
         WITH client_lives AS (
@@ -614,6 +618,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
 }
 
 async function fetchStalledContracts(app, masterTenantId, periodInfo, allowedTenantIds = null) {
+  // MASTER: cross-tenant — contratos parados de todas as unidades (c.tenant_id <> $1); só rotas masterAccess
   const result = await app.db.query(
     `
       SELECT
@@ -686,6 +691,7 @@ async function fetchCrmSnapshot(
     : (dateFilter ? `WHERE 1=1 ${dateFilter}` : '')
 
   // 1. Resumo legado (mantém retrocompatibilidade da UI antiga).
+  // MASTER: cross-tenant — leads da rede agregados por franqueadora_id (isMaster: todos/allowed); só rotas masterAccess
   const summaryResult = await app.db.query(
     `
       SELECT
@@ -706,6 +712,7 @@ async function fetchCrmSnapshot(
   const stageWhere = baseConditions.length > 0
     ? `WHERE ${baseConditions.join(' AND ')} AND status <> 'expirado'`
     : `WHERE status <> 'expirado'`
+  // MASTER: cross-tenant — pipeline de leads da rede (franqueadora_id todos/allowed); só rotas masterAccess
   const stageResult = await app.db.query(
     `
       SELECT
@@ -739,6 +746,7 @@ async function fetchCrmSnapshot(
         ? `WHERE ${aliasedConditions.join(' AND ')} AND l.status <> 'expirado'`
         : `WHERE l.status <> 'expirado'`
 
+    // MASTER: cross-tenant — top unidades por etapa (só isMaster, JOIN tenants); só rotas masterAccess
     const perTenantResult = await app.db.query(
       `
         SELECT
@@ -784,6 +792,7 @@ async function fetchCrmSnapshot(
   })
 
   // 5. Totals agregados (cross-tenant ou per-tenant conforme isMaster).
+  // MASTER: cross-tenant — totais de leads da rede (franqueadora_id todos/allowed); só rotas masterAccess
   const totalsResult = await app.db.query(
     `
       SELECT
@@ -812,6 +821,7 @@ async function fetchCrmSnapshot(
   const bioWhere = baseConditions.length > 0
     ? `WHERE ${baseConditions.join(' AND ')} AND status <> 'expirado' AND origem = ANY($${bioParams.length}::text[])`
     : `WHERE status <> 'expirado' AND origem = ANY($${bioParams.length}::text[])`
+  // MASTER: cross-tenant — leads bio da rede (franqueadora_id todos/allowed); só rotas masterAccess
   const bioResult = await app.db.query(
     `
       SELECT
@@ -851,6 +861,7 @@ async function fetchCrmSnapshot(
   const motivoWhere = baseConditions.length > 0
     ? `WHERE ${baseConditions.join(' AND ')} AND crm_etapa = 'perdido'`
     : `WHERE crm_etapa = 'perdido'`
+  // MASTER: cross-tenant — motivo de perda da rede (franqueadora_id todos/allowed); só rotas masterAccess
   const motivoResult = await app.db.query(
     `
       SELECT motivo_perda, COUNT(*)::int AS qtd
@@ -1043,6 +1054,7 @@ function buildUnidadesEmRisco(units) {
 }
 
 async function fetchMasterTotals(app, masterTenantId, periodInfo, allowedTenantIds = null) {
+  // MASTER: cross-tenant — totais de lives/GMV da rede (tenant_id <> $1); só rotas masterAccess
   const result = await app.db.query(
     `
       WITH lives_periodo AS (
@@ -1206,6 +1218,7 @@ async function fetchNetworkRanking(app, {
   limit = null,
   publicOnly = false,
 }) {
+  // MASTER: cross-tenant — ranking da rede (exclui excludeTenantId); usado por /v1/master/ranking e /v1/public/ranking (payload sanitizado)
   return app.db.query(
     `
       WITH lives_atual AS (
@@ -1346,6 +1359,7 @@ export async function franqueadoRoutes(app) {
     masterAccess,
     async (req, reply) => {
       try {
+        // MASTER: cross-tenant — lista todas as unidades da rede (t.id != $1); guard masterAccess
         const { rows } = await app.db.query(
           `
             SELECT
@@ -1479,6 +1493,7 @@ export async function franqueadoRoutes(app) {
       ) {
         return reply.code(403).send({ error: 'Acesso não autorizado a esta unidade' })
       }
+      // MASTER: cross-tenant — master consulta outra unidade (l.tenant_id = :tenantId; guard impede tenant próprio + restringe gerente_regional a allowedTenantIds)
       const result = await app.db.query(
         `
           WITH meses AS (
@@ -1535,6 +1550,7 @@ export async function franqueadoRoutes(app) {
       ]
 
       // 1. GMV queda >= 30% vs mês anterior
+      // MASTER: cross-tenant — alerta GMV queda da rede (tenant_id <> $1); guard masterAccess
       const gmvQuedaQuery = app.db.query(
         `
           WITH atual AS (
@@ -1571,6 +1587,7 @@ export async function franqueadoRoutes(app) {
       )
 
       // 2. Sem lives nos últimos 7 dias
+      // MASTER: cross-tenant — alerta unidades sem lives da rede (t.id <> $1); guard masterAccess
       const semLivesQuery = app.db.query(
         `
           SELECT t.id AS tenant_id, t.nome,
@@ -1590,6 +1607,7 @@ export async function franqueadoRoutes(app) {
       )
 
       // 3. Boletos vencidos (status='vencido' OU pendente com vencimento < hoje)
+      // MASTER: cross-tenant — alerta boletos vencidos da rede (b.tenant_id <> $1); guard masterAccess
       const boletosVencidosQuery = app.db.query(
         `
           SELECT t.id AS tenant_id, t.nome,
@@ -1609,6 +1627,7 @@ export async function franqueadoRoutes(app) {
       )
 
       // 4. Contratos expirando em até 30 dias (ativos com fim próximo)
+      // MASTER: cross-tenant — alerta contratos expirando da rede (c.tenant_id <> $1); guard masterAccess
       const contratosExpirandoQuery = app.db.query(
         `
           SELECT t.id AS tenant_id, t.nome,

@@ -33,6 +33,10 @@ export default async function onboardingRoutes(app) {
 
     const d = parsed.data
 
+    // SYSTEM: transação atômica (BEGIN/COMMIT) exige pool.connect() cru. RLS é
+    // aplicada manualmente logo abaixo via set_config('app.tenant_id', $1) + todas
+    // as queries filtram por tenant_id explícito. Usuário já autenticado (cliente_
+    // parceiro com tenant_id) — não é pré-tenant. Não vaza entre tenants.
     // B4.2 — wrap em transação para garantir atomicidade entre INSERT e UPDATE
     const client = await app.db.pool.connect()
     try {

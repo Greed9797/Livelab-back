@@ -1,3 +1,8 @@
+// MASTER: CRUD e visão cross-tenant de franquias. TODAS as 6 rotas deste arquivo
+// são RBAC-gated a franqueador_master (preHandler: masterOnly) — nenhuma é usada
+// por franqueado para ler o próprio tenant. As queries diretas em app.db leem/
+// escrevem tenants/users de múltiplos tenants por design (o master enxerga tudo).
+// Bypass de RLS intencional e necessário.
 import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
 import { z } from 'zod'

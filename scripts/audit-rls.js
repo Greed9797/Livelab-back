@@ -26,11 +26,18 @@ const fail = (msg) => { console.error('❌', msg); failed = true }
 const ok = (msg) => console.log('✅', msg)
 
 async function checkRls(pool) {
+  // Só TABELAS base — não views. Uma view (ex.: live_requests sobre agenda_eventos
+  // + marcas) não tem RLS própria: herda a das tabelas base. Sem o filtro de
+  // table_type, a view aparecia aqui, não constava em pg_tables, e era flagada como
+  // "RLS=false" (falso positivo).
   const tablesQ = await pool.query(`
-    SELECT DISTINCT t.table_name
-    FROM information_schema.columns t
-    WHERE t.table_schema = 'public'
-      AND t.column_name IN ('tenant_id', 'franqueadora_id')
+    SELECT DISTINCT c.table_name
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+    WHERE c.table_schema = 'public'
+      AND c.column_name IN ('tenant_id', 'franqueadora_id')
+      AND t.table_type = 'BASE TABLE'
   `)
 
   const rlsQ = await pool.query(`
@@ -77,12 +84,21 @@ async function checkOrphans(pool) {
 
 async function checkNotNull(pool) {
   console.log('\n[3/4] tenant_id NOT NULL constraint:')
+  // Só tabelas base — is_nullable de uma coluna de VIEW reflete a expressão, não uma
+  // constraint, e não faz sentido exigir NOT NULL nela (ex.: view live_requests).
   const r = await pool.query(`
-    SELECT table_name, is_nullable
-    FROM information_schema.columns
-    WHERE table_schema='public' AND column_name IN ('tenant_id','franqueadora_id')
+    SELECT c.table_name, c.is_nullable
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+    WHERE c.table_schema='public' AND c.column_name IN ('tenant_id','franqueadora_id')
+      AND t.table_type = 'BASE TABLE'
   `)
-  const exceptions = ['webhook_eventos'] // webhooks externos chegam sem tenant resolvido
+  // webhook_eventos: webhooks externos chegam sem tenant resolvido.
+  // audit_log: eventos de auth/sistema (ex. auth.refresh_reuse) são gravados sem
+  //   tenant no contexto — o tenant, quando existe, vai no metadata. 536/1212 linhas
+  //   em prod têm tenant_id NULL legitimamente; forçar NOT NULL quebraria o log de auth.
+  const exceptions = ['webhook_eventos', 'audit_log']
   for (const row of r.rows) {
     if (row.is_nullable === 'YES' && !exceptions.includes(row.table_name)) {
       fail(`${row.table_name}: tenant_id permite NULL (force NOT NULL ou adicione à exceptions)`)

@@ -208,6 +208,7 @@ export async function financeiroRoutes(app) {
     const MARKETING_PCT = 0
     // Respeita o período informado (inicio/fim ou mes/ano); default = mês corrente.
     const { startDate, endDate } = resolveRange(request.query)
+    // MASTER: visão consolidada cross-tenant do franqueador_master (agrega todos os tenants). Sem RLS por design.
     const result = await app.db.query(`
       SELECT
         t.id                                                              AS tenant_id,

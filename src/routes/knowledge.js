@@ -1,5 +1,11 @@
 import { z } from 'zod'
 
+// PUBLIC: Knowledge base é global/compartilhada entre todos os tenants por design.
+// Tabelas `manuais` e `knowledge_categories` NÃO têm coluna tenant_id (migrations
+// 011/035/063 — "manuais são públicos para todos os usuários autenticados"). Não há
+// dado por-tenant a filtrar; todas as queries usam o pool app.db (bypass RLS) de
+// forma legítima. Banner vale para o arquivo inteiro.
+
 /**
  * Knowledge Base — categorias + artigos com Markdown + vídeo embedado.
  * Evolução do módulo `manuais` (compat mantida).

@@ -1,3 +1,8 @@
+// WEBHOOK: endpoint de sistema sem usuário. As queries diretas em app.db tocam só
+// tabela de sistema (webhook_replay_log) e config do tenant de destino (tenants),
+// resolvido por env server-controlled (franqueadoraId), nunca pelo payload. A
+// escrita do lead vai por app.withTenant (RLS ativo). Bypass intencional.
+//
 // Receiver de webhook do form bio público (cliente / franqueado / apresentador).
 // Emissor: outro sistema (Codex). Payload assinado via HMAC SHA256 + secret compartilhado.
 // Ação: cria registro em `leads` linkado à franqueadora padrão (env BIO_WEBHOOK_DEFAULT_FRANQUEADORA_ID).

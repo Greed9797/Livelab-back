@@ -377,6 +377,7 @@ export async function leadsRoutes(app) {
     const { tenant_id, sub: userId } = request.user
     const { pacote_id } = request.body ?? {}
 
+    // SYSTEM: transação com FOR UPDATE (lock pessimista); seta app.tenant_id (RLS) + filtra franqueadora_id explícito.
     const client = await app.db.pool.connect()
     try {
       await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenant_id])
@@ -501,6 +502,7 @@ export async function leadsRoutes(app) {
   // POST /v1/leads/:id/pegar — pega lead disponível (fluxo legado)
   app.post('/v1/leads/:id/pegar', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
+    // SYSTEM: transação com FOR UPDATE (lock pessimista); seta app.tenant_id (RLS) + filtra franqueadora_id explícito.
     const client = await app.db.pool.connect()
     try {
       await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenant_id])

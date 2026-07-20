@@ -98,6 +98,7 @@ export async function solicitacoesRoutes(app) {
     )
 
     // Usar pool direto para transação com FOR UPDATE
+    // SYSTEM: seta app.tenant_id (RLS) na transação + filtra tenant_id explícito em cada query.
     const client = await app.db.pool.connect()
     try {
       await client.query('BEGIN')
@@ -247,6 +248,7 @@ export async function solicitacoesRoutes(app) {
     const { tenant_id, sub: user_id } = request.user
     const d = parsed.data
 
+    // SYSTEM: seta app.tenant_id (RLS) na transação + filtra tenant_id explícito em cada query.
     const client = await app.db.pool.connect()
     try {
       await client.query('BEGIN')

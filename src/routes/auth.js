@@ -1,3 +1,9 @@
+// AUTH: rotas de autenticação. Todas as queries diretas em app.db rodam ANTES de
+// haver contexto de tenant (login/refresh/esqueci-senha/redefinir/aceitar-convite)
+// ou operam nas tabelas de auth do sistema (users, refresh_tokens,
+// password_reset_tokens) chaveadas pelo próprio usuário (request.user.sub) ou por
+// token_hash. Nenhuma lê/escreve dado de franquia de outro tenant — bypass de RLS
+// é intencional e necessário aqui.
 import bcrypt from 'bcrypt'
 import crypto from 'node:crypto'
 import {

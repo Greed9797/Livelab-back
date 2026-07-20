@@ -350,6 +350,7 @@ export async function comissoesRoutes(app) {
     const range = monthRangeFromQuery(request.query)
     const limit = limitFromQuery(request.query, 10)
 
+    // PUBLIC: endpoint público (sem auth); tenant é uuid validado do query e gate por ranking_publico_ativo.
     const tenantQ = await app.db.query(
       `SELECT id, ranking_publico_ativo, ranking_publico_nome
          FROM tenants WHERE id = $1::uuid`,

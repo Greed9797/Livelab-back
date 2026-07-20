@@ -2157,9 +2157,10 @@ export async function livesRoutes(app) {
         }
 
         // F1: notificação por e-mail — fire-and-forget, jamais bloqueia o response.
-        // Lê tenant fora da conexão RLS (app.db.query, sem set_config tenant).
+        // Lê tenant fora da conexão RLS (pool direto, sem set_config tenant).
         ;(async () => {
           try {
+            // SYSTEM: lê config de notificação do próprio tenant (WHERE id = tenant_id do JWT). Filtro explícito.
             const tQ = await app.db.query(
               `SELECT email_contato, notif_email_ativo, notif_live_meta
                FROM tenants WHERE id = $1`,

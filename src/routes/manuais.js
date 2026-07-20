@@ -1,5 +1,10 @@
 import { z } from 'zod'
 
+// PUBLIC: Tabela `manuais` é global — sem coluna tenant_id (migration 011:
+// "manuais são públicos para todos os usuários autenticados"; 035/063 só
+// adicionam metadados/knowledge, nunca tenant_id). app.db (bypass RLS) é
+// correto aqui; não há dado por-tenant a filtrar. Banner vale para o arquivo.
+
 const manualSchema = z.object({
   titulo: z.string().min(2, 'Título obrigatório'),
   url: z.string().url('URL inválida'),

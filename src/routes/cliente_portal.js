@@ -18,6 +18,7 @@ export async function clientePortalRoutes(app) {
 
   async function resolveClienteContext(user) {
     const tenantId = user.tenant_id
+    // SYSTEM: resolve o cliente do próprio usuário autenticado (WHERE user_id = sub AND tenant_id do JWT). Filtro explícito.
     const sysDb = await app.db.pool.connect()
     try {
       const res = await sysDb.query(

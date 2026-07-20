@@ -75,6 +75,10 @@ export async function notificacoesRoutes(app) {
   }, async (request, reply) => {
     const { tenant_id } = request.user
 
+    // SYSTEM: lê a própria linha do tenant na registry table `tenants` (sem RLS,
+    // PK `id` = identificador do tenant), filtrada por id = tenant_id do JWT.
+    // Filtro manual pelo tenant autenticado — não vaza outro tenant. Mesma
+    // convenção de auth.js/contratos.js/lives.js ao ler o próprio tenant.
     const tenantQ = await app.db.query(
       `SELECT email_contato, nome, notif_email_ativo
        FROM tenants WHERE id = $1`,

@@ -1,3 +1,10 @@
+// WEBHOOK: integração de gateway (Appmax), endpoints de sistema sem usuário. As
+// queries diretas em app.db tocam tabelas de sistema (webhook_replay_log,
+// webhook_eventos, appmax_installations) e um lookup cross-tenant EM boletos que É
+// o passo legítimo de resolução de tenant do pagamento (LIMIT 2 + rejeita match
+// ambíguo entre tenants). A escrita do boleto e leitura do cliente vão por
+// app.withTenant (RLS ativo). Bypass intencional.
+//
 // Rotas de integração com Appmax (gateway de pagamento).
 // - POST /v1/webhooks/appmax/validate — endpoint de instalação (Appmax bate pra
 //   confirmar que o app está instalado; precisa retornar 200 + app_id matching).

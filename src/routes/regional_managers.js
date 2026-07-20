@@ -1,3 +1,9 @@
+// MASTER: gestão cross-tenant de acesso de gerente_regional (Tier 4). Todas as
+// rotas são RBAC-gated a franqueador_master (masterOnly). As queries diretas em
+// app.db operam sobre users/user_tenant_access/tenants de forma cross-tenant por
+// design — é a função do master. Nenhuma rota é usada por franqueado. Bypass
+// de RLS intencional.
+//
 // Endpoints administrativos para gerenciar acesso de gerente_regional
 // (papel Tier 4, multi-tenant). Apenas franqueador_master pode operar aqui.
 //

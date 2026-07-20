@@ -142,6 +142,7 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
     }
 
     // Transação manual (sem withTenant) pra ter BEGIN/COMMIT explícitos.
+    // SYSTEM: seta app.tenant_id (RLS) na transação + filtra tenant_id explícito em cada query.
     const client = await app.db.pool.connect()
     try {
       await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenant_id])

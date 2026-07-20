@@ -120,6 +120,7 @@ export async function tiktokRoutes(app) {
 
     try {
       // Verificar que o tenant existe antes de atualizar credenciais
+      // AUTH: callback OAuth TikTok — tenantId vem de signed state (HMAC verificado); opera só nesse tenant.
       const tenantCheck = await app.db.query(`SELECT id FROM tenants WHERE id = $1`, [tenantId])
       if (tenantCheck.rowCount === 0) {
         return reply.type('text/html').send(_errorPage('Conta não encontrada. Tente conectar novamente.'))
@@ -146,6 +147,7 @@ export async function tiktokRoutes(app) {
 
       const expiresAt = new Date(Date.now() + data.expires_in * 1000)
 
+      // AUTH: armazena tokens OAuth do TikTok no tenant verificado via signed state (WHERE id = tenantId).
       await app.db.query(`
         UPDATE tenants SET
           tiktok_access_token     = $1,
@@ -173,6 +175,7 @@ export async function tiktokRoutes(app) {
    */
   app.get('/v1/tiktok/status', { preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])] }, async (request, reply) => {
     const { tenant_id } = request.user
+    // SYSTEM: lê status TikTok do próprio tenant (WHERE id = tenant_id do JWT). Filtro explícito.
     const { rows } = await app.db.query(
       `SELECT tiktok_access_token, tiktok_user_id, tiktok_token_expires_at FROM tenants WHERE id = $1`,
       [tenant_id]
@@ -242,6 +245,7 @@ export async function tiktokRoutes(app) {
 
     try {
       if (userOpenId) {
+        // WEBHOOK: webhook TikTok (assinatura verificada) — resolve tenant pelo open_id (cross-tenant por design).
         const { rows } = await app.db.query(
           `SELECT id FROM tenants WHERE tiktok_user_id = $1 LIMIT 1`,
           [userOpenId]
@@ -249,6 +253,7 @@ export async function tiktokRoutes(app) {
         tenantId = rows[0]?.id ?? null
       }
 
+      // WEBHOOK: registra evento do webhook TikTok (tenant_id pode ser null — evento externo).
       await app.db.query(
         `INSERT INTO webhook_eventos (tenant_id, source, event_type, payload_raw)
          VALUES ($1, 'tiktok', $2, $3::jsonb)`,
@@ -256,6 +261,7 @@ export async function tiktokRoutes(app) {
       )
 
       if (eventType === 'authorization.removed' && tenantId) {
+        // WEBHOOK: webhook TikTok revoga tokens do tenant resolvido pelo open_id (WHERE id = tenantId).
         await app.db.query(
           `UPDATE tenants
            SET tiktok_access_token = NULL,

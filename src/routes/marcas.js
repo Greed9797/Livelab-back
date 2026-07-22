@@ -18,7 +18,7 @@ export const LISTAGEM_NAMESPACES = ['marcas:list', 'clientes:list']
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
   ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username, m.site, m.marketplace_url, m.logo_url, m.cor,
-  m.comissao_franquia_pct, m.comissao_franqueadora_pct, m.valor_fixo_minimo,
+  m.comissao_franquia_pct, m.comissao_franqueadora_pct, m.valor_fixo_minimo, m.tipo_cobranca,
   m.observacoes, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
   COALESCE(am_agg.apresentadoras, '[]'::json) AS apresentadoras
@@ -43,6 +43,9 @@ const marcaBaseSchema = z.object({
   // por mês com atividade, em franquia e franqueadora (ver performance-rollups.js e
   // financeiro.js). Não é mais piso por live. Afiliadas ignoram este campo.
   valor_fixo_minimo: z.number().min(0).optional(),
+  // Regra de composição da ENTRADAS da marca (migration 132). Optional: payload sem o campo
+  // = "não mexer" (mesma razão dos percentuais). Default do banco = 'fixo_mais_comissao'.
+  tipo_cobranca: z.enum(['fixo_mais_comissao', 'fixo_ou_comissao']).optional(),
   observacoes: z.string().nullable().optional(),
 })
 
@@ -246,6 +249,7 @@ export async function marcasRoutes(app) {
                  observacoes = $9, logo_url = COALESCE($10, logo_url),
                  valor_fixo_minimo = COALESCE($11, valor_fixo_minimo),
                  cor = COALESCE($12, cor),
+                 tipo_cobranca = COALESCE($13, tipo_cobranca),
                  atualizado_em = NOW()
                WHERE id = $1 AND tenant_id = $2::uuid
                RETURNING *`,
@@ -253,23 +257,23 @@ export async function marcasRoutes(app) {
                 createdMarcaId, tenant_id, d.nome, d.status, d.site ?? null, d.marketplace_url ?? null,
                 d.comissao_franquia_pct ?? null, d.comissao_franqueadora_pct ?? null,
                 d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? null,
-                d.cor ?? null,
+                d.cor ?? null, d.tipo_cobranca ?? null,
               ],
             )
           : await db.query(
               `INSERT INTO marcas (
                  tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
                  marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
-                 observacoes, logo_url, valor_fixo_minimo, cor
+                 observacoes, logo_url, valor_fixo_minimo, cor, tipo_cobranca
                )
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
                RETURNING *`,
               [
                 tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
                 d.tipo === 'cliente' ? null : d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
                 d.comissao_franquia_pct ?? 0, d.comissao_franqueadora_pct ?? 0,
                 d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
-                d.cor ?? null,
+                d.cor ?? null, d.tipo_cobranca ?? 'fixo_mais_comissao',
               ],
             )
         if (d.tiktok_username !== undefined) {

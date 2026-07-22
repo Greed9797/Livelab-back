@@ -108,3 +108,24 @@ export function calcularComissaoFranquia({ gmv, pct }) {
   const p = Number(pct ?? 0)
   return g * (p / 100)
 }
+
+/**
+ * Combina o fixo mensal e a comissão variável de uma marca conforme o tipo de cobrança.
+ * Fonte ÚNICA da regra de composição da ENTRADAS — usar em todo rollup mensal (financeiro,
+ * billing, master). No SQL, espelhar com `CASE WHEN tipo='fixo_ou_comissao' THEN GREATEST(...)
+ * ELSE fixo+comissao END`.
+ *
+ *   - 'fixo_mais_comissao' (default): fixoMensal + comissaoVariavel  (regra aditiva desde a 116)
+ *   - 'fixo_ou_comissao':             GREATEST(fixoMensal, comissaoVariavel)
+ *
+ * O "OU" tem limiar fixo/pct: abaixo dele o fixo vence, acima a comissão vence — o GREATEST
+ * resolve isso implicitamente (comissaoVariavel = gmv*pct já é a comissão do período).
+ *
+ * @param {{ tipo: string | null, fixoMensal: number | null, comissaoVariavel: number | null }} params
+ * @returns {number}
+ */
+export function combinarEntradaMarca({ tipo, fixoMensal, comissaoVariavel }) {
+  const fixo = Number(fixoMensal ?? 0)
+  const comissao = Number(comissaoVariavel ?? 0)
+  return tipo === 'fixo_ou_comissao' ? Math.max(fixo, comissao) : fixo + comissao
+}

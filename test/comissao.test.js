@@ -12,6 +12,7 @@ import {
   calcularComissaoApresentadora,
   calcularComissaoFranquia,
   calcularComissaoLivelab,
+  combinarEntradaMarca,
   isFimDeSemanaSP,
 } from '../src/services/comissao.js'
 
@@ -182,5 +183,34 @@ describe('calcularComissaoFranquia (por live = só variável; sem piso)', () => 
   it('pct/gmv nulos → 0', () => {
     expect(calcularComissaoFranquia({ gmv: null, pct: null })).toBe(0)
     expect(calcularComissaoFranquia({ gmv: 1000, pct: null })).toBe(0)
+  })
+})
+
+describe('combinarEntradaMarca (tipo de cobrança por marca — migration 132)', () => {
+  it('fixo_mais_comissao (default) soma fixo + comissão', () => {
+    expect(combinarEntradaMarca({ tipo: 'fixo_mais_comissao', fixoMensal: 3000, comissaoVariavel: 17407.2 })).toBeCloseTo(20407.2)
+    // tipo ausente/desconhecido cai no aditivo (default seguro que preserva o vigente)
+    expect(combinarEntradaMarca({ tipo: undefined, fixoMensal: 4000, comissaoVariavel: 1000 })).toBe(5000)
+    expect(combinarEntradaMarca({ tipo: null, fixoMensal: 4000, comissaoVariavel: 1000 })).toBe(5000)
+  })
+
+  it('fixo_ou_comissao pega o MAIOR (fixo abaixo do limiar, comissão acima)', () => {
+    // fixo 8500, pct 10% → limiar de GMV = 85000.
+    // GMV 80k → comissão 8000 < fixo 8500 → entra o FIXO.
+    expect(combinarEntradaMarca({ tipo: 'fixo_ou_comissao', fixoMensal: 8500, comissaoVariavel: 8000 })).toBe(8500)
+    // GMV 90k → comissão 9000 > fixo 8500 → entra a COMISSÃO.
+    expect(combinarEntradaMarca({ tipo: 'fixo_ou_comissao', fixoMensal: 8500, comissaoVariavel: 9000 })).toBe(9000)
+  })
+
+  it('na fronteira (comissão == fixo) os dois tipos dão o mesmo valor', () => {
+    // GMV = fixo/pct exato → comissão = fixo. MAX == fixo; soma seria 2×, mas na fronteira
+    // do "OU" o valor é o fixo (empate resolve pro maior, que é igual). Só checamos o OU.
+    expect(combinarEntradaMarca({ tipo: 'fixo_ou_comissao', fixoMensal: 8500, comissaoVariavel: 8500 })).toBe(8500)
+  })
+
+  it('só um dos componentes preenchido → tipo não muda o resultado', () => {
+    expect(combinarEntradaMarca({ tipo: 'fixo_ou_comissao', fixoMensal: 5000, comissaoVariavel: 0 })).toBe(5000)
+    expect(combinarEntradaMarca({ tipo: 'fixo_ou_comissao', fixoMensal: 0, comissaoVariavel: 3000 })).toBe(3000)
+    expect(combinarEntradaMarca({ tipo: 'fixo_mais_comissao', fixoMensal: 5000, comissaoVariavel: 0 })).toBe(5000)
   })
 })

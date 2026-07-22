@@ -126,6 +126,7 @@ export const MIGRATIONS_LIST = [
   '129_marca_nome_unico_e_status_cliente.sql',
   '130_drop_colunas_mortas.sql',
   '131_rls_gaps_live_requests_user_tenant_access.sql',
+  '132_marca_tipo_cobranca.sql',
 ]
 
 async function ensureMigrationsTable(client) {

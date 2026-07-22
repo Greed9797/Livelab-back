@@ -589,6 +589,8 @@ describe('LIVELAB operational routes', () => {
         pedidos_videos: '2',
         total_videos: '1',
         total_custos: '20.00',
+        receita_combinada: '114.20',
+        fixo_mensal_total: '0',
       }],
     })
     const { app } = buildApp({ queryMock })

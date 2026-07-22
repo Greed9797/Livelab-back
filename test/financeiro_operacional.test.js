@@ -131,4 +131,48 @@ describe('GET /v1/financeiro/operacional', () => {
     expect(calls.length).toBeGreaterThanOrEqual(2) // uma no /operacional, uma no /resumo
     await app.close()
   })
+
+  it('tipo_cobranca=fixo_ou_comissao: entra só o MAIOR (uma linha por marca), total = GREATEST', async () => {
+    // m1: comissão 250, fixo 300 → fixo vence. m2: comissão 900, fixo 500 → comissão vence.
+    const query = vi.fn().mockImplementation(async (sql) => {
+      const s = String(sql)
+      if (s.includes('SUM(va.comissao_franquia)')) {
+        return { rows: [
+          { marca_id: 'm1', marca_nome: 'OU-fixo', tipo_cobranca: 'fixo_ou_comissao', valor: '250.00', gmv: '10000.00', lives: 4 },
+          { marca_id: 'm2', marca_nome: 'OU-com', tipo_cobranca: 'fixo_ou_comissao', valor: '900.00', gmv: '9000.00', lives: 3 },
+        ] }
+      }
+      if (s.includes('valor_fixo_minimo > 0')) {
+        return { rows: [
+          { marca_id: 'm1', marca_nome: 'OU-fixo', valor_fixo_minimo: '300.00', meses_ativos: 1, tipo_cobranca: 'fixo_ou_comissao' },
+          { marca_id: 'm2', marca_nome: 'OU-com', valor_fixo_minimo: '500.00', meses_ativos: 1, tipo_cobranca: 'fixo_ou_comissao' },
+        ] }
+      }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock: query })
+    await app.register(financeiroRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/operacional?inicio=2026-08&fim=2026-08' })
+    const body = res.json()
+
+    // total = MAX(250,300) + MAX(900,500) = 300 + 900 = 1200 (não a soma 250+300+900+500)
+    expect(body.totais.entradas).toBe(1200)
+    // uma linha por marca (não duas), somando exatamente o total
+    expect(body.entradas).toHaveLength(2)
+    expect(body.entradas.reduce((s, l) => s + l.valor, 0)).toBe(1200)
+
+    const m1 = body.entradas.find((l) => l.memoria.marca_id === 'm1')
+    expect(m1.categoria).toBe('fixo_marca')
+    expect(m1.valor).toBe(300)
+    expect(m1.memoria.criterio).toBe('fixo_ou_comissao_venceu_fixo')
+    expect(m1.memoria.comissao_comparada).toBe(250)
+
+    const m2 = body.entradas.find((l) => l.memoria.marca_id === 'm2')
+    expect(m2.categoria).toBe('comissao_franquia')
+    expect(m2.valor).toBe(900)
+    expect(m2.memoria.criterio).toBe('fixo_ou_comissao_venceu_comissao')
+    expect(m2.memoria.fixo_comparado).toBe(500)
+    await app.close()
+  })
 })

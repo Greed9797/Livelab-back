@@ -492,16 +492,19 @@ export async function financeiroRoutes(app) {
       `, [startDate, endDate, tenant_id])
 
       // SAÍDA: fixo mensal (com cap padrão) das apresentadoras ativas não-arquivadas,
-      // rateado por dias de contrato (data_inicio/data_fim, migration 041) no mês de referência
-      // ($1 = startDate). Saiu dia 15 → metade; saiu antes do mês → 0; datas NULL → fixo cheio.
-      // ponytail: rateia só o mês de $1 (range multi-mês usa o 1º mês); exato no default (1 mês).
+      // rateado por dias de contrato (data_inicio/data_fim, migration 041), SOMADO por mês do
+      // range [$1,$3]. Saiu dia 15 → metade naquele mês; mês fora do contrato → 0; datas NULL →
+      // fixo cheio por mês. Consistente com o fator_meses da marca. Single-mês (default) = 1 parcela.
       const fixoApresentadoras = await db.query(`
         SELECT a.id AS apresentadora_id, a.nome,
-               (${presenterFixedSql('a')}) * ${prorateFatorSql("date_trunc('month', $1::date)", 'a.data_inicio', 'a.data_fim')} AS valor
+               (${presenterFixedSql('a')}) * COALESCE((
+                 SELECT SUM(${prorateFatorSql('gs.mes', 'a.data_inicio', 'a.data_fim')})
+                 FROM generate_series(date_trunc('month', $1::date), date_trunc('month', $3::date), interval '1 month') gs(mes)
+               ), 0) AS valor
         FROM apresentadoras a
         WHERE a.tenant_id = $2::uuid AND a.ativo IS TRUE AND COALESCE(a.arquivada, false) = false
         ORDER BY valor DESC, a.nome ASC
-      `, [startDate, tenant_id])
+      `, [startDate, tenant_id, endDate])
 
       // SAÍDA: custos manuais lançados na competência
       const custosManuais = await db.query(`

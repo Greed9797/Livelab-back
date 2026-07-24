@@ -38,7 +38,7 @@ function operacionalQueryMock() {
       return { rows: [{ apresentadora_id: 'ap1', nome: 'Ana', valor: '100.00', gmv: '10000.00' }] }
     }
     if (s.includes('valor_fixo_minimo > 0')) {
-      return { rows: [{ marca_id: 'm1', marca_nome: 'Marca A', valor_fixo_minimo: '300.00', meses_ativos: 1 }] }
+      return { rows: [{ marca_id: 'm1', marca_nome: 'Marca A', valor_fixo_minimo: '300.00', meses_ativos: 1, fator_meses: 1 }] }
     }
     if (s.includes('FROM apresentadoras a')) {
       return { rows: [{ apresentadora_id: 'ap1', nome: 'Ana', valor: '2700.00' }] }
@@ -144,8 +144,8 @@ describe('GET /v1/financeiro/operacional', () => {
       }
       if (s.includes('valor_fixo_minimo > 0')) {
         return { rows: [
-          { marca_id: 'm1', marca_nome: 'OU-fixo', valor_fixo_minimo: '300.00', meses_ativos: 1, tipo_cobranca: 'fixo_ou_comissao' },
-          { marca_id: 'm2', marca_nome: 'OU-com', valor_fixo_minimo: '500.00', meses_ativos: 1, tipo_cobranca: 'fixo_ou_comissao' },
+          { marca_id: 'm1', marca_nome: 'OU-fixo', valor_fixo_minimo: '300.00', meses_ativos: 1, fator_meses: 1, tipo_cobranca: 'fixo_ou_comissao' },
+          { marca_id: 'm2', marca_nome: 'OU-com', valor_fixo_minimo: '500.00', meses_ativos: 1, fator_meses: 1, tipo_cobranca: 'fixo_ou_comissao' },
         ] }
       }
       return { rows: [] }

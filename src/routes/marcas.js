@@ -19,6 +19,7 @@ const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
   ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username, m.site, m.marketplace_url, m.logo_url, m.cor,
   m.comissao_franquia_pct, m.comissao_franqueadora_pct, m.valor_fixo_minimo, m.tipo_cobranca,
+  m.data_inicio, m.data_fim,
   m.observacoes, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
   COALESCE(am_agg.apresentadoras, '[]'::json) AS apresentadoras
@@ -46,6 +47,10 @@ const marcaBaseSchema = z.object({
   // Regra de composição da ENTRADAS da marca (migration 132). Optional: payload sem o campo
   // = "não mexer" (mesma razão dos percentuais). Default do banco = 'fixo_mais_comissao'.
   tipo_cobranca: z.enum(['fixo_mais_comissao', 'fixo_ou_comissao']).optional(),
+  // Datas de contrato da marca (migration 133): rateiam o fixo por dias no mês de
+  // entrada/saída. Formato YYYY-MM-DD; null = sem recorte. Optional = "não mexer".
+  data_inicio: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'data deve ser YYYY-MM-DD').nullable().optional(),
+  data_fim: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'data deve ser YYYY-MM-DD').nullable().optional(),
   observacoes: z.string().nullable().optional(),
 })
 
@@ -250,6 +255,8 @@ export async function marcasRoutes(app) {
                  valor_fixo_minimo = COALESCE($11, valor_fixo_minimo),
                  cor = COALESCE($12, cor),
                  tipo_cobranca = COALESCE($13, tipo_cobranca),
+                 data_inicio = COALESCE($14, data_inicio),
+                 data_fim = COALESCE($15, data_fim),
                  atualizado_em = NOW()
                WHERE id = $1 AND tenant_id = $2::uuid
                RETURNING *`,
@@ -258,15 +265,17 @@ export async function marcasRoutes(app) {
                 d.comissao_franquia_pct ?? null, d.comissao_franqueadora_pct ?? null,
                 d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? null,
                 d.cor ?? null, d.tipo_cobranca ?? null,
+                d.data_inicio ?? null, d.data_fim ?? null,
               ],
             )
           : await db.query(
               `INSERT INTO marcas (
                  tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
                  marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
-                 observacoes, logo_url, valor_fixo_minimo, cor, tipo_cobranca
+                 observacoes, logo_url, valor_fixo_minimo, cor, tipo_cobranca,
+                 data_inicio, data_fim
                )
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
                RETURNING *`,
               [
                 tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
@@ -274,6 +283,7 @@ export async function marcasRoutes(app) {
                 d.comissao_franquia_pct ?? 0, d.comissao_franqueadora_pct ?? 0,
                 d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
                 d.cor ?? null, d.tipo_cobranca ?? 'fixo_mais_comissao',
+                d.data_inicio ?? null, d.data_fim ?? null,
               ],
             )
         if (d.tiktok_username !== undefined) {

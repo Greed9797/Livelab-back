@@ -19,31 +19,53 @@ const custoSchema = z.object({
 
 const toNum = (v) => Number(v ?? 0)
 
+// Fração de um mês (`mesExpr` = timestamp no 1º dia do mês) coberta pelo contrato
+// [inicioCol, fimCol]. Datas NULL → 1.0 (mês cheio, comportamento pré-133). Clamp [0,1].
+// ponytail: rateio por dias (saiu dia 15 de 30 → 0.5; mês fora do contrato → 0). Exato quando
+// o range = 1 mês (o default dos painéis); em range multi-mês a marca soma fração por mês ativo
+// e a apresentadora usa só o mês de referência. Reusa o padrão EXTRACT(DAY) do home.js.
+function prorateFatorSql(mesExpr, inicioCol, fimCol) {
+  const ini = `(${mesExpr})::date`
+  const fim = `((${mesExpr}) + interval '1 month' - interval '1 day')::date`
+  return `GREATEST(0, LEAST(1.0,
+    (LEAST(${fim}, COALESCE(${fimCol}, ${fim})) - GREATEST(${ini}, COALESCE(${inicioCol}, ${ini})) + 1)::numeric
+    / EXTRACT(DAY FROM (${fim}))::numeric
+  ))`
+}
+
 // Fixo mensal das marcas tipo='cliente' (semântica migration 116): 1× por marca por mês
 // COM atividade (GMV/pedidos > 0 em lives ou vídeos). FONTE ÚNICA compartilhada entre
 // /resumo (soma agregada) e /operacional (1 lançamento por marca) — não duplicar.
+// `meses_ativos` = contagem inteira de meses (display); `fator_meses` = soma das frações
+// rateadas por data_inicio/data_fim da marca (migration 133) — o valor MONETÁRIO usa fator_meses.
 // Params posicionais fixos: $1=startDate, $2=endDate, $3=tenant_id.
 function marcaFixoMensalSql() {
   return `
-    SELECT m.id AS marca_id, m.nome AS marca_nome, m.valor_fixo_minimo, m.tipo_cobranca, am.meses_ativos
+    SELECT m.id AS marca_id, m.nome AS marca_nome, m.valor_fixo_minimo, m.tipo_cobranca,
+           am.meses_ativos, am.fator_meses
     FROM marcas m
     JOIN (
-      SELECT marca_id, COUNT(DISTINCT mes)::int AS meses_ativos
+      SELECT am2.marca_id,
+             COUNT(*)::int AS meses_ativos,
+             COALESCE(SUM(${prorateFatorSql('am2.mes', 'mk.data_inicio', 'mk.data_fim')}), 0) AS fator_meses
       FROM (
-        SELECT l.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes
-        FROM lives l
-        WHERE l.tenant_id = $3::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
-          AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
-          AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
-          AND (${liveGmvSql('l')} > 0 OR ${liveOrdersSql('l')} > 0)
-        UNION
-        SELECT vr.marca_id, date_trunc('month', vr.data::timestamp) AS mes
-        FROM video_registros vr
-        WHERE vr.tenant_id = $3::uuid
-          AND vr.data >= $1::date AND vr.data <= $2::date
-          AND (vr.gmv_atribuido > 0 OR vr.pedidos_atribuidos > 0)
-      ) ativ
-      GROUP BY marca_id
+        SELECT DISTINCT marca_id, mes FROM (
+          SELECT l.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes
+          FROM lives l
+          WHERE l.tenant_id = $3::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
+            AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
+            AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
+            AND (${liveGmvSql('l')} > 0 OR ${liveOrdersSql('l')} > 0)
+          UNION
+          SELECT vr.marca_id, date_trunc('month', vr.data::timestamp) AS mes
+          FROM video_registros vr
+          WHERE vr.tenant_id = $3::uuid
+            AND vr.data >= $1::date AND vr.data <= $2::date
+            AND (vr.gmv_atribuido > 0 OR vr.pedidos_atribuidos > 0)
+        ) u
+      ) am2
+      JOIN marcas mk ON mk.id = am2.marca_id AND mk.tenant_id = $3::uuid
+      GROUP BY am2.marca_id
     ) am ON am.marca_id = m.id
     WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente'`
 }
@@ -169,7 +191,7 @@ export async function financeiroRoutes(app) {
         -- Fixo mensal das marcas tipo='cliente': valor_fixo_minimo × meses ativos (migration 116).
         -- Fonte compartilhada marcaFixoMensalSql() — mesma do /operacional e performance-rollups.js.
         fixo_marca AS (
-          SELECT mf.marca_id, mf.tipo_cobranca, (mf.valor_fixo_minimo * mf.meses_ativos) AS fixo
+          SELECT mf.marca_id, mf.tipo_cobranca, (mf.valor_fixo_minimo * mf.fator_meses) AS fixo
           FROM (${marcaFixoMensalSql()}) mf
         ),
         -- Entrada POR marca: junta comissão variável e fixo mensal; tipo_cobranca decide se soma
@@ -448,7 +470,7 @@ export async function financeiroRoutes(app) {
 
       // ENTRADA: fixo mensal por marca tipo=cliente com atividade (mesma fonte do /resumo)
       const fixoMarcas = await db.query(`
-        SELECT mf.marca_id, mf.marca_nome, mf.valor_fixo_minimo, mf.tipo_cobranca, mf.meses_ativos
+        SELECT mf.marca_id, mf.marca_nome, mf.valor_fixo_minimo, mf.tipo_cobranca, mf.meses_ativos, mf.fator_meses
         FROM (${marcaFixoMensalSql()}) mf
         WHERE mf.valor_fixo_minimo > 0
         ORDER BY mf.valor_fixo_minimo DESC
@@ -469,15 +491,17 @@ export async function financeiroRoutes(app) {
         ORDER BY valor DESC
       `, [startDate, endDate, tenant_id])
 
-      // SAÍDA: fixo mensal (com cap padrão) das apresentadoras ativas não-arquivadas.
-      // ponytail: fixo conta 1× no período mesmo em range multi-mês — mesmo teto do rollup
-      // de performance (MAX fixo); multiplicar por mês se range longo virar caso real.
+      // SAÍDA: fixo mensal (com cap padrão) das apresentadoras ativas não-arquivadas,
+      // rateado por dias de contrato (data_inicio/data_fim, migration 041) no mês de referência
+      // ($1 = startDate). Saiu dia 15 → metade; saiu antes do mês → 0; datas NULL → fixo cheio.
+      // ponytail: rateia só o mês de $1 (range multi-mês usa o 1º mês); exato no default (1 mês).
       const fixoApresentadoras = await db.query(`
-        SELECT a.id AS apresentadora_id, a.nome, ${presenterFixedSql('a')} AS valor
+        SELECT a.id AS apresentadora_id, a.nome,
+               (${presenterFixedSql('a')}) * ${prorateFatorSql("date_trunc('month', $1::date)", 'a.data_inicio', 'a.data_fim')} AS valor
         FROM apresentadoras a
-        WHERE a.tenant_id = $1::uuid AND a.ativo IS TRUE AND COALESCE(a.arquivada, false) = false
+        WHERE a.tenant_id = $2::uuid AND a.ativo IS TRUE AND COALESCE(a.arquivada, false) = false
         ORDER BY valor DESC, a.nome ASC
-      `, [tenant_id])
+      `, [startDate, tenant_id])
 
       // SAÍDA: custos manuais lançados na competência
       const custosManuais = await db.query(`
@@ -502,7 +526,8 @@ export async function financeiroRoutes(app) {
         })
       }
       for (const r of fixoMarcas.rows) {
-        const fixo = toNum(r.valor_fixo_minimo) * toNum(r.meses_ativos)
+        // valor monetário rateado por dias de contrato (fator_meses); meses_ativos fica só p/ display.
+        const fixo = toNum(r.valor_fixo_minimo) * toNum(r.fator_meses)
         const cur = marcaEntradas.get(r.marca_id)
         if (cur) {
           cur.fixo = fixo

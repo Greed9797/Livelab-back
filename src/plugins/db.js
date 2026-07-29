@@ -7,6 +7,45 @@ import { resolveDbSslConfig } from '../utils/db-ssl.js'
 
 const { Pool } = pg
 
+// ── Teto de conexões imposto pelo pooler ──────────────────────────────────────
+// O pooler do Supabase em SESSION mode (porta 5432) aceita no máximo `pool_size`
+// clientes por usuário — 15 por padrão — e recusa o excedente com
+// "(EMAXCONNSESSION) max clients reached in session mode". Quem pede a conexão
+// recebe erro, não fila: o request vira 500.
+//
+// Os dois pools deste arquivo dividem essa mesma cota quando apontam para o
+// mesmo servidor. Somados eles pediam 20 + 5 = 25 contra um teto de 15, então
+// bastava um punhado de queries paralelas (o /home/dashboard sozinho toma até
+// DB_TENANT_PARALLEL_MAX) para o dashboard falhar de forma intermitente e
+// "voltar sozinho" quando as conexões eram liberadas.
+//
+// O clamp é aplicado sobre o valor FINAL, não sobre o default: em produção as
+// variáveis DB_POOL_MAX/DB_SYSTEM_POOL_MAX podem estar setadas acima do teto.
+const POOLER_MAX_CLIENTS = Number(process.env.DB_POOLER_MAX_CLIENTS ?? 15)
+const POOLER_RESERVA = 2 // sobra para migrations, psql e health checks externos
+
+/** true quando a URL aponta para o pooler do Supabase em session mode (porta 5432). */
+function usaPoolerEmSessionMode(connectionString) {
+  try {
+    const url = new URL(connectionString)
+    return url.hostname.includes('pooler.supabase.com') && url.port === '5432'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Ajusta os dois pools para caberem na cota do pooler, preservando a proporção
+ * pedida e garantindo um mínimo utilizável para cada um.
+ */
+export function ajustarLimitesDePool({ appMax, systemMax, compartilhamPooler, limiteTotal }) {
+  if (!compartilhamPooler) return { appMax, systemMax, ajustado: false }
+  const orcamento = Math.max(4, limiteTotal - POOLER_RESERVA)
+  if (appMax + systemMax <= orcamento) return { appMax, systemMax, ajustado: false }
+  const sistema = Math.max(2, Math.min(systemMax, Math.floor(orcamento * 0.25)))
+  return { appMax: Math.max(2, orcamento - sistema), systemMax: sistema, ajustado: true }
+}
+
 async function dbPlugin(app) {
   const sslConfig = resolveDbSslConfig(process.env.DATABASE_URL)
   const sslRejectUnauthorized =
@@ -17,11 +56,28 @@ async function dbPlugin(app) {
   // centenas de ms. Com idleTimeout de 30s as conexões morriam entre requests e
   // quase toda chamada pagava handshake. Mantemos um mínimo aquecido e só
   // descartamos conexões após 10min ociosas.
+  const systemConnectionStringPre = process.env.DATABASE_SYSTEM_URL || process.env.DATABASE_URL
+  const limites = ajustarLimitesDePool({
+    appMax: Number(process.env.DB_POOL_MAX ?? 20),
+    systemMax: Number(process.env.DB_SYSTEM_POOL_MAX ?? 5),
+    // Só disputam a mesma cota quando os dois vão para o mesmo pooler.
+    compartilhamPooler: usaPoolerEmSessionMode(process.env.DATABASE_URL)
+      && (systemConnectionStringPre === process.env.DATABASE_URL
+        || usaPoolerEmSessionMode(systemConnectionStringPre)),
+    limiteTotal: POOLER_MAX_CLIENTS,
+  })
+  if (limites.ajustado) {
+    app.log.warn(
+      { appMax: limites.appMax, systemMax: limites.systemMax, poolerMaxClients: POOLER_MAX_CLIENTS },
+      'pools reduzidos para caber na cota do pooler em session mode (evita EMAXCONNSESSION)',
+    )
+  }
+
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: sslConfig,
-    max: Number(process.env.DB_POOL_MAX ?? 20),
-    min: Number(process.env.DB_POOL_MIN ?? 4),
+    max: limites.appMax,
+    min: Math.min(Number(process.env.DB_POOL_MIN ?? 4), limites.appMax),
     idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_MS ?? 600_000),
     connectionTimeoutMillis: 8000,
     keepAlive: true,
@@ -47,12 +103,12 @@ async function dbPlugin(app) {
   // Em produção aponte DATABASE_SYSTEM_URL para um role dedicado (o único com
   // BYPASSRLS) e deixe DATABASE_URL no role NOBYPASSRLS da aplicação. Sem essa
   // variável os dois pools usam a mesma credencial e o comportamento é o de hoje.
-  const systemConnectionString = process.env.DATABASE_SYSTEM_URL || process.env.DATABASE_URL
+  const systemConnectionString = systemConnectionStringPre
   const systemPool = new Pool({
     connectionString: systemConnectionString,
     ssl: resolveDbSslConfig(systemConnectionString),
-    max: Number(process.env.DB_SYSTEM_POOL_MAX ?? 5),
-    min: Number(process.env.DB_SYSTEM_POOL_MIN ?? 1),
+    max: limites.systemMax,
+    min: Math.min(Number(process.env.DB_SYSTEM_POOL_MIN ?? 1), limites.systemMax),
     idleTimeoutMillis: Number(process.env.DB_POOL_IDLE_MS ?? 600_000),
     connectionTimeoutMillis: 8000,
     keepAlive: true,
@@ -115,7 +171,16 @@ async function dbPlugin(app) {
   // Teto de conexões que UM handler pode tomar de uma vez. Sem isso, um único
   // /home/dashboard (~20 queries) tomaria o pool inteiro e faria os outros
   // usuários esperarem. As excedentes apenas aguardam uma vaga.
-  const PARALLEL_MAX = Number(process.env.DB_TENANT_PARALLEL_MAX ?? 12)
+  // Nunca pode passar do tamanho do pool: se um handler sozinho pudesse tomar
+  // todas as conexões, o request seguinte (e o /grade que a própria home dispara
+  // em paralelo) ficaria sem vaga. Deixa ~1/3 do pool livre para os demais.
+  const PARALLEL_MAX = Math.max(
+    2,
+    Math.min(
+      Number(process.env.DB_TENANT_PARALLEL_MAX ?? 12),
+      Math.floor(limites.appMax * 0.66),
+    ),
+  )
 
   app.decorate('tenantParallel', (tenantId) => {
     let ativos = 0

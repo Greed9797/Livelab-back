@@ -1,6 +1,11 @@
 import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 
+// O cálculo de comissão tem cobertura própria; aqui interessa só o que o apply escreve em lives.
+vi.mock('../src/services/commission-engine.js', () => ({
+  calcularComissoesDaLive: vi.fn(async () => ({ ok: true })),
+}))
+
 import { analyticsRoutes } from '../src/routes/analytics.js'
 
 const tenantId = '11111111-1111-4111-8111-111111111111'
@@ -94,13 +99,14 @@ describe('analytics imports routes', () => {
       attributed_orders: 9,
     }
     const queryMock = vi.fn(async (sql, args = []) => {
-      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (['BEGIN', 'COMMIT'].includes(sql) || sql.includes('SAVEPOINT')) return { rows: [] }
       if (sql.includes('FROM analytics_import_batches') && sql.includes('FOR UPDATE')) {
-        return { rows: [{ id: batchId, status: 'preview' }] }
+        return { rows: [{ id: batchId, status: 'preview', source_type: 'tiktok_ads', marca_id: null }] }
       }
-      if (sql.includes('FROM analytics_import_rows') && sql.includes("match_status = 'matched'")) {
-        return { rows: [{ id: rowId, matched_live_id: liveId, normalized }] }
+      if (sql.includes('FROM analytics_import_rows') && sql.includes("decisao IN ('vincular', 'criar')")) {
+        return { rows: [{ id: rowId, row_index: 1, matched_live_id: liveId, normalized, decisao: 'vincular', marca_id: null, apresentadoras: null }] }
       }
+      if (sql.includes('SELECT id FROM lives WHERE id')) return { rows: [{ id: liveId }], rowCount: 1 }
       if (sql.includes('UPDATE lives')) {
         updateLivesArgs = args
         return { rows: [], rowCount: 1 }
@@ -116,7 +122,7 @@ describe('analytics imports routes', () => {
     const res = await app.inject({ method: 'POST', url: `/v1/analytics/imports/${batchId}/apply` })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ ok: true, batch_id: batchId, applied_rows: 1 })
+    expect(res.json()).toMatchObject({ ok: true, batch_id: batchId, applied_rows: 1, failed_rows: [] })
     expect(updateLivesArgs.slice(0, 12)).toEqual([1000, 200, 40000, 7000, 330, 27, 12, 3000, 120, 6000, 8, 9])
     const updateSql = queryMock.mock.calls.find(([sql]) => sql.includes('UPDATE lives'))?.[0]
     expect(updateSql).not.toContain('fat_gerado')

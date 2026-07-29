@@ -1,10 +1,13 @@
+import { z } from 'zod'
 import { READ_ANALYTICS, WRITE_LIVES } from '../config/role_groups.js'
 import {
   loadAnalyticsImportCandidates,
   matchAnalyticsImportRows,
   parseAnalyticsImportBuffer,
   summarizeImportRows,
+  SOURCE_TIKTOK_STUDIO,
 } from '../services/analytics-import.js'
+import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { performance } from 'node:perf_hooks'
@@ -84,36 +87,110 @@ function resolveAnalyticsPeriod(query) {
   }
 }
 
+const MAX_IMPORT_ROWS = 5000
+
+const importRowPatchSchema = z.object({
+  decisao: z.enum(['pendente', 'vincular', 'criar', 'ignorar']).optional(),
+  marca_id: z.string().uuid().optional(),
+  matched_live_id: z.string().uuid().nullable().optional(),
+  apresentadoras: z.array(z.object({
+    apresentadora_id: z.string().uuid(),
+    // percentual_rateio é NUMERIC(5,2): mais casas seriam arredondadas no banco e a soma
+    // deixaria de fechar 100 (33.335 × 3 passaria aqui e viraria 100.02 gravado).
+    percentual: z.number().positive().max(100).refine(
+      (value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-6,
+      { message: 'Use no máximo 2 casas decimais no percentual' },
+    ),
+  })).min(1).optional(),
+}).refine(
+  (data) => !data.apresentadoras
+    || data.apresentadoras.reduce((acc, item) => acc + Math.round(item.percentual * 100), 0) === 10000,
+  { message: 'O rateio das apresentadoras precisa somar exatamente 100%' },
+).refine(
+  (data) => !data.apresentadoras
+    || new Set(data.apresentadoras.map((item) => item.apresentadora_id)).size === data.apresentadoras.length,
+  { message: 'Apresentadora repetida no rateio' },
+)
+
 async function readAnalyticsImportUpload(request) {
+  let upload
+  let fields = {}
+
   if (request.isMultipart?.()) {
     const file = await request.file()
     if (!file) throw new Error('Arquivo CSV/XLSX obrigatorio')
-    return { filename: file.filename, buffer: await file.toBuffer() }
+    fields = file.fields ?? {}
+    upload = { filename: file.filename, buffer: await file.toBuffer() }
+  } else {
+    const body = request.body ?? {}
+    if (body.content_base64) {
+      upload = {
+        filename: body.filename ?? 'analytics-import.xlsx',
+        buffer: Buffer.from(String(body.content_base64), 'base64'),
+      }
+    } else if (body.content) {
+      upload = {
+        filename: body.filename ?? 'analytics-import.csv',
+        buffer: Buffer.from(String(body.content), 'utf8'),
+      }
+    } else {
+      throw new Error('Envie multipart file ou content_base64')
+    }
+    fields = body
   }
 
-  const body = request.body ?? {}
-  if (body.content_base64) {
-    return {
-      filename: body.filename ?? 'analytics-import.xlsx',
-      buffer: Buffer.from(String(body.content_base64), 'base64'),
+  assertUploadLooksLikeSpreadsheet(upload)
+  return { ...upload, fields }
+}
+
+/**
+ * O mimetype declarado no multipart não é confiável (mesma ressalva de src/lib/image_upload.js).
+ * XLSX é um zip: tem que começar com "PK".
+ */
+function assertUploadLooksLikeSpreadsheet({ filename, buffer }) {
+  if (!buffer?.length) throw new Error('Arquivo vazio')
+  const lower = String(filename ?? '').toLowerCase()
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm')) {
+    if (buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+      throw new Error('Arquivo .xlsx invalido (nao e um arquivo XLSX)')
     }
   }
-  if (body.content) {
-    return {
-      filename: body.filename ?? 'analytics-import.csv',
-      buffer: Buffer.from(String(body.content), 'utf8'),
-    }
-  }
-  throw new Error('Envie multipart file ou content_base64')
+}
+
+/** Campo enviado como query string (padrão do apiUpload do front) ou como campo do multipart. */
+function readUploadField(request, fields, name) {
+  const fromQuery = request.query?.[name]
+  if (fromQuery) return String(fromQuery)
+  const field = fields?.[name]
+  if (!field) return null
+  const value = typeof field === 'object' && 'value' in field ? field.value : field
+  return value ? String(value) : null
+}
+
+/**
+ * Decisão inicial sugerida por linha. O usuário revisa e altera antes do apply.
+ * Nada é aplicado sem uma decisão explícita de 'vincular' ou 'criar'.
+ */
+function defaultDecisionFor(matchStatus) {
+  if (matchStatus === 'matched') return 'vincular'
+  if (matchStatus === 'skipped_short' || matchStatus === 'invalid') return 'ignorar'
+  return 'pendente'
 }
 
 function rowResponse(row) {
   return {
+    id: row.id ?? null,
     row_index: row.row_index,
     marca_nome: row.normalized?.marca_nome ?? row.marca_nome,
     live_date: row.normalized?.live_date ?? row.live_date,
     start_time: row.normalized?.start_time ?? row.start_time,
     duration_seconds: row.normalized?.duration_seconds ?? row.duration_seconds,
+    room_id: row.normalized?.room_id ?? null,
+    room_title: row.normalized?.room_title ?? null,
+    attributed_gmv: row.normalized?.attributed_gmv ?? null,
+    likes: row.normalized?.likes ?? null,
+    comments: row.normalized?.comments ?? null,
+    like_rate: row.normalized?.studio_metrics?.like_rate ?? null,
     ads_gmv: row.normalized?.ads_gmv ?? null,
     ads_cost: row.normalized?.ads_cost ?? null,
     attributed_orders: row.normalized?.attributed_orders ?? null,
@@ -126,6 +203,189 @@ function rowResponse(row) {
     candidates: row.candidates ?? [],
     error: row.error ?? null,
   }
+}
+
+/**
+ * GMV oficial da linha. No Creator Live Performance é o "Attributed GMV"; no relatório de Ads
+ * continua sendo o "Ads GMV". Vai para lives.ads_gmv, que é o topo de
+ * COALESCE(ads_gmv, manual_gmv, fat_gerado) em src/lib/metric-sql.js — ou seja, passa a valer
+ * em todos os dashboards e no cálculo de comissão.
+ */
+function officialGmvOf(normalized) {
+  return normalized?.source_type === SOURCE_TIKTOK_STUDIO
+    ? (normalized.attributed_gmv ?? null)
+    : (normalized?.ads_gmv ?? null)
+}
+
+/** Live nova precisa de cabine (NOT NULL): usa a mais recente da marca, senão qualquer ativa. */
+async function resolveCabinePadrao(db, tenantId, marcaId) {
+  if (marcaId) {
+    const daMarca = await db.query(
+      `SELECT cabine_id FROM lives
+        WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND cabine_id IS NOT NULL
+        ORDER BY iniciado_em DESC LIMIT 1`,
+      [tenantId, marcaId],
+    )
+    if (daMarca.rows[0]?.cabine_id) return daMarca.rows[0].cabine_id
+  }
+  const qualquer = await db.query(
+    `SELECT id FROM cabines
+      WHERE tenant_id = $1::uuid AND COALESCE(ativo, true) AND deleted_at IS NULL
+      ORDER BY numero NULLS LAST LIMIT 1`,
+    [tenantId],
+  )
+  if (!qualquer.rows[0]?.id) throw new Error('Nenhuma cabine ativa para criar a live')
+  return qualquer.rows[0].id
+}
+
+/**
+ * Decide em qual live a linha será aplicada.
+ * 'vincular' usa a live escolhida na revisão. 'criar' primeiro procura uma live com o mesmo
+ * Room ID — reimportar a mesma planilha atualiza, não duplica.
+ */
+async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabinePadraoId }) {
+  if (row.decisao === 'vincular') {
+    if (!row.matched_live_id) throw new Error('Linha marcada para vincular sem live selecionada')
+    const existe = await db.query(
+      'SELECT id FROM lives WHERE id = $1::uuid AND tenant_id = $2::uuid',
+      [row.matched_live_id, tenantId],
+    )
+    if (existe.rowCount === 0) throw new Error('Live selecionada nao encontrada')
+    return row.matched_live_id
+  }
+
+  if (normalized.room_id) {
+    const mesmoRoom = await db.query(
+      'SELECT id FROM lives WHERE tenant_id = $1::uuid AND tiktok_room_id = $2',
+      [tenantId, normalized.room_id],
+    )
+    if (mesmoRoom.rows[0]?.id) return mesmoRoom.rows[0].id
+  }
+
+  const marcaId = row.marca_id ?? batch.marca_id
+  if (!marcaId) throw new Error('Marca obrigatoria para criar a live')
+  if (!normalized.started_at) throw new Error('Linha sem data/hora de inicio')
+
+  const inserted = await db.query(
+    `INSERT INTO lives (
+       tenant_id, cabine_id, marca_id, status, iniciado_em, encerrado_em,
+       tipo, status_publicacao, origem_dados, tiktok_room_id, resumo
+     )
+     VALUES ($1::uuid, $2::uuid, $3::uuid, 'encerrada', $4::timestamptz, $5::timestamptz,
+             'cliente', 'rascunho', 'api', $6, $7)
+     RETURNING id`,
+    [
+      tenantId,
+      cabinePadraoId,
+      marcaId,
+      normalized.started_at,
+      normalized.ended_at ?? normalized.started_at,
+      normalized.room_id ?? null,
+      normalized.room_title ?? null,
+    ],
+  )
+  return inserted.rows[0].id
+}
+
+async function applyMetricsToLive(db, { tenantId, liveId, normalized: n, batchId, rowId }) {
+  await db.query(
+    `UPDATE lives
+        SET ads_gmv = $1,
+            ads_cost = COALESCE($2, ads_cost),
+            live_impressions = $3,
+            product_impressions = $4,
+            product_clicks = $5,
+            avg_viewing_duration = $6,
+            new_followers = $7,
+            manual_views = $8,
+            manual_comments = $9,
+            manual_likes = $10,
+            manual_shares = $11,
+            manual_orders = $12,
+            tiktok_room_id = COALESCE($13, tiktok_room_id),
+            studio_metrics = COALESCE($14::jsonb, studio_metrics),
+            encerrado_em = COALESCE($15::timestamptz, encerrado_em),
+            ads_import_batch_id = $16::uuid,
+            ads_import_row_id = $17::uuid,
+            ads_metrics_updated_at = NOW()
+      WHERE id = $18::uuid
+        AND tenant_id = $19::uuid`,
+    [
+      officialGmvOf(n),
+      n.ads_cost ?? null,
+      n.live_impressions ?? null,
+      n.product_impressions ?? null,
+      n.product_clicks ?? null,
+      n.avg_viewing_duration ?? null,
+      n.new_followers ?? null,
+      n.views ?? null,
+      n.comments ?? null,
+      n.likes ?? null,
+      n.shares ?? null,
+      n.attributed_orders ?? null,
+      n.room_id ?? null,
+      n.studio_metrics ? JSON.stringify(n.studio_metrics) : null,
+      n.ended_at ?? null,
+      batchId,
+      rowId,
+      liveId,
+      tenantId,
+    ],
+  )
+}
+
+/**
+ * Rateio da live entre apresentadoras. Substitui o conjunto anterior para que reimportar não
+ * acumule linhas. `lives.apresentador_id` (users.id, legado) segue a apresentadora principal.
+ */
+async function applyApresentadorasToLive(db, { tenantId, liveId, apresentadoras }) {
+  const lista = Array.isArray(apresentadoras) ? apresentadoras.filter((item) => item?.apresentadora_id) : []
+  if (lista.length === 0) return
+
+  // Compara em centésimos: é a escala real de percentual_rateio NUMERIC(5,2).
+  const somaCentesimos = lista.reduce((acc, item) => acc + Math.round(Number(item.percentual ?? 0) * 100), 0)
+  if (somaCentesimos !== 10000) {
+    throw new Error(`Rateio das apresentadoras soma ${somaCentesimos / 100}% (precisa somar 100%)`)
+  }
+
+  await db.query(
+    'DELETE FROM live_apresentadoras_v2 WHERE tenant_id = $1::uuid AND live_id = $2::uuid',
+    [tenantId, liveId],
+  )
+  const principal = lista.reduce((a, b) => (Number(b.percentual) > Number(a.percentual) ? b : a))
+  for (const item of lista) {
+    await db.query(
+      `INSERT INTO live_apresentadoras_v2 (tenant_id, live_id, apresentadora_id, papel, percentual_rateio)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5)`,
+      [
+        tenantId,
+        liveId,
+        item.apresentadora_id,
+        item.apresentadora_id === principal.apresentadora_id ? 'principal' : 'apoio',
+        Number(item.percentual),
+      ],
+    )
+  }
+
+  await db.query(
+    `UPDATE lives
+        SET apresentador_id = (SELECT user_id FROM apresentadoras WHERE id = $3::uuid AND tenant_id = $1::uuid)
+      WHERE id = $2::uuid AND tenant_id = $1::uuid`,
+    [tenantId, liveId, principal.apresentadora_id],
+  )
+
+  // calcularComissoesDaLive só faz upsert de quem está no rateio atual: sem esta limpeza, uma
+  // apresentadora retirada continuaria com a venda antiga somando nos relatórios.
+  // Linhas já aprovadas são imutáveis por regra de negócio e ficam.
+  await db.query(
+    `DELETE FROM vendas_atribuidas
+      WHERE tenant_id = $1::uuid
+        AND origem = 'live'
+        AND origem_id = $2::uuid
+        AND COALESCE(status_aprovacao, '') <> 'aprovada'
+        AND (apresentadora_id IS NULL OR apresentadora_id <> ALL($3::uuid[]))`,
+    [tenantId, liveId, lista.map((item) => item.apresentadora_id)],
+  )
 }
 
 function rowsDateRange(rows) {
@@ -141,9 +401,25 @@ export async function analyticsRoutes(app) {
     const { tenant_id, sub } = request.user
     try {
       const upload = await readAnalyticsImportUpload(request)
-      const parsedRows = parseAnalyticsImportBuffer(upload)
+      const { source_type: sourceType, rows: parsedRows } = parseAnalyticsImportBuffer(upload)
       if (parsedRows.length === 0) {
         return reply.code(400).send({ error: 'Arquivo sem linhas importaveis' })
+      }
+      if (parsedRows.length > MAX_IMPORT_ROWS) {
+        return reply.code(400).send({ error: `Arquivo com ${parsedRows.length} linhas excede o limite de ${MAX_IMPORT_ROWS}` })
+      }
+
+      const marcaId = readUploadField(request, upload.fields, 'marca_id')
+      const apresentadoraId = readUploadField(request, upload.fields, 'apresentadora_id')
+
+      // O Creator Live Performance não traz a marca: sem ela não há como casar nem criar a live.
+      if (sourceType === SOURCE_TIKTOK_STUDIO) {
+        if (!marcaId || !UUID_RE.test(marcaId)) {
+          return reply.code(400).send({ error: 'Selecione a marca antes de importar o relatorio do TikTok Studio' })
+        }
+        if (!apresentadoraId || !UUID_RE.test(apresentadoraId)) {
+          return reply.code(400).send({ error: 'Selecione a apresentadora antes de importar o relatorio do TikTok Studio' })
+        }
       }
 
       const range = rowsDateRange(parsedRows)
@@ -152,20 +428,45 @@ export async function analyticsRoutes(app) {
       return await app.withTenant(tenant_id, async (db) => {
         await db.query('BEGIN')
         try {
+          if (marcaId) {
+            const marcaQ = await db.query(
+              'SELECT id FROM marcas WHERE id = $1::uuid AND tenant_id = $2::uuid',
+              [marcaId, tenant_id],
+            )
+            if (marcaQ.rowCount === 0) {
+              await db.query('ROLLBACK').catch(() => {})
+              return reply.code(400).send({ error: 'Marca nao encontrada' })
+            }
+          }
+          if (apresentadoraId) {
+            const apreQ = await db.query(
+              'SELECT id FROM apresentadoras WHERE id = $1::uuid AND tenant_id = $2::uuid',
+              [apresentadoraId, tenant_id],
+            )
+            if (apreQ.rowCount === 0) {
+              await db.query('ROLLBACK').catch(() => {})
+              return reply.code(400).send({ error: 'Apresentadora nao encontrada' })
+            }
+          }
+
           const candidates = await loadAnalyticsImportCandidates(db, range)
-          const matchedRows = matchAnalyticsImportRows(parsedRows, candidates)
+          const matchedRows = matchAnalyticsImportRows(parsedRows, candidates, { marcaId })
           const summary = summarizeImportRows(matchedRows)
 
           const batchQ = await db.query(
             `INSERT INTO analytics_import_batches (
-               tenant_id, filename, total_rows, matched_rows, ambiguous_rows,
+               tenant_id, filename, source_type, marca_id, apresentadora_id,
+               total_rows, matched_rows, ambiguous_rows,
                unmatched_rows, skipped_rows, invalid_rows, summary, created_by
              )
-             VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+             VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
              RETURNING id`,
             [
               tenant_id,
               upload.filename,
+              sourceType,
+              marcaId,
+              apresentadoraId,
               summary.total_rows,
               summary.matched_rows,
               summary.ambiguous_rows,
@@ -178,20 +479,28 @@ export async function analyticsRoutes(app) {
           )
           const batchId = batchQ.rows[0].id
 
+          const defaultApresentadoras = apresentadoraId
+            ? JSON.stringify([{ apresentadora_id: apresentadoraId, percentual: 100 }])
+            : null
+
+          const rowIds = new Map()
           for (const row of matchedRows) {
-            await db.query(
+            const inserted = await db.query(
               `INSERT INTO analytics_import_rows (
                  tenant_id, batch_id, row_index, raw, normalized,
                  marca_nome, live_date, start_time, duration_seconds,
                  matched_live_id, matched_agenda_evento_id,
-                 match_status, match_confidence, match_reason, candidates
+                 match_status, match_confidence, match_reason, candidates,
+                 decisao, marca_id, apresentadoras
                )
                VALUES (
                  $1::uuid, $2::uuid, $3, $4::jsonb, $5::jsonb,
                  $6, $7::date, $8, $9,
                  $10::uuid, $11::uuid,
-                 $12, $13, $14, $15::jsonb
-               )`,
+                 $12, $13, $14, $15::jsonb,
+                 $16, $17::uuid, $18::jsonb
+               )
+               RETURNING id`,
               [
                 tenant_id,
                 batchId,
@@ -208,16 +517,31 @@ export async function analyticsRoutes(app) {
                 row.match_confidence ?? null,
                 row.match_reason ?? null,
                 JSON.stringify(row.candidates ?? []),
+                defaultDecisionFor(row.match_status),
+                marcaId,
+                defaultApresentadoras,
               ],
             )
+            // A tela de revisão precisa do id da linha para editar decisão e rateio.
+            rowIds.set(row.row_index, inserted.rows[0]?.id ?? null)
           }
 
           await db.query('COMMIT')
           return {
             batch_id: batchId,
             filename: upload.filename,
+            source_type: sourceType,
+            marca_id: marcaId,
+            apresentadora_id: apresentadoraId,
             summary,
-            rows: matchedRows.map(rowResponse),
+            rows: matchedRows.map((row) => ({
+              ...rowResponse({ ...row, id: rowIds.get(row.row_index) ?? null }),
+              decisao: defaultDecisionFor(row.match_status),
+              marca_id: marcaId,
+              apresentadoras: apresentadoraId
+                ? [{ apresentadora_id: apresentadoraId, percentual: 100 }]
+                : [],
+            })),
           }
         } catch (err) {
           await db.query('ROLLBACK').catch(() => {})
@@ -228,6 +552,196 @@ export async function analyticsRoutes(app) {
       request.log.error({ err }, 'analytics/imports/preview error')
       return reply.code(400).send({ error: err.message })
     }
+  })
+
+  app.get('/v1/analytics/imports', {
+    preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)],
+  }, async (request) => {
+    const { tenant_id } = request.user
+    const limit = Math.min(Number(request.query?.limit ?? 20) || 20, 100)
+    return app.withTenant(tenant_id, async (db) => {
+      const q = await db.query(
+        `SELECT b.id, b.filename, b.source_type, b.status, b.marca_id, b.apresentadora_id,
+                m.nome AS marca_nome,
+                b.total_rows, b.matched_rows, b.ambiguous_rows, b.unmatched_rows,
+                b.skipped_rows, b.invalid_rows, b.applied_rows, b.created_at, b.applied_at
+           FROM analytics_import_batches b
+           LEFT JOIN marcas m ON m.id = b.marca_id AND m.tenant_id = b.tenant_id
+          WHERE b.tenant_id = $1::uuid
+          ORDER BY b.created_at DESC
+          LIMIT $2`,
+        [tenant_id, limit],
+      )
+      return q.rows
+    })
+  })
+
+  app.get('/v1/analytics/imports/:id', {
+    preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)],
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const batchId = request.params.id
+    if (!UUID_RE.test(batchId)) return reply.code(400).send({ error: 'id must be a valid UUID' })
+
+    return app.withTenant(tenant_id, async (db) => {
+      const batchQ = await db.query(
+        `SELECT b.*, m.nome AS marca_nome, a.nome AS apresentadora_nome
+           FROM analytics_import_batches b
+           LEFT JOIN marcas m ON m.id = b.marca_id AND m.tenant_id = b.tenant_id
+           LEFT JOIN apresentadoras a ON a.id = b.apresentadora_id AND a.tenant_id = b.tenant_id
+          WHERE b.id = $1::uuid AND b.tenant_id = $2::uuid`,
+        [batchId, tenant_id],
+      )
+      const batch = batchQ.rows[0]
+      if (!batch) return reply.code(404).send({ error: 'Importacao nao encontrada' })
+
+      const rowsQ = await db.query(
+        `SELECT id, row_index, normalized, marca_nome, live_date, start_time, duration_seconds,
+                matched_live_id, matched_agenda_evento_id, match_status, match_confidence,
+                match_reason, candidates, decisao, marca_id, apresentadoras, applied_at, error
+           FROM analytics_import_rows
+          WHERE batch_id = $1::uuid AND tenant_id = $2::uuid
+          ORDER BY row_index ASC`,
+        [batchId, tenant_id],
+      )
+
+      return {
+        batch_id: batch.id,
+        filename: batch.filename,
+        source_type: batch.source_type,
+        status: batch.status,
+        marca_id: batch.marca_id,
+        marca_nome: batch.marca_nome,
+        apresentadora_id: batch.apresentadora_id,
+        apresentadora_nome: batch.apresentadora_nome,
+        summary: batch.summary,
+        rows: rowsQ.rows.map((row) => ({
+          ...rowResponse(row),
+          decisao: row.decisao,
+          marca_id: row.marca_id,
+          apresentadoras: row.apresentadoras ?? [],
+          applied_at: row.applied_at,
+        })),
+      }
+    })
+  })
+
+  app.patch('/v1/analytics/imports/:id/rows/:rowId', {
+    preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)],
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { id: batchId, rowId } = request.params
+    if (!UUID_RE.test(batchId) || !UUID_RE.test(rowId)) {
+      return reply.code(400).send({ error: 'id must be a valid UUID' })
+    }
+
+    const parsed = importRowPatchSchema.safeParse(request.body ?? {})
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? 'payload invalido' })
+    }
+    const patch = parsed.data
+
+    return app.withTenant(tenant_id, async (db) => {
+      const batchQ = await db.query(
+        'SELECT status FROM analytics_import_batches WHERE id = $1::uuid AND tenant_id = $2::uuid',
+        [batchId, tenant_id],
+      )
+      if (batchQ.rowCount === 0) return reply.code(404).send({ error: 'Importacao nao encontrada' })
+      if (batchQ.rows[0].status === 'applied') {
+        return reply.code(409).send({ error: 'Importacao ja aplicada' })
+      }
+
+      // A role do Supabase tem BYPASSRLS e as FKs são só por id: sem esta checagem, um tenant
+      // conseguiria apontar a live para a marca/apresentadora de outro.
+      if (patch.marca_id) {
+        const q = await db.query(
+          'SELECT 1 FROM marcas WHERE id = $1::uuid AND tenant_id = $2::uuid',
+          [patch.marca_id, tenant_id],
+        )
+        if (q.rowCount === 0) return reply.code(400).send({ error: 'Marca nao encontrada' })
+      }
+      if (patch.matched_live_id) {
+        const q = await db.query(
+          'SELECT 1 FROM lives WHERE id = $1::uuid AND tenant_id = $2::uuid',
+          [patch.matched_live_id, tenant_id],
+        )
+        if (q.rowCount === 0) return reply.code(400).send({ error: 'Live nao encontrada' })
+      }
+      if (patch.apresentadoras?.length) {
+        const ids = patch.apresentadoras.map((item) => item.apresentadora_id)
+        const q = await db.query(
+          'SELECT id FROM apresentadoras WHERE id = ANY($1::uuid[]) AND tenant_id = $2::uuid',
+          [ids, tenant_id],
+        )
+        if (q.rowCount !== ids.length) {
+          return reply.code(400).send({ error: 'Apresentadora nao encontrada' })
+        }
+      }
+
+      if (patch.decisao === 'vincular' && patch.matched_live_id === undefined) {
+        const atual = await db.query(
+          'SELECT matched_live_id FROM analytics_import_rows WHERE id = $1::uuid AND tenant_id = $2::uuid',
+          [rowId, tenant_id],
+        )
+        if (!atual.rows[0]?.matched_live_id) {
+          return reply.code(400).send({ error: 'Escolha a live antes de marcar a linha como vincular' })
+        }
+      }
+
+      const updated = await db.query(
+        `UPDATE analytics_import_rows
+            SET decisao = COALESCE($3, decisao),
+                marca_id = COALESCE($4::uuid, marca_id),
+                matched_live_id = CASE WHEN $5::boolean THEN $6::uuid ELSE matched_live_id END,
+                apresentadoras = COALESCE($7::jsonb, apresentadoras)
+          WHERE id = $1::uuid AND tenant_id = $2::uuid AND batch_id = $8::uuid
+          RETURNING id, row_index, normalized, marca_nome, live_date, start_time, duration_seconds,
+                    matched_live_id, match_status, match_confidence, match_reason, candidates,
+                    decisao, marca_id, apresentadoras, error`,
+        [
+          rowId,
+          tenant_id,
+          patch.decisao ?? null,
+          patch.marca_id ?? null,
+          patch.matched_live_id !== undefined,
+          patch.matched_live_id ?? null,
+          patch.apresentadoras ? JSON.stringify(patch.apresentadoras) : null,
+          batchId,
+        ],
+      )
+      const row = updated.rows[0]
+      if (!row) return reply.code(404).send({ error: 'Linha nao encontrada' })
+
+      return {
+        ...rowResponse(row),
+        decisao: row.decisao,
+        marca_id: row.marca_id,
+        apresentadoras: row.apresentadoras ?? [],
+      }
+    })
+  })
+
+  app.delete('/v1/analytics/imports/:id', {
+    preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)],
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const batchId = request.params.id
+    if (!UUID_RE.test(batchId)) return reply.code(400).send({ error: 'id must be a valid UUID' })
+
+    return app.withTenant(tenant_id, async (db) => {
+      const q = await db.query(
+        `UPDATE analytics_import_batches
+            SET status = 'cancelled'
+          WHERE id = $1::uuid AND tenant_id = $2::uuid AND status <> 'applied'
+          RETURNING id`,
+        [batchId, tenant_id],
+      )
+      if (q.rowCount === 0) {
+        return reply.code(409).send({ error: 'Importacao ja aplicada ou nao encontrada' })
+      }
+      app.audit?.log?.(request, { action: 'analytics.import_cancel', entity_type: 'analytics_import_batch', entity_id: batchId })?.catch(err => app.log.error({ err }, 'audit log failed'))
+      return { ok: true, batch_id: batchId, status: 'cancelled' }
+    })
   })
 
   app.post('/v1/analytics/imports/:id/apply', {
@@ -241,7 +755,7 @@ export async function analyticsRoutes(app) {
       await db.query('BEGIN')
       try {
         const batchQ = await db.query(
-          `SELECT id, status
+          `SELECT id, status, source_type, marca_id, apresentadora_id
              FROM analytics_import_batches
             WHERE id = $1::uuid
               AND tenant_id = $2::uuid
@@ -259,82 +773,98 @@ export async function analyticsRoutes(app) {
         }
 
         const rowsQ = await db.query(
-          `SELECT id, matched_live_id, normalized
+          `SELECT id, row_index, matched_live_id, normalized, decisao, marca_id, apresentadoras
              FROM analytics_import_rows
             WHERE tenant_id = $1::uuid
               AND batch_id = $2::uuid
-              AND match_status = 'matched'
-              AND matched_live_id IS NOT NULL
+              AND decisao IN ('vincular', 'criar')
+              AND applied_at IS NULL
             ORDER BY row_index ASC
             FOR UPDATE`,
           [tenant_id, batchId],
         )
 
+        const cabinePadraoId = rowsQ.rows.some((row) => row.decisao === 'criar')
+          ? await resolveCabinePadrao(db, tenant_id, batch.marca_id)
+          : null
+
         let applied = 0
+        const failures = []
+        const touchedLiveIds = []
+
         for (const row of rowsQ.rows) {
           const n = row.normalized ?? {}
-          await db.query(
-            `UPDATE lives
-                SET ads_gmv = $1,
-                    ads_cost = $2,
-                    live_impressions = $3,
-                    product_impressions = $4,
-                    product_clicks = $5,
-                    avg_viewing_duration = $6,
-                    new_followers = $7,
-                    manual_views = $8,
-                    manual_comments = $9,
-                    manual_likes = $10,
-                    manual_shares = $11,
-                    manual_orders = $12,
-                    ads_import_batch_id = $13::uuid,
-                    ads_import_row_id = $14::uuid,
-                    ads_metrics_updated_at = NOW()
-              WHERE id = $15::uuid
-                AND tenant_id = $16::uuid`,
-            [
-              n.ads_gmv ?? null,
-              n.ads_cost ?? null,
-              n.live_impressions ?? null,
-              n.product_impressions ?? null,
-              n.product_clicks ?? null,
-              n.avg_viewing_duration ?? null,
-              n.new_followers ?? null,
-              n.views ?? null,
-              n.comments ?? null,
-              n.likes ?? null,
-              n.shares ?? null,
-              n.attributed_orders ?? null,
+          await db.query('SAVEPOINT import_row')
+          try {
+            const liveId = await resolveTargetLive(db, {
+              tenantId: tenant_id,
+              row,
+              normalized: n,
+              batch,
+              cabinePadraoId,
+            })
+
+            await applyMetricsToLive(db, {
+              tenantId: tenant_id,
+              liveId,
+              normalized: n,
               batchId,
-              row.id,
-              row.matched_live_id,
-              tenant_id,
-            ],
-          )
-          await db.query(
-            `UPDATE analytics_import_rows
-                SET applied_at = NOW(), error = NULL
-              WHERE id = $1::uuid
-                AND tenant_id = $2::uuid`,
-            [row.id, tenant_id],
-          )
-          applied++
+              rowId: row.id,
+            })
+            await applyApresentadorasToLive(db, {
+              tenantId: tenant_id,
+              liveId,
+              apresentadoras: row.apresentadoras,
+            })
+
+            const gmv = officialGmvOf(n)
+            if (gmv != null) {
+              await calcularComissoesDaLive(db, {
+                liveId,
+                tenantId: tenant_id,
+                gmv,
+                pedidos: n.attributed_orders ?? 0,
+              })
+            }
+
+            await db.query(
+              `UPDATE analytics_import_rows
+                  SET applied_at = NOW(), error = NULL, matched_live_id = $3::uuid
+                WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+              [row.id, tenant_id, liveId],
+            )
+            await db.query('RELEASE SAVEPOINT import_row')
+            touchedLiveIds.push(liveId)
+            applied++
+          } catch (err) {
+            // Uma linha ruim não pode derrubar o lote inteiro: volta ao savepoint e registra o erro.
+            await db.query('ROLLBACK TO SAVEPOINT import_row')
+            await db.query(
+              `UPDATE analytics_import_rows SET error = $3
+                WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+              [row.id, tenant_id, String(err.message).slice(0, 500)],
+            )
+            failures.push({ row_index: row.row_index, error: err.message })
+          }
         }
 
+        // Só fecha o lote se tudo passou. Com falhas ele continua reaplicável (as linhas que já
+        // gravaram são puladas por applied_at), senão uma falha transitória travaria o retry.
+        const tudoOk = failures.length === 0
         await db.query(
           `UPDATE analytics_import_batches
-              SET status = 'applied',
-                  applied_rows = $1,
+              SET status = CASE WHEN $5::boolean THEN 'applied' ELSE status END,
+                  applied_rows = COALESCE(applied_rows, 0) + $1,
                   applied_by = $2,
-                  applied_at = NOW()
+                  applied_at = CASE WHEN $5::boolean THEN NOW() ELSE applied_at END
             WHERE id = $3::uuid
               AND tenant_id = $4::uuid`,
-          [applied, sub ?? null, batchId, tenant_id],
+          [applied, sub ?? null, batchId, tenant_id, tudoOk],
         )
 
         await db.query('COMMIT')
-        app.audit?.log?.(request, { action: 'analytics.import_apply', entity_type: 'analytics_import_batch', entity_id: batchId, metadata: { applied_rows: applied, live_ids: rowsQ.rows.map(r => r.matched_live_id) } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-        return { ok: true, batch_id: batchId, applied_rows: applied }
+        app.audit?.log?.(request, { action: 'analytics.import_apply', entity_type: 'analytics_import_batch', entity_id: batchId, metadata: { applied_rows: applied, failed_rows: failures.length, live_ids: touchedLiveIds } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        return { ok: true, batch_id: batchId, applied_rows: applied, failed_rows: failures }
       } catch (err) {
         await db.query('ROLLBACK').catch(() => {})
         request.log.error({ err }, 'analytics/imports/apply error')
@@ -642,7 +1172,11 @@ export async function analyticsRoutes(app) {
               COALESCE(SUM(COALESCE(l.final_total_likes, l.manual_likes, 0)), 0)::bigint AS likes_total,
               COALESCE(SUM(COALESCE(l.final_total_comments, l.manual_comments, 0)), 0)::bigint AS comentarios_total,
               COALESCE(SUM(COALESCE(l.final_total_shares, l.manual_shares, 0)), 0)::bigint AS shares_total,
-              COALESCE(SUM(COALESCE(l.final_gifts_diamonds, l.manual_diamonds, 0)), 0)::bigint AS diamonds_total
+              COALESCE(SUM(COALESCE(l.final_gifts_diamonds, l.manual_diamonds, 0)), 0)::bigint AS diamonds_total,
+              -- % de likes vem do TikTok Studio: usa espectadores únicos como denominador, que
+              -- não vem na planilha, então não dá para recalcular a partir de likes/views.
+              ROUND(AVG(NULLIF((l.studio_metrics->>'like_rate')::numeric, 0)), 2) AS like_rate_medio,
+              COALESCE(SUM(COALESCE(l.new_followers, 0)), 0)::bigint AS novos_seguidores
             FROM lives l
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
@@ -904,6 +1438,8 @@ export async function analyticsRoutes(app) {
             comentarios_total: toInt(liveOps.comentarios_total),
             shares_total: toInt(liveOps.shares_total),
             diamonds_total: toInt(liveOps.diamonds_total),
+            like_rate_medio: liveOps.like_rate_medio == null ? null : Number(liveOps.like_rate_medio),
+            novos_seguidores: toInt(liveOps.novos_seguidores),
             delta_gmv: pct(gmvTotal, gmvPrev),
             delta_faturamento: pct(gmvTotal, gmvPrev),
             delta_pedidos: pct(pedidosTotal, pedidosPrev),
@@ -932,6 +1468,8 @@ export async function analyticsRoutes(app) {
           comentarios_total: toInt(liveOps.comentarios_total),
           shares_total: toInt(liveOps.shares_total),
           diamonds_total: toInt(liveOps.diamonds_total),
+          like_rate_medio: liveOps.like_rate_medio == null ? null : Number(liveOps.like_rate_medio),
+          novos_seguidores: toInt(liveOps.novos_seguidores),
           gmv_mensal: monthlyRows,
           faturamento_mensal: monthlyRows,
           pedidos_mensal: pedidosMensal,
@@ -1030,7 +1568,10 @@ export async function analyticsRoutes(app) {
                   THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
                 ELSE 0
               END
-            ), 0) AS horas_live
+            ), 0) AS horas_live,
+            COALESCE(SUM(COALESCE(l.manual_likes, l.final_total_likes, 0)), 0)::bigint AS likes,
+            COALESCE(SUM(COALESCE(l.new_followers, 0)), 0)::bigint AS novos_seguidores,
+            ROUND(AVG(NULLIF((l.studio_metrics->>'like_rate')::numeric, 0)), 2) AS like_rate_medio
           FROM lives l
           LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
           LEFT JOIN LATERAL (
@@ -1090,6 +1631,11 @@ export async function analyticsRoutes(app) {
             horas_live: horasLive,
             gmv_por_hora: horasLive > 0 ? round2(gmv / horasLive) : 0,
             visualizacoes,
+            likes: Number(r.likes ?? 0),
+            novos_seguidores: Number(r.novos_seguidores ?? 0),
+            // % de likes reportada pelo TikTok Studio — usa espectadores únicos como
+            // denominador, que não vem na planilha, então não é recalculável aqui.
+            like_rate_medio: r.like_rate_medio == null ? null : Number(r.like_rate_medio),
           },
           etapas,
         }

@@ -50,6 +50,7 @@ describe('Route regressions: SQL and RBAC', () => {
         pedidos_lives: '15',
         total_lives: '2',
         comissao_franquia_lives: '300',
+        receita_combinada: '300',
         comissao_configurada: '1',
         comissao_faltante_count: '0',
         gmv_videos: '0',

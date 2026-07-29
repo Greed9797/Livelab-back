@@ -2,8 +2,13 @@ import { unzipSync, strFromU8 } from 'fflate'
 
 const TZ_OFFSET = '-03:00'
 const EXCEL_EPOCH_MS = Date.UTC(1899, 11, 30)
+const HEADER_SCAN_LIMIT = 20
 
-const FIELD_MAP = {
+export const SOURCE_TIKTOK_ADS = 'tiktok_ads'
+export const SOURCE_TIKTOK_STUDIO = 'tiktok_studio'
+
+// Relatório do TikTok Ads: data/hora vêm como serial + fração do Excel e a marca é uma coluna.
+const FIELD_MAP_ADS = {
   marca_nome: ['MARCA', 'Marca', 'marca'],
   excel_date: ['Start time', 'start time', 'Data'],
   start_fraction: ['Start time fraction', '__col_C'],
@@ -21,6 +26,59 @@ const FIELD_MAP = {
   shares: ['Shares'],
   ads_cost: ['Ads Cost'],
   ads_gmv: ['Ads GMV'],
+}
+
+// Relatório "Creator Live Performance" (TikTok Studio): tudo vem como texto, a data/hora é uma
+// string local, a duração é "2h37m" e NÃO existe coluna de marca — ela vem da seleção na tela.
+const FIELD_MAP_STUDIO = {
+  room_id: ['Room ID'],
+  room_title: ['Room Title'],
+  started_at_text: ['Start Time', 'Start time'],
+  ended_at_text: ['End Time', 'End time'],
+  duration_text: ['Duration'],
+  attributed_gmv: ['Attributed GMV'],
+  attributed_orders: ['Attributed orders'],
+  views: ['Views'],
+  live_impressions: ['Impressions', 'LIVE impressions'],
+  product_impressions: ['Product Impressions', 'Product impressions'],
+  product_clicks: ['Product clicks', 'Product Clicks'],
+  avg_viewing_duration: ['Avg. viewing duration per view', 'Avg. viewing duration per viewer'],
+  new_followers: ['New followers'],
+  likes: ['Likes'],
+  comments: ['Comments'],
+  shares: ['Shares'],
+}
+
+// Colunas que não têm coluna própria em `lives` e vão preservadas em lives.studio_metrics.
+// As taxas do TikTok não são reproduzíveis a partir dos absolutos (cada uma usa um denominador
+// diferente — Comment rate usa Views, Like rate usa espectadores únicos, que não vêm na planilha),
+// por isso são guardadas como vieram. Percentuais ficam como número percentual (201.57 = 201,57%).
+const STUDIO_EXTRA_FIELDS = [
+  ['room_title', 'Room Title', 'text'],
+  ['items_sold', 'Attributed items sold', 'int'],
+  ['sku_orders', 'Attributed SKU orders', 'int'],
+  ['customers', 'Customers', 'int'],
+  ['aov', 'AOV', 'num'],
+  ['impressions_per_hour', 'Impressions Per Hour', 'num'],
+  ['gmv_per_hour', 'GMV per hour', 'num'],
+  ['show_gpm', 'Show GPM', 'num'],
+  ['watch_gpm', 'Watch GPM', 'num'],
+  ['avg_viewing_duration_total', 'Avg. viewing duration', 'num'],
+  ['tap_through_rate', 'Tap through rate', 'num'],
+  ['live_ctr', 'LIVE CTR', 'num'],
+  ['ctr', 'CTR', 'num'],
+  ['ctor', 'CTOR', 'num'],
+  ['ctor_sku_orders', 'CTOR (SKU orders)', 'num'],
+  ['sku_order_rate', 'SKU order rate', 'num'],
+  ['follow_rate', 'Follow rate', 'num'],
+  ['comment_rate', 'Comment rate', 'num'],
+  ['share_rate', 'Share rate', 'num'],
+  ['like_rate', 'Like rate', 'num'],
+]
+
+const FIELD_MAPS = {
+  [SOURCE_TIKTOK_ADS]: FIELD_MAP_ADS,
+  [SOURCE_TIKTOK_STUDIO]: FIELD_MAP_STUDIO,
 }
 
 function xmlUnescape(value) {
@@ -78,9 +136,10 @@ function parseXlsxRows(buffer) {
     if (Object.keys(row).length > 0) rows.push(row)
   }
 
-  if (rows.length < 2) return []
-  const headers = rows[0]
-  return rows.slice(1).map((row) => {
+  if (rows.length < 2) return { source_type: SOURCE_TIKTOK_ADS, records: [] }
+  const headerIndex = findHeaderRowIndex(rows)
+  const headers = rows[headerIndex]
+  const records = rows.slice(headerIndex + 1).map((row) => {
     const record = { __columns: row }
     for (const [col, value] of Object.entries(row)) {
       const header = headers[col]
@@ -90,6 +149,44 @@ function parseXlsxRows(buffer) {
     }
     return record
   })
+  return { source_type: detectSourceType(headers), records }
+}
+
+// Todos os cabeçalhos que o sistema reconhece, em qualquer formato de planilha.
+const KNOWN_HEADERS = new Set(
+  [
+    ...Object.values(FIELD_MAP_ADS).flat(),
+    ...Object.values(FIELD_MAP_STUDIO).flat(),
+    ...STUDIO_EXTRA_FIELDS.map(([, header]) => header),
+  ]
+    .filter((header) => !header.startsWith('__'))
+    .map((header) => header.toLowerCase()),
+)
+
+function countKnownHeaders(row) {
+  return Object.values(row)
+    .filter((value) => value && KNOWN_HEADERS.has(String(value).trim().toLowerCase()))
+    .length
+}
+
+/**
+ * O Creator Live Performance põe a data na linha 1, deixa a linha 2 vazia e só então o cabeçalho.
+ * Em vez de assumir a primeira linha, pega a que mais reconhece cabeçalhos conhecidos.
+ */
+function findHeaderRowIndex(rows) {
+  let best = { index: 0, score: 0 }
+  for (let i = 0; i < Math.min(rows.length, HEADER_SCAN_LIMIT); i++) {
+    const score = countKnownHeaders(rows[i])
+    if (score > best.score) best = { index: i, score }
+  }
+  return best.score >= 2 ? best.index : 0
+}
+
+function detectSourceType(headerRow) {
+  const headers = new Set(
+    Object.values(headerRow ?? {}).map((value) => String(value ?? '').trim().toLowerCase()),
+  )
+  return headers.has('room id') ? SOURCE_TIKTOK_STUDIO : SOURCE_TIKTOK_ADS
 }
 
 function detectDelimiter(line) {
@@ -126,10 +223,11 @@ function splitCsvLine(line, delimiter) {
 function parseCsvRows(buffer) {
   const text = Buffer.from(buffer).toString('utf8').replace(/^\uFEFF/, '')
   const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '')
-  if (lines.length < 2) return []
+  if (lines.length < 2) return { source_type: SOURCE_TIKTOK_ADS, records: [] }
   const delimiter = detectDelimiter(lines[0])
-  const headers = splitCsvLine(lines[0], delimiter).map((h) => h.trim())
-  return lines.slice(1).map((line) => {
+  const headerLineIndex = findHeaderLineIndex(lines, delimiter)
+  const headers = splitCsvLine(lines[headerLineIndex], delimiter).map((h) => h.trim())
+  const records = lines.slice(headerLineIndex + 1).map((line) => {
     const cols = splitCsvLine(line, delimiter)
     const record = { __columns: {} }
     headers.forEach((header, index) => {
@@ -142,6 +240,17 @@ function parseCsvRows(buffer) {
     if (!record['Start time fraction']) record['Start time fraction'] = record.__col_C
     return record
   })
+  return { source_type: detectSourceType(headers), records }
+}
+
+function findHeaderLineIndex(lines, delimiter) {
+  let best = { index: 0, score: 0 }
+  for (let i = 0; i < Math.min(lines.length, HEADER_SCAN_LIMIT); i++) {
+    const cols = splitCsvLine(lines[i], delimiter).map((value) => value.trim())
+    const score = countKnownHeaders(cols)
+    if (score > best.score) best = { index: i, score }
+  }
+  return best.score >= 2 ? best.index : 0
 }
 
 function pick(record, names) {
@@ -186,6 +295,73 @@ function fractionToTime(value) {
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
 }
 
+/**
+ * Duração em texto do Creator Live Performance: "2h37m", "1h", "45m", "01:23:45", "90".
+ * parseImportNumber sozinho devolveria 2 para "2h37m" — por isso este parser existe.
+ */
+export function parseDurationToSeconds(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? Math.round(value) : null
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+
+  if (raw.includes(':')) {
+    const parts = raw.split(':').map((part) => Number(part.trim()))
+    if (parts.some((part) => !Number.isFinite(part))) return null
+    const [h, m, s] = parts.length === 2 ? [parts[0], parts[1], 0] : parts
+    return Math.round(h * 3600 + m * 60 + (s ?? 0))
+  }
+
+  // Sem \b: em "2h37m" o 'h' é seguido de dígito, então não há fronteira de palavra e o "2h"
+  // seria descartado. Alternativas em ordem decrescente para "horas" vencer "h".
+  const unit = raw.match(/(\d+(?:[.,]\d+)?)\s*(horas|hora|hrs|hr|h|mins|min|m|segs|seg|s)/gi)
+  if (unit) {
+    let total = 0
+    for (const part of unit) {
+      const amount = Number(part.match(/\d+(?:[.,]\d+)?/)[0].replace(',', '.'))
+      const suffix = part.replace(/[\d.,\s]/g, '').toLowerCase()
+      if (suffix.startsWith('h')) total += amount * 3600
+      else if (suffix.startsWith('m')) total += amount * 60
+      else total += amount
+    }
+    return Math.round(total)
+  }
+
+  const plain = parseImportNumber(raw)
+  return plain == null ? null : Math.round(plain)
+}
+
+/**
+ * "2026-07-23 08:09:17" → "2026-07-23T08:09:17-03:00".
+ * A planilha vem em horário local; o banco roda em UTC. Sem a âncora de fuso, `new Date()` no
+ * Railway interpretaria a string como UTC e jogaria a live 3 horas para frente.
+ */
+export function parseDateTimeLocal(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+
+  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?/)
+  if (iso) {
+    const [, y, mo, d, h, mi, s] = iso
+    return `${y}-${mo}-${d}T${h.padStart(2, '0')}:${mi}:${s ?? '00'}${TZ_OFFSET}`
+  }
+
+  const br = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})[T ]?(\d{1,2})?:?(\d{2})?(?::(\d{2}))?/)
+  if (br) {
+    const [, d, mo, y, h, mi, s] = br
+    return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}T${(h ?? '00').padStart(2, '0')}:${mi ?? '00'}:${s ?? '00'}${TZ_OFFSET}`
+  }
+
+  return null
+}
+
+function localDateOf(isoWithOffset) {
+  return isoWithOffset ? isoWithOffset.slice(0, 10) : null
+}
+
+function localTimeOf(isoWithOffset) {
+  return isoWithOffset ? isoWithOffset.slice(11, 16) : null
+}
+
 function addSecondsToIso(iso, seconds) {
   return new Date(new Date(iso).getTime() + seconds * 1000).toISOString()
 }
@@ -203,7 +379,84 @@ export function normalizeBrandName(value) {
   return normalizeText(value)
 }
 
-function normalizeRow(record, rowIndex) {
+function normalizeRow(record, rowIndex, sourceType) {
+  return sourceType === SOURCE_TIKTOK_STUDIO
+    ? normalizeRowStudio(record, rowIndex)
+    : normalizeRowAds(record, rowIndex)
+}
+
+/**
+ * O Creator Live Performance não traz marca: ela vem da seleção feita na tela de importação e é
+ * aplicada depois, no preview. Aqui só o que a planilha realmente diz.
+ */
+function normalizeRowStudio(record, rowIndex) {
+  const FIELD_MAP = FIELD_MAP_STUDIO
+  const startedAt = parseDateTimeLocal(pick(record, FIELD_MAP.started_at_text))
+  const endedAtRaw = parseDateTimeLocal(pick(record, FIELD_MAP.ended_at_text))
+  const durationText = pick(record, FIELD_MAP.duration_text)
+  const durationFromText = parseDurationToSeconds(durationText)
+  const durationFromRange = startedAt && endedAtRaw
+    ? Math.round((new Date(endedAtRaw).getTime() - new Date(startedAt).getTime()) / 1000)
+    : null
+  // A duração em texto é arredondada ao minuto ("2h37m"); o intervalo real é mais preciso.
+  const durationSeconds = durationFromRange && durationFromRange > 0
+    ? durationFromRange
+    : (durationFromText ?? 0)
+  const endedAt = endedAtRaw
+    ?? (startedAt && durationSeconds > 0 ? addSecondsToIso(startedAt, durationSeconds) : null)
+
+  // 19 dígitos: estoura Number.MAX_SAFE_INTEGER, então nunca passa por parseImportNumber.
+  const roomId = String(pick(record, FIELD_MAP.room_id) ?? '').trim() || null
+
+  const studioMetrics = {}
+  for (const [key, header, kind] of STUDIO_EXTRA_FIELDS) {
+    const value = pick(record, [header])
+    if (value === null || value === undefined || value === '') continue
+    if (kind === 'text') studioMetrics[key] = String(value).trim()
+    else {
+      const parsed = parseImportNumber(value)
+      if (parsed != null) studioMetrics[key] = kind === 'int' ? Math.round(parsed) : parsed
+    }
+  }
+
+  const normalized = {
+    row_index: rowIndex,
+    source_type: SOURCE_TIKTOK_STUDIO,
+    room_id: roomId,
+    room_title: studioMetrics.room_title ?? null,
+    marca_nome: '',
+    marca_key: '',
+    live_date: localDateOf(startedAt),
+    start_time: localTimeOf(startedAt),
+    started_at: startedAt,
+    ended_at: endedAt,
+    duration_seconds: durationSeconds,
+    duration_hours: durationSeconds > 0 ? durationSeconds / 3600 : null,
+    attributed_gmv: parseImportNumber(pick(record, FIELD_MAP.attributed_gmv)),
+    attributed_orders: Math.round(parseImportNumber(pick(record, FIELD_MAP.attributed_orders)) ?? 0),
+    views: Math.round(parseImportNumber(pick(record, FIELD_MAP.views)) ?? 0),
+    live_impressions: Math.round(parseImportNumber(pick(record, FIELD_MAP.live_impressions)) ?? 0),
+    product_clicks: Math.round(parseImportNumber(pick(record, FIELD_MAP.product_clicks)) ?? 0),
+    avg_viewing_duration: parseImportNumber(pick(record, FIELD_MAP.avg_viewing_duration)),
+    product_impressions: Math.round(parseImportNumber(pick(record, FIELD_MAP.product_impressions)) ?? 0),
+    new_followers: Math.round(parseImportNumber(pick(record, FIELD_MAP.new_followers)) ?? 0),
+    likes: Math.round(parseImportNumber(pick(record, FIELD_MAP.likes)) ?? 0),
+    comments: Math.round(parseImportNumber(pick(record, FIELD_MAP.comments)) ?? 0),
+    shares: Math.round(parseImportNumber(pick(record, FIELD_MAP.shares)) ?? 0),
+    ads_cost: null,
+    ads_gmv: null,
+    studio_metrics: studioMetrics,
+  }
+
+  const errors = []
+  if (!normalized.started_at) errors.push('data/hora ausente')
+  if (!normalized.duration_seconds || normalized.duration_seconds <= 0) errors.push('duracao ausente')
+
+  return { row_index: rowIndex, raw: record, normalized, errors }
+}
+
+function normalizeRowAds(record, rowIndex) {
+  const FIELD_MAP = FIELD_MAP_ADS
   const marcaNome = String(pick(record, FIELD_MAP.marca_nome) ?? '').trim()
   const liveDate = excelSerialToDate(pick(record, FIELD_MAP.excel_date))
   const startTime = fractionToTime(pick(record, FIELD_MAP.start_fraction))
@@ -213,6 +466,7 @@ function normalizeRow(record, rowIndex) {
 
   const normalized = {
     row_index: rowIndex,
+    source_type: SOURCE_TIKTOK_ADS,
     marca_nome: marcaNome,
     marca_key: normalizeBrandName(marcaNome),
     live_date: liveDate,
@@ -244,15 +498,26 @@ function normalizeRow(record, rowIndex) {
   return { row_index: rowIndex, raw: record, normalized, errors }
 }
 
+/**
+ * @returns {{ source_type: string, rows: Array }} formato detectado pelos cabeçalhos + linhas normalizadas.
+ */
 export function parseAnalyticsImportBuffer({ buffer, filename }) {
   const lower = String(filename ?? '').toLowerCase()
-  const records = lower.endsWith('.xlsx') || lower.endsWith('.xlsm')
+  const { source_type: sourceType, records } = lower.endsWith('.xlsx') || lower.endsWith('.xlsm')
     ? parseXlsxRows(buffer)
     : parseCsvRows(buffer)
 
-  return records
-    .map((record, index) => normalizeRow(record, index + 1))
-    .filter((row) => row.normalized.marca_nome || row.normalized.duration_seconds || row.normalized.ads_gmv != null)
+  const rows = records
+    .map((record, index) => normalizeRow(record, index + 1, sourceType))
+    .filter((row) => (
+      row.normalized.marca_nome
+      || row.normalized.room_id
+      || row.normalized.duration_seconds
+      || row.normalized.ads_gmv != null
+      || row.normalized.attributed_gmv != null
+    ))
+
+  return { source_type: sourceType, rows }
 }
 
 export async function loadAnalyticsImportCandidates(db, { fromDate, toDate }) {
@@ -289,7 +554,11 @@ function overlapSeconds(aStart, aEnd, bStart, bEnd) {
   return Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart)) / 1000
 }
 
-export function matchAnalyticsImportRows(rows, candidates) {
+/**
+ * @param {{ marcaId?: string|null }} options marca escolhida na tela — usada quando a planilha
+ *   não traz coluna de marca (Creator Live Performance), para restringir os candidatos.
+ */
+export function matchAnalyticsImportRows(rows, candidates, { marcaId = null } = {}) {
   return rows.map((row) => {
     const n = row.normalized
     if (row.errors.length > 0) {
@@ -302,7 +571,9 @@ export function matchAnalyticsImportRows(rows, candidates) {
     const rowStart = new Date(n.started_at).getTime()
     const rowEnd = new Date(n.ended_at).getTime()
     const matches = candidates
-      .filter((candidate) => candidate.marca_key === n.marca_key)
+      .filter((candidate) => (n.marca_key
+        ? candidate.marca_key === n.marca_key
+        : !marcaId || String(candidate.marca_id) === String(marcaId)))
       .map((candidate) => {
         const candDuration = Math.max(1, (candidate.end_ms - candidate.start_ms) / 1000)
         const overlap = overlapSeconds(rowStart, rowEnd, candidate.start_ms, candidate.end_ms)

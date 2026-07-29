@@ -128,6 +128,7 @@ export const MIGRATIONS_LIST = [
   '131_rls_gaps_live_requests_user_tenant_access.sql',
   '132_marca_tipo_cobranca.sql',
   '133_marca_datas_contrato.sql',
+  '134_tiktok_studio_import.sql',
 ]
 
 async function ensureMigrationsTable(client) {

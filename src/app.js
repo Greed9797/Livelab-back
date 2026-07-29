@@ -184,10 +184,19 @@ export async function buildApp(opts = {}) {
   })
   // Global rate limiting — usa request.ip (já correto graças ao trustProxy)
   await app.register(rateLimit, {
-    max: 100,
+    max: 300,
     timeWindow: '1 minute',
-    keyGenerator: (request) => request.ip,
-    errorResponseBuilder: () => ({ error: 'Muitas requisições. Tente novamente em breve.' }),
+    // Chave por USUÁRIO quando autenticado; IP só para quem não está logado.
+    // Com chave por IP, um escritório atrás de NAT dividia uma única cota entre todo
+    // mundo: bastavam algumas abas com o polling da home (30s) para estourar e o
+    // dashboard começar a falhar para todos ao mesmo tempo.
+    keyGenerator: (request) => request.user?.sub ?? request.ip,
+    // Sem statusCode aqui, o errorHandler global cai no `?? 500` e o cliente recebe
+    // 500 — o front trata como servidor quebrado em vez de "excedeu, tente de novo".
+    errorResponseBuilder: () => ({
+      statusCode: 429,
+      error: 'Muitas requisições. Tente novamente em breve.',
+    }),
   })
   await app.register(compress, { global: true })
   await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024 } })

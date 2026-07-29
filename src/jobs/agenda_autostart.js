@@ -8,7 +8,7 @@
 // live_id IS NULL), pra cada um:
 //   1) SELECT FOR UPDATE no agenda_eventos (lock pessimista vs clique manual)
 //   2) Re-check live_id IS NULL dentro da transação
-//   3) INSERT lives (status_publicacao='rascunho', origem_dados='auto_agenda')
+//   3) INSERT lives (status_publicacao='rascunho', origem_dados='api')
 //   4) UPDATE agenda_eventos status='ao_vivo', live_id
 //   5) UPDATE cabines status='ao_vivo', live_atual_id
 //   6) Audit log
@@ -165,8 +165,14 @@ async function startOneEvent(app, ev) {
       `INSERT INTO lives
         (tenant_id, cabine_id, cliente_id, apresentador_id, tipo,
          status_publicacao, origem_dados, agenda_evento_id, previsto_fim, marca_id)
-       VALUES ($1::uuid, $2::uuid, $3, $4, 'live',
-               'rascunho', 'auto_agenda', $5::uuid, $6::timestamptz, $7)
+       -- origem_dados só aceita 'manual'|'api' (lives_origem_dados_check). Gravar
+       -- 'auto_agenda' fazia TODO insert deste job falhar em silêncio — nenhuma live
+       -- chegou a ser aberta automaticamente. Quem veio da agenda já é identificável
+       -- por agenda_evento_id IS NOT NULL, então 'api' basta.
+       -- tipo só aceita 'cliente'|'afiliado'|'teste' (lives_tipo_check); 'live' não
+       -- existe e derrubava o insert junto com origem_dados.
+       VALUES ($1::uuid, $2::uuid, $3, $4, 'cliente',
+               'rascunho', 'api', $5::uuid, $6::timestamptz, $7)
        RETURNING id`,
       [
         ev.tenant_id,
@@ -206,7 +212,10 @@ async function startOneEvent(app, ev) {
     // Audit log (best effort — não bloqueia se tabela ausente).
     try {
       await client.query(
-        `INSERT INTO audit_log (tenant_id, actor_user_id, action, entity_type, entity_id, metadata)
+        // audit_log usa user_id (actor_user_id é de cabine_eventos/contrato_eventos).
+        // Com o nome errado o INSERT falhava e abortava a transação inteira, revertendo
+        // a live que o job acabara de abrir.
+        `INSERT INTO audit_log (tenant_id, user_id, action, entity_type, entity_id, metadata)
            VALUES ($1::uuid, NULL, 'live.iniciada_auto', 'lives', $2::uuid, $3::jsonb)`,
         [ev.tenant_id, liveId, JSON.stringify({ agenda_evento_id: locked.id, source: 'agenda_autostart' })],
       )

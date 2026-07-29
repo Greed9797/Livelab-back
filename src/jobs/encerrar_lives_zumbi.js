@@ -81,7 +81,8 @@ export async function runEncerrarLivesZumbiTick(app) {
         }
         try {
           await client.query(
-            `INSERT INTO audit_log (tenant_id, actor_user_id, action, entity_type, entity_id, metadata)
+            // audit_log usa user_id, não actor_user_id — ver agenda_autostart.js.
+            `INSERT INTO audit_log (tenant_id, user_id, action, entity_type, entity_id, metadata)
                VALUES ($1::uuid, NULL, 'live.auto_encerrada_zumbi', 'lives', $2::uuid, '{}'::jsonb)`,
             [live.tenant_id, live.id],
           )

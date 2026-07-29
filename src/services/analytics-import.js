@@ -559,64 +559,90 @@ function overlapSeconds(aStart, aEnd, bStart, bEnd) {
  *   não traz coluna de marca (Creator Live Performance), para restringir os candidatos.
  */
 export function matchAnalyticsImportRows(rows, candidates, { marcaId = null } = {}) {
-  return rows.map((row) => {
-    const n = row.normalized
-    if (row.errors.length > 0) {
-      return { ...row, match_status: 'invalid', match_reason: row.errors.join(', '), candidates: [] }
-    }
-    if (n.duration_seconds < 300) {
-      return { ...row, match_status: 'skipped_short', match_reason: 'live com menos de 5 minutos', candidates: [] }
-    }
+  // 1ª passada: pontua os candidatos de cada linha isoladamente.
+  const avaliadas = rows.map((row) => avaliarLinha(row, candidates, marcaId))
 
-    const rowStart = new Date(n.started_at).getTime()
-    const rowEnd = new Date(n.ended_at).getTime()
-    const matches = candidates
-      .filter((candidate) => (n.marca_key
-        ? candidate.marca_key === n.marca_key
-        : !marcaId || String(candidate.marca_id) === String(marcaId)))
-      .map((candidate) => {
-        const candDuration = Math.max(1, (candidate.end_ms - candidate.start_ms) / 1000)
-        const overlap = overlapSeconds(rowStart, rowEnd, candidate.start_ms, candidate.end_ms)
-        const score = overlap / Math.max(1, Math.min(n.duration_seconds, candDuration))
-        return {
-          live_id: candidate.live_id,
-          agenda_evento_id: candidate.agenda_evento_id,
-          marca_nome: candidate.marca_nome,
-          iniciado_em: candidate.iniciado_em,
-          encerrado_em: candidate.encerrado_em,
-          overlap_seconds: Math.round(overlap),
-          start_delta_seconds: Math.round(Math.abs(candidate.start_ms - rowStart) / 1000),
-          score: Number(score.toFixed(4)),
-        }
-      })
-      .filter((candidate) => candidate.overlap_seconds > 0)
-      .sort((a, b) => b.score - a.score || b.overlap_seconds - a.overlap_seconds || a.start_delta_seconds - b.start_delta_seconds)
+  // 2ª passada: uma live só pode ser o destino de UMA linha. Sem isso, duas lives
+  // distintas da planilha casavam com a mesma live e o apply sobrescrevia uma com a
+  // outra — o GMV de uma delas sumia.
+  const tomadas = new Map()
+  const comCandidatos = avaliadas
+    .filter((a) => a.matches && a.matches.length > 0)
+    .sort((a, b) => b.matches[0].score - a.matches[0].score)
 
-    if (matches.length === 0) {
-      return { ...row, match_status: 'unmatched', match_reason: 'sem live da mesma marca com sobreposicao no dia', candidates: [] }
+  for (const avaliada of comCandidatos) {
+    const livres = avaliada.matches.filter((m) => !tomadas.has(m.live_id))
+    if (livres.length === 0) {
+      avaliada.resultado = {
+        match_status: 'unmatched',
+        match_reason: 'a live candidata ja foi vinculada a outra linha do arquivo',
+        candidates: avaliada.matches.slice(0, 5),
+      }
+      continue
     }
 
-    const [best, second] = matches
-    const ambiguous = second && second.score > 0 && (best.score - second.score) < 0.15
-    if (ambiguous) {
-      return {
-        ...row,
+    const [best, second] = livres
+    if (second && second.score > 0 && (best.score - second.score) < 0.15) {
+      avaliada.resultado = {
         match_status: 'ambiguous',
         match_reason: 'mais de uma live candidata com sobreposicao parecida',
-        candidates: matches.slice(0, 5),
+        candidates: livres.slice(0, 5),
       }
+      continue
     }
 
-    return {
-      ...row,
+    tomadas.set(best.live_id, avaliada.row.row_index)
+    avaliada.resultado = {
       match_status: 'matched',
       match_reason: `sobreposicao ${Math.round(best.score * 100)}%`,
       match_confidence: best.score,
       matched_live_id: best.live_id,
       matched_agenda_evento_id: best.agenda_evento_id,
-      candidates: matches.slice(0, 5),
+      candidates: livres.slice(0, 5),
     }
-  })
+  }
+
+  return avaliadas.map((a) => ({ ...a.row, ...a.resultado }))
+}
+
+/** Pontua os candidatos de uma linha. Não decide o vínculo — quem decide é a 2ª passada. */
+function avaliarLinha(row, candidates, marcaId) {
+  const n = row.normalized
+  if (row.errors.length > 0) {
+    return { row, matches: null, resultado: { match_status: 'invalid', match_reason: row.errors.join(', '), candidates: [] } }
+  }
+  if (n.duration_seconds < 300) {
+    return { row, matches: null, resultado: { match_status: 'skipped_short', match_reason: 'live com menos de 5 minutos', candidates: [] } }
+  }
+
+  const rowStart = new Date(n.started_at).getTime()
+  const rowEnd = new Date(n.ended_at).getTime()
+  const matches = candidates
+    .filter((candidate) => (n.marca_key
+      ? candidate.marca_key === n.marca_key
+      : !marcaId || String(candidate.marca_id) === String(marcaId)))
+    .map((candidate) => {
+      const candDuration = Math.max(1, (candidate.end_ms - candidate.start_ms) / 1000)
+      const overlap = overlapSeconds(rowStart, rowEnd, candidate.start_ms, candidate.end_ms)
+      const score = overlap / Math.max(1, Math.min(n.duration_seconds, candDuration))
+      return {
+        live_id: candidate.live_id,
+        agenda_evento_id: candidate.agenda_evento_id,
+        marca_nome: candidate.marca_nome,
+        iniciado_em: candidate.iniciado_em,
+        encerrado_em: candidate.encerrado_em,
+        overlap_seconds: Math.round(overlap),
+        start_delta_seconds: Math.round(Math.abs(candidate.start_ms - rowStart) / 1000),
+        score: Number(score.toFixed(4)),
+      }
+    })
+    .filter((candidate) => candidate.overlap_seconds > 0)
+    .sort((a, b) => b.score - a.score || b.overlap_seconds - a.overlap_seconds || a.start_delta_seconds - b.start_delta_seconds)
+
+  if (matches.length === 0) {
+    return { row, matches: null, resultado: { match_status: 'unmatched', match_reason: 'sem live da mesma marca com sobreposicao no dia', candidates: [] } }
+  }
+  return { row, matches, resultado: null }
 }
 
 export function summarizeImportRows(rows) {

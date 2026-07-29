@@ -86,6 +86,56 @@ describe('analytics import parser and matcher', () => {
   })
 })
 
+describe('uma live não pode receber duas linhas do mesmo arquivo', () => {
+  // Duas lives distintas do TikTok sobrepondo a mesma janela. Sem atribuição exclusiva, as duas
+  // casavam com a mesma live e o apply gravava uma por cima da outra — o GMV de uma sumia.
+  const duasLinhas = [
+    'Room ID,Room Title,Start Time,End Time,Duration,Attributed GMV,Attributed orders,Views,Likes',
+    '111,Live A,2026-07-23 08:00:00,2026-07-23 11:00:00,3h,"R$ 100.00",1,10,5',
+    '222,Live B,2026-07-23 08:30:00,2026-07-23 11:30:00,3h,"R$ 200.00",2,20,6',
+  ].join('\n')
+
+  const candidato = (liveId, inicio, fim) => ({
+    live_id: liveId,
+    agenda_evento_id: null,
+    marca_id: 'M1',
+    marca_nome: 'X',
+    marca_key: 'x',
+    iniciado_em: inicio,
+    encerrado_em: fim,
+    start_ms: new Date(inicio).getTime(),
+    end_ms: new Date(fim).getTime(),
+  })
+
+  const parse = () => parseAnalyticsImportBuffer({ filename: 'x.csv', buffer: Buffer.from(duasLinhas) }).rows
+
+  it('gives the live to the best-scoring row and leaves the other unmatched', () => {
+    const matched = matchAnalyticsImportRows(
+      parse(),
+      [candidato('LIVE-UNICA', '2026-07-23T11:00:00Z', '2026-07-23T14:00:00Z')],
+      { marcaId: 'M1' },
+    )
+    const vinculadas = matched.filter((r) => r.matched_live_id).map((r) => r.matched_live_id)
+    expect(new Set(vinculadas).size).toBe(vinculadas.length)
+    expect(vinculadas).toHaveLength(1)
+    expect(matched.find((r) => !r.matched_live_id)?.match_reason).toContain('ja foi vinculada')
+  })
+
+  it('still matches every row when there are enough distinct lives', () => {
+    const matched = matchAnalyticsImportRows(
+      parse(),
+      [
+        candidato('LIVE-A', '2026-07-23T11:00:00Z', '2026-07-23T14:00:00Z'),
+        candidato('LIVE-B', '2026-07-23T11:30:00Z', '2026-07-23T14:30:00Z'),
+      ],
+      { marcaId: 'M1' },
+    )
+    const vinculadas = matched.filter((r) => r.matched_live_id).map((r) => r.matched_live_id)
+    expect(vinculadas).toHaveLength(2)
+    expect(new Set(vinculadas).size).toBe(2)
+  })
+})
+
 describe('rateio das apresentadoras na escala do banco', () => {
   // percentual_rateio é NUMERIC(5,2). Uma tolerância de 0.01 aceitaria 33.335 × 3, que o banco
   // arredonda para 33.34 cada e passa a somar 100.02 — GMV rateado além do total da live.

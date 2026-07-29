@@ -666,6 +666,22 @@ export async function analyticsRoutes(app) {
           [patch.matched_live_id, tenant_id],
         )
         if (q.rowCount === 0) return reply.code(400).send({ error: 'Live nao encontrada' })
+
+        // Uma live só pode receber uma linha do arquivo: duas linhas na mesma live
+        // fariam a segunda sobrescrever a primeira no apply.
+        const jaUsada = await db.query(
+          `SELECT row_index FROM analytics_import_rows
+            WHERE tenant_id = $1::uuid AND batch_id = $2::uuid
+              AND matched_live_id = $3::uuid AND id <> $4::uuid
+              AND decisao = 'vincular'
+            LIMIT 1`,
+          [tenant_id, batchId, patch.matched_live_id, rowId],
+        )
+        if (jaUsada.rowCount > 0) {
+          return reply.code(409).send({
+            error: `Essa live já está vinculada à linha ${jaUsada.rows[0].row_index} deste arquivo`,
+          })
+        }
       }
       if (patch.apresentadoras?.length) {
         const ids = patch.apresentadoras.map((item) => item.apresentadora_id)
@@ -791,6 +807,9 @@ export async function analyticsRoutes(app) {
         let applied = 0
         const failures = []
         const touchedLiveIds = []
+        // Guarda final contra duas linhas gravando na mesma live (a segunda apagaria a
+        // primeira). O matcher e o PATCH já barram antes; aqui é a rede de segurança.
+        const livesDoLote = new Map()
 
         for (const row of rowsQ.rows) {
           const n = row.normalized ?? {}
@@ -803,6 +822,11 @@ export async function analyticsRoutes(app) {
               batch,
               cabinePadraoId,
             })
+
+            if (livesDoLote.has(liveId)) {
+              throw new Error(`Live já recebeu a linha ${livesDoLote.get(liveId)} deste arquivo`)
+            }
+            livesDoLote.set(liveId, row.row_index)
 
             await applyMetricsToLive(db, {
               tenantId: tenant_id,

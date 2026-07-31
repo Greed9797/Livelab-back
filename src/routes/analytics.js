@@ -833,22 +833,6 @@ export async function analyticsRoutes(app) {
           [patch.matched_live_id, tenant_id],
         )
         if (q.rowCount === 0) return reply.code(400).send({ error: 'Live nao encontrada' })
-
-        // Uma live só pode receber uma linha do arquivo: duas linhas na mesma live
-        // fariam a segunda sobrescrever a primeira no apply.
-        const jaUsada = await db.query(
-          `SELECT row_index FROM analytics_import_rows
-            WHERE tenant_id = $1::uuid AND batch_id = $2::uuid
-              AND matched_live_id = $3::uuid AND id <> $4::uuid
-              AND decisao = 'vincular'
-            LIMIT 1`,
-          [tenant_id, batchId, patch.matched_live_id, rowId],
-        )
-        if (jaUsada.rowCount > 0) {
-          return reply.code(409).send({
-            error: `Essa live já está vinculada à linha ${jaUsada.rows[0].row_index} deste arquivo`,
-          })
-        }
       }
       if (patch.apresentadoras?.length) {
         const ids = patch.apresentadoras.map((item) => item.apresentadora_id)
@@ -861,13 +845,37 @@ export async function analyticsRoutes(app) {
         }
       }
 
-      if (patch.decisao === 'vincular' && patch.matched_live_id === undefined) {
-        const atual = await db.query(
-          'SELECT matched_live_id FROM analytics_import_rows WHERE id = $1::uuid AND tenant_id = $2::uuid',
-          [rowId, tenant_id],
+      // As duas checagens abaixo valem sobre o estado FINAL da linha, não sobre o payload.
+      // Antes, a trava de duplicidade só rodava quando matched_live_id vinha no PATCH: mandar
+      // apenas { decisao: 'vincular' } passava direto, e duas linhas terminavam apontando para a
+      // mesma live — no apply a primeira gravava GMV e comissão nela e a segunda falhava.
+      const atualQ = await db.query(
+        'SELECT matched_live_id, decisao FROM analytics_import_rows WHERE id = $1::uuid AND tenant_id = $2::uuid',
+        [rowId, tenant_id],
+      )
+      if (atualQ.rowCount === 0) return reply.code(404).send({ error: 'Linha nao encontrada' })
+      const liveFinal = patch.matched_live_id !== undefined
+        ? patch.matched_live_id
+        : atualQ.rows[0].matched_live_id
+      const decisaoFinal = patch.decisao ?? atualQ.rows[0].decisao
+
+      if (decisaoFinal === 'vincular' && !liveFinal) {
+        return reply.code(400).send({ error: 'Escolha a live antes de marcar a linha como vincular' })
+      }
+
+      if (decisaoFinal === 'vincular' && liveFinal) {
+        const jaUsada = await db.query(
+          `SELECT row_index FROM analytics_import_rows
+            WHERE tenant_id = $1::uuid AND batch_id = $2::uuid
+              AND matched_live_id = $3::uuid AND id <> $4::uuid
+              AND decisao = 'vincular'
+            LIMIT 1`,
+          [tenant_id, batchId, liveFinal, rowId],
         )
-        if (!atual.rows[0]?.matched_live_id) {
-          return reply.code(400).send({ error: 'Escolha a live antes de marcar a linha como vincular' })
+        if (jaUsada.rowCount > 0) {
+          return reply.code(409).send({
+            error: `Essa live já está vinculada à linha ${jaUsada.rows[0].row_index} deste arquivo`,
+          })
         }
       }
 

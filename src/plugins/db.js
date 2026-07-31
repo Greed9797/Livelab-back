@@ -199,8 +199,23 @@ async function dbPlugin(app) {
         await vaga()
         const client = await pool.connect()
         try {
-          await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
+          // set_config é um round-trip inteiro. Entre Railway (us-west) e Supabase (sa-east)
+          // isso custa ~180ms, e só a home dispara 23 queries — repetir o set_config numa
+          // conexão que JÁ está neste tenant é metade do tempo de resposta jogada fora.
+          //
+          // A marca vive no objeto do client, que o pg descarta junto com a conexão; o catch
+          // abaixo a limpa quando algo falha, porque depois de um erro não dá para afirmar que
+          // a sessão continua com o tenant certo. Errar aqui não daria erro visível: a query
+          // usa current_setting('app.tenant_id', true) e um tenant errado ou ausente vira
+          // filtro silencioso — por isso a marca só é confiada quando o valor é idêntico.
+          if (client.__tenantId !== tenantId) {
+            await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
+            client.__tenantId = tenantId
+          }
           return await client.query(text, params)
+        } catch (err) {
+          client.__tenantId = undefined
+          throw err
         } finally {
           client.release()
           libera()

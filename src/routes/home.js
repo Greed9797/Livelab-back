@@ -783,6 +783,15 @@ export async function homeRoutes(app) {
           cliente_nome: r.cliente_nome ?? r.marca_nome,
         }))
 
+      /**
+       * Série diária do mês.
+       *
+       * Cuidado: quando a query volta SEM LINHAS este bloco monta o mês inteiro com gmv 0 —
+       * "não vieram dados" fica indistinguível de "não houve venda", e o card do mês desenha
+       * uma reta no zero embaixo de um total de seis dígitos. A checagem logo abaixo compara a
+       * série com o total do mês justamente para que essa divergência apareça no log em vez de
+       * virar um gráfico mentindo em silêncio.
+       */
       const gmvDiario = (() => {
         const [anoRef, mesRef] = effectiveMonth.split('-').map(Number)
         const diasNoMes = new Date(anoRef, mesRef, 0).getDate()
@@ -851,6 +860,20 @@ export async function homeRoutes(app) {
       const pedidosVideosMes = Number(gmvOperacional.pedidos_videos_mes ?? 0)
       const pedidosTotalMes = Number(gmvOperacional.pedidos_total_mes ?? (pedidosLivesMes + pedidosVideosMes))
       const videosMes = Number(gmvOperacional.videos_mes ?? 0)
+
+      // A série diária e o total do mês são duas queries diferentes sobre os mesmos dados.
+      // Série somando zero com total positivo é impossível: uma das duas falhou. A que o
+      // usuário vê é a série — uma reta no zero embaixo de um total de seis dígitos. Não dá
+      // para saber aqui qual das duas errou, mas dá para não deixar passar em silêncio.
+      const somaSerieDiaria = round2(gmvDiario.reduce((acc, d) => acc + Number(d.gmv || 0), 0))
+      if (somaSerieDiaria === 0 && gmvLivesMes > 0) {
+        app.log.error({
+          tenant_id,
+          mes: effectiveMonth,
+          gmv_lives_mes: gmvLivesMes,
+          linhas_retornadas: gmvDiarioQ.rows.length,
+        }, 'home: serie diaria zerada com total do mes positivo — grafico do mes vai desenhar reta em zero')
+      }
       const videosMesAnterior = Number(gmvOperacional.videos_mes_anterior ?? 0)
       const livesMes = Number(livesMesQ.rows[0].lives_mes)
       const livesMesAnterior = Number(livesMesQ.rows[0].lives_mes_anterior ?? 0)

@@ -11,7 +11,8 @@ import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { performance } from 'node:perf_hooks'
-import { withCache, buildCacheKey, setCacheControl } from '../lib/dashboard-cache.js'
+import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
+import { invalidateHomeDashboard } from './home.js'
 
 const ANALYTICS_DASHBOARD_CACHE_TTL_MS = Number(process.env.ANALYTICS_DASHBOARD_CACHE_TTL_MS ?? 60_000)
 const ANALYTICS_DIARIO_CACHE_TTL_MS = Number(process.env.ANALYTICS_DIARIO_CACHE_TTL_MS ?? 60_000)
@@ -89,21 +90,36 @@ function resolveAnalyticsPeriod(query) {
 
 const MAX_IMPORT_ROWS = 5000
 
+/** Duas casas decimais — a escala de NUMERIC(_,2), tanto em percentual_rateio quanto em gmv_rateado. */
+const duasCasas = (value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-6
+
 const importRowPatchSchema = z.object({
   decisao: z.enum(['pendente', 'vincular', 'criar', 'ignorar']).optional(),
   marca_id: z.string().uuid().optional(),
+  cabine_id: z.string().uuid().nullable().optional(),
   matched_live_id: z.string().uuid().nullable().optional(),
   apresentadoras: z.array(z.object({
     apresentadora_id: z.string().uuid(),
+    // Rateio absoluto: o que a pessoa realmente digita na revisão ("a Ana fez 4h e vendeu
+    // R$ 3.000"). É a forma preferida — não passa por porcentagem, então não arredonda.
+    gmv: z.number().min(0).refine(duasCasas, { message: 'Use no máximo 2 casas decimais no GMV' }).optional(),
+    segundos: z.number().int().min(0).optional(),
+    // Percentual continua aceito para não invalidar lotes salvos antes desta mudança.
     // percentual_rateio é NUMERIC(5,2): mais casas seriam arredondadas no banco e a soma
     // deixaria de fechar 100 (33.335 × 3 passaria aqui e viraria 100.02 gravado).
     percentual: z.number().positive().max(100).refine(
-      (value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-6,
+      duasCasas,
       { message: 'Use no máximo 2 casas decimais no percentual' },
-    ),
+    ).optional(),
   })).min(1).optional(),
 }).refine(
-  (data) => !data.apresentadoras
+  // Modo misto silenciosamente ratearia metade por valor e metade por porcentagem.
+  (data) => !data.apresentadoras || data.apresentadoras.every(rateioAbsoluto)
+    || data.apresentadoras.every((item) => item.percentual != null),
+  { message: 'Informe valor (R$ e tempo) para todas as apresentadoras, ou percentual para todas' },
+).refine(
+  // Só vale para o formato legado: no absoluto quem fecha a conta é o total da live, no apply.
+  (data) => !data.apresentadoras || data.apresentadoras.some(rateioAbsoluto)
     || data.apresentadoras.reduce((acc, item) => acc + Math.round(item.percentual * 100), 0) === 10000,
   { message: 'O rateio das apresentadoras precisa somar exatamente 100%' },
 ).refine(
@@ -111,6 +127,11 @@ const importRowPatchSchema = z.object({
     || new Set(data.apresentadoras.map((item) => item.apresentadora_id)).size === data.apresentadoras.length,
   { message: 'Apresentadora repetida no rateio' },
 )
+
+/** Uma linha de rateio está no formato novo quando traz R$ ou tempo em vez de porcentagem. */
+function rateioAbsoluto(item) {
+  return item?.gmv != null || item?.segundos != null
+}
 
 async function readAnalyticsImportUpload(request) {
   let upload
@@ -266,6 +287,21 @@ async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabineP
   if (!marcaId) throw new Error('Marca obrigatoria para criar a live')
   if (!normalized.started_at) throw new Error('Linha sem data/hora de inicio')
 
+  // Cabine confirmada na revisão manda; o palpite do lote é só o fallback.
+  const cabineId = row.cabine_id ?? cabinePadraoId
+  if (!cabineId) throw new Error('Cabine obrigatoria para criar a live')
+
+  // A FK de analytics_import_rows.cabine_id é só REFERENCES cabines(id), sem amarrar tenant, e
+  // a role do Supabase tem BYPASSRLS. O PATCH já checa, mas o valor fica persistido entre o
+  // PATCH e o apply: revalidar aqui é o que impede um tenant de criar live na cabine de outro.
+  if (row.cabine_id) {
+    const daCasa = await db.query(
+      'SELECT 1 FROM cabines WHERE id = $1::uuid AND tenant_id = $2::uuid',
+      [row.cabine_id, tenantId],
+    )
+    if (daCasa.rowCount === 0) throw new Error('Cabine selecionada nao encontrada')
+  }
+
   const inserted = await db.query(
     `INSERT INTO lives (
        tenant_id, cabine_id, marca_id, status, iniciado_em, encerrado_em,
@@ -276,7 +312,7 @@ async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabineP
      RETURNING id`,
     [
       tenantId,
-      cabinePadraoId,
+      cabineId,
       marcaId,
       normalized.started_at,
       normalized.ended_at ?? normalized.started_at,
@@ -334,35 +370,155 @@ async function applyMetricsToLive(db, { tenantId, liveId, normalized: n, batchId
   )
 }
 
+/** GMV oficial e duração da live — o que o rateio informado precisa fechar. */
+async function liveTotals(db, tenantId, liveId) {
+  const q = await db.query(
+    // Mesmo COALESCE de liveGmvSql (src/lib/metric-sql.js): o rateio tem que fechar contra o
+    // GMV que os dashboards e a comissão enxergam, não contra outra coluna.
+    `SELECT COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)::numeric AS gmv,
+            CASE WHEN encerrado_em IS NOT NULL
+                 THEN ROUND(EXTRACT(EPOCH FROM (encerrado_em - iniciado_em)))::int
+                 END AS segundos
+       FROM lives WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+    [liveId, tenantId],
+  )
+  const row = q.rows[0]
+  if (!row) throw new Error('Live nao encontrada para aplicar o rateio')
+  return { gmvLive: round2(row.gmv ?? 0), segundosLive: row.segundos ?? null }
+}
+
+const formatBRL = (value) => Number(value).toFixed(2).replace('.', ',')
+const formatHoras = (segundos) => `${Math.floor(segundos / 3600)}h${String(Math.round((segundos % 3600) / 60)).padStart(2, '0')}`
+
+/**
+ * Normaliza o rateio para { gmv, segundos, percentual } por apresentadora, validando contra os
+ * totais da live. Aceita dois formatos:
+ *  - absoluto (preferido): R$ e segundos digitados na revisão. A soma tem que bater com a live.
+ *  - percentual (legado): percentuais que somam 100; R$ e segundos são derivados.
+ * O percentual é sempre gravado junto porque parte do sistema ainda lê essa coluna.
+ */
+export function normalizarRateio(lista, { gmvLive, segundosLive }) {
+  // Esta função grava dinheiro e é chamada também fora da rota (testes, scripts), então não
+  // pode depender do Zod para barrar entrada torta.
+  for (const item of lista) {
+    for (const campo of ['gmv', 'segundos', 'percentual']) {
+      const valor = item[campo]
+      if (valor == null) continue
+      if (!Number.isFinite(Number(valor))) throw new Error(`Valor invalido em ${campo} do rateio`)
+      if (Number(valor) < 0) throw new Error(`Rateio nao aceita ${campo} negativo`)
+    }
+  }
+
+  const usaAbsoluto = lista.some(rateioAbsoluto)
+  // Metade por valor e metade por porcentagem daria a quem só mandou percentual um GMV zero.
+  if (usaAbsoluto && !lista.every(rateioAbsoluto)) {
+    throw new Error('Informe R$ e tempo para todas as apresentadoras, ou percentual para todas')
+  }
+
+  if (!usaAbsoluto) {
+    const somaCentesimos = lista.reduce((acc, item) => acc + Math.round(Number(item.percentual ?? 0) * 100), 0)
+    if (somaCentesimos !== 10000) {
+      throw new Error(`Rateio das apresentadoras soma ${somaCentesimos / 100}% (precisa somar 100%)`)
+    }
+    return lista.map((item) => {
+      const percentual = Number(item.percentual)
+      return {
+        apresentadora_id: item.apresentadora_id,
+        percentual,
+        gmv: round2(gmvLive * percentual / 100),
+        segundos: segundosLive == null ? null : Math.round(segundosLive * percentual / 100),
+      }
+    })
+  }
+
+  const somaGmv = round2(lista.reduce((acc, item) => acc + Number(item.gmv ?? 0), 0))
+  if (Math.abs(somaGmv - gmvLive) > 0.01) {
+    throw new Error(`GMV do rateio soma R$ ${formatBRL(somaGmv)} e a live tem R$ ${formatBRL(gmvLive)}`)
+  }
+
+  // Tempo só é cobrado quando dá para cobrar: live ainda em andamento não tem duração fechada.
+  const todosComTempo = lista.every((item) => item.segundos != null)
+  if (todosComTempo && segundosLive != null) {
+    const somaSegundos = lista.reduce((acc, item) => acc + Number(item.segundos), 0)
+    // 60s de folga absorve o arredondamento de minuto da UI; não é margem de negócio.
+    if (Math.abs(somaSegundos - segundosLive) > 60) {
+      throw new Error(`Tempo do rateio soma ${formatHoras(somaSegundos)} e a live durou ${formatHoras(segundosLive)}`)
+    }
+  }
+
+  return distribuirPercentuais(lista, { gmvLive, segundosLive })
+}
+
+/**
+ * Deriva o percentual a partir dos valores absolutos, garantindo soma exata de 10000 centésimos
+ * (percentual_rateio é NUMERIC(5,2)). A sobra do arredondamento vai para a maior linha — mesmo
+ * critério do "distribuir igual" da tela. Live sem GMV rateia por tempo; sem tempo, divide igual.
+ */
+function distribuirPercentuais(lista, { gmvLive, segundosLive }) {
+  const totalTempo = lista.reduce((acc, item) => acc + Number(item.segundos ?? 0), 0)
+  const base = gmvLive > 0
+    ? lista.map((item) => Number(item.gmv ?? 0) / gmvLive)
+    : totalTempo > 0
+      ? lista.map((item) => Number(item.segundos ?? 0) / totalTempo)
+      : lista.map(() => 1 / lista.length)
+
+  // O épsilon corrige o binário, não a conta: 0.4 * 10000 dá 3999.9999999999995 e o floor cru
+  // devolveria 39.99% + 60.01% para uma divisão que é exatamente 40/60.
+  const centesimos = base.map((fracao) => Math.floor(fracao * 10000 + 1e-6))
+  const sobra = 10000 - centesimos.reduce((acc, value) => acc + value, 0)
+  if (sobra !== 0) {
+    const maior = centesimos.indexOf(Math.max(...centesimos))
+    centesimos[maior] += sobra
+  }
+
+  return lista.map((item, index) => ({
+    apresentadora_id: item.apresentadora_id,
+    percentual: centesimos[index] / 100,
+    gmv: round2(item.gmv ?? 0),
+    segundos: item.segundos == null ? null : Math.round(Number(item.segundos)),
+  }))
+}
+
 /**
  * Rateio da live entre apresentadoras. Substitui o conjunto anterior para que reimportar não
  * acumule linhas. `lives.apresentador_id` (users.id, legado) segue a apresentadora principal.
  */
-async function applyApresentadorasToLive(db, { tenantId, liveId, apresentadoras }) {
+async function applyApresentadorasToLive(db, { tenantId, liveId, apresentadoras, duracaoPlanilha }) {
   const lista = Array.isArray(apresentadoras) ? apresentadoras.filter((item) => item?.apresentadora_id) : []
   if (lista.length === 0) return
 
-  // Compara em centésimos: é a escala real de percentual_rateio NUMERIC(5,2).
-  const somaCentesimos = lista.reduce((acc, item) => acc + Math.round(Number(item.percentual ?? 0) * 100), 0)
-  if (somaCentesimos !== 10000) {
-    throw new Error(`Rateio das apresentadoras soma ${somaCentesimos / 100}% (precisa somar 100%)`)
-  }
+  const totais = await liveTotals(db, tenantId, liveId)
+  // A duração da planilha manda quando existe: numa linha 'vincular' o iniciado_em da live
+  // cadastrada não é sobrescrito, então encerrado_em - iniciado_em pode não bater com o que a
+  // tela mostrou ao dividir. Validar contra outro total do que o usuário viu seria recusar
+  // um rateio correto.
+  const rateio = normalizarRateio(lista, {
+    ...totais,
+    segundosLive: duracaoPlanilha ?? totais.segundosLive,
+  })
 
   await db.query(
     'DELETE FROM live_apresentadoras_v2 WHERE tenant_id = $1::uuid AND live_id = $2::uuid',
     [tenantId, liveId],
   )
-  const principal = lista.reduce((a, b) => (Number(b.percentual) > Number(a.percentual) ? b : a))
-  for (const item of lista) {
+  // Principal = quem trouxe mais GMV; empate (ou live zerada) desempata por tempo.
+  const principal = rateio.reduce((a, b) => {
+    if (b.gmv !== a.gmv) return b.gmv > a.gmv ? b : a
+    return Number(b.segundos ?? 0) > Number(a.segundos ?? 0) ? b : a
+  })
+  for (const item of rateio) {
     await db.query(
-      `INSERT INTO live_apresentadoras_v2 (tenant_id, live_id, apresentadora_id, papel, percentual_rateio)
-       VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5)`,
+      `INSERT INTO live_apresentadoras_v2
+         (tenant_id, live_id, apresentadora_id, papel, percentual_rateio, gmv_rateado, segundos_rateio)
+       VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7)`,
       [
         tenantId,
         liveId,
         item.apresentadora_id,
         item.apresentadora_id === principal.apresentadora_id ? 'principal' : 'apoio',
-        Number(item.percentual),
+        item.percentual,
+        item.gmv,
+        item.segundos,
       ],
     )
   }
@@ -598,7 +754,8 @@ export async function analyticsRoutes(app) {
       const rowsQ = await db.query(
         `SELECT id, row_index, normalized, marca_nome, live_date, start_time, duration_seconds,
                 matched_live_id, matched_agenda_evento_id, match_status, match_confidence,
-                match_reason, candidates, decisao, marca_id, apresentadoras, applied_at, error
+                match_reason, candidates, decisao, marca_id, cabine_id, apresentadoras,
+                applied_at, error
            FROM analytics_import_rows
           WHERE batch_id = $1::uuid AND tenant_id = $2::uuid
           ORDER BY row_index ASC`,
@@ -619,6 +776,7 @@ export async function analyticsRoutes(app) {
           ...rowResponse(row),
           decisao: row.decisao,
           marca_id: row.marca_id,
+          cabine_id: row.cabine_id,
           apresentadoras: row.apresentadoras ?? [],
           applied_at: row.applied_at,
         })),
@@ -659,6 +817,15 @@ export async function analyticsRoutes(app) {
           [patch.marca_id, tenant_id],
         )
         if (q.rowCount === 0) return reply.code(400).send({ error: 'Marca nao encontrada' })
+      }
+      if (patch.cabine_id) {
+        const q = await db.query(
+          `SELECT 1 FROM cabines
+            WHERE id = $1::uuid AND tenant_id = $2::uuid
+              AND COALESCE(ativo, true) AND deleted_at IS NULL`,
+          [patch.cabine_id, tenant_id],
+        )
+        if (q.rowCount === 0) return reply.code(400).send({ error: 'Cabine nao encontrada' })
       }
       if (patch.matched_live_id) {
         const q = await db.query(
@@ -709,11 +876,12 @@ export async function analyticsRoutes(app) {
             SET decisao = COALESCE($3, decisao),
                 marca_id = COALESCE($4::uuid, marca_id),
                 matched_live_id = CASE WHEN $5::boolean THEN $6::uuid ELSE matched_live_id END,
-                apresentadoras = COALESCE($7::jsonb, apresentadoras)
+                apresentadoras = COALESCE($7::jsonb, apresentadoras),
+                cabine_id = CASE WHEN $9::boolean THEN $10::uuid ELSE cabine_id END
           WHERE id = $1::uuid AND tenant_id = $2::uuid AND batch_id = $8::uuid
           RETURNING id, row_index, normalized, marca_nome, live_date, start_time, duration_seconds,
                     matched_live_id, match_status, match_confidence, match_reason, candidates,
-                    decisao, marca_id, apresentadoras, error`,
+                    decisao, marca_id, apresentadoras, cabine_id, error`,
         [
           rowId,
           tenant_id,
@@ -723,6 +891,8 @@ export async function analyticsRoutes(app) {
           patch.matched_live_id ?? null,
           patch.apresentadoras ? JSON.stringify(patch.apresentadoras) : null,
           batchId,
+          patch.cabine_id !== undefined,
+          patch.cabine_id ?? null,
         ],
       )
       const row = updated.rows[0]
@@ -732,6 +902,7 @@ export async function analyticsRoutes(app) {
         ...rowResponse(row),
         decisao: row.decisao,
         marca_id: row.marca_id,
+        cabine_id: row.cabine_id,
         apresentadoras: row.apresentadoras ?? [],
       }
     })
@@ -789,7 +960,7 @@ export async function analyticsRoutes(app) {
         }
 
         const rowsQ = await db.query(
-          `SELECT id, row_index, matched_live_id, normalized, decisao, marca_id, apresentadoras
+          `SELECT id, row_index, matched_live_id, normalized, decisao, marca_id, apresentadoras, cabine_id
              FROM analytics_import_rows
             WHERE tenant_id = $1::uuid
               AND batch_id = $2::uuid
@@ -800,7 +971,8 @@ export async function analyticsRoutes(app) {
           [tenant_id, batchId],
         )
 
-        const cabinePadraoId = rowsQ.rows.some((row) => row.decisao === 'criar')
+        // Só vale o custo de adivinhar quando sobrou alguma linha 'criar' sem cabine confirmada.
+        const cabinePadraoId = rowsQ.rows.some((row) => row.decisao === 'criar' && !row.cabine_id)
           ? await resolveCabinePadrao(db, tenant_id, batch.marca_id)
           : null
 
@@ -839,6 +1011,7 @@ export async function analyticsRoutes(app) {
               tenantId: tenant_id,
               liveId,
               apresentadoras: row.apresentadoras,
+              duracaoPlanilha: n.duration_seconds ?? null,
             })
 
             const gmv = officialGmvOf(n)
@@ -887,6 +1060,13 @@ export async function analyticsRoutes(app) {
         )
 
         await db.query('COMMIT')
+
+        // O import reescreve GMV, métricas e comissão das lives. Sem isto os painéis continuam
+        // servindo o valor anterior até o TTL vencer, e o usuário vê a home "atrasada" em
+        // relação ao Analytics logo depois de importar.
+        invalidateTenant(tenant_id)
+        invalidateHomeDashboard(tenant_id)
+
         app.audit?.log?.(request, { action: 'analytics.import_apply', entity_type: 'analytics_import_batch', entity_id: batchId, metadata: { applied_rows: applied, failed_rows: failures.length, live_ids: touchedLiveIds } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return { ok: true, batch_id: batchId, applied_rows: applied, failed_rows: failures }
       } catch (err) {

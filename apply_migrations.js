@@ -129,6 +129,7 @@ export const MIGRATIONS_LIST = [
   '132_marca_tipo_cobranca.sql',
   '133_marca_datas_contrato.sql',
   '134_tiktok_studio_import.sql',
+  '135_rateio_absoluto_cabine_import.sql',
 ]
 
 async function ensureMigrationsTable(client) {

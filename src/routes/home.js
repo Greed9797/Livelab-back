@@ -19,6 +19,25 @@ function homeDashboardCacheEnabled() {
   return Number.isFinite(HOME_DASHBOARD_CACHE_TTL_MS) && HOME_DASHBOARD_CACHE_TTL_MS > 0
 }
 
+/**
+ * Descarta o painel em cache de um tenant.
+ *
+ * A home tem cache próprio (não passa por src/lib/dashboard-cache.js), então o
+ * invalidateTenant() que zera Analytics, Comissões e Financeiro nunca chegava aqui: depois de
+ * importar o relatório do TikTok o Analytics já mostrava o número novo e a home continuava
+ * servindo a cópia antiga por até 45s. Quem grava dado que a home exibe chama isto.
+ *
+ * O cache é por processo — com mais de uma instância no Railway isto limpa só a que atendeu a
+ * escrita; nas outras o TTL resolve. Aceitável para um painel, e melhor que esperar sempre.
+ */
+export function invalidateHomeDashboard(tenantId) {
+  if (!tenantId) return
+  const prefixo = `${tenantId}:`
+  for (const key of homeDashboardCache.keys()) {
+    if (key.startsWith(prefixo)) homeDashboardCache.delete(key)
+  }
+}
+
 function getHomeDashboardCache(key, now = Date.now()) {
   const entry = homeDashboardCache.get(key)
   if (!entry) return null
@@ -80,6 +99,8 @@ export async function homeRoutes(app) {
       const [mesEfetivoQ, hojeSpQ] = await Promise.all([
         requestedMes ? Promise.resolve(null) : db.query(`
           WITH meses AS (
+            -- O GMV > 0 é proposital: no dia 1º o mês novo teria só uma live sem faturamento
+            -- lançado e a home trocaria um mês fechado inteiro por uma tela quase vazia.
             SELECT date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS m
             FROM lives l
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid

@@ -7,6 +7,7 @@
 import { calcularStatusOperacional } from '../services/status_operacional.js'
 import { isFimDeSemanaSP } from '../services/comissao.js'
 import { buildRelatorioOperacionalPdf } from '../services/reports.js'
+import { liveGmvSql, liveOrdersSql, liveHoursSql } from '../lib/metric-sql.js'
 
 const TZ = 'America/Sao_Paulo'
 
@@ -135,10 +136,12 @@ export async function clienteInsightsRoutes(app) {
                   make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${TZ}') + INTERVAL '1 month' AS fim
          )
          SELECT
-           COALESCE(SUM(l.fat_gerado), 0) AS gmv_mes,
+           -- fat_gerado cru ignorava ads_gmv, onde o import do TikTok grava: toda live
+           -- importada aparecia com GMV zero só para o cliente. Mesma COALESCE do resto.
+           COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_mes,
            COUNT(l.id)::int AS lives_mes,
-           COALESCE(SUM(l.final_orders_count), 0)::int AS pedidos,
-           COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.iniciado_em) - l.iniciado_em)) / 3600, 0)), 0) AS horas_live_mes
+           COALESCE(SUM(${liveOrdersSql('l')}), 0)::int AS pedidos,
+           COALESCE(SUM(${liveHoursSql('l')}), 0) AS horas_live_mes
          FROM lives l CROSS JOIN periodo p
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
            AND l.status = 'encerrada'
@@ -148,8 +151,8 @@ export async function clienteInsightsRoutes(app) {
       const resumo = resumoQ.rows[0] ?? {}
 
       const liveNowQ = await db.query(
-        `SELECT l.id, l.iniciado_em, COALESCE(l.fat_gerado,0) AS gmv,
-                COALESCE(l.final_orders_count,0)::int AS pedidos, c.numero AS cabine_numero
+        `SELECT l.id, l.iniciado_em, ${liveGmvSql('l')} AS gmv,
+                ${liveOrdersSql('l')}::int AS pedidos, c.numero AS cabine_numero
          FROM lives l
          LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
@@ -175,7 +178,7 @@ export async function clienteInsightsRoutes(app) {
 
       const seriesQ = await db.query(
         `SELECT to_char(date_trunc('month', l.iniciado_em AT TIME ZONE '${TZ}'), 'YYYY-MM') AS mes,
-                COALESCE(SUM(l.fat_gerado), 0) AS gmv,
+                COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv,
                 COUNT(l.id)::int AS lives
          FROM lives l
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
@@ -236,7 +239,7 @@ export async function clienteInsightsRoutes(app) {
          )
          SELECT
            l.id, l.iniciado_em, l.encerrado_em, l.status, l.status_publicacao,
-           COALESCE(l.fat_gerado,0) AS gmv, COALESCE(l.final_orders_count,0)::int AS pedidos,
+           ${liveGmvSql('l')} AS gmv, ${liveOrdersSql('l')}::int AS pedidos,
            l.manual_views, l.manual_likes, l.manual_comments, l.manual_shares, l.resumo,
            c.numero AS cabine_numero, u.nome AS apresentador_nome,
            GREATEST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.iniciado_em) - l.iniciado_em)) / 60, 0) AS duracao_min
@@ -288,10 +291,10 @@ export async function clienteInsightsRoutes(app) {
       const result = await db.query(
         `SELECT
            (l.iniciado_em AT TIME ZONE '${TZ}')::date AS dia,
-           COALESCE(SUM(l.fat_gerado), 0) AS gmv_lives,
-           COALESCE(SUM(l.final_orders_count), 0)::int AS pedidos,
+           COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_lives,
+           COALESCE(SUM(${liveOrdersSql('l')}), 0)::int AS pedidos,
            COUNT(l.id)::int AS total_lives,
-           COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (l.encerrado_em - l.iniciado_em)) / 3600, 0)), 0) AS horas_live
+           COALESCE(SUM(${liveHoursSql('l')}), 0) AS horas_live
          FROM lives l
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
            AND l.status = 'encerrada'
@@ -618,7 +621,7 @@ async function _fetchMetricasPeriodo(db, tenantId, clienteId, periodo) {
       ) AS horas_live,
 
       -- GMV: zero medido é zero real
-      COALESCE(SUM(l.fat_gerado) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')), 0)
+      COALESCE(SUM(${liveGmvSql('l')}) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')), 0)
         AS gmv,
 
       -- Comissão LiveLab acumulada
@@ -646,7 +649,7 @@ async function _fetchMetricasPeriodo(db, tenantId, clienteId, periodo) {
 
       -- Pedidos
       COALESCE(
-        SUM(COALESCE(l.final_orders_count, 0)) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
+        SUM(${liveOrdersSql('l')}) FILTER (WHERE l.status IN ('encerrada', 'em_andamento')),
         0
       ) AS pedidos,
 
@@ -697,7 +700,8 @@ async function _fetchSessoesPeriodo(db, tenantId, clienteId, periodo, opts = {})
       l.iniciado_em,
       l.encerrado_em,
       l.status,
-      l.fat_gerado,
+      -- Mesmo alias de antes: o mapeamento em JS mais abaixo lê r.fat_gerado.
+      ${liveGmvSql('l')} AS fat_gerado,
       l.comissao_calculada,
       l.comissao_apresentadora_valor,
       l.comissao_apresentadora_pct,
@@ -706,7 +710,7 @@ async function _fetchSessoesPeriodo(db, tenantId, clienteId, periodo, opts = {})
       l.status_operacional,
       l.problema,
       l.proxima_acao,
-      l.final_orders_count,
+      ${liveOrdersSql('l')} AS final_orders_count,
       -- Nome da apresentadora: preferir apresentadoras.nome, fallback users.nome
       COALESCE(a.nome, u.nome) AS apresentadora_nome,
       COUNT(*) OVER() AS total_count

@@ -78,7 +78,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
 
   // 3. Resolve apresentadoras da live (principal + live_apresentadoras)
   const apresentadorasQ = await db.query(
-    `SELECT DISTINCT ap.id AS apresentadora_id, la.percentual_rateio
+    `SELECT DISTINCT ap.id AS apresentadora_id, la.percentual_rateio, la.gmv_rateado
      FROM (
        -- apresentadora principal (lives.apresentador_id → apresentadoras.user_id)
        SELECT ap2.id, ap2.user_id
@@ -109,7 +109,23 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
   // 4. Se não há apresentadoras vinculadas, cria um registro "sem apresentadora"
   const linhas = apresentadoras.length > 0
     ? apresentadoras
-    : [{ apresentadora_id: null, percentual_rateio: null }]
+    : [{ apresentadora_id: null, percentual_rateio: null, gmv_rateado: null }]
+
+  // Rateio por valor absoluto (live_apresentadoras_v2.gmv_rateado) tem precedência sobre o
+  // percentual: é o R$ que a pessoa digitou na revisão do import, sem passar por porcentagem.
+  // É usado como PESO e não como valor final de propósito — assim a soma das linhas continua
+  // fechando exatamente o GMV da live mesmo quando ele é recalculado depois com outro valor,
+  // preservando o invariante lives.comissao_calculada == SUM(vendas_atribuidas.comissao_franquia).
+  const pesosAbsolutos = linhas.map((ap) => {
+    const valor = Number(ap.gmv_rateado)
+    return ap.gmv_rateado === null || ap.gmv_rateado === undefined || ap.gmv_rateado === '' || !Number.isFinite(valor)
+      ? null
+      : valor
+  })
+  const somaPesosAbsolutos = pesosAbsolutos.reduce((sum, valor) => sum + (valor ?? 0), 0)
+  // Exige todas as linhas preenchidas: um subconjunto com valor não define o rateio das outras.
+  const usaPesoAbsoluto = pesosAbsolutos.every((valor) => valor !== null) && somaPesosAbsolutos > 0
+
   const rateiosExplicitados = linhas
     .map((ap) => ap.percentual_rateio)
     .filter((value) => value !== null && value !== undefined && value !== '')
@@ -128,9 +144,11 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
     // P1-1: pedidos reais (antes era literal 0). Atribuídos 100% à apresentadora
     // principal (primeira linha) — evita rateio com arredondamento que não soma o total.
     const pedidosLinha = index === 0 ? Math.round(Number(pedidos ?? 0)) : 0
-    const rateio      = ap.percentual_rateio !== null && ap.percentual_rateio !== undefined && ap.percentual_rateio !== ''
-      ? Number(ap.percentual_rateio) / 100
-      : rateioPadrao
+    const rateio      = usaPesoAbsoluto
+      ? pesosAbsolutos[index] / somaPesosAbsolutos
+      : ap.percentual_rateio !== null && ap.percentual_rateio !== undefined && ap.percentual_rateio !== ''
+        ? Number(ap.percentual_rateio) / 100
+        : rateioPadrao
     const gmvRateado  = gmvNum * (Number.isFinite(rateio) ? rateio : 0)
     const apPct       = await resolvePresenterCommissionPct(db, {
       tenantId,

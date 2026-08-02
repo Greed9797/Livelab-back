@@ -115,6 +115,28 @@ async function dbPlugin(app) {
     keepAliveInitialDelayMillis: 5000,
   })
 
+  // ── Por que este handler existe: sem ele o processo MORRE ────────────────────
+  // `pg.Pool` é um EventEmitter e emite 'error' quando uma conexão OCIOSA quebra —
+  // o pooler do Supabase derruba conexões paradas, e a rede entre Railway (us-west)
+  // e Supabase (sa-east) também. EventEmitter que emite 'error' sem nenhum listener
+  // relança como exceção não capturada, e o Node encerra o processo. Não é um erro
+  // de request: é um evento do pool, ninguém está esperando por ele, e o `try/catch`
+  // das rotas nunca chega perto.
+  //
+  // Isso derrubou produção (Railway CRASHED 2/2) depois que o idleTimeout subiu para
+  // 10min com `min` conexões quentes: manter conexões ociosas por muito tempo é
+  // justamente o que multiplica as quedas do lado do servidor.
+  //
+  // Logar e seguir é o comportamento correto: o `pg` já descarta a conexão quebrada
+  // e abre outra na próxima aquisição. Requests em andamento nessa conexão falham
+  // pelo caminho normal (a Promise da query rejeita), não por aqui.
+  pool.on('error', (err) => {
+    app.log.error({ err, pool: 'tenant' }, 'conexão ociosa do pool de tenant quebrou — pg vai descartá-la')
+  })
+  systemPool.on('error', (err) => {
+    app.log.error({ err, pool: 'system' }, 'conexão ociosa do pool de sistema quebrou — pg vai descartá-la')
+  })
+
   // Testa conexão na inicialização
   const client = await pool.connect()
   client.release()
@@ -140,7 +162,15 @@ async function dbPlugin(app) {
   // Decorator para queries com RLS (com tenant_id do JWT)
   app.decorate('dbTenant', async (tenantId) => {
     const client = await pool.connect()
-    await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
+    // Se o set_config falhar, quem chamou nunca recebe o objeto e portanto nunca chama
+    // release(): a conexão fica presa no pool para sempre. Bastam `max` falhas para o
+    // pool inteiro travar e toda rota autenticada pendurar até o timeout.
+    try {
+      await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
+    } catch (err) {
+      client.release()
+      throw err
+    }
     return {
       query: (text, params) => client.query(text, params),
       release: () => client.release(),
@@ -197,8 +227,14 @@ async function dbPlugin(app) {
     return {
       query: async (text, params) => {
         await vaga()
-        const client = await pool.connect()
+        // `pool.connect()` fica DENTRO do try/finally: quando ele rejeita (pool cheio,
+        // EMAXCONNSESSION, rede caída) a vaga do semáforo precisa voltar mesmo assim.
+        // Fora do try, cada falha de conexão consumia uma vaga permanentemente — depois
+        // de PARALLEL_MAX falhas toda query nova ficava esperando na fila para sempre,
+        // e a home passava a pendurar até o timeout do cliente em vez de dar erro.
+        let client
         try {
+          client = await pool.connect()
           // set_config é um round-trip inteiro. Entre Railway (us-west) e Supabase (sa-east)
           // isso custa ~180ms, e só a home dispara 23 queries — repetir o set_config numa
           // conexão que JÁ está neste tenant é metade do tempo de resposta jogada fora.
@@ -214,11 +250,18 @@ async function dbPlugin(app) {
           }
           return await client.query(text, params)
         } catch (err) {
-          client.__tenantId = undefined
+          // `client` fica indefinido quando é o próprio connect() que falha — tocar nele
+          // aqui trocaria o erro real (pool cheio) por um TypeError e esconderia a causa.
+          if (client) client.__tenantId = undefined
           throw err
         } finally {
-          client.release()
-          libera()
+          // libera() no finally de dentro: se release() estourar, a vaga do semáforo
+          // ainda volta. Perder uma vaga é permanente; perder uma conexão, não.
+          try {
+            if (client) client.release()
+          } finally {
+            libera()
+          }
         }
       },
     }

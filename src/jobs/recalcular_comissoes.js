@@ -164,8 +164,14 @@ export async function runRecalcularComissoesTick(app) {
 export function startRecalcularComissoes(app, cron) {
   cron.schedule(TICK_CRON, async () => {
     // Advisory lock além da flag _running: com 2 réplicas a flag não vê a outra.
-    await withAdvisoryLock(app.db.pool, LOCK_KEY, '[recalc comissoes]', app.log, () =>
-      runRecalcularComissoesTick(app))
+    // try/catch: o pool.connect() de withAdvisoryLock fica fora do try dele, e o
+    // node-cron engole a rejeição no console — sem isto o tick falha invisível.
+    try {
+      await withAdvisoryLock(app.db.pool, LOCK_KEY, '[recalc comissoes]', app.log, () =>
+        runRecalcularComissoesTick(app))
+    } catch (err) {
+      app.log?.error?.({ err }, '[recalc comissoes] tick falhou')
+    }
   })
   app.log?.info?.({ schedule: TICK_CRON }, '[recalc comissoes] cron registrado (10min)')
 }

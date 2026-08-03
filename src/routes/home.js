@@ -226,6 +226,14 @@ export async function homeRoutes(app) {
       `),
       ])
 
+      // O await do Grupo 1 só acontece lá embaixo, depois do Grupo 2. Se o Grupo 2
+      // falhar antes disso, ninguém nunca chega no `await grupo1Promise` — e uma
+      // rejeição do Grupo 1 fica órfã, virando unhandledRejection na rota mais
+      // acessada do sistema. Este .catch marca a promise como tratada AGORA, de forma
+      // síncrona à criação; ele não engole nada, porque o `await` da linha ~516
+      // continua recebendo e propagando a mesma rejeição.
+      grupo1Promise.catch(() => {})
+
       // ── Grupo 2: métricas, pipeline, alertas, ocupação, ranking (independentes) ──
       const [
         clientesQ,

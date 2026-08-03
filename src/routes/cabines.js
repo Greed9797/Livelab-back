@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { READ_CABINES, WRITE_CABINES, READ_LIVES, WRITE_LIVES } from '../config/role_groups.js'
 import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
+import { esperarDesconexao } from '../lib/sse.js'
 
 const cabineRoleAccess = (app) => [
   app.authenticate,
@@ -979,10 +980,7 @@ export async function cabinesRoutes(app) {
       if (!reply.raw.destroyed) reply.raw.write(': keep-alive\n\n')
     }, 15_000)
 
-    await new Promise((resolve) => {
-      request.raw.once('close', resolve)
-      request.raw.once('error', resolve)
-    })
+    await esperarDesconexao(request)
 
     emitter.off(eventName, handler)
     clearInterval(heartbeat)

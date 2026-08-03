@@ -1,5 +1,6 @@
 import fp from 'fastify-plugin'
 import pg from 'pg'
+import * as Sentry from '@sentry/node'
 import 'dotenv/config'
 
 import '../lib/pg-date-string.js' // DATE → string 'YYYY-MM-DD' (nunca Date JS)
@@ -160,6 +161,30 @@ async function dbPlugin(app) {
   systemPool.on('error', (err) => {
     app.log.error({ err, pool: 'system' }, 'conexão ociosa do pool de sistema quebrou — pg vai descartá-la')
   })
+
+  // O `pool.on('error')` acima só cobre conexão OCIOSA. Enquanto uma conexão está
+  // EM USO (entre o connect() e o release()) o pg-pool remove o próprio listener dela
+  // — `pg-pool/index.js:344` — e o pg.Client fica com ZERO listeners de 'error'. Se a
+  // conexão cair nessa janela, é o mesmo EventEmitter sem ouvinte que já derrubou
+  // produção uma vez, só que um nível abaixo e fora do alcance do listener do pool.
+  //
+  // O gancho é 'connect', emitido em `pg-pool/index.js:337` ANTES daquele
+  // removeListener, e cujos listeners de terceiros o pg-pool nunca remove. Quatro
+  // linhas aqui cobrem dbTenant, withTenant, tenantParallel, withAdvisoryLock e os
+  // ~24 pool.connect() crus espalhados por jobs e rotas — sem precisar parear um
+  // removeListener em cada um deles, que é onde vazaria listener se alguém esquecesse.
+  //
+  // captureException é obrigatório: com o listener no lugar a barreira do server.js
+  // deixa de ver esse evento. Sem mandar pro Sentry aqui, trocaríamos um crash
+  // barulhento por uma falha silenciosa — que é pior.
+  const observarClient = (nome) => (client) => {
+    client.on('error', (err) => {
+      app.log.error({ err, pool: nome }, 'conexão EM USO quebrou (client checked-out)')
+      if (process.env.SENTRY_DSN) Sentry.captureException(err)
+    })
+  }
+  pool.on('connect', observarClient('tenant'))
+  systemPool.on('connect', observarClient('system'))
 
   // Testa conexão na inicialização
   const client = await pool.connect()

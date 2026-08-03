@@ -538,17 +538,28 @@ export async function usuariosRoutes(app) {
         [inviteTokenHash, inviteExpiraEm, request.params.id, request.user.tenant_id]
       )
 
-      // Disparar email de convite (fire-and-forget)
+      // notify recebe UM objeto — a chamada posicional antiga fazia o e-mail nunca sair.
       const inviteUrl = `${_frontendUrl()}/aceitar-convite?token=${encodeURIComponent(inviteRawToken)}`
-      notify('convite_usuario', {
-        usuario_nome: result.rows[0].nome,
-        usuario_email: result.rows[0].email,
-        invite_url: inviteUrl,
-        expira_em: inviteExpiraEm.toLocaleString('pt-BR'),
-      }).catch(err => app.log.error({ err }, 'Failed to send invite email'))
+      const envio = await notify({
+        app,
+        tenantId: request.user.tenant_id,
+        to: result.rows[0].email,
+        template: 'convite_usuario',
+        vars: {
+          usuario_nome: result.rows[0].nome,
+          usuario_email: result.rows[0].email,
+          invite_url: inviteUrl,
+          expira_em: inviteExpiraEm.toLocaleString('pt-BR'),
+        },
+      }).catch((err) => {
+        app.log.error({ err }, 'Failed to send invite email')
+        return { ok: false }
+      })
 
       app.audit?.log?.(request, { action: 'usuarios.invite_resend', entity_type: 'user', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      return { ok: true, invite_enviado: true }
+      // Reflete o que aconteceu de verdade: antes esta rota respondia sempre `true`
+      // enquanto nenhum e-mail saía, e o admin ficava esperando um convite inexistente.
+      return { ok: true, invite_enviado: envio?.ok === true }
     })
   })
 
@@ -626,11 +637,17 @@ export async function usuariosRoutes(app) {
           )
 
           const inviteUrl = `${_frontendUrl()}/aceitar-convite?token=${encodeURIComponent(inviteRawToken)}`
-          notify('convite_usuario', {
-            usuario_nome: user.rows[0].nome,
-            usuario_email: user.rows[0].email,
-            invite_url: inviteUrl,
-            expira_em: inviteExpiraEm.toLocaleString('pt-BR'),
+          notify({
+            app,
+            tenantId: request.user.tenant_id,
+            to: user.rows[0].email,
+            template: 'convite_usuario',
+            vars: {
+              usuario_nome: user.rows[0].nome,
+              usuario_email: user.rows[0].email,
+              invite_url: inviteUrl,
+              expira_em: inviteExpiraEm.toLocaleString('pt-BR'),
+            },
           }).catch(err => app.log.error({ err }, 'Failed to send bulk invite email'))
 
           app.audit?.log?.(request, { action: 'usuarios.invite_resend_bulk', entity_type: 'user', entity_id: id })?.catch(err => app.log.error({ err }, 'audit log failed'))

@@ -407,6 +407,17 @@ export function renderTemplate(name, vars = {}) {
  * @param {boolean=} args.dedupe        — se true, checa hasSent antes
  */
 export async function notify(args) {
+  // notify recebe UM objeto. Chamar como notify('template', {...}) desestrutura a string:
+  // todo campo vira undefined, o guard de `!to` abaixo retorna {ok:false} sem lançar, e o
+  // .catch do chamador nunca dispara. Foi assim que o e-mail de convite ficou meses sem
+  // ser enviado, sem uma linha de log, com a rota respondendo invite_enviado: true.
+  // Todos os call sites de rota são fire-and-forget com .catch, então lançar aqui vira
+  // log — não derruba request.
+  if (typeof args !== 'object' || args === null) {
+    throw new TypeError(
+      `[mailer] notify recebe um único objeto ({ app, to, template, vars }), recebeu ${typeof args}`,
+    )
+  }
   const { app, tenantId, to, template, vars = {}, refId, settings, settingsKey, dedupe } = args
   if (!to) {
     app?.log?.warn?.({ template, tenantId }, '[mailer] notify chamado sem destinatário')

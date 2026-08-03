@@ -2,6 +2,7 @@ import pg from 'pg'
 import 'dotenv/config'
 import cron from 'node-cron'
 import { buscarOuCriarCustomer, gerarIdempotencyKey, criarCobranca } from '../services/appmax.js'
+import { withAdvisoryLock } from './advisory_lock.js'
 
 // Para evitar problemas com timezone ao consultar as lives do banco
 // No Node, usaremos a data atual no timezone de SP
@@ -193,14 +194,66 @@ async function processTenantBilling(tenantId, day, spDate) {
     await db.query('COMMIT')
 
   } catch (err) {
-    await db.query('ROLLBACK')
+    // .catch aqui porque o erro que nos trouxe ao catch costuma ser a própria queda da
+    // conexão — e aí o ROLLBACK também rejeita. Sem isso, a rejeição do ROLLBACK
+    // substitui o erro original, escapa do catch e mata o loop de tenants.
+    await db.query('ROLLBACK').catch(() => {})
     console.error(`Erro ao faturar tenant ${tenantId}:`, err)
+    throw err // quem chama decide: hoje o loop pula este tenant e segue para o próximo
   } finally {
     db.release()
   }
 }
 
 let _billingRunning = false
+
+/**
+ * Uma rodada de faturamento. Exportada para poder ser testada sem esperar as 02:00.
+ *
+ * Um tenant que falha NÃO derruba os seguintes: cada um tem conexão e transação
+ * próprias, então pular o que quebrou e seguir é seguro. E é "pular", não "tentar de
+ * novo" — repetir faturamento é repetir cobrança. A `UNIQUE` em
+ * `boletos.idempotency_key` só protege depois que a linha comitou; logo após um
+ * ROLLBACK ela não protege nada, e a chamada ao gateway pode já ter saído.
+ *
+ * @returns {{rodou: boolean, total: number, falhas: number}}
+ */
+export async function runBillingTick(pool, { hoje } = {}) {
+  const resultado = await withAdvisoryLock(
+    pool, BILLING_ADVISORY_LOCK_KEY, '[Billing Engine]', console,
+    async () => {
+      console.log('[Billing Engine] Iniciando rotina de faturamento...')
+      const spDate = hoje ?? getSPDate()
+      const day = spDate.getDate()
+
+      // O faturamento só roda se for dia 1 ou 16
+      if (day !== 1 && day !== 16) {
+        console.log('[Billing Engine] Hoje não é dia de faturamento. Encerrando.')
+        return { rodou: false, total: 0, falhas: 0 }
+      }
+
+      // Query cross-tenant — não precisa de RLS.
+      const res = await pool.query('SELECT id FROM tenants')
+      let falhas = 0
+      for (const row of res.rows) {
+        try {
+          await processTenantBilling(row.id, day, spDate)
+        } catch {
+          // Já logado com o id do tenant dentro de processTenantBilling.
+          falhas += 1
+        }
+      }
+      if (falhas > 0) {
+        console.error(`[Billing Engine] ${falhas}/${res.rows.length} tenants NÃO faturados — verificar antes do próximo ciclo`)
+      } else {
+        console.log('[Billing Engine] Rotina finalizada com sucesso.')
+      }
+      return { rodou: true, total: res.rows.length, falhas }
+    },
+  )
+  // undefined = outra instância segurava o lock.
+  return resultado ?? { rodou: false, total: 0, falhas: 0 }
+}
 
 export async function startBillingEngine(db) {
   dbPool = db
@@ -212,53 +265,17 @@ export async function startBillingEngine(db) {
       return
     }
     _billingRunning = true
-
-    // Advisory lock cross-instance: previne 2+ workers Railway rodando billing
-    // simultaneamente. pg_try_advisory_lock retorna false se outra conexão já
-    // segurou o lock — nesse caso pula essa rodada.
-    const lockClient = await dbPool.connect()
-    let lockAcquired = false
     try {
-      const lockRes = await lockClient.query(
-        'SELECT pg_try_advisory_lock($1::bigint) AS acquired',
-        [BILLING_ADVISORY_LOCK_KEY.toString()],
-      )
-      lockAcquired = lockRes.rows[0]?.acquired === true
-      if (!lockAcquired) {
-        console.log('[Billing Engine] Outra instância já está rodando (advisory lock). Pulando.')
-        return
-      }
-
-      console.log('[Billing Engine] Iniciando rotina de faturamento...')
-      const spDate = getSPDate()
-      const day = spDate.getDate()
-
-      // O faturamento só roda se for dia 1 ou 16
-      if (day !== 1 && day !== 16) {
-        console.log('[Billing Engine] Hoje não é dia de faturamento. Encerrando.')
-        return
-      }
-
-      // Pega todos os tenants (query cross-tenant — não precisa de RLS).
-      const res = await dbPool.query('SELECT id FROM tenants')
-      for (const row of res.rows) {
-        await processTenantBilling(row.id, day, spDate)
-      }
-      console.log('[Billing Engine] Rotina finalizada com sucesso.')
+      await runBillingTick(dbPool)
     } catch (err) {
+      // withAdvisoryLock RE-LANÇA o erro de fn (é contrato dele, e o teste depende
+      // disso). Sem este catch a rejeição sairia solta do callback do cron e o log
+      // contextualizado sumiria.
       console.error('[Billing Engine] Erro geral na rotina:', err)
     } finally {
-      if (lockAcquired) {
-        try {
-          await lockClient.query(
-            'SELECT pg_advisory_unlock($1::bigint)',
-            [BILLING_ADVISORY_LOCK_KEY.toString()],
-          )
-        } catch (err) {
-          console.error('[Billing Engine] Falha ao liberar advisory lock:', err)
-        }
-      }
-      lockClient.release()
+      // Este finally é o mais externo e só faz atribuição — de propósito. Qualquer
+      // chamada capaz de lançar aqui dentro pularia o reset da flag, e _billingRunning
+      // preso em true significa faturamento parado em silêncio até o próximo deploy.
       _billingRunning = false
     }
   }, {

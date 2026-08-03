@@ -45,15 +45,26 @@ export async function uploadTenantImage(request, reply, { folder = 'uploads', ma
   const filename = `${safeFolder}/${tenantId}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`
   const bucket = 'tenant-assets'
 
-  const uploadRes = await fetch(`${supabaseUrl}/storage/v1/object/${bucket}/${filename}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${supabaseKey}`,
-      'Content-Type': realMime,
-      'x-upsert': 'true',
-    },
-    body: buffer,
-  })
+  // Sem signal, o default do undici é 300s: um Storage lento pendura o request do
+  // usuário por 5 minutos, que na tela é indistinguível de sistema travado. O try/catch
+  // é parte da correção — sem ele o TimeoutError vaza como "The operation was aborted
+  // due to timeout" em inglês, em vez da mensagem que a UI já sabe mostrar.
+  let uploadRes
+  try {
+    uploadRes = await fetch(`${supabaseUrl}/storage/v1/object/${bucket}/${filename}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${supabaseKey}`,
+        'Content-Type': realMime,
+        'x-upsert': 'true',
+      },
+      body: buffer,
+      signal: AbortSignal.timeout(30_000),
+    })
+  } catch (err) {
+    request.log.error({ err }, 'Supabase Storage upload falhou (rede ou timeout)')
+    return reply.code(500).send({ error: 'Falha ao salvar imagem. Tente novamente.' })
+  }
 
   if (!uploadRes.ok) {
     const err = await uploadRes.text().catch(() => '')

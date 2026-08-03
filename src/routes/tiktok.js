@@ -9,6 +9,7 @@ import { getEmitter } from '../services/tiktok-connector-manager.js'
 import { createSignedState, verifySignedState } from '../services/oauth-state.js'
 import { encryptToken } from '../services/token-crypto.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
+import { esperarDesconexao } from '../lib/sse.js'
 
 export async function tiktokRoutes(app) {
   const tiktokUrlVerification = {
@@ -430,10 +431,7 @@ export async function tiktokRoutes(app) {
       if (!reply.raw.destroyed) reply.raw.write(': keep-alive\n\n')
     }, 15_000)
 
-    await new Promise((resolve) => {
-      request.raw.once('close', resolve)
-      request.raw.once('error', resolve)
-    })
+    await esperarDesconexao(request)
 
     emitter.off(eventName, handler)
     clearInterval(heartbeat)
@@ -506,10 +504,7 @@ export async function tiktokRoutes(app) {
     }, 15_000)
 
     // Wait for client disconnect
-    await new Promise((resolve) => {
-      request.raw.once('close', resolve)
-      request.raw.once('error', resolve)
-    })
+    await esperarDesconexao(request)
 
     // Cleanup
     emitter.off(eventName, handler)

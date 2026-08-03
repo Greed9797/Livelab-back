@@ -241,8 +241,18 @@ async function startOneEvent(app, ev) {
 export function startAgendaAutostart(app, cron) {
   cron.schedule('*/30 * * * * *', async () => {
     // Advisory lock além da flag _running: com 2 réplicas a flag não vê a outra.
-    await withAdvisoryLock(app.db.pool, LOCK_KEY, '[agenda autostart]', app.log, () =>
-      runAgendaAutostartTick(app))
+    // O try/catch não é decorativo: o pool.connect() dentro de withAdvisoryLock fica
+    // fora do try dele, então quando o pool está esgotado a rejeição sai daqui. O
+    // node-cron a engole no console e ela nunca chega no pino nem no Sentry — o tick
+    // some sem deixar rastro. Pior neste job: STALE_THRESHOLD_MINUTES é 60, então uma
+    // indisponibilidade de pool maior que 1h deixa dano permanente na agenda (evento
+    // vira stale e passa a ser pulado de vez).
+    try {
+      await withAdvisoryLock(app.db.pool, LOCK_KEY, '[agenda autostart]', app.log, () =>
+        runAgendaAutostartTick(app))
+    } catch (err) {
+      app.log?.error?.({ err }, '[agenda autostart] tick falhou')
+    }
   })
   app.log?.info?.({ interval_ms: AUTOSTART_INTERVAL_MS },
     '[agenda autostart] cron registrado (cada 30s)')

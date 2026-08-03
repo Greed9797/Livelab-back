@@ -125,8 +125,14 @@ export async function runEncerrarLivesZumbiTick(app) {
 export function startEncerrarLivesZumbi(app, cron) {
   cron.schedule(TICK_CRON, async () => {
     // Advisory lock além da flag _running: com 2 réplicas a flag não vê a outra.
-    await withAdvisoryLock(app.db.pool, LOCK_KEY, '[encerrar zumbi]', app.log, () =>
-      runEncerrarLivesZumbiTick(app))
+    // try/catch: o pool.connect() de withAdvisoryLock fica fora do try dele, e o
+    // node-cron engole a rejeição no console — sem isto o tick falha invisível.
+    try {
+      await withAdvisoryLock(app.db.pool, LOCK_KEY, '[encerrar zumbi]', app.log, () =>
+        runEncerrarLivesZumbiTick(app))
+    } catch (err) {
+      app.log?.error?.({ err }, '[encerrar zumbi] tick falhou')
+    }
   })
   app.log?.info?.({ schedule: TICK_CRON }, '[encerrar zumbi] cron registrado (1h)')
 }

@@ -105,7 +105,7 @@ describe('token_version: revogação imediata de JWT', () => {
     // Emite JWT com token_version stale (1)
     const staleJwt = app.jwt.sign({
       sub: 'user-42',
-      tenant_id: 'tenant-1',
+      tenant_id: '11111111-1111-4111-8111-111111111111', // UUID real: auth recusa tenant fora do formato
       papel: 'franqueado',
       nome: 'Stale',
       email: 'stale@x.com',
@@ -124,7 +124,7 @@ describe('token_version: revogação imediata de JWT', () => {
     // Sanity: JWT atual (token_version=2) deve passar.
     const freshJwt = app.jwt.sign({
       sub: 'user-42',
-      tenant_id: 'tenant-1',
+      tenant_id: '11111111-1111-4111-8111-111111111111', // UUID real: auth recusa tenant fora do formato
       papel: 'franqueado',
       nome: 'Fresh',
       email: 'fresh@x.com',

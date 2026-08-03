@@ -265,7 +265,10 @@ describe('Route regressions: SQL and RBAC', () => {
 
     const token = app.jwt.sign({
       sub: 'user-1',
-      tenant_id: 'tenant-1',
+      // UUID real: token sem tenant_id no formato é barrado com 401 antes da
+      // checagem de papel — autenticação vem antes de autorização. Aqui o alvo do
+      // teste é o 403 do RBAC, então o token precisa ser íntegro no resto.
+      tenant_id: '11111111-1111-4111-8111-111111111111',
       papel: 'franqueado',
       nome: 'Dev User',
     })

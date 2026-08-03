@@ -63,6 +63,35 @@ if (_sbUrl && _sbKey) {
 const app = await buildApp()
 await runMigrations(app.db.pool)
 
+// ── Barreira: um erro solto não pode derrubar a API inteira ───────────────────
+// Duas quedas de produção em dois dias entraram exatamente por aqui: uma rejeição
+// que ninguém capturou vira exceção não tratada e o Node encerra o processo — 100%
+// dos usuários offline por causa de UM request malformado ou de UM cron.
+//
+// Por que NÃO sair do processo: o que morreu foi uma Promise, não o servidor. O
+// Fastify segue com o pool íntegro, os crons registrados e o socket escutando;
+// derrubar tudo troca uma falha isolada por um apagão. O risco clássico de manter
+// o processo vivo é ficar com estado corrompido — aqui não se aplica: os erros que
+// chegam neste ponto são de I/O (query, fetch, timer), sem estado global partilhado.
+//
+// Nada disso é desculpa para engolir: cada evento vai para o log com stack e para
+// o Sentry. Se o processo ficar realmente inutilizável, o /health para de responder
+// e o Railway reinicia — o healthcheck continua sendo o juiz, não o crash.
+const registrarFalhaSolta = (tipo) => (err, origem) => {
+  try {
+    app.log.error(
+      { err, tipo, origem: origem instanceof Promise ? 'promise' : String(origem ?? '') },
+      `[barreira] ${tipo} capturado — processo mantido no ar de propósito`,
+    )
+    if (process.env.SENTRY_DSN) Sentry.captureException(err)
+  } catch {
+    // O logger falhar não pode ser o que derruba o servidor.
+    console.error(`[barreira] ${tipo}:`, err)
+  }
+}
+process.on('unhandledRejection', registrarFalhaSolta('unhandledRejection'))
+process.on('uncaughtException', registrarFalhaSolta('uncaughtException'))
+
 // Initialize ConnectorManager with pool access and logger
 connectorManager.init({ db: app.db, log: app.log })
 

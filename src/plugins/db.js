@@ -46,6 +46,30 @@ export function ajustarLimitesDePool({ appMax, systemMax, compartilhamPooler, li
   return { appMax: Math.max(2, orcamento - sistema), systemMax: sistema, ajustado: true }
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Recusa qualquer tenant que não seja um UUID ANTES de tocar na sessão do banco.
+ *
+ * Sem isso, `set_config('app.tenant_id', $1, false)` com null/undefined/'' grava
+ * STRING VAZIA no GUC (não NULL — verificado contra o banco). Aí toda query que faz
+ * `current_setting('app.tenant_id', true)::uuid` estoura
+ * `22P02 invalid input syntax for type uuid: ""`, e como essas queries vivem dentro
+ * de Promise.all em handlers e crons, a rejeição escapa e mata o processo.
+ *
+ * Falhar aqui transforma "API inteira offline" em "este request falha". A sessão
+ * nunca chega a ficar num estado que envenena as próximas queries da mesma conexão.
+ */
+export function assertTenantId(tenantId, origem) {
+  if (typeof tenantId === 'string' && UUID_RE.test(tenantId)) return tenantId
+  const err = new Error(
+    `tenant_id inválido em ${origem}: ${JSON.stringify(tenantId)} — esperado UUID`,
+  )
+  err.statusCode = 400
+  err.code = 'TENANT_ID_INVALIDO'
+  throw err
+}
+
 async function dbPlugin(app) {
   const sslConfig = resolveDbSslConfig(process.env.DATABASE_URL)
   const sslRejectUnauthorized =
@@ -161,6 +185,7 @@ async function dbPlugin(app) {
 
   // Decorator para queries com RLS (com tenant_id do JWT)
   app.decorate('dbTenant', async (tenantId) => {
+    assertTenantId(tenantId, 'dbTenant')
     const client = await pool.connect()
     // Se o set_config falhar, quem chamou nunca recebe o objeto e portanto nunca chama
     // release(): a conexão fica presa no pool para sempre. Bastam `max` falhas para o
@@ -213,6 +238,9 @@ async function dbPlugin(app) {
   )
 
   app.decorate('tenantParallel', (tenantId) => {
+    // Valida na criação do executor, não a cada query: falha uma vez, no ponto em
+    // que o chamador ainda aparece na stack, em vez de N vezes dentro do Promise.all.
+    assertTenantId(tenantId, 'tenantParallel')
     let ativos = 0
     const fila = []
     const vaga = () => (ativos < PARALLEL_MAX

@@ -2,6 +2,8 @@ import fp from 'fastify-plugin'
 import jwt from '@fastify/jwt'
 import * as Sentry from '@sentry/node'
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 async function authPlugin(app) {
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
     throw new Error('JWT_SECRET deve ter no mínimo 32 caracteres')
@@ -85,6 +87,22 @@ async function authPlugin(app) {
   }
 
   // preHandler reutilizável: app.authenticate
+  // Um token com assinatura válida mas SEM tenant_id chegava até o banco: as rotas
+  // fazem `const { tenant_id } = request.user` e passam adiante, o set_config grava
+  // string vazia no GUC e a primeira query com `::uuid` derruba o processo inteiro.
+  // Ou seja: qualquer portador de um token assim tirava a API do ar. Barrar aqui é o
+  // que transforma isso em 401 para um cliente em vez de apagão para todos.
+  const tenantDoTokenEhValido = (request, reply) => {
+    const tid = request.user?.tenant_id
+    if (typeof tid === 'string' && UUID_RE.test(tid)) return true
+    app.log.error(
+      { user_id: request.user?.sub, papel: request.user?.papel, tenant_id: tid, rota: request.url },
+      'token autenticado sem tenant_id válido — recusado antes de tocar no banco',
+    )
+    reply.code(401).send({ error: 'Token sem vínculo de unidade. Faça login novamente.' })
+    return false
+  }
+
   app.decorate('authenticate', async function (request, reply) {
     try {
       await request.jwtVerify()
@@ -92,6 +110,7 @@ async function authPlugin(app) {
       app.log.warn({ msg: err.message, code: err.code }, 'JWT verification failed')
       return reply.code(401).send({ error: 'Token inválido ou expirado' })
     }
+    if (!tenantDoTokenEhValido(request, reply)) return reply
     // Marca o JWT como já verificado nesta request — permite que requirePapel,
     // quando empilhado depois, pule o 2º jwtVerify redundante (segurança igual:
     // o token já foi validado por jwtVerify aqui).
@@ -128,6 +147,10 @@ async function authPlugin(app) {
       }
       request._jwtVerified = true
     }
+
+    // requirePapel é usado sozinho em várias rotas (ex.: /v1/home/dashboard), sem
+    // app.authenticate empilhado antes — a checagem precisa existir nos dois caminhos.
+    if (!tenantDoTokenEhValido(request, reply)) return reply
 
     if (!papeis.includes(request.user.papel)) {
       return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })

@@ -275,9 +275,26 @@ export async function startConnector(liveId, tenantId, username) {
   })
 
   connection.on('disconnected', () => {
-    _log?.warn({ liveId, username }, 'tiktokManager: connector desconectado — cron reconectará')
     const entry = _liveMap.get(liveId)
-    if (entry) entry.reconnecting = true
+    // Guarda de identidade: um 'disconnected' atrasado da conexão ANTIGA não pode
+    // derrubar a conexão nova que já tomou o lugar dela no mapa.
+    if (!entry || entry.connection !== connection) return
+
+    // A promessa de "cron reconectará" não acontecia: marcar entry.reconnecting é
+    // escrever num campo que ninguém lê (só existe esta atribuição no arquivo inteiro),
+    // e syncLives pula qualquer live que já esteja em _liveMap. Resultado: a entry
+    // ficava lá para sempre com uma conexão morta, e as métricas congelavam parecendo
+    // válidas — sem erro nenhum depois do warn inicial. Remover do mapa é o que
+    // realmente libera o cron a reconectar no próximo ciclo (≤60s).
+    clearInterval(entry.flushTimer)
+    // try/catch porque o mock do teste não implementa removeAllListeners.
+    try { connection.removeAllListeners() } catch { /* mock de teste */ }
+    _liveMap.delete(liveId)
+    _log?.warn({ liveId, username }, 'tiktokManager: connector caiu — liberado para o cron reconectar')
+
+    // De propósito NÃO chamamos stopConnector aqui: ele grava os campos final_* como se
+    // a live tivesse terminado, e quem lê status='encerrada' é o billing_engine e o
+    // recalcular_comissoes. Uma queda de rede viraria gatilho de cobrança.
   })
 
   connection.on('error', (err) => {

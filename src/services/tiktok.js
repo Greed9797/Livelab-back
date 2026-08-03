@@ -42,7 +42,8 @@ export class TikTokService {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json'
-        }
+        },
+        signal: AbortSignal.timeout(15_000),
       })
 
       if (!res.ok) {
@@ -84,7 +85,14 @@ export class TikTokService {
       }
     } catch (error) {
       log.error(`Erro ao buscar dados da live do tenant ${tenantId}:`, error.message)
-      return offlineState
+      // null, NÃO offlineState. offlineState leva ao ramo que faz
+      // UPDATE lives SET status='encerrada', e é exatamente 'encerrada' que
+      // billing_engine e recalcular_comissoes leem para gerar boleto e comissão.
+      // Encerrar live por timeout ou queda de rede seria gatilho de COBRANÇA.
+      // Quem chama (pollAllTenants) já trata: `if (!liveData) continue` — pula este
+      // tenant nesta rodada e tenta de novo no próximo ciclo, que é a forma segura de
+      // "tentar de novo" aqui.
+      return null
     }
   }
 
@@ -110,6 +118,9 @@ export class TikTokService {
           grant_type: 'refresh_token',
           refresh_token: currentRefreshToken,
         }).toString(),
+        // Aqui o timeout é seguro sem desvio: o catch desta função já retorna false,
+        // que o chamador trata como "não renovou" — não como "live acabou".
+        signal: AbortSignal.timeout(15_000),
       })
       const data = await res.json()
       if (data.error) throw new Error(data.error_description ?? data.error)

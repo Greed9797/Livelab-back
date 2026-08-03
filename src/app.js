@@ -149,6 +149,66 @@ export async function buildApp(opts = {}) {
     'https://open-api.tiktok.com',
   ]
 
+  // ── PRECISA vir antes do primeiro register ───────────────────────────────────
+  // Nenhum módulo de rota usa fastify-plugin, então cada register cria um contexto
+  // encapsulado que FOTOGRAFA o errorHandler vigente naquele instante. Registrado no
+  // fim do arquivo, este handler não valia para nenhuma das 48 rotas da API: o Sentry
+  // nunca recebeu um erro de rota (observabilidade cega durante duas quedas em dois
+  // dias) e a mensagem crua do Postgres ia direto para o navegador — inclusive o
+  // "invalid input syntax for type uuid" do segundo incidente.
+  app.setErrorHandler((error, request, reply) => {
+    // Custom AppError subclasses: usa statusCode/sentryTag/reportable da classe
+    const isAppError = error instanceof AppError
+    const status = isAppError ? error.statusCode : (error.statusCode ?? 500)
+    const shouldReport = status >= 500 || (isAppError && error.reportable === true)
+
+    // LGPD: errorContext inclui APENAS metadados não-sensíveis (tenant, papel, request_id).
+    // request.body NUNCA é logado — pode conter password, token, cpf, dados pessoais.
+    const errorContext = {
+      err: error,
+      request_id: request.id,
+      tenant_id: request.user?.tenant_id,
+      papel: request.user?.papel,
+      sentryTag: isAppError ? error.sentryTag : undefined,
+    }
+
+    if (status >= 500) {
+      request.log.error(errorContext, 'Unhandled error')
+    } else if (isAppError && error.reportable) {
+      request.log.warn(errorContext, 'Reportable AppError')
+    }
+
+    if (shouldReport && process.env.SENTRY_DSN) {
+      Sentry.withScope((scope) => {
+        scope.setTag('route', request.routeOptions?.url ?? request.url)
+        scope.setTag('method', request.method)
+        scope.setTag('request_id', request.id)
+        if (request.user?.tenant_id) scope.setTag('tenant_id', String(request.user.tenant_id))
+        if (isAppError) scope.setTag('error_class', error.sentryTag)
+        // Inclui dados do usuário APENAS se autenticado; email/nome são úteis
+        // para triagem no Sentry mas nunca expostos sem autenticação prévia.
+        scope.setUser(request.user ? {
+          id: request.user.sub,
+          papel: request.user.papel,
+          email: request.user.email,
+          nome: request.user.nome,
+        } : undefined)
+        Sentry.captureException(error)
+      })
+    }
+
+    // As três chaves de propósito. Até agora as rotas caíam no handler PADRÃO do
+    // Fastify, que responde {statusCode, error, message}; passar a responder só {error}
+    // mudaria o shape de 48 rotas de uma vez. O React lê `data.error ?? data.message`,
+    // mas o cliente Flutter e qualquer integração existente foram escritos contra o
+    // formato antigo — emitir as três mantém todos funcionando.
+    if (status >= 500) {
+      // Mensagem genérica: o texto cru do Postgres não pode chegar ao navegador.
+      const msg = 'Erro interno do servidor'
+      return reply.code(500).send({ statusCode: 500, error: msg, message: msg })
+    }
+    return reply.code(status).send({ statusCode: status, error: error.message, message: error.message })
+  })
   await app.register(cors, {
     origin: (origin, cb) => {
       // Sem header Origin = server-to-server (webhooks, health) → permitir
@@ -295,52 +355,7 @@ export async function buildApp(opts = {}) {
   // processo está de pé e aceitando conexão.
   app.get('/healthz', async () => ({ ok: true }))
 
-  app.setErrorHandler((error, request, reply) => {
-    // Custom AppError subclasses: usa statusCode/sentryTag/reportable da classe
-    const isAppError = error instanceof AppError
-    const status = isAppError ? error.statusCode : (error.statusCode ?? 500)
-    const shouldReport = status >= 500 || (isAppError && error.reportable === true)
 
-    // LGPD: errorContext inclui APENAS metadados não-sensíveis (tenant, papel, request_id).
-    // request.body NUNCA é logado — pode conter password, token, cpf, dados pessoais.
-    const errorContext = {
-      err: error,
-      request_id: request.id,
-      tenant_id: request.user?.tenant_id,
-      papel: request.user?.papel,
-      sentryTag: isAppError ? error.sentryTag : undefined,
-    }
-
-    if (status >= 500) {
-      request.log.error(errorContext, 'Unhandled error')
-    } else if (isAppError && error.reportable) {
-      request.log.warn(errorContext, 'Reportable AppError')
-    }
-
-    if (shouldReport && process.env.SENTRY_DSN) {
-      Sentry.withScope((scope) => {
-        scope.setTag('route', request.routeOptions?.url ?? request.url)
-        scope.setTag('method', request.method)
-        scope.setTag('request_id', request.id)
-        if (request.user?.tenant_id) scope.setTag('tenant_id', String(request.user.tenant_id))
-        if (isAppError) scope.setTag('error_class', error.sentryTag)
-        // Inclui dados do usuário APENAS se autenticado; email/nome são úteis
-        // para triagem no Sentry mas nunca expostos sem autenticação prévia.
-        scope.setUser(request.user ? {
-          id: request.user.sub,
-          papel: request.user.papel,
-          email: request.user.email,
-          nome: request.user.nome,
-        } : undefined)
-        Sentry.captureException(error)
-      })
-    }
-
-    if (status >= 500) {
-      return reply.code(500).send({ error: 'Erro interno do servidor' })
-    }
-    return reply.code(status).send({ error: error.message })
-  })
 
   return app
 }

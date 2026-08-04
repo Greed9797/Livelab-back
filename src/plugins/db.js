@@ -322,7 +322,20 @@ async function dbPlugin(app) {
         // e a home passava a pendurar até o timeout do cliente em vez de dar erro.
         let client
         try {
-          client = await pool.connect()
+          try {
+            client = await pool.connect()
+          } catch (err) {
+            // O teto do pooler não aparece em lugar nenhum quando é atingido: o request vira
+            // um 500 genérico e ninguém liga o ponto ao limite de conexões. Nomear o erro é o
+            // que transforma "o sistema dá erro às vezes" em "a cota do pooler acabou".
+            if (/EMAXCONNSESSION|max clients reached/i.test(err?.message ?? '')) {
+              app.log.error(
+                { err, pool_app: limites.appMax, pool_sistema: limites.systemMax, teto_assumido: POOLER_MAX_CLIENTS },
+                'cota de conexões do pooler esgotada — ajuste DB_POOLER_MAX_CLIENTS para o pool_size real do Supabase',
+              )
+            }
+            throw err
+          }
           // SEMPRE set_config, sem cache. Já tentamos guardar uma marca do tenant no objeto
           // do client para pular este round-trip; a marca MENTE.
           //

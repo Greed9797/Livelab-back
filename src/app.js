@@ -207,7 +207,13 @@ export async function buildApp(opts = {}) {
       const msg = 'Erro interno do servidor'
       return reply.code(500).send({ statusCode: 500, error: msg, message: msg })
     }
-    return reply.code(status).send({ statusCode: status, error: error.message, message: error.message })
+    // `error.message` não é universal: o @fastify/rate-limit monta o erro pelo
+    // errorResponseBuilder e põe o texto em `.error`, sem `.message`. Como este handler
+    // agora roda ANTES dos plugins, ele intercepta esse caso — e sem o fallback o 429
+    // chegava ao navegador como {"statusCode":429}, sem uma palavra explicando, o que a UI
+    // exibe como erro genérico de servidor em vez de "excedeu, tente de novo".
+    const msg = error.message || error.error || 'Erro ao processar a requisição'
+    return reply.code(status).send({ statusCode: status, error: msg, message: msg })
   })
   await app.register(cors, {
     origin: (origin, cb) => {

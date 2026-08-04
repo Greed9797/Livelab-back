@@ -6,6 +6,7 @@ import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { calcularComissaoApresentadora, isFimDeSemanaSP } from '../services/comissao.js'
 import { moneySchema } from '../lib/money.js'
+import { invalidateHomeDashboard } from './home.js'
 import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
@@ -1285,6 +1286,12 @@ export async function livesRoutes(app) {
         }
 
         await db.query('COMMIT')
+
+        // A Home tem cache PRÓPRIO, fora do dashboard-cache.js, e o hook global de app.js
+        // não o alcança (ver comentário em src/routes/home.js:26). Sem esta chamada, editar
+        // o GMV de uma live deixa os cards da Home no valor antigo por até 45s — que o
+        // usuário lê como "não salvou".
+        invalidateHomeDashboard(tenant_id)
 
         // Recalcula comissões (escritor único) se mudou GMV, marca ou apresentadora (fire-and-forget).
         if (gmvMudou || d.marca_id !== undefined || d.apresentador_id !== undefined) {

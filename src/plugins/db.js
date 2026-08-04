@@ -288,25 +288,26 @@ async function dbPlugin(app) {
         let client
         try {
           client = await pool.connect()
-          // set_config é um round-trip inteiro. Entre Railway (us-west) e Supabase (sa-east)
-          // isso custa ~180ms, e só a home dispara 23 queries — repetir o set_config numa
-          // conexão que JÁ está neste tenant é metade do tempo de resposta jogada fora.
+          // SEMPRE set_config, sem cache. Já tentamos guardar uma marca do tenant no objeto
+          // do client para pular este round-trip; a marca MENTE.
           //
-          // A marca vive no objeto do client, que o pg descarta junto com a conexão; o catch
-          // abaixo a limpa quando algo falha, porque depois de um erro não dá para afirmar que
-          // a sessão continua com o tenant certo. Errar aqui não daria erro visível: a query
-          // usa current_setting('app.tenant_id', true) e um tenant errado ou ausente vira
-          // filtro silencioso — por isso a marca só é confiada quando o valor é idêntico.
-          if (client.__tenantId !== tenantId) {
-            await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
-            client.__tenantId = tenantId
-          }
+          // `dbTenant` e os ~24 pool.connect() crus de jobs e rotas pegam conexão do MESMO
+          // pool e trocam o tenant da sessão sem saber que essa marca existe. Basta um deles
+          // rodar entre dois usos daqui para a sessão ficar num tenant e a marca em outro —
+          // e aí o set_config é pulado e a query roda sob o tenant errado.
+          //
+          // Nada disso dá erro: `current_setting('app.tenant_id', true)` com o tenant errado
+          // vira `WHERE tenant_id = <outro>` e devolve 0 linhas em silêncio. Reproduzido
+          // contra o banco real com pool de 1 conexão: 469 lives viraram 0 depois que outro
+          // tenant tocou a mesma conexão. Na Home isso apareceu como GMV e horas zerados
+          // enquanto ranking e grade mostravam dados — e piorava quanto mais o pool circulava.
+          // Se o outro tenant tivesse dados, seria vazamento entre tenants, não só zero.
+          //
+          // O round-trip extra (~180ms na distância Railway↔Supabase) é o preço da certeza de
+          // que a sessão está no tenant certo. Otimizar isso exige um caminho único de troca
+          // de tenant, não uma marca que os outros caminhos não atualizam.
+          await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
           return await client.query(text, params)
-        } catch (err) {
-          // `client` fica indefinido quando é o próprio connect() que falha — tocar nele
-          // aqui trocaria o erro real (pool cheio) por um TypeError e esconderia a causa.
-          if (client) client.__tenantId = undefined
-          throw err
         } finally {
           // libera() no finally de dentro: se release() estourar, a vaga do semáforo
           // ainda volta. Perder uma vaga é permanente; perder uma conexão, não.

@@ -1222,7 +1222,20 @@ export async function livesRoutes(app) {
         // (removido: upsert direto em vendas_atribuidas — o commission-engine pós-commit
         //  é o escritor único de origem='live'. P1-1)
 
-        // Rastreia mudanças em fat_gerado e manual_gmv na tabela live_metric_revisions
+        // Rastreia mudanças de GMV em live_metric_revisions.
+        //
+        // ads_gmv entrou aqui depois: é o TOPO de COALESCE(ads_gmv, manual_gmv, fat_gerado),
+        // ou seja, o campo que manda no número exibido — e era o único dos três sem rastro.
+        // Alterá-lo mudava todos os dashboards sem deixar linha no histórico de GMV
+        // (GET /v1/lives/:id/historico-gmv) nem no diff do audit_log: o número mudava e não
+        // havia como responder "quem mexeu, e quando".
+        if (d.ads_gmv !== undefined && d.ads_gmv !== live.ads_gmv) {
+          await db.query(
+            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em)
+             VALUES ($1, $2, 'ads_gmv', $3, $4, $5, NOW())`,
+            [tenant_id, request.params.id, live.ads_gmv?.toString() ?? null, d.ads_gmv?.toString() ?? null, sub]
+          )
+        }
         if (d.fat_gerado !== undefined && d.fat_gerado !== live.fat_gerado) {
           await db.query(
             `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em)
@@ -1284,7 +1297,10 @@ export async function livesRoutes(app) {
           'cabine_id', 'cliente_id', 'marca_id', 'apresentador_id', 'gestor_id',
           'agenda_evento_id', 'tiktok_username', 'previsto_fim', 'tipo',
           'status', 'status_publicacao', 'origem_dados',
-          'fat_gerado', 'manual_gmv', 'final_orders_count',
+          // ads_gmv junto dos outros dois: é o topo do COALESCE que define o GMV exibido,
+          // e ficava de fora do diff — dava para mudar o número de todos os dashboards sem
+          // deixar rastro de quem mexeu.
+          'ads_gmv', 'fat_gerado', 'manual_gmv', 'final_orders_count',
         ]
         const diff = {}
         for (const f of auditFields) {

@@ -77,6 +77,26 @@ describe('comissão pendente — o cron reprocessa quem ficou marcado', () => {
   })
 })
 
+describe('ads_gmv — o campo que manda no GMV precisa deixar rastro', () => {
+  // ads_gmv é o topo de COALESCE(ads_gmv, manual_gmv, fat_gerado): mudá-lo muda o número de
+  // todos os dashboards. Era o único dos três sem registro — dava para alterar o GMV exibido
+  // sem deixar como responder "quem mexeu, e quando".
+  it('grava revisão em live_metric_revisions', () => {
+    expect(lives).toMatch(/VALUES \(\$1, \$2, 'ads_gmv'/)
+  })
+
+  it('entra no diff do audit_log junto dos outros campos de GMV', () => {
+    const bloco = lives.split('const auditFields = [')[1]?.split(']')[0] ?? ''
+    expect(bloco).toContain("'ads_gmv'")
+    expect(bloco).toContain("'fat_gerado'")
+    expect(bloco).toContain("'manual_gmv'")
+  })
+
+  it('só registra quando o valor realmente muda', () => {
+    expect(lives).toMatch(/d\.ads_gmv !== undefined && d\.ads_gmv !== live\.ads_gmv/)
+  })
+})
+
 describe('cache da Home — invalidação centralizada', () => {
   it('o hook global invalida também o cache próprio da Home', () => {
     // Antes cada rota tinha que lembrar; encerrar uma live não lembrava, e a Home ficava

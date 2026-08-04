@@ -262,20 +262,55 @@ async function dbPlugin(app) {
     ),
   )
 
+  // ── Semáforo GLOBAL, um só para todo o processo ──────────────────────────────
+  // Antes cada chamada de tenantParallel() criava o SEU semáforo. Isso limita um
+  // handler isoladamente e não limita nada no conjunto: dois /home/dashboard
+  // simultâneos pediam 2×PARALLEL_MAX conexões, e as rotas de página (que usam
+  // withTenant, 1 conexão cada, ~8 em paralelo ao abrir uma tela) disputavam o
+  // resto. Com o pool em 10 conexões, bastava pouca gente mexendo junto para o
+  // pool.connect() encostar no connectionTimeoutMillis de 8s e virar erro — é o
+  // "quanto mais tempo mexendo, mais erros aparecem".
+  //
+  // Com um teto compartilhado, o excedente espera EM MEMÓRIA (barato, sem prazo)
+  // em vez de esperar por uma conexão e estourar timeout. E o teto deixa uma
+  // reserva fixa livre para as rotas de conexão única, que de outra forma ficariam
+  // atrás de uma home na fila do pool.
+  const RESERVA_ROTAS_SIMPLES = 4
+  const GLOBAL_MAX = Math.max(2, Math.min(PARALLEL_MAX, limites.appMax - RESERVA_ROTAS_SIMPLES))
+  app.log.info(
+    { pool_app: limites.appMax, por_handler: PARALLEL_MAX, teto_global: GLOBAL_MAX },
+    'tenantParallel: teto de conexões simultâneas',
+  )
+
+  let ativosGlobal = 0
+  const filaGlobal = []
+  const vagaGlobal = () => (ativosGlobal < GLOBAL_MAX
+    ? (ativosGlobal++, Promise.resolve())
+    : new Promise((resolve) => filaGlobal.push(resolve)))
+  const liberaGlobal = () => {
+    const proximo = filaGlobal.shift()
+    if (proximo) proximo()
+    else ativosGlobal--
+  }
+
   app.decorate('tenantParallel', (tenantId) => {
     // Valida na criação do executor, não a cada query: falha uma vez, no ponto em
     // que o chamador ainda aparece na stack, em vez de N vezes dentro do Promise.all.
     assertTenantId(tenantId, 'tenantParallel')
+    // Teto por handler, ALÉM do global: impede que um único /home/dashboard tome
+    // sozinho todas as vagas globais e deixe os outros handlers esperando por ele.
     let ativos = 0
     const fila = []
-    const vaga = () => (ativos < PARALLEL_MAX
+    const vagaLocal = () => (ativos < PARALLEL_MAX
       ? (ativos++, Promise.resolve())
       : new Promise((resolve) => fila.push(resolve)))
-    const libera = () => {
+    const liberaLocal = () => {
       const proximo = fila.shift()
       if (proximo) proximo()
       else ativos--
     }
+    const vaga = async () => { await vagaLocal(); await vagaGlobal() }
+    const libera = () => { liberaGlobal(); liberaLocal() }
 
     return {
       query: async (text, params) => {

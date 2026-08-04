@@ -59,6 +59,16 @@ describe('contrato do rate limit', () => {
   })
 
   it('keys the limit by user when authenticated, so NAT does not share one quota', () => {
-    expect(bloco).toMatch(/keyGenerator:.*request\.user\?\.sub/)
+    // Este teste checava `request.user?.sub` no fonte — e assim congelou justamente o bug:
+    // o rate-limit roda no hook onRequest, ANTES do preHandler que verifica o JWT, então
+    // `request.user` é sempre undefined e a chave caía sempre no IP. Um escritório atrás de
+    // NAT dividia 300 req/min entre todos.
+    //
+    // A chave agora sai do payload do próprio header. O comportamento de verdade (usuários
+    // distintos no mesmo IP não dividem cota) está coberto em test/rate_limit_por_usuario.js,
+    // com requests reais — aqui fica só a guarda contra alguém voltar ao request.user.
+    expect(bloco).not.toMatch(/keyGenerator:[\s\S]*request\.user\?\.sub/)
+    expect(bloco).toMatch(/authorization/)
+    expect(bloco).toMatch(/payload\?\.sub/)
   })
 })

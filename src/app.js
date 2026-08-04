@@ -252,11 +252,33 @@ export async function buildApp(opts = {}) {
   await app.register(rateLimit, {
     max: 300,
     timeWindow: '1 minute',
-    // Chave por USUÁRIO quando autenticado; IP só para quem não está logado.
-    // Com chave por IP, um escritório atrás de NAT dividia uma única cota entre todo
-    // mundo: bastavam algumas abas com o polling da home (30s) para estourar e o
-    // dashboard começar a falhar para todos ao mesmo tempo.
-    keyGenerator: (request) => request.user?.sub ?? request.ip,
+    // Chave por USUÁRIO quando há token; IP só para quem não está logado.
+    //
+    // `request.user` NÃO serve aqui: o rate-limit roda no hook onRequest e a verificação do
+    // JWT é preHandler, que vem depois. `request.user?.sub` era sempre undefined e a chave
+    // caía SEMPRE no IP — exatamente o cenário que o código dizia querer evitar. Num
+    // escritório atrás de NAT, os 40 usuários dividiam uma cota só; medido: 6 "usuários"
+    // distintos estouraram juntos em ~48 requests cada, somando ~300. É o "quanto mais
+    // gente mexendo, mais erros aparecem".
+    //
+    // Por isso lemos o `sub` do payload do token SEM verificar assinatura. Isso é seguro
+    // para o fim aqui: a chave só reparte cotas. Quem forjar um `sub` ganha um balde
+    // próprio e nada mais — a autenticação de verdade continua no preHandler e rejeita o
+    // token. O prefixo evita que um `sub` colida com um IP.
+    keyGenerator: (request) => {
+      const auth = request.headers?.authorization
+      if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
+        try {
+          const payload = JSON.parse(
+            Buffer.from(auth.slice(7).split('.')[1], 'base64url').toString('utf8'),
+          )
+          if (typeof payload?.sub === 'string' && payload.sub.length > 0) return `u:${payload.sub}`
+        } catch {
+          // token malformado: cai no IP, como qualquer anônimo
+        }
+      }
+      return `ip:${request.ip}`
+    },
     // Sem statusCode aqui, o errorHandler global cai no `?? 500` e o cliente recebe
     // 500 — o front trata como servidor quebrado em vez de "excedeu, tente de novo".
     errorResponseBuilder: () => ({

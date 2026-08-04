@@ -11,7 +11,7 @@ import { dbPlugin } from './plugins/db.js'
 import { authPlugin } from './plugins/auth.js'
 import { auditLogPlugin } from './plugins/audit_log.js'
 import { authRoutes } from './routes/auth.js'
-import { homeRoutes } from './routes/home.js'
+import { homeRoutes, invalidateHomeDashboard } from './routes/home.js'
 import { analyticsRoutes } from './routes/analytics.js'
 import { clientesRoutes } from './routes/clientes.js'
 import { contratosRoutes } from './routes/contratos.js'
@@ -302,7 +302,16 @@ export async function buildApp(opts = {}) {
     if (request.method === 'GET' || request.method === 'HEAD') return
     if (reply.statusCode >= 400) return // escrita falhou: nada mudou
     const tenantId = request.user?.tenant_id ?? request.cacheInvalidateTenantId
-    if (tenantId) invalidateTenant(tenantId)
+    if (!tenantId) return
+    invalidateTenant(tenantId)
+    // A Home tem cache PRÓPRIO, fora do dashboard-cache — o invalidateTenant acima não o
+    // alcança (ver comentário em src/routes/home.js). Antes cada rota tinha que lembrar de
+    // chamar isto, e encerrar uma live não chamava: a Home ficava até 45s mostrando o total
+    // anterior. Flagrado num monitor de produção — live encerrada, GMV subiu R$385 no banco
+    // e a Home seguiu no número velho.
+    //
+    // Aqui, no mesmo hook do outro cache, uma rota nova nasce coberta sem ninguém lembrar.
+    invalidateHomeDashboard(tenantId)
   })
 
   // Captura rawBody em JSON pra validação HMAC de webhooks (bio-crm, tiktok).

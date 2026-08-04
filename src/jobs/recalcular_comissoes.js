@@ -37,7 +37,7 @@ export async function runRecalcularComissoesTick(app) {
     return { skipped: true }
   }
   _running = true
-  const results = { tenants: 0, apresentadoras: 0, vendas: 0, errors: 0 }
+  const results = { tenants: 0, apresentadoras: 0, vendas: 0, errors: 0, comissoesRemarcadas: 0 }
 
   try {
     const { mes, inicio, fim } = currentMonthRange()
@@ -149,7 +149,61 @@ export async function runRecalcularComissoesTick(app) {
       app.log?.warn?.({ err }, '[recalc comissoes] varredura lives orfãs falhou')
     }
 
-    if (results.vendas > 0 || results.errors > 0) {
+    // Etapa 3: lives MARCADAS como precisando de recálculo (comissao_recalculo_pendente).
+    //
+    // As duas etapas acima só enxergam comissão ZERADA ou ausente. Quando o GMV de uma live
+    // é editado e o recálculo pós-edição falha, a venda_atribuida fica com o valor ANTIGO —
+    // não-zero — e some do radar: fica errada para sempre, sem erro e sem log. A marca é
+    // gravada na transação da edição (src/routes/lives.js) e limpa pelo recálculo que der
+    // certo, então ela sobrevive a falha de rede, erro do engine e queda do processo.
+    try {
+      const livesMarcadas = await scanPorTenant(
+        app,
+        `SELECT l.id, l.tenant_id,
+                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
+                COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos
+           FROM lives l
+          WHERE l.comissao_recalculo_pendente
+          ORDER BY l.encerrado_em DESC NULLS LAST
+          LIMIT 100`,
+        [],
+        '[recalc comissoes marcadas]',
+      )
+      for (const live of livesMarcadas) {
+        const lc = await app.db.pool.connect()
+        try {
+          await lc.query('BEGIN')
+          await lc.query(`SELECT set_config('app.tenant_id', $1::text, true)`, [live.tenant_id])
+          const r = await calcularComissoesDaLive(lc, {
+            liveId: live.id,
+            tenantId: live.tenant_id,
+            gmv: Number(live.gmv),
+            pedidos: Number(live.pedidos),
+          })
+          // Limpar a marca na MESMA transação do recálculo: ou os dois valem, ou nenhum.
+          // Limpar fora daqui reabriria a janela que este mecanismo existe para fechar.
+          await lc.query(
+            `UPDATE lives SET comissao_recalculo_pendente = FALSE
+              WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+            [live.id, live.tenant_id],
+          )
+          await lc.query('COMMIT')
+          results.comissoesRemarcadas = (results.comissoesRemarcadas ?? 0) + 1
+          if (Array.isArray(r) && r.length > 0) results.vendas += r.length
+        } catch (err) {
+          await lc.query('ROLLBACK').catch(() => {})
+          results.errors += 1
+          // A marca continua no banco — o próximo tick tenta de novo.
+          app.log?.warn?.({ err, liveId: live.id }, '[recalc comissoes] live marcada falhou — segue marcada')
+        } finally {
+          lc.release()
+        }
+      }
+    } catch (err) {
+      app.log?.warn?.({ err }, '[recalc comissoes] varredura de lives marcadas falhou')
+    }
+
+    if (results.vendas > 0 || results.errors > 0 || results.comissoesRemarcadas > 0) {
       app.log?.info?.({ ...results }, '[recalc comissoes] tick concluído')
     }
   } catch (err) {

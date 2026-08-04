@@ -1027,6 +1027,12 @@ export async function livesRoutes(app) {
         const cabineId = d.cabine_id ?? live.cabine_id
         let comissao = undefined
         const gmvMudou = d.fat_gerado !== undefined || d.manual_gmv !== undefined || d.ads_gmv !== undefined
+        // Mesma condição que dispara o recálculo lá embaixo — declarada uma vez só para as
+        // duas não poderem divergir: marcar sem recalcular deixaria o cron trabalhando à toa,
+        // recalcular sem marcar traz de volta a comissão congelada.
+        const precisaRecalcularComissao = gmvMudou
+          || d.marca_id !== undefined
+          || d.apresentador_id !== undefined
         if (gmvMudou) {
           const cab = await db.query(
             `SELECT ct.comissao_pct FROM cabines c
@@ -1108,6 +1114,17 @@ export async function livesRoutes(app) {
         if (d.status_publicacao !== undefined) addField('status_publicacao', d.status_publicacao)
         if (d.fat_gerado      !== undefined) addField('fat_gerado', d.fat_gerado)
         if (gmvMudou) addField('comissao_calculada', comissao)
+        // Intenção durável de recálculo, gravada na MESMA transação da edição.
+        //
+        // O recálculo das vendas_atribuidas roda fora daqui, em fire-and-forget. Se ele
+        // falhar — ou se o processo morrer entre o COMMIT e a chamada — a venda fica com o
+        // valor ANTIGO, não-zero. E o cron de reconciliação só varre comissão ZERADA, então
+        // comissão errada mas não-zero nunca seria reprocessada: ficava errada para sempre,
+        // sem erro e sem log.
+        //
+        // Marcando aqui, a intenção sobrevive a qualquer uma dessas falhas; quem limpa é o
+        // recálculo bem-sucedido. Enquanto estiver marcada, o cron reprocessa.
+        if (precisaRecalcularComissao) addField('comissao_recalculo_pendente', true)
         // Recalcular comissão apresentadora quando GMV muda (snapshot operacional)
         if (gmvMudou) {
           const gmvAtualPatch      = officialGmvFromPayload(d, live)
@@ -1294,7 +1311,7 @@ export async function livesRoutes(app) {
         invalidateHomeDashboard(tenant_id)
 
         // Recalcula comissões (escritor único) se mudou GMV, marca ou apresentadora (fire-and-forget).
-        if (gmvMudou || d.marca_id !== undefined || d.apresentador_id !== undefined) {
+        if (precisaRecalcularComissao) {
           const gmvAtualizado = officialGmvFromPayload(d, live)
           const pedidosAtualizado = officialOrdersFromPayload(d, live)
           app.withTenant(tenant_id, async (db2) => {
@@ -1305,8 +1322,20 @@ export async function livesRoutes(app) {
                 gmv: gmvAtualizado,
                 pedidos: pedidosAtualizado,
               })
+              // Só agora a marca sai: ela representa "falta recalcular", e recalcular
+              // acabou de acontecer. Se este UPDATE falhar, a marca fica e o cron refaz —
+              // recalcular duas vezes é inofensivo (o engine é idempotente por
+              // origem+origem_id), deixar de recalcular não é.
+              await db2.query(
+                `UPDATE lives SET comissao_recalculo_pendente = FALSE
+                  WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+                [request.params.id, tenant_id],
+              )
             } catch (commErr) {
-              app.log.warn({ err: commErr, liveId: request.params.id }, 'commission-engine: falha no recálculo pós-edição (soft)')
+              // Sem elevar para error de propósito: a marca no banco já garante o
+              // reprocessamento, então isto é aviso, não incidente.
+              app.log.warn({ err: commErr, liveId: request.params.id },
+                'commission-engine: recálculo pós-edição falhou — live segue marcada para o cron')
             }
           }).catch(err => app.log.warn({ err, liveId: request.params.id }, 'commission-engine: withTenant falhou'))
         }

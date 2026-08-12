@@ -131,6 +131,7 @@ export const MIGRATIONS_LIST = [
   '134_tiktok_studio_import.sql',
   '135_rateio_absoluto_cabine_import.sql',
   '136_comissao_recalculo_pendente.sql',
+  '137_apresentadora_fixo_historico.sql',
 ]
 
 async function ensureMigrationsTable(client) {

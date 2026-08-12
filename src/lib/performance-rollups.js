@@ -1,4 +1,4 @@
-import { presenterFixedSql } from '../config/presenter_defaults.js'
+import { presenterFixedCapSql } from '../config/presenter_defaults.js'
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
 
@@ -259,12 +259,26 @@ export async function getPerformanceRanking(db, {
       SELECT * FROM live_source
       UNION ALL
       SELECT * FROM video_source
+    ),
+    -- Fixo VIGENTE no último dia da janela (migration 137), resolvido UMA vez por
+    -- apresentadora. Não usar subquery correlacionada aqui: ela seria reexecutada por
+    -- linha de \`combined\` (uma por live e por venda de vídeo), e este SQL serve a Home
+    -- com polling de 15s e ao ranking público sem autenticação.
+    -- $3 é EXCLUSIVO (\`va.data < $3\`), por isso -1 dia: sem isso, um reajuste feito no
+    -- dia 1º de setembro entraria no fechamento de agosto.
+    -- tenant_id explícito: o ranking público roda pelo pool de sistema, sem RLS.
+    fixo_vigente AS (
+      SELECT DISTINCT ON (apresentadora_id) apresentadora_id, valor
+        FROM apresentadora_fixo_historico
+       WHERE tenant_id = $1::uuid
+         AND vigencia_inicio <= ($3::date - 1)
+       ORDER BY apresentadora_id, vigencia_inicio DESC, id DESC
     )
     SELECT
       combined.apresentadora_id,
       COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
       a.foto_url AS apresentadora_foto_url,
-      MAX(${presenterFixedSql('a')}) AS fixo,
+      MAX(${presenterFixedCapSql('COALESCE(fv.valor, a.fixo)')}) AS fixo,
       COALESCE(SUM(combined.gmv), 0) AS gmv_total,
       COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'live'), 0) AS gmv_lives,
       COALESCE(SUM(combined.gmv) FILTER (WHERE combined.origem = 'video'), 0) AS gmv_videos,
@@ -274,10 +288,11 @@ export async function getPerformanceRanking(db, {
       COUNT(DISTINCT combined.origem_id) FILTER (WHERE combined.origem = 'video')::int AS total_videos,
       COALESCE(SUM(combined.comissao_apresentadora), 0) AS comissao_apresentadora,
       COALESCE(SUM(combined.comissao_apresentadora), 0) AS comissao_variavel,
-      (MAX(${presenterFixedSql('a')}) + COALESCE(SUM(combined.comissao_apresentadora), 0)) AS total_recebido,
+      (MAX(${presenterFixedCapSql('COALESCE(fv.valor, a.fixo)')}) + COALESCE(SUM(combined.comissao_apresentadora), 0)) AS total_recebido,
       COUNT(*)::int AS registros
     FROM combined
     LEFT JOIN apresentadoras a ON a.id = combined.apresentadora_id AND a.tenant_id = $1::uuid
+    LEFT JOIN fixo_vigente fv ON fv.apresentadora_id = combined.apresentadora_id
     GROUP BY combined.apresentadora_id, a.nome, a.foto_url
     HAVING COALESCE(SUM(combined.gmv), 0) <> 0 OR COALESCE(SUM(combined.pedidos), 0) <> 0
     ORDER BY gmv_total DESC, total_recebido DESC, apresentadora_nome ASC

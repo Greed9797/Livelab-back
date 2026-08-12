@@ -4,7 +4,7 @@ import { moneySchema } from '../lib/money.js'
 import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { marcaResolveLateralSql, MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
 import { resolveMonthRange } from '../lib/operacional.js'
-import { presenterFixedSql } from '../config/presenter_defaults.js'
+import { presenterFixedAtSql } from '../config/presenter_defaults.js'
 import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl } from '../lib/dashboard-cache.js'
 
@@ -495,10 +495,17 @@ export async function financeiroRoutes(app) {
       // rateado por dias de contrato (data_inicio/data_fim, migration 041), SOMADO por mês do
       // range [$1,$3]. Saiu dia 15 → metade naquele mês; mês fora do contrato → 0; datas NULL →
       // fixo cheio por mês. Consistente com o fator_meses da marca. Single-mês (default) = 1 parcela.
+      // O fixo entra DENTRO do SUM por mês (migration 137): cada parcela usa o salário
+      // vigente no último dia daquele mês, não o valor de cadastro de hoje. Antes o
+      // fixo multiplicava a soma inteira, então um reajuste reescrevia retroativamente
+      // todos os meses do intervalo — inclusive competências já fechadas.
       const fixoApresentadoras = await db.query(`
         SELECT a.id AS apresentadora_id, a.nome,
-               (${presenterFixedSql('a')}) * COALESCE((
-                 SELECT SUM(${prorateFatorSql('gs.mes', 'a.data_inicio', 'a.data_fim')})
+               COALESCE((
+                 SELECT SUM(
+                   (${presenterFixedAtSql('a', "((gs.mes + interval '1 month' - interval '1 day')::date)")})
+                   * ${prorateFatorSql('gs.mes', 'a.data_inicio', 'a.data_fim')}
+                 )
                  FROM generate_series(date_trunc('month', $1::date), date_trunc('month', $3::date), interval '1 month') gs(mes)
                ), 0) AS valor
         FROM apresentadoras a

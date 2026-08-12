@@ -1,9 +1,40 @@
 export const DEFAULT_APRESENTADORA_FIXO = 2700
 export const MAX_APRESENTADORA_FIXO = 10000
 
+// Piso/teto do fixo mensal aplicado a QUALQUER expressão: valor ausente, zerado ou
+// acima do teto vira o padrão. Extraído para que o valor histórico (migration 137)
+// passe exatamente pela mesma normalização do valor de cadastro — duas regras
+// diferentes dariam dois números para a mesma apresentadora.
+export function presenterFixedCapSql(expr) {
+  return `CASE WHEN COALESCE(${expr}, 0) <= 0 OR (${expr}) > ${MAX_APRESENTADORA_FIXO} THEN ${DEFAULT_APRESENTADORA_FIXO} ELSE (${expr}) END`
+}
+
 export function presenterFixedSql(alias = 'a') {
-  const column = alias ? `${alias}.fixo` : 'fixo'
-  return `CASE WHEN COALESCE(${column}, 0) <= 0 OR ${column} > ${MAX_APRESENTADORA_FIXO} THEN ${DEFAULT_APRESENTADORA_FIXO} ELSE ${column} END`
+  return presenterFixedCapSql(alias ? `${alias}.fixo` : 'fixo')
+}
+
+// Fixo VIGENTE numa data — para relatórios de período fechado (migration 137).
+//
+// dataRefExpr precisa ser uma data INCLUSIVA (o último dia que o relatório cobre).
+// Isso não é detalhe de estilo: performance-rollups e comissoes trabalham com fim
+// EXCLUSIVO (`va.data < $3`) e o financeiro com fim inclusivo. Sem normalizar, um
+// reajuste feito no dia 1º de setembro entraria no fechamento de AGOSTO em uma tela
+// e não na outra — dois números para o mesmo mês fechado.
+//
+// COALESCE com a coluna atual antes do cap: apresentadora sem linha de histórico
+// (criada fora do trigger, banco restaurado pela metade) cai no valor de cadastro,
+// que é o comportamento de antes. Nunca devolve 0 nem inventa o padrão.
+export function presenterFixedAtSql(alias, dataRefExpr) {
+  const a = alias || 'a'
+  return presenterFixedCapSql(`COALESCE((
+    SELECT h.valor
+      FROM apresentadora_fixo_historico h
+     WHERE h.tenant_id = ${a}.tenant_id
+       AND h.apresentadora_id = ${a}.id
+       AND h.vigencia_inicio <= (${dataRefExpr})
+     ORDER BY h.vigencia_inicio DESC, h.id DESC
+     LIMIT 1
+  ), ${a}.fixo)`)
 }
 
 // Fallback de ÚLTIMO recurso — a fonte EDITÁVEL da escada padrão é a tabela

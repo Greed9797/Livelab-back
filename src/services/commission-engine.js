@@ -28,7 +28,7 @@ import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribu
  * @param {number} [opts.pedidos] - pedidos oficiais da live (atribuídos 100% à apresentadora principal)
  * @returns {Promise<Array>}      - array de vendas_atribuidas upsertadas (uma por apresentadora)
  */
-export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedidos }) {
+export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedidos, retroLift = true }) {
   // 1. Busca dados da live + contrato + marca.
   //    EXTRA-6: resolve a marca por l.marca_id (afiliada/teste tem marca direta e
   //    cliente_id NULL); só cai para cliente_id quando a live não tem marca_id.
@@ -231,18 +231,34 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
   //    (resolvePresenterCommissionPct + gmv*pct de franquia) → idempotente.
   //    Falha aqui não pode derrubar a escrita da venda (nem a transação do cron):
   //    o botão "Fechamento do mês" corrige depois.
-  const mesDaVenda = typeof data === 'string' ? data.slice(0, 7) : null
-  for (const apresentadoraId of new Set(resultados.map((r) => r?.apresentadora_id).filter(Boolean))) {
-    try {
-      await recalcularVendasAtribuidasApresentadora(db, {
-        tenantId,
-        apresentadoraId,
-        ...(mesDaVenda ? { mesReferencia: mesDaVenda } : {}),
-      })
-    } catch (err) {
-      console.warn(`comissao: retro-lift do mes falhou (apresentadora ${apresentadoraId}, live ${liveId}):`, err?.message ?? err)
+  //
+  //    retroLift=false: quem grava VÁRIAS lives em sequência (a importação de planilha)
+  //    passa false e chama aplicarRetroLiftDoMes UMA vez no fim. Rodar por live ali é
+  //    trabalho jogado fora — a passada seguinte refaz o mesmo mês — e era o que fazia
+  //    um lote de 9 linhas levar 177s: ~91 das ~96 queries por linha eram este bloco.
+  if (retroLift) {
+    const mesDaVenda = typeof data === 'string' ? data.slice(0, 7) : null
+    for (const apresentadoraId of new Set(resultados.map((r) => r?.apresentadora_id).filter(Boolean))) {
+      await aplicarRetroLiftDoMes(db, { tenantId, apresentadoraId, mes: mesDaVenda, liveId })
     }
   }
 
   return resultados
+}
+
+// Recalcula as vendas pendentes do mês de UMA apresentadora. Extraído para que o
+// caminho adiado (importação) use exatamente a mesma semântica do caminho normal,
+// inclusive engolir a falha: o retro-lift é otimização de precisão, não pode derrubar
+// a escrita da venda nem a transação do lote.
+export async function aplicarRetroLiftDoMes(db, { tenantId, apresentadoraId, mes = null, liveId = null }) {
+  try {
+    await recalcularVendasAtribuidasApresentadora(db, {
+      tenantId,
+      apresentadoraId,
+      ...(mes ? { mesReferencia: mes } : {}),
+    })
+  } catch (err) {
+    const ondeLive = liveId ? `, live ${liveId}` : ''
+    console.warn(`comissao: retro-lift do mes falhou (apresentadora ${apresentadoraId}${ondeLive}):`, err?.message ?? err)
+  }
 }

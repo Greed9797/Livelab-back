@@ -27,3 +27,6 @@ PROMPT_*.md
 
 # SDD scratch (ledger, reports, review packages)
 .superpowers/
+
+# Trajetórias do fastcontext — ferramenta local, não é do projeto
+.fastcontext/

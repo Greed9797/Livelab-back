@@ -7,7 +7,7 @@ import {
   summarizeImportRows,
   SOURCE_TIKTOK_STUDIO,
 } from '../services/analytics-import.js'
-import { calcularComissoesDaLive } from '../services/commission-engine.js'
+import { aplicarRetroLiftDoMes, calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { performance } from 'node:perf_hooks'
@@ -990,6 +990,9 @@ export async function analyticsRoutes(app) {
         // Guarda final contra duas linhas gravando na mesma live (a segunda apagaria a
         // primeira). O matcher e o PATCH já barram antes; aqui é a rede de segurança.
         const livesDoLote = new Map()
+        // (apresentadora, mês) tocados pelo lote — o retro-lift do cliff roda uma vez
+        // por par no fim, em vez de uma vez por linha. Map dedupe pela chave.
+        const retroLiftPendente = new Map()
 
         for (const row of rowsQ.rows) {
           const n = row.normalized ?? {}
@@ -1024,12 +1027,22 @@ export async function analyticsRoutes(app) {
 
             const gmv = officialGmvOf(n)
             if (gmv != null) {
-              await calcularComissoesDaLive(db, {
+              // retroLift: false — o recálculo do mês inteiro sai daqui e roda UMA vez
+              // por (apresentadora, mês) depois do laço. Rodando por linha, cada uma
+              // refazia o mês que a anterior acabou de refazer: 9 linhas custavam 177s.
+              const vendas = await calcularComissoesDaLive(db, {
                 liveId,
                 tenantId: tenant_id,
                 gmv,
                 pedidos: n.attributed_orders ?? 0,
+                retroLift: false,
               })
+              for (const venda of Array.isArray(vendas) ? vendas : []) {
+                const apId = venda?.apresentadora_id
+                if (!apId) continue
+                const mes = typeof venda.data === 'string' ? venda.data.slice(0, 7) : null
+                retroLiftPendente.set(`${apId}|${mes ?? ''}`, { apresentadoraId: apId, mes })
+              }
             }
 
             await db.query(
@@ -1051,6 +1064,15 @@ export async function analyticsRoutes(app) {
             )
             failures.push({ row_index: row.row_index, error: err.message })
           }
+        }
+
+        // Retro-lift do cliff, adiado: a escada usa o GMV MENSAL acumulado, então as vendas
+        // gravadas agora podem ter empurrado a apresentadora para uma faixa maior. Rodando
+        // aqui, uma vez por (apresentadora, mês), o resultado é o mesmo que rodar a cada
+        // linha — só a última passada sobrevivia — por uma fração das idas ao banco.
+        // Ainda dentro da transação: ou o lote inteiro vale, ou nada vale.
+        for (const { apresentadoraId, mes } of retroLiftPendente.values()) {
+          await aplicarRetroLiftDoMes(db, { tenantId: tenant_id, apresentadoraId, mes })
         }
 
         // Só fecha o lote se tudo passou. Com falhas ele continua reaplicável (as linhas que já

@@ -2,8 +2,14 @@ import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 
 // O cálculo de comissão tem cobertura própria; aqui interessa só o que o apply escreve em lives.
+// O mock devolvia { ok: true } onde a função real devolve a LISTA de vendas gravadas.
+// Contrato falso: o apply itera esse retorno para saber quais (apresentadora, mês)
+// precisam do retro-lift no fim do lote.
 vi.mock('../src/services/commission-engine.js', () => ({
-  calcularComissoesDaLive: vi.fn(async () => ({ ok: true })),
+  calcularComissoesDaLive: vi.fn(async () => ([
+    { apresentadora_id: '55555555-5555-4555-8555-555555555555', data: '2026-05-04' },
+  ])),
+  aplicarRetroLiftDoMes: vi.fn(async () => {}),
 }))
 
 import { analyticsRoutes } from '../src/routes/analytics.js'
@@ -127,6 +133,74 @@ describe('analytics imports routes', () => {
     const updateSql = queryMock.mock.calls.find(([sql]) => sql.includes('UPDATE lives'))?.[0]
     expect(updateSql).not.toContain('fat_gerado')
     expect(updateSql).not.toContain('comissao_calculada')
+
+    await app.close()
+  })
+
+  // O recálculo do mês inteiro (retro-lift do cliff) rodava DENTRO do laço, uma vez por
+  // linha da planilha — e cada passada refazia o mês que a anterior acabou de refazer.
+  // Era ~91 das ~96 idas ao banco por linha: um lote de 9 linhas levava 177s contra um
+  // navegador que desiste aos 15s. Agora roda uma vez por (apresentadora, mês) no fim.
+  it('recalcula o mês uma vez por apresentadora, não uma vez por linha', async () => {
+    const { calcularComissoesDaLive, aplicarRetroLiftDoMes } = await import('../src/services/commission-engine.js')
+    calcularComissoesDaLive.mockClear()
+    aplicarRetroLiftDoMes.mockClear()
+
+    const apA = '66666666-6666-4666-8666-666666666666'
+    const apB = '77777777-7777-4777-8777-777777777777'
+    // 3 linhas: duas da mesma apresentadora no mesmo mês (dedupe), uma de outra.
+    const porLinha = {
+      1: [{ apresentadora_id: apA, data: '2026-05-04' }],
+      2: [{ apresentadora_id: apA, data: '2026-05-19' }],
+      3: [{ apresentadora_id: apB, data: '2026-05-07' }],
+    }
+    let chamada = 0
+    calcularComissoesDaLive.mockImplementation(async () => {
+      chamada += 1
+      return porLinha[chamada] ?? []
+    })
+
+    const normalized = { ads_gmv: 500, attributed_orders: 3 }
+    const linhas = [1, 2, 3].map((i) => ({
+      id: `4444444${i}-4444-4444-8444-44444444444${i}`,
+      row_index: i,
+      matched_live_id: `5555555${i}-5555-4555-8555-55555555555${i}`,
+      normalized,
+      decisao: 'vincular',
+      marca_id: null,
+      apresentadoras: null,
+    }))
+
+    const queryMock = vi.fn(async (sql) => {
+      if (['BEGIN', 'COMMIT'].includes(sql) || sql.includes('SAVEPOINT')) return { rows: [] }
+      if (sql.includes('FROM analytics_import_batches') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: batchId, status: 'preview', source_type: 'tiktok_studio', marca_id: null }] }
+      }
+      if (sql.includes('FROM analytics_import_rows') && sql.includes("decisao IN ('vincular', 'criar')")) {
+        return { rows: linhas }
+      }
+      if (sql.includes('SELECT id FROM lives WHERE id')) return { rows: [{ id: linhas[0].matched_live_id }], rowCount: 1 }
+      if (sql.includes('UPDATE lives')) return { rows: [], rowCount: 1 }
+      if (sql.includes('UPDATE analytics_import_rows')) return { rows: [] }
+      if (sql.includes('UPDATE analytics_import_batches')) return { rows: [] }
+      throw new Error(`Unexpected SQL: ${sql}`)
+    })
+
+    const app = buildApp(queryMock)
+    await app.register(analyticsRoutes)
+    const res = await app.inject({ method: 'POST', url: `/v1/analytics/imports/${batchId}/apply` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ ok: true, applied_rows: 3, failed_rows: [] })
+
+    // Nenhuma linha pode disparar o recálculo do mês por conta própria.
+    for (const [, opts] of calcularComissoesDaLive.mock.calls) {
+      expect(opts.retroLift).toBe(false)
+    }
+    // 3 linhas, 2 pares (apresentadora, mês) — não 3 chamadas.
+    expect(aplicarRetroLiftDoMes).toHaveBeenCalledTimes(2)
+    const pares = aplicarRetroLiftDoMes.mock.calls.map(([, o]) => `${o.apresentadoraId}|${o.mes}`).sort()
+    expect(pares).toEqual([`${apA}|2026-05`, `${apB}|2026-05`])
 
     await app.close()
   })

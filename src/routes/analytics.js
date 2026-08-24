@@ -10,6 +10,7 @@ import {
 import { aplicarRetroLiftDoMes, calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { applyApresentadorasToLive, rateioAbsoluto } from '../lib/live-rateio.js'
 import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
 import { invalidateHomeDashboard } from './home.js'
@@ -127,11 +128,6 @@ const importRowPatchSchema = z.object({
     || new Set(data.apresentadoras.map((item) => item.apresentadora_id)).size === data.apresentadoras.length,
   { message: 'Apresentadora repetida no rateio' },
 )
-
-/** Uma linha de rateio está no formato novo quando traz R$ ou tempo em vez de porcentagem. */
-function rateioAbsoluto(item) {
-  return item?.gmv != null || item?.segundos != null
-}
 
 async function readAnalyticsImportUpload(request) {
   let upload
@@ -324,9 +320,23 @@ async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabineP
 }
 
 async function applyMetricsToLive(db, { tenantId, liveId, normalized: n, batchId, rowId }) {
-  await db.query(
+  // ads_gmv é o topo de COALESCE(ads_gmv, manual_gmv, fat_gerado): é ele que manda no número
+  // exibido. Desde que a tela voltou a permitir corrigi-lo, sobrescrever aqui apagaria a
+  // correção humana em silêncio numa reimportação — o mesmo pecado do "editei e voltou
+  // sozinho" que já aconteceu 3x em produção. Existir linha em live_metric_revisions com
+  // campo='ads_gmv' é prova de correção manual: essa tabela só é escrita pelo PATCH da live,
+  // nunca por este import.
+  const updated = await db.query(
     `UPDATE lives
-        SET ads_gmv = $1,
+        SET ads_gmv = CASE
+              WHEN EXISTS (
+                SELECT 1 FROM live_metric_revisions r
+                 WHERE r.live_id = lives.id
+                   AND r.tenant_id = lives.tenant_id
+                   AND r.campo = 'ads_gmv'
+              ) THEN ads_gmv
+              ELSE $1
+            END,
             ads_cost = COALESCE($2, ads_cost),
             live_impressions = $3,
             product_impressions = $4,
@@ -345,7 +355,8 @@ async function applyMetricsToLive(db, { tenantId, liveId, normalized: n, batchId
             ads_import_row_id = $17::uuid,
             ads_metrics_updated_at = NOW()
       WHERE id = $18::uuid
-        AND tenant_id = $19::uuid`,
+        AND tenant_id = $19::uuid
+    RETURNING ads_gmv, (ads_gmv IS DISTINCT FROM $1) AS gmv_preservado`,
     [
       officialGmvOf(n),
       n.ads_cost ?? null,
@@ -368,181 +379,18 @@ async function applyMetricsToLive(db, { tenantId, liveId, normalized: n, batchId
       tenantId,
     ],
   )
+  // gmvPreservado = a live tinha correção manual e o valor da planilha NÃO entrou. O apply
+  // devolve essa contagem para a tela dizer o que preservou; preservar em silêncio esconderia
+  // do usuário que o número da planilha foi descartado.
+  // gmvOficial é o que ficou GRAVADO — é ele que a comissão tem que usar, não o da planilha,
+  // senão a comissão passaria a divergir do GMV que a tela mostra.
+  const linha = updated.rows[0]
+  return {
+    gmvPreservado: Boolean(linha?.gmv_preservado),
+    gmvOficial: linha?.ads_gmv == null ? null : Number(linha.ads_gmv),
+  }
 }
 
-/** GMV oficial e duração da live — o que o rateio informado precisa fechar. */
-async function liveTotals(db, tenantId, liveId) {
-  const q = await db.query(
-    // Mesmo COALESCE de liveGmvSql (src/lib/metric-sql.js): o rateio tem que fechar contra o
-    // GMV que os dashboards e a comissão enxergam, não contra outra coluna.
-    `SELECT COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)::numeric AS gmv,
-            CASE WHEN encerrado_em IS NOT NULL
-                 THEN ROUND(EXTRACT(EPOCH FROM (encerrado_em - iniciado_em)))::int
-                 END AS segundos
-       FROM lives WHERE id = $1::uuid AND tenant_id = $2::uuid`,
-    [liveId, tenantId],
-  )
-  const row = q.rows[0]
-  if (!row) throw new Error('Live nao encontrada para aplicar o rateio')
-  return { gmvLive: round2(row.gmv ?? 0), segundosLive: row.segundos ?? null }
-}
-
-const formatBRL = (value) => Number(value).toFixed(2).replace('.', ',')
-const formatHoras = (segundos) => `${Math.floor(segundos / 3600)}h${String(Math.round((segundos % 3600) / 60)).padStart(2, '0')}`
-
-/**
- * Normaliza o rateio para { gmv, segundos, percentual } por apresentadora, validando contra os
- * totais da live. Aceita dois formatos:
- *  - absoluto (preferido): R$ e segundos digitados na revisão. A soma tem que bater com a live.
- *  - percentual (legado): percentuais que somam 100; R$ e segundos são derivados.
- * O percentual é sempre gravado junto porque parte do sistema ainda lê essa coluna.
- */
-export function normalizarRateio(lista, { gmvLive, segundosLive }) {
-  // Esta função grava dinheiro e é chamada também fora da rota (testes, scripts), então não
-  // pode depender do Zod para barrar entrada torta.
-  for (const item of lista) {
-    for (const campo of ['gmv', 'segundos', 'percentual']) {
-      const valor = item[campo]
-      if (valor == null) continue
-      if (!Number.isFinite(Number(valor))) throw new Error(`Valor invalido em ${campo} do rateio`)
-      if (Number(valor) < 0) throw new Error(`Rateio nao aceita ${campo} negativo`)
-    }
-  }
-
-  const usaAbsoluto = lista.some(rateioAbsoluto)
-  // Metade por valor e metade por porcentagem daria a quem só mandou percentual um GMV zero.
-  if (usaAbsoluto && !lista.every(rateioAbsoluto)) {
-    throw new Error('Informe R$ e tempo para todas as apresentadoras, ou percentual para todas')
-  }
-
-  if (!usaAbsoluto) {
-    const somaCentesimos = lista.reduce((acc, item) => acc + Math.round(Number(item.percentual ?? 0) * 100), 0)
-    if (somaCentesimos !== 10000) {
-      throw new Error(`Rateio das apresentadoras soma ${somaCentesimos / 100}% (precisa somar 100%)`)
-    }
-    return lista.map((item) => {
-      const percentual = Number(item.percentual)
-      return {
-        apresentadora_id: item.apresentadora_id,
-        percentual,
-        gmv: round2(gmvLive * percentual / 100),
-        segundos: segundosLive == null ? null : Math.round(segundosLive * percentual / 100),
-      }
-    })
-  }
-
-  const somaGmv = round2(lista.reduce((acc, item) => acc + Number(item.gmv ?? 0), 0))
-  if (Math.abs(somaGmv - gmvLive) > 0.01) {
-    throw new Error(`GMV do rateio soma R$ ${formatBRL(somaGmv)} e a live tem R$ ${formatBRL(gmvLive)}`)
-  }
-
-  // Tempo só é cobrado quando dá para cobrar: live ainda em andamento não tem duração fechada.
-  const todosComTempo = lista.every((item) => item.segundos != null)
-  if (todosComTempo && segundosLive != null) {
-    const somaSegundos = lista.reduce((acc, item) => acc + Number(item.segundos), 0)
-    // 60s de folga absorve o arredondamento de minuto da UI; não é margem de negócio.
-    if (Math.abs(somaSegundos - segundosLive) > 60) {
-      throw new Error(`Tempo do rateio soma ${formatHoras(somaSegundos)} e a live durou ${formatHoras(segundosLive)}`)
-    }
-  }
-
-  return distribuirPercentuais(lista, { gmvLive, segundosLive })
-}
-
-/**
- * Deriva o percentual a partir dos valores absolutos, garantindo soma exata de 10000 centésimos
- * (percentual_rateio é NUMERIC(5,2)). A sobra do arredondamento vai para a maior linha — mesmo
- * critério do "distribuir igual" da tela. Live sem GMV rateia por tempo; sem tempo, divide igual.
- */
-function distribuirPercentuais(lista, { gmvLive, segundosLive }) {
-  const totalTempo = lista.reduce((acc, item) => acc + Number(item.segundos ?? 0), 0)
-  const base = gmvLive > 0
-    ? lista.map((item) => Number(item.gmv ?? 0) / gmvLive)
-    : totalTempo > 0
-      ? lista.map((item) => Number(item.segundos ?? 0) / totalTempo)
-      : lista.map(() => 1 / lista.length)
-
-  // O épsilon corrige o binário, não a conta: 0.4 * 10000 dá 3999.9999999999995 e o floor cru
-  // devolveria 39.99% + 60.01% para uma divisão que é exatamente 40/60.
-  const centesimos = base.map((fracao) => Math.floor(fracao * 10000 + 1e-6))
-  const sobra = 10000 - centesimos.reduce((acc, value) => acc + value, 0)
-  if (sobra !== 0) {
-    const maior = centesimos.indexOf(Math.max(...centesimos))
-    centesimos[maior] += sobra
-  }
-
-  return lista.map((item, index) => ({
-    apresentadora_id: item.apresentadora_id,
-    percentual: centesimos[index] / 100,
-    gmv: round2(item.gmv ?? 0),
-    segundos: item.segundos == null ? null : Math.round(Number(item.segundos)),
-  }))
-}
-
-/**
- * Rateio da live entre apresentadoras. Substitui o conjunto anterior para que reimportar não
- * acumule linhas. `lives.apresentador_id` (users.id, legado) segue a apresentadora principal.
- */
-async function applyApresentadorasToLive(db, { tenantId, liveId, apresentadoras, duracaoPlanilha }) {
-  const lista = Array.isArray(apresentadoras) ? apresentadoras.filter((item) => item?.apresentadora_id) : []
-  if (lista.length === 0) return
-
-  const totais = await liveTotals(db, tenantId, liveId)
-  // A duração da planilha manda quando existe: numa linha 'vincular' o iniciado_em da live
-  // cadastrada não é sobrescrito, então encerrado_em - iniciado_em pode não bater com o que a
-  // tela mostrou ao dividir. Validar contra outro total do que o usuário viu seria recusar
-  // um rateio correto.
-  const rateio = normalizarRateio(lista, {
-    ...totais,
-    segundosLive: duracaoPlanilha ?? totais.segundosLive,
-  })
-
-  await db.query(
-    'DELETE FROM live_apresentadoras_v2 WHERE tenant_id = $1::uuid AND live_id = $2::uuid',
-    [tenantId, liveId],
-  )
-  // Principal = quem trouxe mais GMV; empate (ou live zerada) desempata por tempo.
-  const principal = rateio.reduce((a, b) => {
-    if (b.gmv !== a.gmv) return b.gmv > a.gmv ? b : a
-    return Number(b.segundos ?? 0) > Number(a.segundos ?? 0) ? b : a
-  })
-  for (const item of rateio) {
-    await db.query(
-      `INSERT INTO live_apresentadoras_v2
-         (tenant_id, live_id, apresentadora_id, papel, percentual_rateio, gmv_rateado, segundos_rateio)
-       VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7)`,
-      [
-        tenantId,
-        liveId,
-        item.apresentadora_id,
-        item.apresentadora_id === principal.apresentadora_id ? 'principal' : 'apoio',
-        item.percentual,
-        item.gmv,
-        item.segundos,
-      ],
-    )
-  }
-
-  await db.query(
-    `UPDATE lives
-        SET apresentador_id = (SELECT user_id FROM apresentadoras WHERE id = $3::uuid AND tenant_id = $1::uuid)
-      WHERE id = $2::uuid AND tenant_id = $1::uuid`,
-    [tenantId, liveId, principal.apresentadora_id],
-  )
-
-  // calcularComissoesDaLive só faz upsert de quem está no rateio atual: sem esta limpeza, uma
-  // apresentadora retirada continuaria com a venda antiga somando nos relatórios.
-  // Linhas já aprovadas são imutáveis por regra de negócio e ficam.
-  await db.query(
-    `DELETE FROM vendas_atribuidas
-      WHERE tenant_id = $1::uuid
-        AND origem = 'live'
-        AND origem_id = $2::uuid
-        AND COALESCE(status_aprovacao, '') <> 'aprovada'
-        AND (apresentadora_id IS NULL OR apresentadora_id <> ALL($3::uuid[]))`,
-    [tenantId, liveId, lista.map((item) => item.apresentadora_id)],
-  )
-}
 
 function rowsDateRange(rows) {
   const dates = rows.map((r) => r.normalized.live_date).filter(Boolean).sort()
@@ -985,6 +833,8 @@ export async function analyticsRoutes(app) {
           : null
 
         let applied = 0
+        // Lives cujo GMV corrigido à mão prevaleceu sobre o da planilha (ver applyMetricsToLive).
+        let gmvsPreservados = 0
         const failures = []
         const touchedLiveIds = []
         // Guarda final contra duas linhas gravando na mesma live (a segunda apagaria a
@@ -1011,13 +861,14 @@ export async function analyticsRoutes(app) {
             }
             livesDoLote.set(liveId, row.row_index)
 
-            await applyMetricsToLive(db, {
+            const { gmvPreservado, gmvOficial } = await applyMetricsToLive(db, {
               tenantId: tenant_id,
               liveId,
               normalized: n,
               batchId,
               rowId: row.id,
             })
+            if (gmvPreservado) gmvsPreservados += 1
             await applyApresentadorasToLive(db, {
               tenantId: tenant_id,
               liveId,
@@ -1025,7 +876,7 @@ export async function analyticsRoutes(app) {
               duracaoPlanilha: n.duration_seconds ?? null,
             })
 
-            const gmv = officialGmvOf(n)
+            const gmv = gmvPreservado ? gmvOficial : officialGmvOf(n)
             if (gmv != null) {
               // retroLift: false — o recálculo do mês inteiro sai daqui e roda UMA vez
               // por (apresentadora, mês) depois do laço. Rodando por linha, cada uma
@@ -1097,8 +948,8 @@ export async function analyticsRoutes(app) {
         invalidateTenant(tenant_id)
         invalidateHomeDashboard(tenant_id)
 
-        app.audit?.log?.(request, { action: 'analytics.import_apply', entity_type: 'analytics_import_batch', entity_id: batchId, metadata: { applied_rows: applied, failed_rows: failures.length, live_ids: touchedLiveIds } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-        return { ok: true, batch_id: batchId, applied_rows: applied, failed_rows: failures }
+        app.audit?.log?.(request, { action: 'analytics.import_apply', entity_type: 'analytics_import_batch', entity_id: batchId, metadata: { applied_rows: applied, failed_rows: failures.length, gmv_preservado_rows: gmvsPreservados, live_ids: touchedLiveIds } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        return { ok: true, batch_id: batchId, applied_rows: applied, failed_rows: failures, gmv_preservado_rows: gmvsPreservados }
       } catch (err) {
         await db.query('ROLLBACK').catch(() => {})
         request.log.error({ err }, 'analytics/imports/apply error')

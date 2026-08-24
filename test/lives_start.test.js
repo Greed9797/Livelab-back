@@ -150,6 +150,14 @@ describe('GET /v1/lives/:id', () => {
         cliente_nome: 'Cliente Teste',
       }],
     })
+    // Segunda query da rota: o rateio completo da live. O SELECT principal traz só a
+    // apresentadora principal (LATERAL … LIMIT 1) e a tela de dividir precisa da lista.
+    queryMock.mockResolvedValueOnce({
+      rows: [
+        { apresentadora_id: 'ap-1', nome: 'Ana', papel: 'principal', gmv_rateado: '600.00', segundos_rateio: 3600, percentual_rateio: '60.00' },
+        { apresentadora_id: 'ap-2', nome: 'Bia', papel: 'apoio', gmv_rateado: '400.00', segundos_rateio: 2400, percentual_rateio: '40.00' },
+      ],
+    })
     const { app } = buildApp({ queryMock })
     await app.register(livesRoutes)
 
@@ -160,6 +168,10 @@ describe('GET /v1/lives/:id', () => {
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({ id: liveId, cliente_nome: 'Cliente Teste' })
+    expect(response.json().apresentadoras).toEqual([
+      { apresentadora_id: 'ap-1', nome: 'Ana', papel: 'principal', gmv: 600, segundos: 3600, percentual: 60 },
+      { apresentadora_id: 'ap-2', nome: 'Bia', papel: 'apoio', gmv: 400, segundos: 2400, percentual: 40 },
+    ])
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining('WHERE l.tenant_id = $1::uuid'),
       ['tenant-1', liveId],

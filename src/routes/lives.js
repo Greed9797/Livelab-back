@@ -10,6 +10,7 @@ import { invalidateHomeDashboard } from './home.js'
 import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
+import { applyApresentadorasToLive } from '../lib/live-rateio.js'
 
 function parseIntegerMetric(value) {
   if (typeof value === 'number') return value
@@ -138,6 +139,14 @@ const liveManualEditSchema = z.object({
   previsto_fim:     z.string().datetime({ offset: true }).nullable().optional(),
   status:           z.enum(['em_andamento', 'encerrada', 'cancelada']).optional(),
   origem_dados:     z.enum(['manual', 'api']).optional(),
+  // Rateio da live entre apresentadoras que se revezaram — "a Ana fez 4h e vendeu R$ 3.000,
+  // a Bia fez 5h e vendeu R$ 2.000". Mesmo formato absoluto que a revisão do import já usa;
+  // quem valida a soma contra o GMV e a duração da live é normalizarRateio, no lib.
+  apresentadoras:   z.array(z.object({
+    apresentadora_id: z.string().uuid(),
+    gmv:      z.coerce.number().min(0).optional(),
+    segundos: z.coerce.number().int().min(0).optional(),
+  })).min(1).optional(),
 })
 
 function officialGmvFromPayload(payload = {}, fallback = {}) {
@@ -1033,6 +1042,9 @@ export async function livesRoutes(app) {
         const precisaRecalcularComissao = gmvMudou
           || d.marca_id !== undefined
           || d.apresentador_id !== undefined
+          // Mudar só o rateio não mexe em nenhuma coluna de lives, mas muda quanto cada
+          // apresentadora recebe — sem isto a divisão ficaria gravada e a comissão, velha.
+          || d.apresentadoras !== undefined
         if (gmvMudou) {
           const cab = await db.query(
             `SELECT ct.comissao_pct FROM cabines c
@@ -1219,6 +1231,31 @@ export async function livesRoutes(app) {
           }
         }
 
+        // Rateio entre apresentadoras que se revezaram na mesma live. Até aqui só o import do
+        // TikTok escrevia isso, e o resultado medido em produção era 0 lives divididas no banco
+        // inteiro: quem operava não tinha por onde separar quem fez o quê, e a comissão saía
+        // toda para uma só. Vem DEPOIS do bloco de apresentador_id de propósito — quando o
+        // mesmo PATCH manda os dois, a informação mais rica ganha.
+        //
+        // O UPDATE de lives acima já rodou, então liveTotals (dentro do helper) valida a soma
+        // contra o GMV e a duração NOVOS, não contra os que a live tinha ao abrir a tela.
+        let rateioAnterior = null
+        if (d.apresentadoras !== undefined) {
+          const antes = await db.query(
+            `SELECT apresentadora_id, gmv_rateado, segundos_rateio
+               FROM live_apresentadoras_v2
+              WHERE live_id = $1::uuid AND tenant_id = $2::uuid
+              ORDER BY (papel = 'principal') DESC, criado_em ASC`,
+            [request.params.id, tenant_id],
+          )
+          rateioAnterior = antes.rows
+          await applyApresentadorasToLive(db, {
+            tenantId: tenant_id,
+            liveId: request.params.id,
+            apresentadoras: d.apresentadoras,
+          })
+        }
+
         // (removido: upsert direto em vendas_atribuidas — o commission-engine pós-commit
         //  é o escritor único de origem='live'. P1-1)
 
@@ -1307,6 +1344,18 @@ export async function livesRoutes(app) {
           const dKey = f === 'final_orders_count' ? 'qtd_pedidos' : f
           if (d[dKey] !== undefined && String(d[dKey] ?? '') !== String(live[f] ?? '')) {
             diff[f] = { before: live[f] ?? null, after: d[dKey] ?? null }
+          }
+        }
+        // Rateio não é coluna de lives, então não cai no laço acima — mas é dinheiro mudando
+        // de dona e precisa do mesmo rastro.
+        if (rateioAnterior !== null) {
+          diff.rateio_apresentadoras = {
+            before: rateioAnterior.map((r) => ({
+              apresentadora_id: r.apresentadora_id,
+              gmv: r.gmv_rateado == null ? null : Number(r.gmv_rateado),
+              segundos: r.segundos_rateio,
+            })),
+            after: d.apresentadoras,
           }
         }
         if (Object.keys(diff).length > 0) {
@@ -1484,6 +1533,27 @@ export async function livesRoutes(app) {
 
       const live = result.rows[0]
       if (!live) return reply.code(404).send({ error: 'Live não encontrada' })
+
+      // O SELECT acima traz só a apresentadora principal (LATERAL … LIMIT 1). Para dividir a
+      // live entre quem se revezou, a tela precisa da lista inteira com os valores rateados —
+      // sem isto o modal de rateio abriria sempre em branco e apagaria a divisão anterior.
+      const rateio = await db.query(
+        `SELECT lav.apresentadora_id, a.nome, lav.papel,
+                lav.gmv_rateado, lav.segundos_rateio, lav.percentual_rateio
+           FROM live_apresentadoras_v2 lav
+           JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
+          WHERE lav.live_id = $1::uuid AND lav.tenant_id = $2::uuid
+          ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC`,
+        [request.params.id, tenant_id],
+      )
+      live.apresentadoras = rateio.rows.map((r) => ({
+        apresentadora_id: r.apresentadora_id,
+        nome: r.nome,
+        papel: r.papel,
+        gmv: r.gmv_rateado == null ? null : Number(r.gmv_rateado),
+        segundos: r.segundos_rateio,
+        percentual: r.percentual_rateio == null ? null : Number(r.percentual_rateio),
+      }))
       return live
     })
   })

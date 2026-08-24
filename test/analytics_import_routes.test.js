@@ -115,7 +115,7 @@ describe('analytics imports routes', () => {
       if (sql.includes('SELECT id FROM lives WHERE id')) return { rows: [{ id: liveId }], rowCount: 1 }
       if (sql.includes('UPDATE lives')) {
         updateLivesArgs = args
-        return { rows: [], rowCount: 1 }
+        return { rows: [{ ads_gmv: args[0], gmv_preservado: false }], rowCount: 1 }
       }
       if (sql.includes('UPDATE analytics_import_rows')) return { rows: [] }
       if (sql.includes('UPDATE analytics_import_batches')) return { rows: [] }
@@ -180,7 +180,7 @@ describe('analytics imports routes', () => {
         return { rows: linhas }
       }
       if (sql.includes('SELECT id FROM lives WHERE id')) return { rows: [{ id: linhas[0].matched_live_id }], rowCount: 1 }
-      if (sql.includes('UPDATE lives')) return { rows: [], rowCount: 1 }
+      if (sql.includes('UPDATE lives')) return { rows: [{ ads_gmv: 500, gmv_preservado: false }], rowCount: 1 }
       if (sql.includes('UPDATE analytics_import_rows')) return { rows: [] }
       if (sql.includes('UPDATE analytics_import_batches')) return { rows: [] }
       throw new Error(`Unexpected SQL: ${sql}`)
@@ -204,5 +204,48 @@ describe('analytics imports routes', () => {
 
     await app.close()
   })
-})
+  // GMV corrigido à mão numa live importada não pode ser apagado por uma reimportação: é o
+  // mesmo "editei e voltou sozinho" que já custou 3 lives em produção. A prova de correção
+  // manual é a linha em live_metric_revisions com campo='ads_gmv' — essa tabela só é escrita
+  // pelo PATCH da live, nunca por este import.
+  it('não sobrescreve o GMV corrigido à mão e diz quantas lives preservou', async () => {
+    const { calcularComissoesDaLive } = await import('../src/services/commission-engine.js')
+    calcularComissoesDaLive.mockClear()
+    calcularComissoesDaLive.mockImplementation(async () => ([]))
 
+    let updateSql = null
+    const normalized = { ads_gmv: 1000, attributed_orders: 9 }
+    const queryMock = vi.fn(async (sql) => {
+      if (['BEGIN', 'COMMIT'].includes(sql) || sql.includes('SAVEPOINT')) return { rows: [] }
+      if (sql.includes('FROM analytics_import_batches') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: batchId, status: 'preview', source_type: 'tiktok_studio', marca_id: null }] }
+      }
+      if (sql.includes('FROM analytics_import_rows') && sql.includes("decisao IN ('vincular', 'criar')")) {
+        return { rows: [{ id: rowId, row_index: 1, matched_live_id: liveId, normalized, decisao: 'vincular', marca_id: null, apresentadoras: null }] }
+      }
+      if (sql.includes('SELECT id FROM lives WHERE id')) return { rows: [{ id: liveId }], rowCount: 1 }
+      if (sql.includes('UPDATE lives')) {
+        updateSql = sql
+        // A live já tinha correção manual: o banco devolve o valor ANTIGO, não o da planilha.
+        return { rows: [{ ads_gmv: '2419.00', gmv_preservado: true }], rowCount: 1 }
+      }
+      if (sql.includes('UPDATE analytics_import_rows')) return { rows: [] }
+      if (sql.includes('UPDATE analytics_import_batches')) return { rows: [] }
+      throw new Error(`Unexpected SQL: ${sql}`)
+    })
+
+    const app = buildApp(queryMock)
+    await app.register(analyticsRoutes)
+    const res = await app.inject({ method: 'POST', url: `/v1/analytics/imports/${batchId}/apply` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ ok: true, applied_rows: 1, gmv_preservado_rows: 1 })
+    expect(updateSql).toContain('live_metric_revisions')
+    expect(updateSql).toContain("r.campo = 'ads_gmv'")
+    // A comissão tem que usar o GMV que FICOU gravado, não o da planilha — senão o dinheiro
+    // pago diverge do número que a tela mostra.
+    expect(calcularComissoesDaLive.mock.calls[0][1].gmv).toBe(2419)
+
+    await app.close()
+  })
+})

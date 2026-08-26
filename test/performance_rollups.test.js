@@ -10,7 +10,8 @@ const range = { mes: '2026-05', start: '2026-05-01', end: '2026-06-01' }
 describe('performance rollups', () => {
   it('builds presenter ranking from the same live+video source used by analytics', async () => {
     const query = vi.fn(async (sql, params) => {
-      expect(sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv')
+      expect(sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
+      expect(sql).toContain('END AS gmv')
       expect(sql).toContain("va.origem = 'video'")
       expect(sql).toContain('ap_v2.gmv_rateado')
       expect(sql).toContain('ap_v2.segundos_rateio')

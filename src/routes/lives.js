@@ -1554,6 +1554,22 @@ export async function livesRoutes(app) {
         segundos: r.segundos_rateio,
         percentual: r.percentual_rateio == null ? null : Number(r.percentual_rateio),
       }))
+      // Compatibilidade dos campos simples com a fonte de verdade do rateio. O formulário
+      // antigo ainda consome os aliases principal/segunda, enquanto Analytics e comissão
+      // usam a lista completa. Derivar ambos da mesma consulta impede que o detalhe diga
+      // "sem segunda apresentadora" quando live_apresentadoras_v2 já tem o apoio salvo.
+      const principal = live.apresentadoras.find((item) => item.papel === 'principal') ?? live.apresentadoras[0]
+      const apoio = live.apresentadoras.find((item) => item !== principal)
+      if (principal) {
+        live.apresentadora_id = principal.apresentadora_id
+        live.apresentadora_nome = principal.nome
+        live.apresentador_nome = principal.nome
+      }
+      if (apoio) {
+        live.apresentadora2_id = apoio.apresentadora_id
+        live.apresentador2_id = apoio.apresentadora_id
+        live.apresentadora2_nome = apoio.nome
+      }
       return live
     })
   })

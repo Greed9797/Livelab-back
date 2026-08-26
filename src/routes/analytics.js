@@ -1641,14 +1641,36 @@ export async function analyticsRoutes(app) {
         const result = await db.query(`
           SELECT
             COUNT(*)::int AS total_lives,
-            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv,
-            COALESCE(SUM(COALESCE(l.manual_orders, l.final_orders_count, 0)), 0)::bigint AS pedidos,
+            COALESCE(SUM(
+              CASE
+                WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
+                  THEN COALESCE(
+                    ap_v2.gmv_rateado,
+                    COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) * ap_v2.percentual_rateio / 100.0,
+                    CASE WHEN ap_v2.papel = 'principal' THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) ELSE 0 END
+                  )
+                ELSE COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)
+              END
+            ), 0) AS gmv,
+            COALESCE(SUM(
+              CASE
+                WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
+                  THEN COALESCE(live_sales.pedidos, CASE WHEN ap_v2.papel = 'principal' THEN COALESCE(l.manual_orders, l.final_orders_count, 0) ELSE 0 END)
+                ELSE COALESCE(l.manual_orders, l.final_orders_count, 0)
+              END
+            ), 0)::bigint AS pedidos,
             COALESCE(SUM(COALESCE(l.live_impressions, 0)), 0)::bigint AS impressoes,
             COALESCE(SUM(COALESCE(l.manual_views, l.final_peak_viewers, 0)), 0)::bigint AS visualizacoes,
             COALESCE(SUM(COALESCE(l.product_impressions, 0)), 0)::bigint AS impressoes_produto,
             COALESCE(SUM(COALESCE(l.product_clicks, 0)), 0)::bigint AS cliques,
             COALESCE(SUM(
               CASE
+                WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
+                  THEN COALESCE(
+                    ap_v2.segundos_rateio / 3600.0,
+                    LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) * ap_v2.percentual_rateio / 100.0,
+                    CASE WHEN ap_v2.papel = 'principal' THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) ELSE 0 END
+                  )
                 WHEN COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
                   THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
                 ELSE 0
@@ -1660,12 +1682,23 @@ export async function analyticsRoutes(app) {
           FROM lives l
           LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
           LEFT JOIN LATERAL (
-            SELECT lav.apresentadora_id
+            SELECT lav.apresentadora_id, lav.gmv_rateado, lav.segundos_rateio,
+                   lav.percentual_rateio, lav.papel
             FROM live_apresentadoras_v2 lav
             WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+              AND ($4::uuid IS NULL OR lav.apresentadora_id = $4::uuid)
             ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
             LIMIT 1
           ) ap_v2 ON true
+          LEFT JOIN LATERAL (
+            SELECT SUM(va.pedidos)::int AS pedidos
+            FROM vendas_atribuidas va
+            WHERE va.tenant_id = l.tenant_id
+              AND va.origem = 'live'
+              AND va.origem_id = l.id
+              AND va.apresentadora_id = COALESCE(ap_v2.apresentadora_id, ap_user.id)
+              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+          ) live_sales ON true
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status = 'encerrada'
             AND COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
@@ -1780,9 +1813,27 @@ export async function analyticsRoutes(app) {
               COALESCE(m.nome, 'Sem marca') AS marca_nome,
               COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
               COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora') AS apresentadora_nome,
-              COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
-              COALESCE(l.manual_orders, l.final_orders_count, 0)::int AS pedidos,
               CASE
+                WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
+                  THEN COALESCE(
+                    ap_v2.gmv_rateado,
+                    COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) * ap_v2.percentual_rateio / 100.0,
+                    CASE WHEN ap_v2.papel = 'principal' THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) ELSE 0 END
+                  )
+                ELSE COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)
+              END AS gmv,
+              CASE
+                WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
+                  THEN COALESCE(live_sales.pedidos, CASE WHEN ap_v2.papel = 'principal' THEN COALESCE(l.manual_orders, l.final_orders_count, 0) ELSE 0 END)
+                ELSE COALESCE(l.manual_orders, l.final_orders_count, 0)
+              END::int AS pedidos,
+              CASE
+                WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
+                  THEN COALESCE(
+                    ap_v2.segundos_rateio / 3600.0,
+                    LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) * ap_v2.percentual_rateio / 100.0,
+                    CASE WHEN ap_v2.papel = 'principal' THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) ELSE 0 END
+                  )
                 WHEN COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
                  AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
                   THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
@@ -1793,13 +1844,24 @@ export async function analyticsRoutes(app) {
             LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
             LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
             LEFT JOIN LATERAL (
-              SELECT lav.apresentadora_id, a.nome
+              SELECT lav.apresentadora_id, a.nome, lav.gmv_rateado, lav.segundos_rateio,
+                     lav.percentual_rateio, lav.papel
               FROM live_apresentadoras_v2 lav
               JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
               WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+                AND ($4::uuid IS NULL OR lav.apresentadora_id = $4::uuid)
               ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
               LIMIT 1
             ) ap_v2 ON true
+            LEFT JOIN LATERAL (
+              SELECT SUM(va.pedidos)::int AS pedidos
+              FROM vendas_atribuidas va
+              WHERE va.tenant_id = l.tenant_id
+                AND va.origem = 'live'
+                AND va.origem_id = l.id
+                AND va.apresentadora_id = COALESCE(ap_v2.apresentadora_id, ap_user.id)
+                AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+            ) live_sales ON true
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
               AND l.iniciado_em >= ($1::date) AT TIME ZONE '${ANALYTICS_TZ}'

@@ -186,4 +186,36 @@ describe('GET /v1/lives/:id', () => {
       ['tenant-1', liveId],
     )
   })
+
+  it('clears legacy secondary aliases when the authoritative split has only one presenter', async () => {
+    const liveId = '33333333-3333-4333-8333-333333333333'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{
+          id: liveId,
+          status: 'encerrada',
+          apresentadora2_id: 'legacy-ap-2',
+          apresentador2_id: 'legacy-ap-2',
+          apresentadora2_nome: 'Fantasma legado',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [
+          { apresentadora_id: 'ap-1', nome: 'Ana', papel: 'principal', gmv_rateado: '1000.00', segundos_rateio: 3600, percentual_rateio: '100.00' },
+        ],
+      })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const response = await app.inject({ method: 'GET', url: `/v1/lives/${liveId}` })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      apresentadora_id: 'ap-1',
+      apresentadora2_id: null,
+      apresentador2_id: null,
+      apresentadora2_nome: null,
+    })
+    await app.close()
+  })
 })

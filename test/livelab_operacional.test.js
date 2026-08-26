@@ -369,6 +369,31 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('GET /v1/lives filters by any split presenter and hydrates the full split on the row', async () => {
+    const apresentadoraId = '33333333-3333-4333-8333-333333333333'
+    const split = [
+      { apresentadora_id: '44444444-4444-4444-8444-444444444444', nome: 'Sandy', papel: 'principal' },
+      { apresentadora_id: apresentadoraId, nome: 'Cliceane', papel: 'apoio' },
+    ]
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: 'live-1', total_count: '1' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'live-1', apresentadoras: split }] })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/lives?paginado=1&apresentadora_id=${apresentadoraId}`,
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().items[0].apresentadoras).toEqual(split)
+    expect(queryMock.mock.calls[0][0]).toContain('EXISTS (')
+    expect(queryMock.mock.calls[0][0]).toContain('lav_filter.apresentadora_id = $2::uuid')
+    expect(queryMock.mock.calls[1][0]).toContain('ap_v2.apresentadoras AS apresentadoras')
+    await app.close()
+  })
+
   it('PATCH /v1/lives/:id/encerrar rolls back when agenda sync fails', async () => {
     const liveId = '11111111-1111-4111-8111-111111111111'
     const cabineId = '22222222-2222-4222-8222-222222222222'

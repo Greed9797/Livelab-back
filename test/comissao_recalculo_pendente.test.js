@@ -43,11 +43,13 @@ describe('comissão pendente — a marca é gravada com a edição', () => {
     // recalcular sem marcar traz a comissão congelada de volta.
     expect(lives).toMatch(/const precisaRecalcularComissao = gmvMudou/)
     expect(lives).toMatch(/if \(precisaRecalcularComissao\) addField/)
-    expect(lives).toMatch(/if \(precisaRecalcularComissao\) \{/)
+    expect(lives).toMatch(/if \(precisaRecalcularComissao && !rateioRecalculadoNaTransacao\) \{/)
   })
 
   it('a marca só é limpa DEPOIS do recálculo bem-sucedido', () => {
-    const bloco = lives.split('if (precisaRecalcularComissao) {')[1]?.slice(0, 1600) ?? ''
+    const bloco = lives
+      .split('if (precisaRecalcularComissao && !rateioRecalculadoNaTransacao) {')[1]
+      ?.slice(0, 1600) ?? ''
     const posCalculo = bloco.indexOf('calcularComissoesDaLive')
     const posLimpeza = bloco.indexOf('comissao_recalculo_pendente = FALSE')
     expect(posCalculo).toBeGreaterThan(-1)

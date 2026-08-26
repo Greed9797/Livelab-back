@@ -1128,8 +1128,10 @@ export async function livesRoutes(app) {
         if (gmvMudou) addField('comissao_calculada', comissao)
         // Intenção durável de recálculo, gravada na MESMA transação da edição.
         //
-        // O recálculo das vendas_atribuidas roda fora daqui, em fire-and-forget. Se ele
-        // falhar — ou se o processo morrer entre o COMMIT e a chamada — a venda fica com o
+        // O recálculo comum das vendas_atribuidas roda fora daqui; o de rateio roda dentro
+        // da transação para que Analytics nunca misture o rateio novo com vendas antigas.
+        // Se um recálculo assíncrono falhar — ou se o processo morrer entre o COMMIT e a
+        // chamada — a venda fica com o
         // valor ANTIGO, não-zero. E o cron de reconciliação só varre comissão ZERADA, então
         // comissão errada mas não-zero nunca seria reprocessada: ficava errada para sempre,
         // sem erro e sem log.
@@ -1254,6 +1256,13 @@ export async function livesRoutes(app) {
             liveId: request.params.id,
             apresentadoras: d.apresentadoras,
           })
+          // A lista v2 passa a ser a única fonte de verdade. Manter a junção legada aqui
+          // deixa uma segunda apresentadora "fantasma" quando o apoio é removido.
+          await db.query(
+            `DELETE FROM live_apresentadores
+              WHERE live_id = $1::uuid AND tenant_id = $2::uuid`,
+            [request.params.id, tenant_id],
+          )
         }
 
         // (removido: upsert direto em vendas_atribuidas — o commission-engine pós-commit
@@ -1288,7 +1297,7 @@ export async function livesRoutes(app) {
           )
         }
 
-        if ('apresentador2_id' in d) {
+        if (d.apresentadoras === undefined && 'apresentador2_id' in d) {
           await db.query(`DELETE FROM live_apresentadores WHERE live_id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])
           if (d.apresentador2_id) {
             const ap2Row = await db.query('SELECT user_id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid', [d.apresentador2_id, tenant_id])
@@ -1367,6 +1376,25 @@ export async function livesRoutes(app) {
           })?.catch?.(err => app.log.warn({ err }, 'audit log live.update falhou'))
         }
 
+        // Alterar o rateio muda simultaneamente GMV/horas por apresentadora e as linhas de
+        // vendas/comissão. Persistir as duas fontes na mesma transação impede a leitura
+        // híbrida que antes podia ficar armazenada nos caches de Analytics por até 60s.
+        let rateioRecalculadoNaTransacao = false
+        if (d.apresentadoras !== undefined) {
+          await calcularComissoesDaLive(db, {
+            liveId: request.params.id,
+            tenantId: tenant_id,
+            gmv: officialGmvFromPayload(d, live),
+            pedidos: officialOrdersFromPayload(d, live),
+          })
+          await db.query(
+            `UPDATE lives SET comissao_recalculo_pendente = FALSE
+              WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+            [request.params.id, tenant_id],
+          )
+          rateioRecalculadoNaTransacao = true
+        }
+
         await db.query('COMMIT')
 
         // A Home tem cache PRÓPRIO, fora do dashboard-cache.js, e o hook global de app.js
@@ -1375,8 +1403,9 @@ export async function livesRoutes(app) {
         // usuário lê como "não salvou".
         invalidateHomeDashboard(tenant_id)
 
-        // Recalcula comissões (escritor único) se mudou GMV, marca ou apresentadora (fire-and-forget).
-        if (precisaRecalcularComissao) {
+        // Demais edições mantêm o recálculo assíncrono existente. O rateio já foi concluído
+        // atomicamente acima e não pode ser disparado duas vezes aqui.
+        if (precisaRecalcularComissao && !rateioRecalculadoNaTransacao) {
           const gmvAtualizado = officialGmvFromPayload(d, live)
           const pedidosAtualizado = officialOrdersFromPayload(d, live)
           app.withTenant(tenant_id, async (db2) => {
@@ -1565,11 +1594,9 @@ export async function livesRoutes(app) {
         live.apresentadora_nome = principal.nome
         live.apresentador_nome = principal.nome
       }
-      if (apoio) {
-        live.apresentadora2_id = apoio.apresentadora_id
-        live.apresentador2_id = apoio.apresentadora_id
-        live.apresentadora2_nome = apoio.nome
-      }
+      live.apresentadora2_id = apoio?.apresentadora_id ?? null
+      live.apresentador2_id = apoio?.apresentadora_id ?? null
+      live.apresentadora2_nome = apoio?.nome ?? null
       return live
     })
   })
@@ -1610,7 +1637,16 @@ export async function livesRoutes(app) {
       }
       if (fApresentadoraId) {
         params.push(fApresentadoraId)
-        where += ` AND COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) = $${params.length}::uuid`
+        where += ` AND (
+          EXISTS (
+            SELECT 1
+              FROM live_apresentadoras_v2 lav_filter
+             WHERE lav_filter.live_id = l.id
+               AND lav_filter.tenant_id = l.tenant_id
+               AND lav_filter.apresentadora_id = $${params.length}::uuid
+          )
+          OR COALESCE(ae.apresentadora_id, ap_user.id) = $${params.length}::uuid
+        )`
       }
       if (fQ) {
         // Busca textual server-side: marca, cliente, apresentadora, resumo da live
@@ -1621,7 +1657,7 @@ export async function livesRoutes(app) {
         const qi = params.length
         where += ` AND (cl.nome ILIKE $${qi}
           OR va_marca.marca_nome ILIKE $${qi}
-          OR COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, u.nome) ILIKE $${qi}
+          OR COALESCE(ap_v2.nomes, ap_agenda.nome, ap_user.nome, u.nome) ILIKE $${qi}
           OR l.resumo ILIKE $${qi}
           OR ae.observacoes ILIKE $${qi})`
       }
@@ -1658,13 +1694,27 @@ export async function livesRoutes(app) {
          ) ae ON true`
       const joinApAgenda = `LEFT JOIN apresentadoras ap_agenda ON ap_agenda.id = ae.apresentadora_id AND ap_agenda.tenant_id = l.tenant_id`
       const joinApV2 = `LEFT JOIN LATERAL (
-           SELECT lav.apresentadora_id, a.nome
+           SELECT
+             (array_agg(lav.apresentadora_id ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC))[1] AS apresentadora_id,
+             (array_agg(a.nome ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC))[1] AS nome,
+             (array_agg(lav.apresentadora_id ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC))[2] AS apresentadora2_id,
+             (array_agg(a.nome ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC))[2] AS apresentadora2_nome,
+             string_agg(a.nome, ' ' ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC) AS nomes,
+             COUNT(*)::int AS total,
+             jsonb_agg(
+               jsonb_build_object(
+                 'apresentadora_id', lav.apresentadora_id,
+                 'nome', a.nome,
+                 'papel', lav.papel,
+                 'gmv', lav.gmv_rateado,
+                 'segundos', lav.segundos_rateio,
+                 'percentual', lav.percentual_rateio
+               ) ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+             ) AS apresentadoras
            FROM live_apresentadoras_v2 lav
            JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
            WHERE lav.live_id = l.id
              AND lav.tenant_id = l.tenant_id
-           ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
-           LIMIT 1
          ) ap_v2 ON true`
       const joinApExtra = `LEFT JOIN LATERAL (
            SELECT ap_extra_profile.id AS apresentadora_id,
@@ -1713,7 +1763,7 @@ export async function livesRoutes(app) {
       if (fQ) pageJoins.push(joinClientes, joinUsers)
       if (needsApresentadora) pageJoins.push(joinApUser, joinAe)
       if (fQ) pageJoins.push(joinApAgenda)
-      if (needsApresentadora) pageJoins.push(joinApV2)
+      if (fQ) pageJoins.push(joinApV2)
       if (needsMarca) pageJoins.push(joinVaMarca)
 
       const pageResult = await db.query(
@@ -1756,9 +1806,10 @@ export async function livesRoutes(app) {
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
                 COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
-                ap_extra.apresentadora_id AS apresentadora2_id,
-                ap_extra.apresentadora_id AS apresentador2_id,
-                ap_extra.nome AS apresentadora2_nome,
+                CASE WHEN ap_v2.total > 0 THEN ap_v2.apresentadora2_id ELSE ap_extra.apresentadora_id END AS apresentadora2_id,
+                CASE WHEN ap_v2.total > 0 THEN ap_v2.apresentadora2_id ELSE ap_extra.apresentadora_id END AS apresentador2_id,
+                CASE WHEN ap_v2.total > 0 THEN ap_v2.apresentadora2_nome ELSE ap_extra.nome END AS apresentadora2_nome,
+                ap_v2.apresentadoras AS apresentadoras,
                 COALESCE(l.agenda_evento_id, ae.id) AS agenda_evento_id,
                 ae.data_inicio AS agenda_data_inicio,
                 ae.data_fim AS agenda_data_fim,

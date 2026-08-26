@@ -1032,6 +1032,28 @@ export async function livesRoutes(app) {
           await db.query('ROLLBACK')
           return reply.code(409).send({ error: 'Live cancelada não pode ser editada' })
         }
+        if (d.apresentadoras !== undefined) {
+          // Atribuições aprovadas são imutáveis no commission-engine. Permitir um novo
+          // rateio aqui mudaria o v2 sem mudar as vendas aprovadas e deixaria Analytics
+          // dividido entre duas verdades. Rejeita antes de qualquer escrita parcial.
+          const aprovada = await db.query(
+            `SELECT 1 AS exists
+               FROM vendas_atribuidas
+              WHERE tenant_id = $1::uuid
+                AND origem = 'live'
+                AND origem_id = $2::uuid
+                AND status_aprovacao = 'aprovada'
+              LIMIT 1`,
+            [tenant_id, request.params.id],
+          )
+          if (aprovada.rows[0]) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({
+              error: 'Não é possível alterar o rateio enquanto houver comissão aprovada para esta live.',
+              code: 'RATEIO_COMISSAO_APROVADA',
+            })
+          }
+        }
 
         const cabineId = d.cabine_id ?? live.cabine_id
         let comissao = undefined
@@ -1594,9 +1616,11 @@ export async function livesRoutes(app) {
         live.apresentadora_nome = principal.nome
         live.apresentador_nome = principal.nome
       }
-      live.apresentadora2_id = apoio?.apresentadora_id ?? null
-      live.apresentador2_id = apoio?.apresentadora_id ?? null
-      live.apresentadora2_nome = apoio?.nome ?? null
+      if (apoio) {
+        live.apresentadora2_id = apoio.apresentadora_id
+        live.apresentador2_id = apoio.apresentadora_id
+        live.apresentadora2_nome = apoio.nome
+      }
       return live
     })
   })
@@ -1806,10 +1830,10 @@ export async function livesRoutes(app) {
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
                 COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
-                CASE WHEN ap_v2.total > 0 THEN ap_v2.apresentadora2_id ELSE ap_extra.apresentadora_id END AS apresentadora2_id,
-                CASE WHEN ap_v2.total > 0 THEN ap_v2.apresentadora2_id ELSE ap_extra.apresentadora_id END AS apresentador2_id,
-                CASE WHEN ap_v2.total > 0 THEN ap_v2.apresentadora2_nome ELSE ap_extra.nome END AS apresentadora2_nome,
-                ap_v2.apresentadoras AS apresentadoras,
+                CASE WHEN ap_v2.total >= 2 THEN ap_v2.apresentadora2_id ELSE ap_extra.apresentadora_id END AS apresentadora2_id,
+                CASE WHEN ap_v2.total >= 2 THEN ap_v2.apresentadora2_id ELSE ap_extra.apresentadora_id END AS apresentador2_id,
+                CASE WHEN ap_v2.total >= 2 THEN ap_v2.apresentadora2_nome ELSE ap_extra.nome END AS apresentadora2_nome,
+                CASE WHEN ap_v2.total >= 2 THEN ap_v2.apresentadoras END AS apresentadoras,
                 COALESCE(l.agenda_evento_id, ae.id) AS agenda_evento_id,
                 ae.data_inicio AS agenda_data_inicio,
                 ae.data_fim AS agenda_data_fim,

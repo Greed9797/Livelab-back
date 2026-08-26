@@ -87,4 +87,59 @@ describe('PATCH /v1/lives/:id presenter split consistency', () => {
     expect(deletedLegacy).toBe(true)
     await app.close()
   })
+
+  it('rejects repartition when attribution is already approved', async () => {
+    events.length = 0
+    calcularMock.mockClear()
+    let rolledBack = false
+    const query = vi.fn(async (sql) => {
+      const text = String(sql)
+      if (text === 'BEGIN') return { rows: [] }
+      if (text === 'ROLLBACK') {
+        rolledBack = true
+        return { rows: [] }
+      }
+      if (text.includes('FROM lives l') && text.includes('FOR UPDATE OF l')) {
+        return {
+          rows: [{
+            id: liveId,
+            status: 'encerrada',
+            cabine_id: '55555555-5555-4555-8555-555555555555',
+            marca_id: null,
+            iniciado_em: '2026-08-20T12:00:00.000Z',
+            encerrado_em: '2026-08-20T16:45:00.000Z',
+          }],
+        }
+      }
+      if (text.includes('FROM vendas_atribuidas') && text.includes("status_aprovacao = 'aprovada'")) {
+        return { rows: [{ exists: 1 }] }
+      }
+      return { rows: [] }
+    })
+
+    const app = Fastify()
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: tenantId, sub: 'user-1', papel: 'franqueado' }
+    })
+    app.decorate('requirePapel', () => async () => {})
+    app.decorate('withTenant', async (_tenantId, fn) => fn({ query }))
+    app.decorate('db', { pool: { connect: vi.fn() } })
+    await app.register(livesRoutes)
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}`,
+      payload: {
+        apresentadoras: [
+          { apresentadora_id: sandyId, gmv: 3234.76, segundos: 17100 },
+        ],
+      },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.json()).toMatchObject({ code: 'RATEIO_COMISSAO_APROVADA' })
+    expect(rolledBack).toBe(true)
+    expect(calcularMock).not.toHaveBeenCalled()
+    await app.close()
+  })
 })

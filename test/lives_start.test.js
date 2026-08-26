@@ -167,7 +167,16 @@ describe('GET /v1/lives/:id', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(response.json()).toMatchObject({ id: liveId, cliente_nome: 'Cliente Teste' })
+    expect(response.json()).toMatchObject({
+      id: liveId,
+      cliente_nome: 'Cliente Teste',
+      apresentadora_id: 'ap-1',
+      apresentadora_nome: 'Ana',
+      apresentador_nome: 'Ana',
+      apresentadora2_id: 'ap-2',
+      apresentador2_id: 'ap-2',
+      apresentadora2_nome: 'Bia',
+    })
     expect(response.json().apresentadoras).toEqual([
       { apresentadora_id: 'ap-1', nome: 'Ana', papel: 'principal', gmv: 600, segundos: 3600, percentual: 60 },
       { apresentadora_id: 'ap-2', nome: 'Bia', papel: 'apoio', gmv: 400, segundos: 2400, percentual: 40 },

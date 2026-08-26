@@ -12,7 +12,11 @@ describe('performance rollups', () => {
     const query = vi.fn(async (sql, params) => {
       expect(sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv')
       expect(sql).toContain("va.origem = 'video'")
-      expect(sql).toContain('COALESCE(ap_v2.apresentadora_id, ap_user.id)')
+      expect(sql).toContain('ap_v2.gmv_rateado')
+      expect(sql).toContain('ap_v2.segundos_rateio')
+      expect(sql).toContain("ap_v2.papel = 'principal'")
+      expect(sql).toContain('lav.apresentadora_id = $7::uuid')
+      expect(sql).not.toMatch(/FROM live_apresentadoras_v2 lav[\s\S]*?LIMIT 1[\s\S]*?live_commission/)
       expect(sql).toContain('va.apresentadora_id = $7::uuid')
       expect(params).toEqual([tenantId, range.start, range.end, 10, null, marcaId, apresentadoraId, null])
       return {

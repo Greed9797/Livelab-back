@@ -391,6 +391,7 @@ describe('LIVELAB operational routes', () => {
     expect(queryMock.mock.calls[0][0]).toContain('EXISTS (')
     expect(queryMock.mock.calls[0][0]).toContain('lav_filter.apresentadora_id = $2::uuid')
     expect(queryMock.mock.calls[1][0]).toContain('ap_v2.apresentadoras AS apresentadoras')
+    expect(queryMock.mock.calls[1][0]).toContain('ap_v2.total >= 2')
     await app.close()
   })
 

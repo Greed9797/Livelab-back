@@ -187,7 +187,7 @@ describe('GET /v1/lives/:id', () => {
     )
   })
 
-  it('clears legacy secondary aliases when the authoritative split has only one presenter', async () => {
+  it('preserves a valid legacy secondary presenter when v2 still contains only the primary', async () => {
     const liveId = '33333333-3333-4333-8333-333333333333'
     const queryMock = vi.fn()
       .mockResolvedValueOnce({
@@ -196,7 +196,7 @@ describe('GET /v1/lives/:id', () => {
           status: 'encerrada',
           apresentadora2_id: 'legacy-ap-2',
           apresentador2_id: 'legacy-ap-2',
-          apresentadora2_nome: 'Fantasma legado',
+          apresentadora2_nome: 'Bia legada',
         }],
       })
       .mockResolvedValueOnce({
@@ -212,9 +212,9 @@ describe('GET /v1/lives/:id', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({
       apresentadora_id: 'ap-1',
-      apresentadora2_id: null,
-      apresentador2_id: null,
-      apresentadora2_nome: null,
+      apresentadora2_id: 'legacy-ap-2',
+      apresentador2_id: 'legacy-ap-2',
+      apresentadora2_nome: 'Bia legada',
     })
     await app.close()
   })

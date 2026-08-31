@@ -12,6 +12,12 @@
 
 // ─── Papéis administrativos base ─────────────────────────────────────
 const ADMIN = ['franqueador_master', 'franqueado', 'gerente']
+
+// Papel das chaves de API (migration 138). Não pertence a ninguém na tabela
+// `users`: vive na coluna `papel` de `api_keys` e chega ao request pelo plugin
+// de auth. Entra só em lives, marcas, apresentadoras e nas leituras
+// correspondentes — nunca em financeiro, usuários ou configurações.
+const AUTOMACAO = 'automacao'
 const ADMIN_COMERCIAL = [...ADMIN, 'gerente_comercial']
 
 // ─── FINANCEIRO ──────────────────────────────────────────────────────
@@ -56,15 +62,19 @@ export const WRITE_CABINES = [...ADMIN, 'operacional', 'produtor_live']
 export const READ_LIVES = [
   ...ADMIN, 'operacional', 'apresentador', 'apresentadora',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
+  AUTOMACAO,
 ]
-export const WRITE_LIVES = [...ADMIN, 'operacional', 'apresentador', 'apresentadora', 'produtor_live']
+export const WRITE_LIVES = [
+  ...ADMIN, 'operacional', 'apresentador', 'apresentadora', 'produtor_live', AUTOMACAO,
+]
 
 // ─── APRESENTADORAS ──────────────────────────────────────────────────
 export const READ_APRESENTADORAS = [
   ...ADMIN, 'operacional',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
+  AUTOMACAO,
 ]
-export const WRITE_APRESENTADORAS = [...ADMIN, 'operacional', 'produtor_live']
+export const WRITE_APRESENTADORAS = [...ADMIN, 'operacional', 'produtor_live', AUTOMACAO]
 
 // ─── SOLICITAÇÕES (reservas de cabine pelo cliente) ──────────────────
 export const READ_SOLICITACOES = [
@@ -77,11 +87,15 @@ export const READ_ANALYTICS = [
   ...ADMIN,
   'auditor', 'financeiro_readonly', 'suporte', 'produtor_live',
   'marketing', 'comercial_readonly',
+  AUTOMACAO,
 ]
 
 // ─── CONTEÚDO / MARCAS / AGENDA / VÍDEOS ─────────────────────────────
-export const READ_MARCAS = READ_CLIENTES
-export const WRITE_MARCAS = WRITE_CLIENTES
+// Marcas herdavam CLIENTES inteiro. A automação precisa cadastrar marca sem
+// enxergar a carteira de clientes, então os dois deixam de ser o mesmo array:
+// quem lia cliente continua lendo marca, e só a chave entra a mais.
+export const READ_MARCAS = [...READ_CLIENTES, AUTOMACAO]
+export const WRITE_MARCAS = [...WRITE_CLIENTES, AUTOMACAO]
 
 export const READ_AGENDA = [
   ...ADMIN, 'operacional', 'apresentador', 'apresentadora',
@@ -104,6 +118,7 @@ export const WRITE_VENDAS_ATRIBUIDAS = [
 export const READ_COMISSOES = [
   ...ADMIN, 'financeiro', 'financeiro_readonly',
   'auditor', 'produtor_live', 'marketing', 'comercial_readonly',
+  AUTOMACAO,
 ]
 
 // ─── CONFIGURAÇÕES / USUÁRIOS ────────────────────────────────────────

@@ -28,7 +28,11 @@ async function auditLogPlugin(app) {
     async log(request, info) {
       try {
         const tenantId = request.user?.tenant_id ?? null
-        const userId = request.user?.sub ?? null
+        // Quando quem age é uma chave de API, o `sub` é `apikey:<uuid>` — string
+        // que não entra numa coluna UUID. O INSERT falharia no catch abaixo e a
+        // ação da automação ficaria sem trilha nenhuma, que é justamente a que
+        // mais precisa de trilha. Gravamos o id da chave e marcamos a origem.
+        const userId = request.viaApiKey?.id ?? request.user?.sub ?? null
         const ip =
           request.headers['x-forwarded-for']?.split(',')[0]?.trim() ??
           request.socket?.remoteAddress ??
@@ -36,6 +40,10 @@ async function auditLogPlugin(app) {
         const ua = request.headers['user-agent']?.slice(0, 500) ?? null
 
         const metadata = scrub(info.metadata ?? {})
+        if (request.viaApiKey) {
+          metadata.via = 'api_key'
+          metadata.api_key_nome = request.viaApiKey.nome
+        }
 
         await app.db.query(
           `INSERT INTO audit_log

@@ -12,6 +12,7 @@ import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { applyApresentadorasToLive, rateioAbsoluto } from '../lib/live-rateio.js'
 import { performance } from 'node:perf_hooks'
+import { createHash } from 'node:crypto'
 import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
 import { invalidateHomeDashboard } from './home.js'
 
@@ -90,6 +91,15 @@ function resolveAnalyticsPeriod(query) {
 }
 
 const MAX_IMPORT_ROWS = 5000
+
+// Teto da entrada de máquina. Ela faz preview e apply na mesma requisição, e o
+// apply custa várias idas ao banco por linha — 5.000 linhas não terminam antes
+// de o Railway cortar a conexão.
+const MAX_INGEST_ROWS = Number(process.env.MAX_INGEST_ROWS ?? 1000)
+
+// Sobreposição mínima para a automação vincular sozinha. Abaixo disso a linha
+// espera revisão humana.
+const CONFIANCA_MINIMA_INGEST = 0.8
 
 /** Duas casas decimais — a escala de NUMERIC(_,2), tanto em percentual_rateio quanto em gmv_rateado. */
 const duasCasas = (value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-6
@@ -191,6 +201,22 @@ function readUploadField(request, fields, name) {
 function defaultDecisionFor(matchStatus) {
   if (matchStatus === 'matched') return 'vincular'
   if (matchStatus === 'skipped_short' || matchStatus === 'invalid') return 'ignorar'
+  return 'pendente'
+}
+
+/**
+ * Decisão da entrada de máquina, no lugar do humano que revisaria na tela.
+ *
+ * A régua é a confiança do casamento: `matched` com sobreposição folgada entra
+ * sozinho, o resto fica pendente. Um agente que aplica o duvidoso escreve GMV na
+ * live errada, e o erro só aparece na comissão do fim do mês.
+ */
+function decisaoAutomatica(row, { criarLives = false } = {}) {
+  if (row.match_status === 'skipped_short' || row.match_status === 'invalid') return 'ignorar'
+  if (row.match_status === 'matched' && Number(row.match_confidence ?? 0) >= CONFIANCA_MINIMA_INGEST) {
+    return 'vincular'
+  }
+  if (row.match_status === 'unmatched' && criarLives) return 'criar'
   return 'pendente'
 }
 
@@ -398,6 +424,252 @@ function rowsDateRange(rows) {
   return { fromDate: dates[0], toDate: dates[dates.length - 1] }
 }
 
+// Grava o lote e suas linhas. Serve os dois caminhos de entrada — a tela, que
+// deixa tudo pendente para alguém revisar, e a automação, que já chega com a
+// decisão tomada. Quem manda na decisão é `decisaoDe`, e é a única diferença
+// entre os dois.
+async function criarLoteDeImportacao(db, {
+  tenantId, sub, upload, sourceType, matchedRows, summary,
+  marcaId, apresentadoraId, fileHash = null, decisaoDe,
+}) {
+  const batchQ = await db.query(
+    `INSERT INTO analytics_import_batches (
+       tenant_id, filename, source_type, marca_id, apresentadora_id,
+       total_rows, matched_rows, ambiguous_rows,
+       unmatched_rows, skipped_rows, invalid_rows, summary, created_by, file_hash
+     )
+     VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14)
+     RETURNING id`,
+    [
+      tenantId,
+      upload.filename,
+      sourceType,
+      marcaId,
+      apresentadoraId,
+      summary.total_rows,
+      summary.matched_rows,
+      summary.ambiguous_rows,
+      summary.unmatched_rows,
+      summary.skipped_rows,
+      summary.invalid_rows,
+      JSON.stringify(summary),
+      sub ?? null,
+      fileHash,
+    ],
+  )
+  const batchId = batchQ.rows[0].id
+
+  const defaultApresentadoras = apresentadoraId
+    ? JSON.stringify([{ apresentadora_id: apresentadoraId, percentual: 100 }])
+    : null
+
+  const rowIds = new Map()
+  const decisoes = new Map()
+  for (const row of matchedRows) {
+    const decisao = decisaoDe(row)
+    const inserted = await db.query(
+      `INSERT INTO analytics_import_rows (
+         tenant_id, batch_id, row_index, raw, normalized,
+         marca_nome, live_date, start_time, duration_seconds,
+         matched_live_id, matched_agenda_evento_id,
+         match_status, match_confidence, match_reason, candidates,
+         decisao, marca_id, apresentadoras
+       )
+       VALUES (
+         $1::uuid, $2::uuid, $3, $4::jsonb, $5::jsonb,
+         $6, $7::date, $8, $9,
+         $10::uuid, $11::uuid,
+         $12, $13, $14, $15::jsonb,
+         $16, $17::uuid, $18::jsonb
+       )
+       RETURNING id`,
+      [
+        tenantId,
+        batchId,
+        row.row_index,
+        JSON.stringify(row.raw),
+        JSON.stringify(row.normalized),
+        row.normalized.marca_nome,
+        row.normalized.live_date,
+        row.normalized.start_time,
+        row.normalized.duration_seconds,
+        row.matched_live_id ?? null,
+        row.matched_agenda_evento_id ?? null,
+        row.match_status,
+        row.match_confidence ?? null,
+        row.match_reason ?? null,
+        JSON.stringify(row.candidates ?? []),
+        decisao,
+        marcaId,
+        defaultApresentadoras,
+      ],
+    )
+    // A tela de revisão precisa do id da linha para editar decisão e rateio.
+    rowIds.set(row.row_index, inserted.rows[0]?.id ?? null)
+    decisoes.set(row.row_index, decisao)
+  }
+
+  return { batchId, rowIds, decisoes }
+}
+
+/** Erro com código HTTP, para o handler traduzir sem adivinhar pela mensagem. */
+class ErroDeImportacao extends Error {
+  constructor(statusCode, message) {
+    super(message)
+    this.statusCode = statusCode
+  }
+}
+
+// Aplica um lote já revisado: resolve a live de cada linha, grava métricas,
+// rateio e comissão, e roda o retro-lift do mês uma vez por (apresentadora,
+// mês). Espera uma transação já aberta e devolve o resumo — quem chama decide
+// o COMMIT.
+//
+// Vive aqui fora, e não dentro do handler, porque dois caminhos aplicam lote: a
+// tela (POST /:id/apply) e a automação (POST /ingest). Duas cópias deste laço
+// seriam dois escritores no caminho do dinheiro, que é como uma delas fica para
+// trás sem ninguém notar.
+async function aplicarLoteDeImportacao(db, { tenantId, batchId, sub }) {
+  const batchQ = await db.query(
+    `SELECT id, status, source_type, marca_id, apresentadora_id
+       FROM analytics_import_batches
+      WHERE id = $1::uuid
+        AND tenant_id = $2::uuid
+      FOR UPDATE`,
+    [batchId, tenantId],
+  )
+  const batch = batchQ.rows[0]
+  if (!batch) throw new ErroDeImportacao(404, 'Importacao nao encontrada')
+  if (batch.status === 'applied') throw new ErroDeImportacao(409, 'Importacao ja aplicada')
+
+  const rowsQ = await db.query(
+    `SELECT id, row_index, matched_live_id, normalized, decisao, marca_id, apresentadoras, cabine_id
+       FROM analytics_import_rows
+      WHERE tenant_id = $1::uuid
+        AND batch_id = $2::uuid
+        AND decisao IN ('vincular', 'criar')
+        AND applied_at IS NULL
+      ORDER BY row_index ASC
+      FOR UPDATE`,
+    [tenantId, batchId],
+  )
+
+  // Só vale o custo de adivinhar quando sobrou alguma linha 'criar' sem cabine confirmada.
+  const cabinePadraoId = rowsQ.rows.some((row) => row.decisao === 'criar' && !row.cabine_id)
+    ? await resolveCabinePadrao(db, tenantId, batch.marca_id)
+    : null
+
+  let applied = 0
+  // Lives cujo GMV corrigido à mão prevaleceu sobre o da planilha (ver applyMetricsToLive).
+  let gmvsPreservados = 0
+  const failures = []
+  const touchedLiveIds = []
+  // Guarda final contra duas linhas gravando na mesma live (a segunda apagaria a
+  // primeira). O matcher e o PATCH já barram antes; aqui é a rede de segurança.
+  const livesDoLote = new Map()
+  // (apresentadora, mês) tocados pelo lote — o retro-lift do cliff roda uma vez
+  // por par no fim, em vez de uma vez por linha. Map dedupe pela chave.
+  const retroLiftPendente = new Map()
+
+  for (const row of rowsQ.rows) {
+    const n = row.normalized ?? {}
+    await db.query('SAVEPOINT import_row')
+    try {
+      const liveId = await resolveTargetLive(db, {
+        tenantId,
+        row,
+        normalized: n,
+        batch,
+        cabinePadraoId,
+      })
+
+      if (livesDoLote.has(liveId)) {
+        throw new Error(`Live já recebeu a linha ${livesDoLote.get(liveId)} deste arquivo`)
+      }
+      livesDoLote.set(liveId, row.row_index)
+
+      const { gmvPreservado, gmvOficial } = await applyMetricsToLive(db, {
+        tenantId,
+        liveId,
+        normalized: n,
+        batchId,
+        rowId: row.id,
+      })
+      if (gmvPreservado) gmvsPreservados += 1
+      await applyApresentadorasToLive(db, {
+        tenantId,
+        liveId,
+        apresentadoras: row.apresentadoras,
+        duracaoPlanilha: n.duration_seconds ?? null,
+      })
+
+      const gmv = gmvPreservado ? gmvOficial : officialGmvOf(n)
+      if (gmv != null) {
+        // retroLift: false — o recálculo do mês inteiro sai daqui e roda UMA vez
+        // por (apresentadora, mês) depois do laço. Rodando por linha, cada uma
+        // refazia o mês que a anterior acabou de refazer: 9 linhas custavam 177s.
+        const vendas = await calcularComissoesDaLive(db, {
+          liveId,
+          tenantId,
+          gmv,
+          pedidos: n.attributed_orders ?? 0,
+          retroLift: false,
+        })
+        for (const venda of Array.isArray(vendas) ? vendas : []) {
+          const apId = venda?.apresentadora_id
+          if (!apId) continue
+          const mes = typeof venda.data === 'string' ? venda.data.slice(0, 7) : null
+          retroLiftPendente.set(`${apId}|${mes ?? ''}`, { apresentadoraId: apId, mes })
+        }
+      }
+
+      await db.query(
+        `UPDATE analytics_import_rows
+            SET applied_at = NOW(), error = NULL, matched_live_id = $3::uuid
+          WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+        [row.id, tenantId, liveId],
+      )
+      await db.query('RELEASE SAVEPOINT import_row')
+      touchedLiveIds.push(liveId)
+      applied++
+    } catch (err) {
+      // Uma linha ruim não pode derrubar o lote inteiro: volta ao savepoint e registra o erro.
+      await db.query('ROLLBACK TO SAVEPOINT import_row')
+      await db.query(
+        `UPDATE analytics_import_rows SET error = $3
+          WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+        [row.id, tenantId, String(err.message).slice(0, 500)],
+      )
+      failures.push({ row_index: row.row_index, error: err.message })
+    }
+  }
+
+  // Retro-lift do cliff, adiado: a escada usa o GMV MENSAL acumulado, então as vendas
+  // gravadas agora podem ter empurrado a apresentadora para uma faixa maior. Rodando
+  // aqui, uma vez por (apresentadora, mês), o resultado é o mesmo que rodar a cada
+  // linha — só a última passada sobrevivia — por uma fração das idas ao banco.
+  // Ainda dentro da transação: ou o lote inteiro vale, ou nada vale.
+  for (const { apresentadoraId, mes } of retroLiftPendente.values()) {
+    await aplicarRetroLiftDoMes(db, { tenantId, apresentadoraId, mes })
+  }
+
+  // Só fecha o lote se tudo passou. Com falhas ele continua reaplicável (as linhas que já
+  // gravaram são puladas por applied_at), senão uma falha transitória travaria o retry.
+  const tudoOk = failures.length === 0
+  await db.query(
+    `UPDATE analytics_import_batches
+        SET status = CASE WHEN $5::boolean THEN 'applied' ELSE status END,
+            applied_rows = COALESCE(applied_rows, 0) + $1,
+            applied_by = $2,
+            applied_at = CASE WHEN $5::boolean THEN NOW() ELSE applied_at END
+      WHERE id = $3::uuid
+        AND tenant_id = $4::uuid`,
+    [applied, sub ?? null, batchId, tenantId, tudoOk],
+  )
+
+  return { applied, failures, gmvsPreservados, touchedLiveIds }
+}
+
 export async function analyticsRoutes(app) {
   app.post('/v1/analytics/imports/preview', {
     preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)],
@@ -457,78 +729,17 @@ export async function analyticsRoutes(app) {
           const matchedRows = matchAnalyticsImportRows(parsedRows, candidates, { marcaId })
           const summary = summarizeImportRows(matchedRows)
 
-          const batchQ = await db.query(
-            `INSERT INTO analytics_import_batches (
-               tenant_id, filename, source_type, marca_id, apresentadora_id,
-               total_rows, matched_rows, ambiguous_rows,
-               unmatched_rows, skipped_rows, invalid_rows, summary, created_by
-             )
-             VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
-             RETURNING id`,
-            [
-              tenant_id,
-              upload.filename,
-              sourceType,
-              marcaId,
-              apresentadoraId,
-              summary.total_rows,
-              summary.matched_rows,
-              summary.ambiguous_rows,
-              summary.unmatched_rows,
-              summary.skipped_rows,
-              summary.invalid_rows,
-              JSON.stringify(summary),
-              sub ?? null,
-            ],
-          )
-          const batchId = batchQ.rows[0].id
-
-          const defaultApresentadoras = apresentadoraId
-            ? JSON.stringify([{ apresentadora_id: apresentadoraId, percentual: 100 }])
-            : null
-
-          const rowIds = new Map()
-          for (const row of matchedRows) {
-            const inserted = await db.query(
-              `INSERT INTO analytics_import_rows (
-                 tenant_id, batch_id, row_index, raw, normalized,
-                 marca_nome, live_date, start_time, duration_seconds,
-                 matched_live_id, matched_agenda_evento_id,
-                 match_status, match_confidence, match_reason, candidates,
-                 decisao, marca_id, apresentadoras
-               )
-               VALUES (
-                 $1::uuid, $2::uuid, $3, $4::jsonb, $5::jsonb,
-                 $6, $7::date, $8, $9,
-                 $10::uuid, $11::uuid,
-                 $12, $13, $14, $15::jsonb,
-                 $16, $17::uuid, $18::jsonb
-               )
-               RETURNING id`,
-              [
-                tenant_id,
-                batchId,
-                row.row_index,
-                JSON.stringify(row.raw),
-                JSON.stringify(row.normalized),
-                row.normalized.marca_nome,
-                row.normalized.live_date,
-                row.normalized.start_time,
-                row.normalized.duration_seconds,
-                row.matched_live_id ?? null,
-                row.matched_agenda_evento_id ?? null,
-                row.match_status,
-                row.match_confidence ?? null,
-                row.match_reason ?? null,
-                JSON.stringify(row.candidates ?? []),
-                defaultDecisionFor(row.match_status),
-                marcaId,
-                defaultApresentadoras,
-              ],
-            )
-            // A tela de revisão precisa do id da linha para editar decisão e rateio.
-            rowIds.set(row.row_index, inserted.rows[0]?.id ?? null)
-          }
+          const { batchId, rowIds } = await criarLoteDeImportacao(db, {
+            tenantId: tenant_id,
+            sub,
+            upload,
+            sourceType,
+            matchedRows,
+            summary,
+            marcaId,
+            apresentadoraId,
+            decisaoDe: (row) => defaultDecisionFor(row.match_status),
+          })
 
           await db.query('COMMIT')
           return {
@@ -555,6 +766,180 @@ export async function analyticsRoutes(app) {
     } catch (err) {
       request.log.error({ err }, 'analytics/imports/preview error')
       return reply.code(400).send({ error: err.message })
+    }
+  })
+
+  // Entrada de máquina: recebe o arquivo, decide o que dá para decidir sozinho e
+  // aplica na mesma chamada. O caminho da tela (preview → revisão → apply)
+  // pressupõe alguém olhando entre uma etapa e outra; uma automação não tem esse
+  // alguém.
+  //
+  // O que ela NÃO faz é decidir no lugar de quem sabe: linha ambígua ou de
+  // casamento fraco fica pendente no mesmo lote de sempre, visível na tela de
+  // importação. Número duvidoso aplicado em silêncio vira comissão errada, e
+  // ninguém descobre olhando o dashboard.
+  app.post('/v1/analytics/imports/ingest', {
+    preHandler: [app.authenticate, app.requirePapel(WRITE_LIVES)],
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    // `sub` de uma chave é `apikey:<uuid>`, que não entra nas colunas UUID de
+    // created_by/applied_by. O id da chave entra, e é o que identifica o autor.
+    const sub = request.viaApiKey?.id ?? request.user.sub
+
+    try {
+      const upload = await readAnalyticsImportUpload(request)
+      const fileHash = createHash('sha256').update(upload.buffer).digest('hex')
+
+      const { source_type: sourceType, rows: parsedRows } = parseAnalyticsImportBuffer(upload)
+      if (parsedRows.length === 0) {
+        return reply.code(400).send({ error: 'Arquivo sem linhas importaveis' })
+      }
+      // Teto mais baixo que o da tela: aqui tudo acontece numa requisição só, e
+      // o Railway corta antes de o lote terminar. Melhor pedir para fatiar do
+      // que estourar no meio com metade do arquivo aplicada.
+      if (parsedRows.length > MAX_INGEST_ROWS) {
+        return reply.code(413).send({
+          error: `Arquivo com ${parsedRows.length} linhas excede o limite de ${MAX_INGEST_ROWS} desta rota. Divida o arquivo e envie em partes.`,
+        })
+      }
+
+      const marcaId = readUploadField(request, upload.fields, 'marca_id')
+      const apresentadoraId = readUploadField(request, upload.fields, 'apresentadora_id')
+      const criarLives = String(readUploadField(request, upload.fields, 'criar_lives') ?? '')
+        .toLowerCase() === 'true'
+
+      if (sourceType === SOURCE_TIKTOK_STUDIO) {
+        if (!marcaId || !UUID_RE.test(marcaId)) {
+          return reply.code(400).send({ error: 'Informe marca_id para o relatorio do TikTok Studio' })
+        }
+        if (!apresentadoraId || !UUID_RE.test(apresentadoraId)) {
+          return reply.code(400).send({ error: 'Informe apresentadora_id para o relatorio do TikTok Studio' })
+        }
+      }
+
+      const range = rowsDateRange(parsedRows)
+      if (!range) return reply.code(400).send({ error: 'Nenhuma linha com data valida encontrada' })
+
+      return await app.withTenant(tenant_id, async (db) => {
+        await db.query('BEGIN')
+        try {
+          // Reenvio do mesmo arquivo é a falha mais provável de um agente: ele
+          // não entende a resposta e tenta de novo. Sem isto, o segundo envio
+          // dobrava o GMV do mês.
+          const jaVisto = await db.query(
+            `SELECT id, applied_rows FROM analytics_import_batches
+              WHERE tenant_id = $1::uuid
+                AND file_hash = $2
+                AND created_at > NOW() - INTERVAL '24 hours'
+              ORDER BY created_at DESC
+              LIMIT 1`,
+            [tenant_id, fileHash],
+          )
+          if (jaVisto.rowCount > 0) {
+            await db.query('COMMIT')
+            return {
+              ok: true,
+              duplicado: true,
+              batch_id: jaVisto.rows[0].id,
+              applied_rows: jaVisto.rows[0].applied_rows ?? 0,
+              // Resposta com a mesma forma da original de propósito: o agente
+              // não tem por que insistir.
+              pendentes: [],
+            }
+          }
+
+          if (marcaId) {
+            const marcaQ = await db.query(
+              'SELECT id FROM marcas WHERE id = $1::uuid AND tenant_id = $2::uuid',
+              [marcaId, tenant_id],
+            )
+            if (marcaQ.rowCount === 0) {
+              await db.query('ROLLBACK').catch(() => {})
+              return reply.code(400).send({ error: 'Marca nao encontrada' })
+            }
+          }
+          if (apresentadoraId) {
+            const apreQ = await db.query(
+              'SELECT id FROM apresentadoras WHERE id = $1::uuid AND tenant_id = $2::uuid',
+              [apresentadoraId, tenant_id],
+            )
+            if (apreQ.rowCount === 0) {
+              await db.query('ROLLBACK').catch(() => {})
+              return reply.code(400).send({ error: 'Apresentadora nao encontrada' })
+            }
+          }
+
+          const candidates = await loadAnalyticsImportCandidates(db, range)
+          const matchedRows = matchAnalyticsImportRows(parsedRows, candidates, { marcaId })
+          const summary = summarizeImportRows(matchedRows)
+
+          const { batchId, decisoes } = await criarLoteDeImportacao(db, {
+            tenantId: tenant_id,
+            sub,
+            upload,
+            sourceType,
+            matchedRows,
+            summary,
+            marcaId,
+            apresentadoraId,
+            fileHash,
+            decisaoDe: (row) => decisaoAutomatica(row, { criarLives }),
+          })
+
+          const resultado = await aplicarLoteDeImportacao(db, {
+            tenantId: tenant_id,
+            batchId,
+            sub,
+          })
+
+          await db.query('COMMIT')
+
+          invalidateTenant(tenant_id)
+          invalidateHomeDashboard(tenant_id)
+
+          // O que ficou de fora vai nomeado na resposta: é o trabalho de revisão
+          // que sobra para a tela, e o agente precisa poder dizer isso a quem
+          // perguntar.
+          const pendentes = matchedRows
+            .filter((row) => decisoes.get(row.row_index) === 'pendente')
+            .map((row) => ({
+              row_index: row.row_index,
+              marca: row.normalized?.marca_nome ?? null,
+              data: row.normalized?.live_date ?? null,
+              motivo: row.match_reason ?? row.match_status,
+            }))
+
+          app.audit?.log?.(request, {
+            action: 'analytics.import_ingest',
+            entity_type: 'analytics_import_batch',
+            entity_id: batchId,
+            metadata: {
+              applied_rows: resultado.applied,
+              pendentes: pendentes.length,
+              failed_rows: resultado.failures.length,
+              gmv_preservado_rows: resultado.gmvsPreservados,
+            },
+          })?.catch?.((err) => app.log.error({ err }, 'audit import_ingest falhou'))
+
+          return {
+            ok: true,
+            duplicado: false,
+            batch_id: batchId,
+            total_rows: summary.total_rows,
+            applied_rows: resultado.applied,
+            gmv_preservado_rows: resultado.gmvsPreservados,
+            failed_rows: resultado.failures,
+            pendentes,
+          }
+        } catch (err) {
+          await db.query('ROLLBACK').catch(() => {})
+          throw err
+        }
+      })
+    } catch (err) {
+      request.log.error({ err }, 'analytics/imports/ingest error')
+      const code = err instanceof ErroDeImportacao ? err.statusCode : 400
+      return reply.code(code).send({ error: err.message })
     }
   })
 
@@ -797,148 +1182,8 @@ export async function analyticsRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
       try {
-        const batchQ = await db.query(
-          `SELECT id, status, source_type, marca_id, apresentadora_id
-             FROM analytics_import_batches
-            WHERE id = $1::uuid
-              AND tenant_id = $2::uuid
-            FOR UPDATE`,
-          [batchId, tenant_id],
-        )
-        const batch = batchQ.rows[0]
-        if (!batch) {
-          await db.query('ROLLBACK')
-          return reply.code(404).send({ error: 'Importacao nao encontrada' })
-        }
-        if (batch.status === 'applied') {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Importacao ja aplicada' })
-        }
-
-        const rowsQ = await db.query(
-          `SELECT id, row_index, matched_live_id, normalized, decisao, marca_id, apresentadoras, cabine_id
-             FROM analytics_import_rows
-            WHERE tenant_id = $1::uuid
-              AND batch_id = $2::uuid
-              AND decisao IN ('vincular', 'criar')
-              AND applied_at IS NULL
-            ORDER BY row_index ASC
-            FOR UPDATE`,
-          [tenant_id, batchId],
-        )
-
-        // Só vale o custo de adivinhar quando sobrou alguma linha 'criar' sem cabine confirmada.
-        const cabinePadraoId = rowsQ.rows.some((row) => row.decisao === 'criar' && !row.cabine_id)
-          ? await resolveCabinePadrao(db, tenant_id, batch.marca_id)
-          : null
-
-        let applied = 0
-        // Lives cujo GMV corrigido à mão prevaleceu sobre o da planilha (ver applyMetricsToLive).
-        let gmvsPreservados = 0
-        const failures = []
-        const touchedLiveIds = []
-        // Guarda final contra duas linhas gravando na mesma live (a segunda apagaria a
-        // primeira). O matcher e o PATCH já barram antes; aqui é a rede de segurança.
-        const livesDoLote = new Map()
-        // (apresentadora, mês) tocados pelo lote — o retro-lift do cliff roda uma vez
-        // por par no fim, em vez de uma vez por linha. Map dedupe pela chave.
-        const retroLiftPendente = new Map()
-
-        for (const row of rowsQ.rows) {
-          const n = row.normalized ?? {}
-          await db.query('SAVEPOINT import_row')
-          try {
-            const liveId = await resolveTargetLive(db, {
-              tenantId: tenant_id,
-              row,
-              normalized: n,
-              batch,
-              cabinePadraoId,
-            })
-
-            if (livesDoLote.has(liveId)) {
-              throw new Error(`Live já recebeu a linha ${livesDoLote.get(liveId)} deste arquivo`)
-            }
-            livesDoLote.set(liveId, row.row_index)
-
-            const { gmvPreservado, gmvOficial } = await applyMetricsToLive(db, {
-              tenantId: tenant_id,
-              liveId,
-              normalized: n,
-              batchId,
-              rowId: row.id,
-            })
-            if (gmvPreservado) gmvsPreservados += 1
-            await applyApresentadorasToLive(db, {
-              tenantId: tenant_id,
-              liveId,
-              apresentadoras: row.apresentadoras,
-              duracaoPlanilha: n.duration_seconds ?? null,
-            })
-
-            const gmv = gmvPreservado ? gmvOficial : officialGmvOf(n)
-            if (gmv != null) {
-              // retroLift: false — o recálculo do mês inteiro sai daqui e roda UMA vez
-              // por (apresentadora, mês) depois do laço. Rodando por linha, cada uma
-              // refazia o mês que a anterior acabou de refazer: 9 linhas custavam 177s.
-              const vendas = await calcularComissoesDaLive(db, {
-                liveId,
-                tenantId: tenant_id,
-                gmv,
-                pedidos: n.attributed_orders ?? 0,
-                retroLift: false,
-              })
-              for (const venda of Array.isArray(vendas) ? vendas : []) {
-                const apId = venda?.apresentadora_id
-                if (!apId) continue
-                const mes = typeof venda.data === 'string' ? venda.data.slice(0, 7) : null
-                retroLiftPendente.set(`${apId}|${mes ?? ''}`, { apresentadoraId: apId, mes })
-              }
-            }
-
-            await db.query(
-              `UPDATE analytics_import_rows
-                  SET applied_at = NOW(), error = NULL, matched_live_id = $3::uuid
-                WHERE id = $1::uuid AND tenant_id = $2::uuid`,
-              [row.id, tenant_id, liveId],
-            )
-            await db.query('RELEASE SAVEPOINT import_row')
-            touchedLiveIds.push(liveId)
-            applied++
-          } catch (err) {
-            // Uma linha ruim não pode derrubar o lote inteiro: volta ao savepoint e registra o erro.
-            await db.query('ROLLBACK TO SAVEPOINT import_row')
-            await db.query(
-              `UPDATE analytics_import_rows SET error = $3
-                WHERE id = $1::uuid AND tenant_id = $2::uuid`,
-              [row.id, tenant_id, String(err.message).slice(0, 500)],
-            )
-            failures.push({ row_index: row.row_index, error: err.message })
-          }
-        }
-
-        // Retro-lift do cliff, adiado: a escada usa o GMV MENSAL acumulado, então as vendas
-        // gravadas agora podem ter empurrado a apresentadora para uma faixa maior. Rodando
-        // aqui, uma vez por (apresentadora, mês), o resultado é o mesmo que rodar a cada
-        // linha — só a última passada sobrevivia — por uma fração das idas ao banco.
-        // Ainda dentro da transação: ou o lote inteiro vale, ou nada vale.
-        for (const { apresentadoraId, mes } of retroLiftPendente.values()) {
-          await aplicarRetroLiftDoMes(db, { tenantId: tenant_id, apresentadoraId, mes })
-        }
-
-        // Só fecha o lote se tudo passou. Com falhas ele continua reaplicável (as linhas que já
-        // gravaram são puladas por applied_at), senão uma falha transitória travaria o retry.
-        const tudoOk = failures.length === 0
-        await db.query(
-          `UPDATE analytics_import_batches
-              SET status = CASE WHEN $5::boolean THEN 'applied' ELSE status END,
-                  applied_rows = COALESCE(applied_rows, 0) + $1,
-                  applied_by = $2,
-                  applied_at = CASE WHEN $5::boolean THEN NOW() ELSE applied_at END
-            WHERE id = $3::uuid
-              AND tenant_id = $4::uuid`,
-          [applied, sub ?? null, batchId, tenant_id, tudoOk],
-        )
+        const { applied, failures, gmvsPreservados, touchedLiveIds } =
+          await aplicarLoteDeImportacao(db, { tenantId: tenant_id, batchId, sub })
 
         await db.query('COMMIT')
 
@@ -952,6 +1197,7 @@ export async function analyticsRoutes(app) {
         return { ok: true, batch_id: batchId, applied_rows: applied, failed_rows: failures, gmv_preservado_rows: gmvsPreservados }
       } catch (err) {
         await db.query('ROLLBACK').catch(() => {})
+        if (err instanceof ErroDeImportacao) return reply.code(err.statusCode).send({ error: err.message })
         request.log.error({ err }, 'analytics/imports/apply error')
         return reply.code(500).send({ error: err.message })
       }

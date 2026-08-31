@@ -132,6 +132,7 @@ export const MIGRATIONS_LIST = [
   '135_rateio_absoluto_cabine_import.sql',
   '136_comissao_recalculo_pendente.sql',
   '137_apresentadora_fixo_historico.sql',
+  '138_api_keys.sql',
 ]
 
 async function ensureMigrationsTable(client) {

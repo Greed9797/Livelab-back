@@ -1,8 +1,41 @@
 import fp from 'fastify-plugin'
 import jwt from '@fastify/jwt'
+import { createHash } from 'node:crypto'
 import * as Sentry from '@sentry/node'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// Rotas que uma chave de API alcança. Tudo que não está aqui responde 403 para
+// a chave, mesmo que o papel dela permitisse.
+//
+// A lista existe porque papel sozinho não segura: uma rota nova que use
+// `app.authenticate` sem `requirePapel` nasceria aberta para a automação, e
+// ninguém ia lembrar de conferir. Aqui o padrão é o contrário — nasce fechada.
+//
+// Não há DELETE nenhum, e de fora ficam usuários, financeiro, boletos,
+// contratos e configurações (esta última guarda as chaves do gateway de
+// pagamento).
+const ROTAS_API_KEY = [
+  ['POST', '/v1/analytics/imports'],
+  ['GET', '/v1/analytics/'],
+  ['GET', '/v1/lives'],
+  ['POST', '/v1/lives'],
+  ['PATCH', '/v1/lives/'],
+  ['GET', '/v1/marcas'],
+  ['POST', '/v1/marcas'],
+  ['PATCH', '/v1/marcas/'],
+  ['GET', '/v1/apresentadoras'],
+  ['POST', '/v1/apresentadoras'],
+  ['PATCH', '/v1/apresentadoras/'],
+  ['GET', '/v1/comissoes'],
+]
+
+export function chaveAlcancaRota(metodo, caminho) {
+  const limpo = String(caminho ?? '').split('?')[0]
+  return ROTAS_API_KEY.some(([m, prefixo]) => m === metodo && limpo.startsWith(prefixo))
+}
+
+export const hashDaChave = (chave) => createHash('sha256').update(chave, 'utf8').digest('hex')
 
 async function authPlugin(app) {
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
@@ -63,6 +96,10 @@ async function authPlugin(app) {
   app.decorate('invalidateTokenVersionCache', (userId) => tokenVersionCache.delete(userId))
 
   async function _verifyTokenVersion(request, reply) {
+    // Chave de API não tem sessão para expirar: quem a derruba é a revogação na
+    // própria tabela, conferida a cada request. O `sub` dela nem é um UUID de
+    // usuário, então o SELECT abaixo só geraria erro de cast.
+    if (request.viaApiKey) return
     // Dedup por request: rotas que empilham [authenticate, requirePapel(...)]
     // chamariam este check 2× (1 SELECT token_version + 1 jwtVerify redundante
     // cada). Após a 1ª verificação bem-sucedida na request, marcamos a flag e
@@ -103,7 +140,57 @@ async function authPlugin(app) {
     return false
   }
 
+  // Autenticação de máquina. Devolve `true` quando a request veio com chave e a
+  // chave passou; `false` quando não veio chave nenhuma (segue o caminho do
+  // JWT); e `reply` quando veio chave e ela foi recusada.
+  //
+  // A consulta usa `app.db` (pool de sistema, sem contexto de tenant) pelo mesmo
+  // motivo do token_version logo acima: neste ponto ainda não se sabe qual é o
+  // tenant — é a chave que diz.
+  async function autenticarPorChave(request, reply) {
+    const bruta = request.headers['x-api-key']
+    if (typeof bruta !== 'string' || bruta.length === 0) return false
+
+    const { rows } = await app.db.query(
+      `SELECT id, tenant_id, papel, nome, revogada_em, expira_em
+         FROM api_keys
+        WHERE key_hash = $1`,
+      [hashDaChave(bruta)],
+    )
+    const chave = rows[0]
+    // Chave inexistente, revogada e vencida dão a mesma resposta de propósito:
+    // quem está tentando adivinhar não aprende em qual dos três estados errou.
+    if (!chave || chave.revogada_em || (chave.expira_em && new Date(chave.expira_em) <= new Date())) {
+      app.log.warn({ rota: request.url }, 'chave de API inválida, revogada ou expirada')
+      return reply.code(401).send({ error: 'Chave de API inválida' })
+    }
+    if (!chaveAlcancaRota(request.method, request.url)) {
+      app.log.warn(
+        { api_key_id: chave.id, metodo: request.method, rota: request.url },
+        'chave de API tentou rota fora da allowlist',
+      )
+      return reply.code(403).send({ error: 'Esta chave não tem acesso a esta rota' })
+    }
+
+    request.user = { sub: `apikey:${chave.id}`, tenant_id: chave.tenant_id, papel: chave.papel }
+    request.viaApiKey = chave
+    // requirePapel, quando empilhado depois, pula o jwtVerify — não existe JWT
+    // nesta request e tentar verificar um daria 401 numa chave válida.
+    request._jwtVerified = true
+
+    // Carimbo de uso, sem prender a resposta: serve para o Vitor ver na lista
+    // qual chave ainda está viva. Falhar aqui não pode derrubar a request.
+    app.db
+      .query(`UPDATE api_keys SET ultimo_uso = NOW() WHERE id = $1`, [chave.id])
+      .catch((err) => app.log.warn({ err }, 'não deu para carimbar ultimo_uso da chave'))
+
+    return true
+  }
+  app.decorate('autenticarPorChave', autenticarPorChave)
+
   app.decorate('authenticate', async function (request, reply) {
+    const porChave = await autenticarPorChave(request, reply)
+    if (porChave !== false) return porChave === true ? undefined : porChave
     try {
       await request.jwtVerify()
     } catch (err) {
@@ -134,6 +221,14 @@ async function authPlugin(app) {
   // preHandler: verifica papel específico
   app.decorate('requirePapel', (requiredPapeis) => async (request, reply) => {
     const papeis = Array.isArray(requiredPapeis) ? requiredPapeis : [requiredPapeis]
+
+    // Várias rotas usam requirePapel sozinho, sem app.authenticate empilhado
+    // antes. Sem isto, uma chave válida levaria 401 nelas — a request não tem
+    // JWT nenhum para verificar.
+    if (!request.viaApiKey) {
+      const porChave = await autenticarPorChave(request, reply)
+      if (porChave !== false && porChave !== true) return porChave
+    }
 
     // S-04: SEMPRE valida JWT — nunca confia em request.user pré-existente
     // (evita bypass se outro plugin popular request.user antes). Exceção segura:

@@ -1,6 +1,6 @@
 import Fastify from 'fastify'
 import * as Sentry from '@sentry/node'
-import { timingSafeEqual } from 'crypto'
+import { timingSafeEqual, createHash } from 'crypto'
 import { invalidateTenant } from './lib/dashboard-cache.js'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
@@ -50,6 +50,7 @@ import { appmaxRoutes } from './routes/appmax.js'
 import { notificacoesRoutes } from './routes/notificacoes.js'
 import { auditLogRoutes } from './routes/audit_log.js'
 import { marcasRoutes } from './routes/marcas.js'
+import { apiKeysRoutes } from './routes/api_keys.js'
 import { agendaRoutes } from './routes/agenda.js'
 import { gradeRoutes } from './routes/grade.js'
 import { videosRoutes } from './routes/videos.js'
@@ -266,6 +267,16 @@ export async function buildApp(opts = {}) {
     // próprio e nada mais — a autenticação de verdade continua no preHandler e rejeita o
     // token. O prefixo evita que um `sub` colida com um IP.
     keyGenerator: (request) => {
+      // Chave de API tem balde próprio. Sem isto a automação divide a cota com
+      // o IP de saída dela — e um bot que repete chamada derrubaria junto quem
+      // mais estivesse atrás daquele endereço. Aqui vale o mesmo raciocínio do
+      // `sub` abaixo: o valor não é verificado, só reparte cota. Quem forjar
+      // ganha um balde separado e nada mais; a autenticação de verdade continua
+      // no preHandler.
+      const chave = request.headers?.['x-api-key']
+      if (typeof chave === 'string' && chave.length > 0) {
+        return `k:${createHash('sha256').update(chave, 'utf8').digest('hex').slice(0, 32)}`
+      }
       const auth = request.headers?.authorization
       if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
         try {
@@ -371,6 +382,7 @@ export async function buildApp(opts = {}) {
   await app.register(notificacoesRoutes)
   await app.register(auditLogRoutes)
   await app.register(marcasRoutes)
+  await app.register(apiKeysRoutes)
   await app.register(agendaRoutes)
   await app.register(gradeRoutes)
   await app.register(videosRoutes)

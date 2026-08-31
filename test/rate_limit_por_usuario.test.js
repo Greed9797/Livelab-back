@@ -13,19 +13,10 @@ import rateLimit from '@fastify/rate-limit'
  * É o "quanto mais gente mexendo, mais erros aparecem".
  */
 
-// mesma função de app.js
-const keyGenerator = (request) => {
-  const auth = request.headers?.authorization
-  if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
-    try {
-      const payload = JSON.parse(
-        Buffer.from(auth.slice(7).split('.')[1], 'base64url').toString('utf8'),
-      )
-      if (typeof payload?.sub === 'string' && payload.sub.length > 0) return `u:${payload.sub}`
-    } catch { /* token malformado: cai no IP */ }
-  }
-  return `ip:${request.ip}`
-}
+// A função de verdade, a mesma que o app.js registra. Antes era uma cópia
+// colada aqui: cópia envelhece sem avisar, e um teste que passa sobre a cópia
+// não prova nada sobre o que está no ar.
+import { chaveDeRateLimit as keyGenerator } from '../src/lib/rate-limit-key.js'
 
 const tokenCom = (sub) => {
   const parte = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
@@ -75,6 +66,40 @@ describe('rate limit — cota por usuário, não por IP', () => {
     const app = await montar(3)
     const r = await bater(app, null, 5)
     expect(r.limitados).toBe(2)
+    await app.close()
+  })
+
+  it('duas chaves de API não dividem cota, e cada uma respeita o próprio teto', async () => {
+    const app = await montar(3)
+    const bater = async (chave, n) => {
+      let ok = 0, limitados = 0
+      for (let i = 0; i < n; i += 1) {
+        const r = await app.inject({ method: 'GET', url: '/x', headers: { 'x-api-key': chave } })
+        if (r.statusCode === 200) ok += 1
+        else if (r.statusCode === 429) limitados += 1
+      }
+      return { ok, limitados }
+    }
+
+    // O bot A estoura o próprio teto...
+    expect(await bater('llk_bot-a', 5)).toEqual({ ok: 3, limitados: 2 })
+    // ...e o bot B começa com a cota inteira, mesmo saindo pelo mesmo IP.
+    expect(await bater('llk_bot-b', 3)).toEqual({ ok: 3, limitados: 0 })
+    await app.close()
+  })
+
+  it('chave de API não divide cota com quem está logado no mesmo IP', async () => {
+    const app = await montar(2)
+    const bot = await app.inject({ method: 'GET', url: '/x', headers: { 'x-api-key': 'llk_bot-c' } })
+    const outro = await app.inject({ method: 'GET', url: '/x', headers: { 'x-api-key': 'llk_bot-c' } })
+    expect([bot.statusCode, outro.statusCode]).toEqual([200, 200])
+    // A cota do bot acabou; a de uma pessoa logada não foi tocada.
+    const terceiro = await app.inject({ method: 'GET', url: '/x', headers: { 'x-api-key': 'llk_bot-c' } })
+    expect(terceiro.statusCode).toBe(429)
+    const pessoa = await app.inject({
+      method: 'GET', url: '/x', headers: { authorization: `Bearer ${tokenCom('ana')}` },
+    })
+    expect(pessoa.statusCode).toBe(200)
     await app.close()
   })
 

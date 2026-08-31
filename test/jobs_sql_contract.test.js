@@ -67,8 +67,13 @@ describe('contrato do rate limit', () => {
     // A chave agora sai do payload do próprio header. O comportamento de verdade (usuários
     // distintos no mesmo IP não dividem cota) está coberto em test/rate_limit_por_usuario.js,
     // com requests reais — aqui fica só a guarda contra alguém voltar ao request.user.
+    //
+    // A função saiu do app.js para src/lib/rate-limit-key.js, onde dá para
+    // exercitá-la — o comportamento (usuários e chaves de API não dividem cota)
+    // está em test/rate_limit_por_usuario.test.js e test/rate_limit_key.test.js,
+    // com requests reais. Aqui fica só a guarda contra alguém voltar a montar a
+    // chave a partir de request.user, que no onRequest é sempre undefined.
     expect(bloco).not.toMatch(/keyGenerator:[\s\S]*request\.user\?\.sub/)
-    expect(bloco).toMatch(/authorization/)
-    expect(bloco).toMatch(/payload\?\.sub/)
+    expect(bloco).toMatch(/keyGenerator: chaveDeRateLimit/)
   })
 })

@@ -1,6 +1,7 @@
 import Fastify from 'fastify'
 import * as Sentry from '@sentry/node'
-import { timingSafeEqual, createHash } from 'crypto'
+import { timingSafeEqual } from 'crypto'
+import { chaveDeRateLimit } from './lib/rate-limit-key.js'
 import { invalidateTenant } from './lib/dashboard-cache.js'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
@@ -266,30 +267,8 @@ export async function buildApp(opts = {}) {
     // para o fim aqui: a chave só reparte cotas. Quem forjar um `sub` ganha um balde
     // próprio e nada mais — a autenticação de verdade continua no preHandler e rejeita o
     // token. O prefixo evita que um `sub` colida com um IP.
-    keyGenerator: (request) => {
-      // Chave de API tem balde próprio. Sem isto a automação divide a cota com
-      // o IP de saída dela — e um bot que repete chamada derrubaria junto quem
-      // mais estivesse atrás daquele endereço. Aqui vale o mesmo raciocínio do
-      // `sub` abaixo: o valor não é verificado, só reparte cota. Quem forjar
-      // ganha um balde separado e nada mais; a autenticação de verdade continua
-      // no preHandler.
-      const chave = request.headers?.['x-api-key']
-      if (typeof chave === 'string' && chave.length > 0) {
-        return `k:${createHash('sha256').update(chave, 'utf8').digest('hex').slice(0, 32)}`
-      }
-      const auth = request.headers?.authorization
-      if (typeof auth === 'string' && auth.startsWith('Bearer ')) {
-        try {
-          const payload = JSON.parse(
-            Buffer.from(auth.slice(7).split('.')[1], 'base64url').toString('utf8'),
-          )
-          if (typeof payload?.sub === 'string' && payload.sub.length > 0) return `u:${payload.sub}`
-        } catch {
-          // token malformado: cai no IP, como qualquer anônimo
-        }
-      }
-      return `ip:${request.ip}`
-    },
+    // Chave de API também tem balde próprio — ver src/lib/rate-limit-key.js.
+    keyGenerator: chaveDeRateLimit,
     // Sem statusCode aqui, o errorHandler global cai no `?? 500` e o cliente recebe
     // 500 — o front trata como servidor quebrado em vez de "excedeu, tente de novo".
     errorResponseBuilder: () => ({

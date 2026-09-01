@@ -136,7 +136,16 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
      FROM lives l
      LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
      LEFT JOIN venda_live_marca vl ON vl.live_id = l.id
-     LEFT JOIN live_apresentadoras_v2 lav ON lav.live_id = l.id AND lav.tenant_id = l.tenant_id AND lav.papel = 'principal'
+     -- LATERAL com LIMIT 1 em vez de JOIN direto: live com DUAS linhas papel='principal'
+     -- (dado que já existe em produção) duplicava a live inteira na lista, dobrando GMV
+     -- e horas na tela. Mesmo molde de src/lib/performance-rollups.js:119-127.
+     LEFT JOIN LATERAL (
+       SELECT lav2.apresentadora_id
+       FROM live_apresentadoras_v2 lav2
+       WHERE lav2.live_id = l.id AND lav2.tenant_id = l.tenant_id
+       ORDER BY (lav2.papel = 'principal') DESC, lav2.criado_em ASC
+       LIMIT 1
+     ) lav ON true
      LEFT JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = l.tenant_id
      LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
      WHERE l.tenant_id = $2::uuid
@@ -223,7 +232,16 @@ export async function getMarcaOperacional(db, { tenantId, marcaId, startDate, en
             COALESCE(a.nome, u.nome) AS apresentadora_nome
      FROM lives l
      LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
-     LEFT JOIN live_apresentadoras_v2 lav ON lav.live_id = l.id AND lav.tenant_id = l.tenant_id AND lav.papel = 'principal'
+     -- LATERAL com LIMIT 1 em vez de JOIN direto: live com DUAS linhas papel='principal'
+     -- (dado que já existe em produção) duplicava a live inteira na lista, dobrando GMV
+     -- e horas na tela. Mesmo molde de src/lib/performance-rollups.js:119-127.
+     LEFT JOIN LATERAL (
+       SELECT lav2.apresentadora_id
+       FROM live_apresentadoras_v2 lav2
+       WHERE lav2.live_id = l.id AND lav2.tenant_id = l.tenant_id
+       ORDER BY (lav2.papel = 'principal') DESC, lav2.criado_em ASC
+       LIMIT 1
+     ) lav ON true
      LEFT JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = l.tenant_id
      LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
      WHERE l.tenant_id = $2::uuid AND l.marca_id = $1

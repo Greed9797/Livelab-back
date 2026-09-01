@@ -199,6 +199,10 @@ describe('LIVELAB operational routes', () => {
           status: 'planejado',
         }],
       })
+      // 4ª query: conflito pelos TURNOS de outros eventos. O espelho escalar só guarda a
+      // principal, então sem este ramo a apresentadora que faz o turno 16-18h de um evento
+      // alheio ficaria livre para ser reservada de novo na mesma hora.
+      .mockResolvedValueOnce({ rows: [] })
     const { app } = buildApp({ queryMock })
     await app.register(agendaRoutes)
 

@@ -133,6 +133,7 @@ export const MIGRATIONS_LIST = [
   '136_comissao_recalculo_pendente.sql',
   '137_apresentadora_fixo_historico.sql',
   '138_api_keys.sql',
+  '139_agenda_evento_apresentadoras.sql',
 ]
 
 async function ensureMigrationsTable(client) {

@@ -11,6 +11,7 @@ import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
 import { applyApresentadorasToLive } from '../lib/live-rateio.js'
+import { seedRateioPlanejado } from '../lib/agenda-turnos.js'
 
 function parseIntegerMetric(value) {
   if (typeof value === 'number') return value
@@ -264,7 +265,15 @@ async function syncAgendaEventForLive(db, {
        SET tipo = 'live',
            marca_id = $3::uuid,
            cabine_id = $4::uuid,
-           apresentadora_id = $5::uuid,
+           -- O sync roda em QUALQUER patch de live com marca e só conhece a apresentadora
+           -- escalar. Com turnos gravados, sobrescrever o espelho achataria o revezamento
+           -- em uma pessoa só; quem manda no espelho é PUT /v1/agenda/:id/apresentadoras.
+           apresentadora_id = CASE
+             WHEN EXISTS (SELECT 1 FROM agenda_evento_apresentadoras aea
+                           WHERE aea.agenda_evento_id = agenda_eventos.id)
+             THEN agenda_eventos.apresentadora_id
+             ELSE $5::uuid
+           END,
            data_inicio = $6::timestamptz,
            data_fim = $7::timestamptz,
            status = $8,
@@ -671,14 +680,15 @@ export async function livesRoutes(app) {
           )
         }
 
-        if (resolvedApresentadoraId) {
-          await db.query(
-            `INSERT INTO live_apresentadoras_v2 (tenant_id, live_id, apresentadora_id)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (live_id, apresentadora_id) DO NOTHING`,
-            [tenant_id, live.id, resolvedApresentadoraId],
-          )
-        }
+        // Rateio inicial da live. Evento com turnos (revezamento) vira uma linha por
+        // apresentadora com o percentual planejado; sem turnos, é o insert único de sempre.
+        await seedRateioPlanejado(db, {
+          tenantId: tenant_id,
+          liveId: live.id,
+          agendaEventoId: resolvedAgendaEventoId,
+          apresentadoraFallbackId: resolvedApresentadoraId,
+          log: app.log,
+        })
 
         // ── Evento automático de agenda (se nenhum evento foi encontrado/vinculado) ──
         // Executado dentro da transação; falha é soft (nunca bloqueia a live).
@@ -939,16 +949,27 @@ export async function livesRoutes(app) {
           )
         }
 
-        if (d.apresentador_id) {
-          await db.query(
-            `INSERT INTO live_apresentadoras_v2 (tenant_id, live_id, apresentadora_id)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (live_id, apresentadora_id) DO NOTHING`,
-            [tenant_id, liveId, d.apresentador_id],
-          )
-        }
+        // Lançamento manual também consome evento de agenda (d.agenda_evento_id), então
+        // também herda o revezamento planejado — é o 5º caminho que abre linha em v2.
+        //
+        // `apresentadoraConfirmadaId`: aqui a live JÁ ACONTECEU e o operador informou quem
+        // apresentou (o mesmo id que virou lives.apresentador_id logo acima). Se ela não
+        // está nos turnos, o plano é mais velho que o fato e o seed o descarta — senão o
+        // rateio planejado ficaria com 100% do GMV e da comissão para quem não apresentou,
+        // e quem apresentou receberia R$ 0,00.
+        const linhasV2 = await seedRateioPlanejado(db, {
+          tenantId: tenant_id,
+          liveId,
+          agendaEventoId: d.agenda_evento_id ?? null,
+          apresentadoraFallbackId: d.apresentador_id ?? null,
+          apresentadoraConfirmadaId: d.apresentador_id ?? null,
+          log: app.log,
+        })
 
-        if (apresentador2UserId) {
+        // Com o rateio de turnos gravado, a 2ª apresentadora já está em v2. Escrever também
+        // no legado live_apresentadores acrescentaria uma 3ª linha ao UNION do
+        // commission-engine que cai em rateioPadrao = 0 e recebe R$ 0,00.
+        if (apresentador2UserId && linhasV2 < 2) {
           await db.query(
             `INSERT INTO live_apresentadores (tenant_id, live_id, apresentador_id)
              VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
@@ -1241,6 +1262,25 @@ export async function livesRoutes(app) {
             clienteId: resolvedClienteId !== undefined ? resolvedClienteId : live.cliente_id,
             contratoId: live.contrato_id,
           })
+        }
+
+        // Trocar a apresentadora escalar apaga TODAS as linhas de v2 e insere uma — o que
+        // destrói um rateio de duas pessoas sem recalcular nada e sem passar pelo guard de
+        // comissão aprovada. A UI já esconde o campo nesse caso (EditarLiveModal.tsx:362);
+        // a API precisava recusar também. Quem quiser mudar quem apresentou usa
+        // `apresentadoras` (applyApresentadorasToLive), que é o escritor com validação.
+        if (d.apresentador_id !== undefined && d.apresentadoras === undefined) {
+          const n = await db.query(
+            'SELECT COUNT(*)::int AS n FROM live_apresentadoras_v2 WHERE live_id = $1::uuid AND tenant_id = $2::uuid',
+            [request.params.id, tenant_id],
+          )
+          if ((n.rows[0]?.n ?? 0) > 1) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({
+              error: 'Esta live tem rateio entre apresentadoras. Use "Dividir entre apresentadoras" para alterar.',
+              code: 'RATEIO_MULTIPLO',
+            })
+          }
         }
 
         if (d.apresentador_id !== undefined) {
@@ -2227,9 +2267,53 @@ export async function livesRoutes(app) {
         )
 
         if (parsed.data.apresentadora_id) {
+          // A live abriu com um rateio PLANEJADO de uma pessoa só (linha sem
+          // percentual/gmv/segundos, vinda do espelho da agenda) e quem encerra informa
+          // OUTRA pessoa: o plano virou ficção. Deixar as duas linhas põe a substituta como
+          // 'apoio' com percentual NULL, e a cascata de COALESCE dos rollups
+          // (performance-rollups.js:224-249) cai no degrau `papel = 'principal'` — 100% do
+          // GMV e das horas para quem não apresentou, R$ 0,00 e zero hora para quem
+          // apresentou. O mesmo UPDATE acima já trocou lives.apresentador_id por ela; v2
+          // tem que contar a mesma história.
+          //
+          // Só a linha planejada solitária sai. Rateio confirmado em "Dividir entre
+          // apresentadoras" (gmv_rateado/segundos_rateio preenchidos) e revezamento
+          // planejado de 2+ pessoas ficam intactos: ali há informação real que este
+          // endpoint não tem como recalcular.
+          //
+          // O SELECT antes do INSERT não reabre a janela de corrida que o CASE fecha: a
+          // live está travada por `SELECT ... FOR UPDATE ... status = 'em_andamento'` no
+          // topo desta transação, então dois encerramentos não chegam aqui juntos.
+          const v2Q = await db.query(
+            `SELECT apresentadora_id, percentual_rateio, gmv_rateado, segundos_rateio
+               FROM live_apresentadoras_v2
+              WHERE live_id = $1::uuid AND tenant_id = $2::uuid`,
+            [live.id, tenant_id],
+          )
+          const planejadaSolo = v2Q.rows.length === 1
+            && v2Q.rows[0].percentual_rateio == null
+            && v2Q.rows[0].gmv_rateado == null
+            && v2Q.rows[0].segundos_rateio == null
+            && v2Q.rows[0].apresentadora_id !== parsed.data.apresentadora_id
+
+          if (planejadaSolo) {
+            await db.query(
+              `DELETE FROM live_apresentadoras_v2
+                WHERE live_id = $1::uuid AND tenant_id = $2::uuid AND apresentadora_id = $3::uuid`,
+              [live.id, tenant_id, v2Q.rows[0].apresentadora_id],
+            )
+          }
+
+          // papel EXPLÍCITO em vez do DEFAULT 'principal' da coluna: quando a live já foi
+          // aberta com revezamento, o encerramento acrescentaria uma SEGUNDA 'principal' e
+          // todo LEFT JOIN por papel='principal' passaria a duplicar a live.
           await db.query(
-            `INSERT INTO live_apresentadoras_v2 (tenant_id, live_id, apresentadora_id)
-             VALUES ($1, $2, $3)
+            `INSERT INTO live_apresentadoras_v2 (tenant_id, live_id, apresentadora_id, papel)
+             SELECT $1::uuid, $2::uuid, $3::uuid,
+                    CASE WHEN EXISTS (SELECT 1 FROM live_apresentadoras_v2
+                                       WHERE live_id = $2::uuid AND tenant_id = $1::uuid
+                                         AND papel = 'principal')
+                         THEN 'apoio' ELSE 'principal' END
              ON CONFLICT (live_id, apresentadora_id) DO NOTHING`,
             [tenant_id, live.id, parsed.data.apresentadora_id],
           )

@@ -77,30 +77,43 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
   const comissaoFranqueadoraTotal = calcularComissaoFranquia({ gmv: gmvNum, pct: franqueadoraPct })
 
   // 3. Resolve apresentadoras da live (principal + live_apresentadoras)
+  //
+  // O ORDER BY externo não é cosmético: os pedidos da live inteira vão para a linha de
+  // índice 0 (ver `pedidosLinha` abaixo). Sem ordenação, a ordem de um UNION + DISTINCT
+  // é livre — a mesma live recalculada duas vezes podia dar os pedidos a pessoas
+  // diferentes. Ordena por papel ('principal' primeiro) e desempata pelo uuid.
+  //
+  // Precisa ser um nível EXTERNO: sob SELECT DISTINCT o Postgres recusa ORDER BY por
+  // expressão derivada, e `apresentadora_id` é alias de saída — não existe dentro de `ap`,
+  // que expõe só `id` e `user_id`.
   const apresentadorasQ = await db.query(
-    `SELECT DISTINCT ap.id AS apresentadora_id, la.percentual_rateio, la.gmv_rateado
-     FROM (
-       -- apresentadora principal (lives.apresentador_id → apresentadoras.user_id)
-       SELECT ap2.id, ap2.user_id
-       FROM apresentadoras ap2
-       WHERE ap2.user_id = $2 AND ap2.tenant_id = $1::uuid
-       UNION
-       -- apresentadoras secundárias (live_apresentadores legado)
-       SELECT ap3.id, ap3.user_id
-       FROM live_apresentadores la2
-       JOIN apresentadoras ap3 ON ap3.user_id = la2.apresentador_id AND ap3.tenant_id = $1::uuid
-       WHERE la2.live_id = $3 AND la2.tenant_id = $1::uuid
-       UNION
-       -- apresentadoras v2 (live_apresentadoras_v2)
-       SELECT lav.apresentadora_id AS id, ap4.user_id
-       FROM live_apresentadoras_v2 lav
-       JOIN apresentadoras ap4 ON ap4.id = lav.apresentadora_id AND ap4.tenant_id = $1::uuid
-       WHERE lav.live_id = $3 AND lav.tenant_id = $1::uuid
-     ) ap
-     LEFT JOIN live_apresentadoras_v2 la
-       ON la.apresentadora_id = ap.id
-      AND la.live_id = $3
-      AND la.tenant_id = $1::uuid`,
+    `SELECT * FROM (
+       SELECT DISTINCT ap.id AS apresentadora_id, la.percentual_rateio, la.gmv_rateado, la.papel
+       FROM (
+         -- apresentadora principal (lives.apresentador_id → apresentadoras.user_id)
+         SELECT ap2.id, ap2.user_id
+         FROM apresentadoras ap2
+         WHERE ap2.user_id = $2 AND ap2.tenant_id = $1::uuid
+         UNION
+         -- apresentadoras secundárias (live_apresentadores legado)
+         SELECT ap3.id, ap3.user_id
+         FROM live_apresentadores la2
+         JOIN apresentadoras ap3 ON ap3.user_id = la2.apresentador_id AND ap3.tenant_id = $1::uuid
+         WHERE la2.live_id = $3 AND la2.tenant_id = $1::uuid
+         UNION
+         -- apresentadoras v2 (live_apresentadoras_v2)
+         SELECT lav.apresentadora_id AS id, ap4.user_id
+         FROM live_apresentadoras_v2 lav
+         JOIN apresentadoras ap4 ON ap4.id = lav.apresentadora_id AND ap4.tenant_id = $1::uuid
+         WHERE lav.live_id = $3 AND lav.tenant_id = $1::uuid
+       ) ap
+       -- papel entra na select list sem multiplicar linha: v2 tem UNIQUE (live_id, apresentadora_id).
+       LEFT JOIN live_apresentadoras_v2 la
+         ON la.apresentadora_id = ap.id
+        AND la.live_id = $3
+        AND la.tenant_id = $1::uuid
+     ) ordenado
+     ORDER BY (ordenado.papel = 'principal') DESC NULLS LAST, ordenado.apresentadora_id ASC`,
     [tenantId, live.apresentador_id ?? NIL_UUID, liveId],
   )
 

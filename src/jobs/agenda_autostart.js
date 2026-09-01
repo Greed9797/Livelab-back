@@ -19,6 +19,7 @@
 // TikTok connector é pego automaticamente por connectorManager.syncLives()
 // (server.js:88) que roda a cada 60s.
 
+import { seedRateioPlanejado } from '../lib/agenda-turnos.js'
 import { withAdvisoryLock } from './advisory_lock.js'
 import { scanPorTenant } from './tenant_scan.js'
 
@@ -193,14 +194,22 @@ async function startOneEvent(app, ev) {
       [liveId, locked.id, ev.tenant_id],
     )
 
-    if (locked.apresentadora_id) {
-      await client.query(
-        `INSERT INTO live_apresentadoras_v2 (tenant_id, live_id, apresentadora_id)
-           VALUES ($1::uuid, $2::uuid, $3::uuid)
-           ON CONFLICT (live_id, apresentadora_id) DO NOTHING`,
-        [ev.tenant_id, liveId, locked.apresentadora_id],
-      )
-    }
+    // Rateio inicial: se o evento tem turnos (revezamento), vira uma linha por
+    // apresentadora com percentual planejado; se não tem, é o insert único de sempre com
+    // a apresentadora do espelho.
+    //
+    // A LEITURA dos turnos é blindada por SAVEPOINT lá dentro e não derruba esta
+    // transação — falhando, cai no insert simples. Os INSERTs não são blindados: uma
+    // violação de FK ali aborta a abertura e reverte live, cabine e evento. É a mesma
+    // exposição do INSERT que existia aqui antes do revezamento, não uma garantia nova —
+    // o docblock do seed escopa a promessa à leitura de propósito.
+    await seedRateioPlanejado(client, {
+      tenantId: ev.tenant_id,
+      liveId,
+      agendaEventoId: locked.id,
+      apresentadoraFallbackId: locked.apresentadora_id,
+      log: app.log,
+    })
 
     await client.query(
       `UPDATE cabines
@@ -210,16 +219,22 @@ async function startOneEvent(app, ev) {
     )
 
     // Audit log (best effort — não bloqueia se tabela ausente).
+    // O SAVEPOINT é o que torna esse "best effort" verdadeiro: sem ele o catch abaixo não
+    // salva ninguém — qualquer erro dentro da transação deixa a sessão em estado abortado
+    // (25P02) e o COMMIT logo adiante vira ROLLBACK silencioso, com o job devolvendo
+    // { liveId } como sucesso sem nada gravado. Já aconteceu aqui uma vez, com o nome de
+    // coluna errado (user_id vs. actor_user_id).
+    await client.query('SAVEPOINT autostart_audit')
     try {
       await client.query(
         // audit_log usa user_id (actor_user_id é de cabine_eventos/contrato_eventos).
-        // Com o nome errado o INSERT falhava e abortava a transação inteira, revertendo
-        // a live que o job acabara de abrir.
         `INSERT INTO audit_log (tenant_id, user_id, action, entity_type, entity_id, metadata)
            VALUES ($1::uuid, NULL, 'live.iniciada_auto', 'lives', $2::uuid, $3::jsonb)`,
         [ev.tenant_id, liveId, JSON.stringify({ agenda_evento_id: locked.id, source: 'agenda_autostart' })],
       )
+      await client.query('RELEASE SAVEPOINT autostart_audit')
     } catch (auditErr) {
+      await client.query('ROLLBACK TO SAVEPOINT autostart_audit').catch(() => {})
       app.log?.warn?.({ err: auditErr }, '[agenda autostart] audit_log falhou (não-bloqueante)')
     }
 

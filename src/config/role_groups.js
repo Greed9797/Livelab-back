@@ -52,9 +52,15 @@ export const READ_LEADS = [
 export const WRITE_LEADS = [...ADMIN_COMERCIAL, 'marketing']
 
 // ─── CABINES / OPERAÇÃO ──────────────────────────────────────────────
+// A automação entra aqui porque a listagem e o detalhe de LIVES são guardados
+// por READ_CABINES, não por READ_LIVES (ver cabineRoleAccess em
+// routes/lives.js). Sem isso a chave levava 403 na leitura que a própria rota de
+// importação promete. Isso não abre /v1/cabines para ela: a allowlist do plugin
+// de auth não tem esse caminho, e allowlist e papel precisam concordar.
 export const READ_CABINES = [
   ...ADMIN, 'operacional', 'apresentador', 'apresentadora',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
+  AUTOMACAO,
 ]
 export const WRITE_CABINES = [...ADMIN, 'operacional', 'produtor_live']
 

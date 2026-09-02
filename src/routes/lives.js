@@ -1911,47 +1911,62 @@ export async function livesRoutes(app) {
   })
 
   // GET /v1/lives/duplicatas — agrupa lives possivelmente duplicadas em clusters.
-  // Heurística (soft, sem constraint rígida): mesma cabine com horários
-  // sobrepostos, OU mesma marca + mesma apresentadora no mesmo dia.
+  //
+  // Uma regra só: MESMA CABINE, com sobreposição que cobre a maior parte da live mais
+  // curta. Duas lives não cabem fisicamente na mesma cabine ao mesmo tempo, então aqui a
+  // sobreposição é impossibilidade, não coincidência — e é a assinatura do caso real que a
+  // operação relata: a mesma live lançada duas vezes à mão (POST /v1/lives/manual é o único
+  // dos quatro caminhos de criação sem guarda de colisão).
+  //
+  // A regra antiga "mesma marca + mesma apresentadora no mesmo dia" foi REMOVIDA: ela
+  // descrevia a operação normal — uma apresentadora faz várias lives da mesma marca no mesmo
+  // dia, todo dia. Sozinha ela gerava da ordem de um cluster por apresentadora ativa por dia
+  // e, sem janela de tempo, o total só crescia. Alerta que acende sempre é alerta ignorado
+  // sempre, e aí a duplicata de verdade passa junto com o ruído.
   app.get('/v1/lives/duplicatas', { preHandler: cabineRoleAccess(app) }, async (request) => {
     const { tenant_id } = request.user
+    // Janela: duplicata é problema de conferência recente. Sem bound, o self-join é O(n²)
+    // sobre a base inteira e a contagem nunca decai — cluster de 2023 seguia acusando hoje.
+    const dias = Math.min(Math.max(Number(request.query?.dias) || 90, 1), 365)
     return app.withTenant(tenant_id, async (db) => {
       const pares = await db.query(`
         WITH base AS (
           SELECT
             l.id,
             l.cabine_id,
-            l.marca_id,
             l.iniciado_em,
-            COALESCE(l.encerrado_em, l.previsto_fim, l.iniciado_em) AS fim,
-            (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
-            COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id
+            -- Fim efetivo, com piso e teto. Sem piso, a live que o import grava com
+            -- encerrado_em = iniciado_em vira intervalo de comprimento zero e casa com
+            -- QUALQUER live que contenha aquele instante (0 >= 50% de 0). Sem teto, a live
+            -- zumbi que o job fecha com até 24h engole a cabine inteira do dia e o
+            -- union-find encadeia tudo num cluster gigante. 4h é a mesma convenção de
+            -- fallback já usada na migration 104.
+            GREATEST(
+              LEAST(
+                COALESCE(l.encerrado_em, l.previsto_fim, l.iniciado_em + INTERVAL '4 hours'),
+                l.iniciado_em + INTERVAL '12 hours'
+              ),
+              l.iniciado_em + INTERVAL '15 minutes'
+            ) AS fim
           FROM lives l
-          LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
-          LEFT JOIN LATERAL (
-            SELECT lav.apresentadora_id
-            FROM live_apresentadoras_v2 lav
-            WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
-            ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
-            LIMIT 1
-          ) ap_v2 ON true
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status <> 'cancelada'
+            AND l.cabine_id IS NOT NULL
+            AND l.iniciado_em >= NOW() - ($1::int || ' days')::interval
         )
-        SELECT a.id AS id_a, b.id AS id_b,
-          CASE
-            WHEN a.cabine_id = b.cabine_id AND a.iniciado_em < b.fim AND b.iniciado_em < a.fim
-              THEN 'cabine_horario'
-            ELSE 'marca_apresentadora_dia'
-          END AS motivo
+        SELECT a.id AS id_a, b.id AS id_b, 'cabine_horario' AS motivo
         FROM base a
-        JOIN base b ON b.id > a.id
-        WHERE
-          (a.cabine_id = b.cabine_id AND a.iniciado_em < b.fim AND b.iniciado_em < a.fim)
-          OR (a.marca_id IS NOT NULL AND a.marca_id = b.marca_id
-              AND a.apresentadora_id IS NOT NULL AND a.apresentadora_id = b.apresentadora_id
-              AND a.dia = b.dia)
-      `)
+        JOIN base b ON b.id > a.id AND b.cabine_id = a.cabine_id
+        WHERE a.iniciado_em < b.fim AND b.iniciado_em < a.fim
+          -- Encostar não é duplicar: live que começa quando a outra acaba se sobrepõe por
+          -- segundos e não é a mesma transmissão. Duas linhas para a MESMA live se
+          -- sobrepõem quase inteiras — exigir metade da mais curta separa os dois casos.
+          AND EXTRACT(EPOCH FROM (LEAST(a.fim, b.fim) - GREATEST(a.iniciado_em, b.iniciado_em)))
+              >= 0.5 * LEAST(
+                   EXTRACT(EPOCH FROM (a.fim - a.iniciado_em)),
+                   EXTRACT(EPOCH FROM (b.fim - b.iniciado_em))
+                 )
+      `, [dias])
 
       if (pares.rows.length === 0) return { clusters: [] }
 

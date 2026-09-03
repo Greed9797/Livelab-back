@@ -66,7 +66,7 @@ describe('POST /v1/lives', () => {
     expect(response.json()).toMatchObject({ id: liveId, cabine_id: cabineId, cliente_id: clienteId })
     expect(queryMock).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo'),
-      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null, marcaId],
+      ['tenant-1', cabineId, clienteId, null, 'cliente', null, null, marcaId, 'manual'],
     )
   })
 
@@ -128,7 +128,7 @@ describe('POST /v1/lives', () => {
     })
 
     expect(response.statusCode).toBe(201)
-    expect(liveInsertArgs).toEqual(['tenant-1', cabineId, null, null, 'afiliado', agendaId, null, marcaId])
+    expect(liveInsertArgs).toEqual(['tenant-1', cabineId, null, null, 'afiliado', agendaId, null, marcaId, 'manual'])
     expect(v2InsertArgs).toEqual(['tenant-1', liveId, apresentadoraId])
   })
 })

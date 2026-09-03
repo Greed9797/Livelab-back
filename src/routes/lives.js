@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { has as managerHas, stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
 import { READ_CABINES, WRITE_LIVES } from '../config/role_groups.js'
+import { origemDados } from '../plugins/auth.js'
 import { notify } from '../services/mailer.js'
 import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
@@ -654,7 +655,7 @@ export async function livesRoutes(app) {
         const liveQ = await db.query(
           `INSERT INTO lives (tenant_id, cabine_id, cliente_id, apresentador_id, tipo,
                               status_publicacao, origem_dados, agenda_evento_id, previsto_fim, marca_id)
-           VALUES ($1, $2, $3, $4, $5, 'rascunho', 'manual', $6, $7, $8)
+           VALUES ($1, $2, $3, $4, $5, 'rascunho', $9, $6, $7, $8)
            RETURNING id, cabine_id, iniciado_em, cliente_id, apresentador_id, tipo,
                      status_publicacao, origem_dados, agenda_evento_id, previsto_fim, marca_id`,
           [
@@ -666,6 +667,7 @@ export async function livesRoutes(app) {
             resolvedAgendaEventoId,
             resolvedPrevistoFim,
             resolvedMarcaId,
+            origemDados(request),
           ]
         )
         const live = liveQ.rows[0]
@@ -776,7 +778,7 @@ export async function livesRoutes(app) {
   // entradas retroativas (atribuição de comissão é responsabilidade do gestor).
   const gestorRoleAccess = [
     app.authenticate,
-    app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'produtor_live']),
+    app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'produtor_live', 'automacao']),
   ]
   app.post('/v1/lives/manual', { preHandler: gestorRoleAccess }, async (request, reply) => {
     const parsed = liveManualSchema.safeParse(request.body)
@@ -930,7 +932,7 @@ export async function livesRoutes(app) {
             d.manual_views ?? null, d.manual_likes ?? null,
             d.manual_comments ?? null, d.manual_shares ?? null, d.manual_diamonds ?? null,
             d.manual_orders ?? null, d.manual_gmv ?? null,
-            d.tipo, d.status_publicacao, d.origem_dados, d.agenda_evento_id ?? null, resolvedMarcaId,
+            d.tipo, d.status_publicacao, origemDados(request, d.origem_dados), d.agenda_evento_id ?? null, resolvedMarcaId,
             comApresManual.pct, comApresManual.valor,
           ]
         )
@@ -1224,7 +1226,8 @@ export async function livesRoutes(app) {
         if (d.new_followers          !== undefined) addField('new_followers',          d.new_followers)
         if (d.agenda_evento_id !== undefined) addField('agenda_evento_id', d.agenda_evento_id)
         if (d.previsto_fim    !== undefined) addField('previsto_fim',   d.previsto_fim)
-        if (d.origem_dados    !== undefined) addField('origem_dados',   d.origem_dados)
+        // Origem é fixada na criação: a chave de API não reescreve o que uma pessoa criou.
+        if (d.origem_dados    !== undefined && !request.viaApiKey) addField('origem_dados',   d.origem_dados)
         if (d.status          !== undefined) {
           addField('status', d.status)
           if (d.status === 'encerrada' && !live.encerrado_em) {
@@ -1339,23 +1342,23 @@ export async function livesRoutes(app) {
         // havia como responder "quem mexeu, e quando".
         if (d.ads_gmv !== undefined && d.ads_gmv !== live.ads_gmv) {
           await db.query(
-            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em)
-             VALUES ($1, $2, 'ads_gmv', $3, $4, $5, NOW())`,
-            [tenant_id, request.params.id, live.ads_gmv?.toString() ?? null, d.ads_gmv?.toString() ?? null, sub]
+            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em, origem_dados)
+             VALUES ($1, $2, 'ads_gmv', $3, $4, $5, NOW(), $6)`,
+            [tenant_id, request.params.id, live.ads_gmv?.toString() ?? null, d.ads_gmv?.toString() ?? null, sub, origemDados(request)]
           )
         }
         if (d.fat_gerado !== undefined && d.fat_gerado !== live.fat_gerado) {
           await db.query(
-            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em)
-             VALUES ($1, $2, 'fat_gerado', $3, $4, $5, NOW())`,
-            [tenant_id, request.params.id, live.fat_gerado?.toString() ?? null, d.fat_gerado.toString(), sub]
+            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em, origem_dados)
+             VALUES ($1, $2, 'fat_gerado', $3, $4, $5, NOW(), $6)`,
+            [tenant_id, request.params.id, live.fat_gerado?.toString() ?? null, d.fat_gerado.toString(), sub, origemDados(request)]
           )
         }
         if (d.manual_gmv !== undefined && d.manual_gmv !== live.manual_gmv) {
           await db.query(
-            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em)
-             VALUES ($1, $2, 'manual_gmv', $3, $4, $5, NOW())`,
-            [tenant_id, request.params.id, live.manual_gmv?.toString() ?? null, d.manual_gmv.toString(), sub]
+            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em, origem_dados)
+             VALUES ($1, $2, 'manual_gmv', $3, $4, $5, NOW(), $6)`,
+            [tenant_id, request.params.id, live.manual_gmv?.toString() ?? null, d.manual_gmv.toString(), sub, origemDados(request)]
           )
         }
 
@@ -2571,9 +2574,9 @@ export async function livesRoutes(app) {
         // Persiste motivo em live_metric_revisions, seguindo o mesmo padrão de fat_gerado/manual_gmv
         if (motivo) {
           await db.query(
-            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em)
-             VALUES ($1, $2, 'status_publicacao', $3, $4, $5, NOW())`,
-            [tenant_id, request.params.id, statusAtual, status_publicacao, sub]
+            `INSERT INTO live_metric_revisions (tenant_id, live_id, campo, valor_anterior, valor_novo, alterado_por, alterado_em, origem_dados)
+             VALUES ($1, $2, 'status_publicacao', $3, $4, $5, NOW(), $6)`,
+            [tenant_id, request.params.id, statusAtual, status_publicacao, sub, origemDados(request)]
           )
         }
 
@@ -2620,7 +2623,7 @@ export async function livesRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT campo, valor_anterior, valor_novo, motivo, alterado_em,
+        `SELECT campo, valor_anterior, valor_novo, motivo, alterado_em, r.origem_dados,
                 u.nome AS alterado_por_nome
          FROM live_metric_revisions r
          LEFT JOIN users u ON u.id = r.alterado_por

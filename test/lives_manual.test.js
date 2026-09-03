@@ -17,13 +17,14 @@ const basePayload = {
   resumo:          'Live de teste',
 }
 
-function buildApp({ papel = 'franqueado', queryRows = [], queryMock } = {}) {
+function buildApp({ papel = 'franqueado', queryRows = [], queryMock, viaApiKey } = {}) {
   const app = Fastify()
   const _query = queryMock ?? vi.fn().mockResolvedValue({ rows: queryRows })
   const release = vi.fn()
 
   app.decorate('authenticate', async (request) => {
-    request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel }
+    request.user = { tenant_id: 'tenant-1', sub: viaApiKey ? null : 'user-1', papel }
+    if (viaApiKey) request.viaApiKey = viaApiKey
   })
   app.decorate('requirePapel', (papeis) => async (request, reply) => {
     if (!request.user) request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel }
@@ -670,5 +671,109 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
 
     expect(res.statusCode).toBe(409)
     expect(res.json()).toMatchObject({ error: 'Live cancelada não pode ser editada' })
+  })
+})
+
+describe('origem_dados por chave de API (BOT)', () => {
+  const chave = { id: 'key-1', nome: 'grok bot' }
+  const cadeiaManual = (liveId) => vi.fn()
+    .mockResolvedValueOnce({ rows: [] })                                       // BEGIN
+    .mockResolvedValueOnce({ rows: [{ id: 'marca-id-1', status: 'ativa' }] })  // marca do cliente
+    .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                    // cliente status
+    .mockResolvedValueOnce({ rows: [{ comissao_pct: '10' }] })                // contrato
+    .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })              // apresentadora
+    .mockResolvedValueOnce({ rows: [{ id: liveId }] })                        // INSERT lives
+    .mockResolvedValueOnce({ rows: [] })                                       // junction
+    .mockResolvedValueOnce({ rows: [] })                                       // marca pós-insert
+    .mockResolvedValueOnce({ rows: [] })                                       // COMMIT
+  const insertLivesArgs = (queryMock) =>
+    queryMock.mock.calls.find(([sql]) => /INSERT INTO lives/.test(sql))[1]
+
+  it("POST /v1/lives/manual por chave grava origem_dados='bot' mesmo com body 'manual'", async () => {
+    const liveId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const queryMock = cadeiaManual(liveId)
+    const { app } = buildApp({ queryMock, papel: 'automacao', viaApiKey: chave })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/lives/manual',
+      payload: { ...basePayload, origem_dados: 'manual' },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(res.json().id).toBe(liveId)
+    expect(insertLivesArgs(queryMock)).toContain('bot')
+    expect(insertLivesArgs(queryMock)).not.toContain('manual')
+  })
+
+  it("POST /v1/lives/manual por JWT continua gravando 'manual'", async () => {
+    const queryMock = cadeiaManual('cccccccc-cccc-4ccc-8ccc-cccccccccccc')
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({ method: 'POST', url: '/v1/lives/manual', payload: basePayload })
+
+    expect(res.statusCode).toBe(201)
+    expect(insertLivesArgs(queryMock)).toContain('manual')
+    expect(insertLivesArgs(queryMock)).not.toContain('bot')
+  })
+
+  const liveRow = {
+    id: 'live-bot-1', status: 'encerrada', cabine_id: basePayload.cabine_id,
+    fat_gerado: '1000', ads_gmv: '500', manual_gmv: '1000',
+    iniciado_em: '2026-05-01T18:00:00Z', encerrado_em: '2026-05-01T20:00:00Z',
+  }
+  const mockGenerico = () => vi.fn().mockImplementation((sql) => {
+    if (/FROM lives/.test(sql)) return { rows: [liveRow] }
+    if (/comissao_pct/.test(sql)) return { rows: [{ comissao_pct: '10' }] }
+    return { rows: [] }
+  })
+
+  it('PATCH /v1/lives/:id por chave não reescreve origem_dados de registro existente', async () => {
+    const queryMock = mockGenerico()
+    const { app } = buildApp({ queryMock, papel: 'automacao', viaApiKey: chave })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveRow.id}`,
+      payload: { status_publicacao: 'publicado', origem_dados: 'manual' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    const update = queryMock.mock.calls.find(([sql]) => /UPDATE lives/.test(sql))
+    expect(update[0]).not.toContain('origem_dados')
+    expect(update[1]).toContain('publicado')
+  })
+
+  it("PATCH ads_gmv por chave grava a revisão de GMV com origem_dados='bot'", async () => {
+    const queryMock = mockGenerico()
+    const { app } = buildApp({ queryMock, papel: 'automacao', viaApiKey: chave })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveRow.id}`,
+      payload: { ads_gmv: 750 },
+    })
+
+    expect(res.statusCode).toBe(200)
+    const revisao = queryMock.mock.calls.find(([sql]) => /INSERT INTO live_metric_revisions/.test(sql))
+    expect(revisao[0]).toContain('origem_dados')
+    expect(revisao[1]).toContain('bot')
+    expect(revisao[1]).toContain('750')
+  })
+
+  it('GET /v1/lives/:id/historico-gmv devolve origem_dados de cada revisão', async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [{ campo: 'ads_gmv', origem_dados: 'bot', alterado_por_nome: null }] })
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({ method: 'GET', url: `/v1/lives/${liveRow.id}/historico-gmv` })
+
+    expect(res.statusCode).toBe(200)
+    expect(queryMock.mock.calls[0][0]).toContain('r.origem_dados')
+    expect(res.json().historico[0].origem_dados).toBe('bot')
   })
 })

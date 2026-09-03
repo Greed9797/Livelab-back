@@ -234,15 +234,15 @@ etc., para errar menos que com rota crua.
 |---|---|---|---|
 | BOT-01 | P1: origem bot em marcas (AC1) | Tasks | Pending |
 | BOT-02 | P1: origem bot em apresentadoras (AC2) | Tasks | Pending |
-| BOT-03 | P1: origem bot em lives manual + iniciar (AC3, AC4) | Tasks | Pending |
+| BOT-03 | P1: origem bot em lives manual + iniciar (AC3, AC4) | Done | Done (T3) |
 | BOT-04 | P1: origem bot em live criada pelo ingest (AC5) | Tasks | Pending |
 | BOT-05 | P1: origem bot em lote de import (AC6) | Tasks | Pending |
-| BOT-06 | P1: origem bot em revisão de GMV (AC7) | Tasks | Pending |
+| BOT-06 | P1: origem bot em revisão de GMV (AC7) | Done | Done (T3) |
 | BOT-07 | P1: JWT continua 'manual' (AC9) | Done | Done (T2 helper; rotas em T3–T6) |
-| BOT-08 | P1: PATCH não reescreve origem (AC8) | Tasks | Pending |
+| BOT-08 | P1: PATCH não reescreve origem (AC8) | Done | Done (T3) |
 | BOT-09 | P1: GETs devolvem origem_dados (AC10) | Tasks | Pending |
 | BOT-10 | P1: CHECK no banco (AC11) | Done | Done (T1, migration 140) |
-| MAN-01 | P1: lives/manual na allowlist + papel (AC1–AC3) | Tasks | Pending |
+| MAN-01 | P1: lives/manual na allowlist + papel (AC1–AC3) | Done | Done (T3) |
 | CLI-01 | P1: arquivo único stdlib (AC1) | Tasks | Pending |
 | CLI-02 | P1: chave ausente exit 2 (AC2) | Tasks | Pending |
 | CLI-03 | P1: `api` GET/POST/PATCH com -q/-d/-f (AC3–AC5) | Tasks | Pending |

@@ -117,7 +117,7 @@ T10 → T16
 
 ---
 
-### T3: lives.js grava origem bot e expõe no histórico
+### T3: lives.js grava origem bot e expõe no histórico ✅ DONE
 
 **What**: `AUTOMACAO` em `gestorRoleAccess`; INSERT iniciar e manual usam `origemDados(request, d.origem_dados)`; 4 INSERTs de `live_metric_revisions` ganham `origem_dados`; PATCH ignora `origem_dados` quando `viaApiKey`; `historico-gmv` devolve `r.origem_dados`.
 **Where**: `src/routes/lives.js`
@@ -128,11 +128,11 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Teste: `POST /v1/lives/manual` com `papel:'automacao'` + `viaApiKey` → 201 e params do INSERT contêm `'bot'` mesmo com body `origem_dados:'manual'`
-- [ ] Teste: mesmo POST com `papel:'franqueado'` sem chave → `'manual'`
-- [ ] Teste: `PATCH /v1/lives/:id` com chave e `origem_dados:'manual'` no body → SQL gerado não contém `origem_dados`
-- [ ] Teste: PATCH `ads_gmv` com chave → INSERT de revisão com `'bot'`
-- [ ] Gate check passes: `npx vitest run test/lives_manual.test.js test/api_key_auth.test.js`
+- [x] Teste: `POST /v1/lives/manual` com `papel:'automacao'` + `viaApiKey` → 201 e params do INSERT contêm `'bot'` mesmo com body `origem_dados:'manual'`
+- [x] Teste: mesmo POST com `papel:'franqueado'` sem chave → `'manual'`
+- [x] Teste: `PATCH /v1/lives/:id` com chave e `origem_dados:'manual'` no body → SQL gerado não contém `origem_dados`
+- [x] Teste: PATCH `ads_gmv` com chave → INSERT de revisão com `'bot'`
+- [x] Gate check passes: `npx vitest run test/lives_manual.test.js test/api_key_auth.test.js`
 **Tests**: integration
 **Gate**: full
 **Commit**: `feat(lives): origem_dados='bot' em live e revisão criadas por chave de API`

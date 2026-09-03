@@ -40,7 +40,7 @@ const faixaSchema = z.object({
 
 const faixaPatchSchema = faixaSchema.partial()
 
-const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, arquivada, ${presenterFixedSql('a')} AS fixo, comissao_pct, foto_url, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
+const COLS = `id, user_id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, arquivada, ${presenterFixedSql('a')} AS fixo, comissao_pct, foto_url, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, origem_dados, criado_em`
 
 // Resolve o id de apresentadora a partir de :id que pode ser:
 //  - id real da tabela apresentadoras, OU
@@ -299,6 +299,10 @@ export async function apresentadorasRoutes(app) {
   })
 
   // POST /v1/apresentadoras
+  // SPEC_DEVIATION: a chave de API não cria apresentadora (spec bot-tag-e-cli BOT-02).
+  // Reason: o cadastro direto está desativado (410) para todo mundo — apresentadora
+  // nasce do convite de usuário em Configurações, que a chave não alcança por desenho.
+  // A coluna origem_dados existe e é devolvida; só não há caminho de escrita por bot.
   app.post('/v1/apresentadoras', { preHandler: writeAccess }, async (request, reply) => {
     return reply.code(410).send({
       error: 'Cadastro direto de apresentadora foi desativado. Crie ou vincule apresentadoras em Configurações > Usuários.',

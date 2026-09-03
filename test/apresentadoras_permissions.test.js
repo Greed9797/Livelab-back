@@ -129,4 +129,16 @@ describe('apresentadoras permissions', () => {
 
     await app.close()
   })
+
+  it('GET /v1/apresentadoras devolve origem_dados de cada apresentadora', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [{ id: 'ap-1', nome: 'Ana', origem_dados: 'bot' }] })
+    const { app } = buildApp({ queryMock: query })
+    await app.register(apresentadorasRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/apresentadoras' })
+
+    expect(res.statusCode).toBe(200)
+    expect(query.mock.calls[0][0]).toContain('origem_dados')
+    expect(res.json()[0].origem_dados).toBe('bot')
+  })
 })

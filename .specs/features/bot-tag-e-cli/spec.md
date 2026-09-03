@@ -245,12 +245,12 @@ etc., para errar menos que com rota crua.
 | BOT-09 | P1: GETs devolvem origem_dados (AC10) | Done | Done (T3–T6) |
 | BOT-10 | P1: CHECK no banco (AC11) | Done | Done (T1, migration 140) |
 | MAN-01 | P1: lives/manual na allowlist + papel (AC1–AC3) | Done | Done (T3) |
-| CLI-01 | P1: arquivo único stdlib (AC1) | Tasks | Pending |
-| CLI-02 | P1: chave ausente exit 2 (AC2) | Tasks | Pending |
-| CLI-03 | P1: `api` GET/POST/PATCH com -q/-d/-f (AC3–AC5) | Tasks | Pending |
-| CLI-04 | P1: `ingest` base64 + preview + teto 5 MB (AC6, AC7) | Tasks | Pending |
-| CLI-05 | P1: erros: exit 1 / 403 dica / exit 3 rede (AC8–AC10) | Tasks | Pending |
-| CLI-06 | P1: `rotas`, `--verbose`, `--help`, chave nunca impressa (AC11–AC14) | Tasks | Pending |
+| CLI-01 | P1: arquivo único stdlib (AC1) | Done | Done (T7) |
+| CLI-02 | P1: chave ausente exit 2 (AC2) | Done | Done (T7) |
+| CLI-03 | P1: `api` GET/POST/PATCH com -q/-d/-f (AC3–AC5) | Done | Done (T7) |
+| CLI-04 | P1: `ingest` base64 + preview + teto 5 MB (AC6, AC7) | Done | Done (T7) |
+| CLI-05 | P1: erros: exit 1 / 403 dica / exit 3 rede (AC8–AC10) | Done | Done (T7) |
+| CLI-06 | P1: `rotas`, `--verbose`, `--help`, chave nunca impressa (AC11–AC14) | Done | Done (T7) |
 | UI-01 | P2: chip BOT lives lista+detalhe (AC1) | Tasks | Pending |
 | UI-02 | P2: BOT no histórico de GMV (AC2) | Tasks | Pending |
 | UI-03 | P2: chip em marcas, apresentadoras, imports (AC3, AC4) | Tasks | Pending |

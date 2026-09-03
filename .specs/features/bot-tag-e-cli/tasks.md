@@ -199,7 +199,7 @@ T10 → T16
 
 ---
 
-### T7: CLI livelab.py — api, ingest, rotas, erros
+### T7: CLI livelab.py — api, ingest, rotas, erros ✅ DONE
 
 **What**: `cli/livelab.py` só stdlib com subcomandos `api`, `ingest`, `rotas`, flags `--verbose`, env `LIVELAB_API_KEY`/`LIVELAB_API_URL`, exit codes 0/1/2/3, dica no 403, teto 5 MB, prefixo `/v1`.
 **Where**: `cli/livelab.py`
@@ -210,9 +210,9 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] `test/cli_livelab.test.js` sobe Fastify falso e cobre: chave ausente exit 2; `api GET -q` monta query e header; `api POST -d` e `-f`; `ingest` manda base64 + campos, `--preview` troca a rota, >5 MB exit 2; 403 imprime dica; não-2xx exit 1; porta fechada exit 3; `rotas` lista `POST /v1/lives/manual`; `--verbose` não contém a chave
-- [ ] `python3 -m py_compile cli/livelab.py`
-- [ ] Gate check passes: `npx vitest run test/cli_livelab.test.js`
+- [x] `test/cli_livelab.test.js` sobe Fastify falso e cobre: chave ausente exit 2; `api GET -q` monta query e header; `api POST -d` e `-f`; `ingest` manda base64 + campos, `--preview` troca a rota, >5 MB exit 2; 403 imprime dica; não-2xx exit 1; porta fechada exit 3; `rotas` lista `POST /v1/lives/manual`; `--verbose` não contém a chave
+- [x] `python3 -m py_compile cli/livelab.py`
+- [x] Gate check passes: `npx vitest run test/cli_livelab.test.js`
 **Tests**: integration
 **Gate**: quick
 **Commit**: `feat(cli): livelab.py para o Grok bot chamar a API pelo terminal`

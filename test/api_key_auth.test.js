@@ -2,7 +2,7 @@ import Fastify from 'fastify'
 import fp from 'fastify-plugin'
 import { describe, expect, it, vi, beforeAll } from 'vitest'
 
-import { authPlugin, chaveAlcancaRota, hashDaChave, origemDados } from '../src/plugins/auth.js'
+import { ROTAS_API_KEY, authPlugin, chaveAlcancaRota, hashDaChave, origemDados } from '../src/plugins/auth.js'
 
 const tenantId = '11111111-1111-4111-8111-111111111111'
 const keyId = '66666666-6666-4666-8666-666666666666'
@@ -71,6 +71,8 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('GET', '/v1/configuracoes')).toBe(false)
     expect(chaveAlcancaRota('DELETE', '/v1/lives/abc')).toBe(false)
     expect(chaveAlcancaRota('POST', '/v1/api-keys')).toBe(false)
+    // cadastro direto de apresentadora é 410 para todo mundo: não fica na lista
+    expect(chaveAlcancaRota('POST', '/v1/apresentadoras')).toBe(false)
   })
 })
 
@@ -79,6 +81,9 @@ describe('origemDados', () => {
     expect(origemDados({ viaApiKey: { id: 'k' } })).toBe('bot')
     expect(origemDados({ viaApiKey: { id: 'k' } }, 'manual')).toBe('bot')
     expect(origemDados({ viaApiKey: { id: 'k' } }, 'api')).toBe('bot')
+  })
+  it("é 'bot' mesmo quando a chave tem criado_por (usuário real)", () => {
+    expect(origemDados({ viaApiKey: { id: 'k', criado_por: '99999999-9999-4999-8999-999999999999' }, user: { sub: '99999999-9999-4999-8999-999999999999' } })).toBe('bot')
   })
   it("sem chave vale o body, e 'manual' na falta dele", () => {
     expect(origemDados({})).toBe('manual')

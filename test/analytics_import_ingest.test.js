@@ -263,4 +263,31 @@ describe('origem_dados do ingest (BOT)', () => {
     expect(insertLives(queryMock)[1]).toContain('api')
     expect(insertLives(queryMock)[1]).not.toContain('bot')
   })
+
+  it("preview por chave também grava o lote com origem_dados='bot'", async () => {
+    const queryMock = queryPadrao()
+    const app = buildApp(queryMock)
+    await app.register(analyticsRoutes)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/analytics/imports/preview',
+      payload: { filename: 'tiktok.csv', content_base64: csvBase64() },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(insertLote(queryMock)[1]).toContain('bot')
+  })
+
+  it('GET /v1/analytics/imports devolve origem_dados de cada lote', async () => {
+    const queryMock = vi.fn(async () => ({ rows: [{ id: batchId, filename: 'tiktok.csv', origem_dados: 'bot' }] }))
+    const app = buildApp(queryMock)
+    await app.register(analyticsRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/analytics/imports' })
+
+    expect(res.statusCode).toBe(200)
+    expect(queryMock.mock.calls[0][0]).toContain('b.origem_dados')
+    expect(res.json()[0].origem_dados).toBe('bot')
+  })
 })

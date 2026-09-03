@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { chaveAlcancaRota } from '../src/plugins/auth.js'
+import { ROTAS_API_KEY, chaveAlcancaRota } from '../src/plugins/auth.js'
 
 // A CLI roda de verdade (python3 + stdlib) contra um Fastify que ecoa o que recebeu.
 const CLI = new URL('../cli/livelab.py', import.meta.url).pathname
@@ -142,6 +142,12 @@ describe.skipIf(!temPython)('cli/livelab.py', () => {
     for (const linha of linhas) {
       const [metodo, rota] = linha.trim().split(/\s+/)
       expect(chaveAlcancaRota(metodo, rota.replace(':id', UUID)), linha).toBe(true)
+    }
+    // e a volta: toda entrada da allowlist tem pelo menos uma linha na CLI
+    const listadas = linhas.map((l) => l.trim().split(/\s+/).slice(0, 2))
+    for (const [metodo, rota] of ROTAS_API_KEY) {
+      const alguma = listadas.some(([m, r]) => m === metodo && r.replace(':id', UUID).startsWith(rota))
+      expect(alguma, `${metodo} ${rota} sem linha em 'livelab rotas'`).toBe(true)
     }
   })
 

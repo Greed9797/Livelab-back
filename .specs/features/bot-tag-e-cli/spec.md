@@ -91,8 +91,9 @@ venha marcado como BOT, para separar o que o bot fez do que a equipe cadastrou.
    THEN the system SHALL gravar essa live com `origem_dados = 'bot'`.
 6. WHEN `POST /v1/analytics/imports/ingest` ou `/preview` é chamado por chave THEN the
    system SHALL gravar o lote em `analytics_import_batches` com `origem_dados = 'bot'`.
-7. WHEN `PATCH /v1/lives/:id` por chave altera `ads_gmv` ou `status_publicacao` THEN the
-   system SHALL gravar a linha de `live_metric_revisions` com `origem_dados = 'bot'`.
+7. WHEN `PATCH /v1/lives/:id` por chave altera `ads_gmv`, `fat_gerado` ou `manual_gmv` THEN
+   the system SHALL gravar a linha de `live_metric_revisions` com `origem_dados = 'bot'`
+   (a revisão de `status_publicacao` só nasce em `/publicar`, rota que a chave não alcança).
 8. WHEN `PATCH` por chave atinge registro com `origem_dados = 'manual'` THEN the system
    SHALL manter `origem_dados = 'manual'` nesse registro.
 9. WHEN as mesmas rotas são chamadas com JWT de usuário THEN the system SHALL gravar

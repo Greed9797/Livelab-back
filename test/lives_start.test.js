@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { livesRoutes } from '../src/routes/lives.js'
 
-function buildApp({ queryMock, papel = 'franqueado' } = {}) {
+function buildApp({ queryMock, papel = 'franqueado', viaApiKey } = {}) {
   const app = Fastify()
   const release = vi.fn()
 
@@ -13,6 +13,7 @@ function buildApp({ queryMock, papel = 'franqueado' } = {}) {
       sub: '99999999-9999-4999-8999-999999999999',
       papel,
     }
+    if (viaApiKey) request.viaApiKey = viaApiKey
   })
   app.decorate('requirePapel', (papeis) => async (request, reply) => {
     if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
@@ -130,6 +131,43 @@ describe('POST /v1/lives', () => {
     expect(response.statusCode).toBe(201)
     expect(liveInsertArgs).toEqual(['tenant-1', cabineId, null, null, 'afiliado', agendaId, null, marcaId, 'manual'])
     expect(v2InsertArgs).toEqual(['tenant-1', liveId, apresentadoraId])
+  })
+
+  it("por chave de API grava origem_dados='bot' na live iniciada", async () => {
+    const cabineId = '11111111-1111-4111-8111-111111111111'
+    const clienteId = '22222222-2222-4222-8222-222222222222'
+    const liveId = '33333333-3333-4333-8333-333333333333'
+    const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })                                    // BEGIN
+      .mockResolvedValueOnce({
+        rows: [{ id: cabineId, numero: 1, status: 'disponivel', contrato_id: null, live_atual_id: null }],
+      })                                                                       // SELECT cabines
+      .mockResolvedValueOnce({ rows: [] })                                    // SELECT agenda_eventos
+      .mockResolvedValueOnce({ rows: [] })                                    // SELECT contratos (auto-reserve)
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // SELECT clientes status
+      .mockResolvedValueOnce({ rows: [{ id: marcaId, status: 'ativa' }] })   // ensureClienteMarca: SELECT marcas
+      .mockResolvedValueOnce({ rows: [] })                                    // UPDATE clientes tiktok_username
+      .mockResolvedValueOnce({
+          rows: [{ id: liveId, cabine_id: cabineId, iniciado_em: '2026-05-15T18:00:00.000Z', cliente_id: clienteId, apresentador_id: null }],
+      })                                                                       // INSERT INTO lives
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+    const { app } = buildApp({ queryMock, papel: 'automacao', viaApiKey: { id: 'key-1', nome: 'grok bot' } })
+    await app.register(livesRoutes)
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/lives',
+      payload: { cabine_id: cabineId, cliente_id: clienteId, tiktok_username: 'marca_live' },
+    })
+
+    expect(response.statusCode).toBe(201)
+    const insert = queryMock.mock.calls.find(([sql]) => /INSERT INTO lives/.test(sql))
+    expect(insert[1]).toContain('bot')
+    expect(insert[1]).not.toContain('manual')
   })
 })
 

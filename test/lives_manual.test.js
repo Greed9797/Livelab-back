@@ -776,4 +776,13 @@ describe('origem_dados por chave de API (BOT)', () => {
     expect(queryMock.mock.calls[0][0]).toContain('r.origem_dados')
     expect(res.json().historico[0].origem_dados).toBe('bot')
   })
+
+  it('POST /v1/lives/manual por chave com body inválido responde 400 como para uma pessoa', async () => {
+    const { app } = buildApp({ queryMock: vi.fn(), papel: 'automacao', viaApiKey: chave })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({ method: 'POST', url: '/v1/lives/manual', payload: { data: '2026-09-01' } })
+
+    expect(res.statusCode).toBe(400)
+  })
 })

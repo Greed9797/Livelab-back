@@ -18,7 +18,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Regra de casamento: GET casa por prefixo; POST/PATCH sem barra final casa EXATO;
 // PATCH com barra final casa só `<prefixo><uuid>` — nunca sub-rota (encerrar,
 // publicar, faixas-comissao, apresentadoras do vínculo).
-const ROTAS_API_KEY = [
+export const ROTAS_API_KEY = [
   ['POST', '/v1/analytics/imports/preview'],
   ['POST', '/v1/analytics/imports/ingest'],
   ['GET', '/v1/analytics/'],
@@ -30,7 +30,6 @@ const ROTAS_API_KEY = [
   ['POST', '/v1/marcas'],
   ['PATCH', '/v1/marcas/'],
   ['GET', '/v1/apresentadoras'],
-  ['POST', '/v1/apresentadoras'],
   ['PATCH', '/v1/apresentadoras/'],
   ['GET', '/v1/comissoes'],
 ]

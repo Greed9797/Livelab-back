@@ -238,7 +238,7 @@ T10 → T16
 
 ---
 
-### T9: Doc de automação
+### T9: Doc de automação ✅ DONE
 
 **What**: `docs/api-automacao.md` ganha `POST /v1/lives/manual` na tabela e no exemplo, o campo `origem_dados = 'bot'`, e a seção "CLI" (download com `curl -O`, env, exemplos de cada comando, exit codes).
 **Where**: `docs/api-automacao.md`
@@ -249,8 +249,8 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Tabela de rotas igual à `ROTAS_API_KEY`
-- [ ] Todo exemplo de CLI roda contra o Fastify falso do T7 (conferido à mão uma vez)
+- [x] Tabela de rotas igual à `ROTAS_API_KEY`
+- [x] Todo exemplo de CLI roda contra o Fastify falso do T7 (conferido à mão uma vez)
 **Tests**: none
 **Gate**: build
 **Commit**: `docs(api): lives/manual, origem_dados bot e CLI livelab`

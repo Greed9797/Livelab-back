@@ -40,10 +40,13 @@ de qualquer coisa, financeiro, boletos, contratos, usuários e configurações.
 | `POST` | `/v1/analytics/imports/ingest` | Mandar o relatório do TikTok e aplicar |
 | `POST` | `/v1/analytics/imports/preview` | Só analisar, sem aplicar |
 | `GET` | `/v1/analytics/imports/:id` | Ver o lote e o estado de cada linha |
+| `GET` | `/v1/analytics/imports` | Listar lotes de import |
 | `GET` | `/v1/lives` · `/v1/lives/:id` | Ler lives |
-| `POST` `PATCH` | `/v1/lives` · `/v1/lives/:id` | Criar e editar live |
-| `GET` `POST` `PATCH` | `/v1/marcas` | Ler e cadastrar marca |
-| `GET` `POST` `PATCH` | `/v1/apresentadoras` | Ler e cadastrar apresentadora |
+| `POST` | `/v1/lives/manual` | Cadastrar live já encerrada (data, hora, GMV, pedidos) |
+| `POST` | `/v1/lives` | Iniciar live ao vivo numa cabine |
+| `PATCH` | `/v1/lives/:id` | Editar live |
+| `GET` `POST` `PATCH` | `/v1/marcas` · `/v1/marcas/:id` | Ler, cadastrar e editar marca |
+| `GET` `PATCH` | `/v1/apresentadoras` · `/v1/apresentadoras/:id` | Ler e editar apresentadora (não há cadastro por API: apresentadora nasce do convite de usuário no painel) |
 | `GET` | `/v1/comissoes` | Ler comissão calculada |
 
 ## Mandar o relatório do TikTok
@@ -128,7 +131,27 @@ Um arquivo com uma linha a mais é um arquivo diferente e será processado
 normalmente; as lives que já receberam dados não são duplicadas, porque o
 casamento continua valendo.
 
-## Cadastrar marca e apresentadora
+## Cadastrar live já encerrada
+
+`POST /v1/lives/manual` registra uma live que já aconteceu, com o número
+fechado. A comissão da apresentadora é calculada na hora.
+
+```bash
+curl -X POST "$BASE/v1/lives/manual" \
+  -H "X-API-Key: $CHAVE" -H "Content-Type: application/json" \
+  -d '{"cabine_id":"<uuid>","marca_id":"<uuid>","apresentador_id":"<uuid>",
+       "data":"2026-09-01","hora_inicio":"19:00","hora_fim":"22:00",
+       "fat_gerado":"12500.00","qtd_pedidos":140}'
+```
+
+Campos: `cabine_id`, `data` (AAAA-MM-DD), `hora_inicio` e `hora_fim` (HH:MM,
+horário de São Paulo), `fat_gerado` e `qtd_pedidos` são obrigatórios; `marca_id`
+ou `cliente_id` identifica de quem é a live; `apresentador_id`, `apresentador2_id`,
+`resumo` e os `manual_*` (views, likes, comments, shares, orders, gmv) são
+opcionais. `POST /v1/lives` (sem `/manual`) é outra coisa: abre uma live ao vivo
+numa cabine agora.
+
+## Cadastrar marca
 
 ```bash
 curl -X POST "$BASE/v1/marcas" \
@@ -140,8 +163,55 @@ Antes de criar, procure pelo nome em `GET /v1/marcas` — "Haag" e "HAAG" viram
 duas marcas diferentes se ninguém olhar, e a partir daí o GMV do mês se divide
 entre as duas sem que nada acuse o problema.
 
-## O que fica registrado
+## O que fica registrado: a tag BOT
 
-Toda escrita feita por chave entra no log de auditoria identificada como tal,
-com o nome da chave. Quem olhar o histórico de uma live consegue distinguir o
-que a automação fez do que uma pessoa fez.
+Tudo que a chave **cria** nasce com `origem_dados = "bot"`: live (por `manual`,
+por `iniciar` ou criada pelo `ingest`), marca, lote de import e revisão de GMV.
+O campo volta em todo `GET` e o painel mostra o chip **BOT** nesses registros.
+Mandar `origem_dados` no body não muda nada: quem decide é a chave.
+
+O que uma pessoa criou continua `manual` mesmo que a chave edite depois — a
+edição fica no histórico de GMV (`GET /v1/lives/:id/historico-gmv`, linha com
+`origem_dados = "bot"`) e no log de auditoria, identificada com o nome da chave.
+
+## CLI: `livelab.py`
+
+Um arquivo Python 3 (só biblioteca padrão, sem `pip`) que embrulha tudo acima.
+Serve para rodar no terminal de uma VM.
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/Greed9797/Livelab-back/codex/blumenau-operational-fase1/cli/livelab.py
+export LIVELAB_API_KEY=llk_...          # obrigatória; nunca vai para arquivo
+# LIVELAB_API_URL=...                  # opcional; padrão é a produção
+python3 livelab.py rotas                # o que a chave alcança
+python3 livelab.py --help
+```
+
+Comandos:
+
+```bash
+python3 livelab.py api GET /v1/lives -q data_inicio=2026-09-01 -q status=encerrada
+python3 livelab.py api POST /v1/marcas -d '{"nome":"Marca X","tipo":"afiliada"}'
+python3 livelab.py api PATCH /v1/lives/<uuid> -f corpo.json     # -f - lê stdin
+python3 livelab.py ingest relatorio.xlsx --marca-id <uuid> --apresentadora-id <uuid> [--criar-lives] [--preview]
+python3 livelab.py lives list|get <id>|criar|editar <id>       # criar = POST /v1/lives/manual
+python3 livelab.py marcas list|get <id>|criar|editar <id>
+python3 livelab.py apresentadoras list|get <id>|editar <id>
+python3 livelab.py comissoes list -q mes=2026-09
+python3 livelab.py imports list|get <id>
+```
+
+`api` aceita a rota com ou sem `/v1` na frente. Os comandos nomeados só escolhem
+método e rota e aceitam os mesmos `-q`, `-d` e `-f`; `python3 livelab.py marcas --help`
+lista os campos do body.
+
+Saída: o JSON da API em stdout. Códigos de saída:
+
+| Código | Significado |
+|---|---|
+| 0 | 2xx |
+| 1 | A API recusou; stderr traz `{"status": ..., "error": ...}`. No 403 vem a dica de olhar `rotas` |
+| 2 | Uso errado: chave ausente, JSON inválido, arquivo do `ingest` acima de 5 MB |
+| 3 | Rede, DNS ou timeout (60 s) |
+
+`--verbose` imprime método, URL e status em stderr. A chave nunca é impressa.

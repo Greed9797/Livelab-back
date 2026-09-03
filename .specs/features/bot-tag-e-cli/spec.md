@@ -256,4 +256,4 @@ etc., para errar menos que com rota crua.
 | UI-03 | P2: chip em marcas, apresentadoras, imports (AC3, AC4) | Tasks | Pending |
 | UI-04 | P2: sem chip para manual/api (AC5) | Tasks | Pending |
 | CLI-07 | P2: comandos nomeados (AC1, AC2) | Done | Done (T8) |
-| DOC-01 | P2: docs/api-automacao.md (AC3) | Tasks | Pending |
+| DOC-01 | P2: docs/api-automacao.md (AC3) | Done | Done (T9) |

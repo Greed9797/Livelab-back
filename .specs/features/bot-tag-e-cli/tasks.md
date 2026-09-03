@@ -257,7 +257,7 @@ T10 → T16
 
 ---
 
-### T10: React — tipo e BotBadge
+### T10: React — tipo e BotBadge ✅ DONE
 
 **What**: `origem_dados` aceita `'bot'` em `LiveAtual`; novo `BotBadge({ origem })` + teste.
 **Where**: `~/dev/Livelab-Front/react-app/src/components/ui/BotBadge.tsx`
@@ -268,16 +268,16 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] `BotBadge.test.tsx`: `'bot'` renderiza texto `BOT`; `'manual'`, `'api'`, `undefined` renderizam nada
-- [ ] `src/types/models.ts:165` união com `'bot'`
-- [ ] Gate check passes: `cd ~/dev/Livelab-Front/react-app && npx vitest run src/components/ui`
+- [x] `BotBadge.test.tsx`: `'bot'` renderiza texto `BOT`; `'manual'`, `'api'`, `undefined` renderizam nada
+- [x] `src/types/models.ts:165` união com `'bot'`
+- [x] Gate check passes: `cd ~/dev/Livelab-Front/react-app && npx vitest run src/components/ui`
 **Tests**: unit
 **Gate**: quick
 **Commit**: `feat(ui): BotBadge para registros criados pela automação`
 
 ---
 
-### T11: React — lives lista, detalhe e modal de edição
+### T11: React — lives lista, detalhe e modal de edição ✅ DONE
 
 **What**: `BotBadge` na linha da lista de lives e em `LiveDetailModal` (ambos em `conteudo/`).
 **Where**: `~/dev/Livelab-Front/react-app/src/components/conteudo/`
@@ -288,15 +288,15 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Live com `origem_dados:'bot'` mostra chip na lista e no detalhe
-- [ ] Gate check passes: `npm run typecheck && npx vitest run`
+- [x] Live com `origem_dados:'bot'` mostra chip na lista e no detalhe
+- [x] Gate check passes: `npm run typecheck && npx vitest run`
 **Tests**: none
 **Gate**: build
 **Commit**: `feat(lives): chip BOT na lista e no detalhe`
 
 ---
 
-### T12: React — histórico de GMV
+### T12: React — histórico de GMV ✅ DONE
 
 **What**: coluna "Alterado por" mostra `BOT` quando `origem_dados === 'bot'`.
 **Where**: `~/dev/Livelab-Front/react-app/src/pages/HistoricoGmvModal.tsx`
@@ -307,15 +307,15 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Render da coluna: bot → `BOT`; senão nome ou `—`
-- [ ] Gate check passes: `npm run typecheck`
+- [x] Render da coluna: bot → `BOT`; senão nome ou `—`
+- [x] Gate check passes: `npm run typecheck`
 **Tests**: none
 **Gate**: build
 **Commit**: `feat(gmv): histórico mostra BOT em revisão feita pela automação`
 
 ---
 
-### T13: React — marcas
+### T13: React — marcas ✅ DONE
 
 **What**: `BotBadge` na célula do nome da tabela de ativos/marcas.
 **Where**: `~/dev/Livelab-Front/react-app/src/pages/ComercialPage.tsx`
@@ -326,15 +326,15 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Marca bot mostra chip
-- [ ] Gate check passes: `npm run typecheck`
+- [x] Marca bot mostra chip
+- [x] Gate check passes: `npm run typecheck`
 **Tests**: none
 **Gate**: build
 **Commit**: `feat(marcas): chip BOT na lista`
 
 ---
 
-### T14: React — apresentadoras
+### T14: React — apresentadoras ⛔ SPEC_DEVIATION
 
 **What**: `BotBadge` na linha da lista.
 **Where**: `~/dev/Livelab-Front/react-app/src/pages/ApresentadorasPage.tsx`
@@ -345,6 +345,7 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
+- [x] SPEC_DEVIATION: o front não lista a entidade `apresentadoras` (a aba de Configurações lista usuários) e a API não deixa a chave criar apresentadora (410) — não existe registro bot para marcar. Nada a renderizar.
 - [ ] Apresentadora bot mostra chip
 - [ ] Gate check passes: `npm run typecheck`
 **Tests**: none
@@ -373,7 +374,7 @@ T10 → T16
 
 ---
 
-### T16: React — modal de edição preserva origem bot
+### T16: React — modal de edição preserva origem bot ✅ DONE
 
 **What**: `<select>` de `origem_dados` ganha `<option value="bot" disabled>Bot</option>` para a live bot não perder o valor ao ser editada.
 **Where**: `~/dev/Livelab-Front/react-app/src/components/forms/EditarLiveModal.tsx`
@@ -384,9 +385,9 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Abrir live bot no modal mostra "Bot" selecionado
-- [ ] Salvar sem mexer em origem não envia `origem_dados` no PATCH
-- [ ] Gate check passes: `npm run typecheck`
+- [x] Abrir live bot no modal mostra "Bot" selecionado
+- [x] Salvar sem mexer em origem não envia `origem_dados` no PATCH
+- [x] Gate check passes: `npm run typecheck`
 **Tests**: none
 **Gate**: build
 **Commit**: `fix(lives): modal de edição não apaga origem bot`

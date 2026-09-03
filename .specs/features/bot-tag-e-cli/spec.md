@@ -251,9 +251,9 @@ etc., para errar menos que com rota crua.
 | CLI-04 | P1: `ingest` base64 + preview + teto 5 MB (AC6, AC7) | Done | Done (T7) |
 | CLI-05 | P1: erros: exit 1 / 403 dica / exit 3 rede (AC8–AC10) | Done | Done (T7) |
 | CLI-06 | P1: `rotas`, `--verbose`, `--help`, chave nunca impressa (AC11–AC14) | Done | Done (T7) |
-| UI-01 | P2: chip BOT lives lista+detalhe (AC1) | Tasks | Pending |
-| UI-02 | P2: BOT no histórico de GMV (AC2) | Tasks | Pending |
+| UI-01 | P2: chip BOT lives lista+detalhe (AC1) | Done | Done (react 5ccfab5, f6fd93b, 352ef2a) |
+| UI-02 | P2: BOT no histórico de GMV (AC2) | Done | Done (react 06eb203) |
 | UI-03 | P2: chip em marcas, apresentadoras, imports (AC3, AC4) | Tasks | Pending |
-| UI-04 | P2: sem chip para manual/api (AC5) | Tasks | Pending |
+| UI-04 | P2: sem chip para manual/api (AC5) | Done | Done (BotBadge.test.tsx) |
 | CLI-07 | P2: comandos nomeados (AC1, AC2) | Done | Done (T8) |
 | DOC-01 | P2: docs/api-automacao.md (AC3) | Done | Done (T9) |

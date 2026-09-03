@@ -24,6 +24,7 @@ const ROTAS_API_KEY = [
   ['GET', '/v1/analytics/'],
   ['GET', '/v1/lives'],
   ['POST', '/v1/lives'],
+  ['POST', '/v1/lives/manual'],
   ['PATCH', '/v1/lives/'],
   ['GET', '/v1/marcas'],
   ['POST', '/v1/marcas'],
@@ -45,6 +46,13 @@ export function chaveAlcancaRota(metodo, caminho) {
 }
 
 export const hashDaChave = (chave) => createHash('sha256').update(chave, 'utf8').digest('hex')
+
+// Origem do registro que a rota vai gravar. Quem chama decide, não o body:
+// veio por chave de API, é 'bot' — mesmo que o payload diga 'manual'. Sem
+// chave, vale o que a rota já fazia (o valor do body ou 'manual').
+export function origemDados(request, doBody = 'manual') {
+  return request?.viaApiKey ? 'bot' : (doBody ?? 'manual')
+}
 
 async function authPlugin(app) {
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {

@@ -2,7 +2,7 @@ import Fastify from 'fastify'
 import fp from 'fastify-plugin'
 import { describe, expect, it, vi, beforeAll } from 'vitest'
 
-import { authPlugin, chaveAlcancaRota, hashDaChave } from '../src/plugins/auth.js'
+import { authPlugin, chaveAlcancaRota, hashDaChave, origemDados } from '../src/plugins/auth.js'
 
 const tenantId = '11111111-1111-4111-8111-111111111111'
 const keyId = '66666666-6666-4666-8666-666666666666'
@@ -58,7 +58,9 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('PATCH', '/v1/marcas/66666666-6666-4666-8666-666666666666')).toBe(true)
     // sub-rota de escrita e id que não é uuid ficam de fora, mesmo com prefixo na lista
     expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666/encerrar')).toBe(false)
-    expect(chaveAlcancaRota('POST', '/v1/lives/manual')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/lives/manual')).toBe(true)
+    expect(chaveAlcancaRota('POST', '/v1/lives/manual/66666666-6666-4666-8666-666666666666')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/lives/manual/x')).toBe(false)
     expect(chaveAlcancaRota('PATCH', '/v1/marcas/abc')).toBe(false)
 
     // O que não pode: o dinheiro, as pessoas e as chaves do gateway.
@@ -67,6 +69,19 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('GET', '/v1/configuracoes')).toBe(false)
     expect(chaveAlcancaRota('DELETE', '/v1/lives/abc')).toBe(false)
     expect(chaveAlcancaRota('POST', '/v1/api-keys')).toBe(false)
+  })
+})
+
+describe('origemDados', () => {
+  it("é 'bot' quando a request veio por chave, ignorando o body", () => {
+    expect(origemDados({ viaApiKey: { id: 'k' } })).toBe('bot')
+    expect(origemDados({ viaApiKey: { id: 'k' } }, 'manual')).toBe('bot')
+    expect(origemDados({ viaApiKey: { id: 'k' } }, 'api')).toBe('bot')
+  })
+  it("sem chave vale o body, e 'manual' na falta dele", () => {
+    expect(origemDados({})).toBe('manual')
+    expect(origemDados({}, 'api')).toBe('api')
+    expect(origemDados({}, undefined)).toBe('manual')
   })
 })
 

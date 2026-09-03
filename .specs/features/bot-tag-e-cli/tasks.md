@@ -97,7 +97,7 @@ T10 → T16
 
 ---
 
-### T2: Helper origemDados + allowlist lives/manual
+### T2: Helper origemDados + allowlist lives/manual ✅ DONE
 
 **What**: `export function origemDados(request, doBody = 'manual')` e `['POST', '/v1/lives/manual']` em `ROTAS_API_KEY`; testes do matcher e do helper.
 **Where**: `src/plugins/auth.js`
@@ -108,9 +108,9 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] `chaveAlcancaRota('POST','/v1/lives/manual') === true`; `/v1/lives/manual/x === false`
-- [ ] `origemDados({viaApiKey:{}}) === 'bot'`; `origemDados({}) === 'manual'`; `origemDados({}, 'api') === 'api'`; `origemDados({viaApiKey:{}}, 'manual') === 'bot'`
-- [ ] Gate check passes: `npx vitest run test/api_key_auth.test.js`
+- [x] `chaveAlcancaRota('POST','/v1/lives/manual') === true`; `/v1/lives/manual/x === false`
+- [x] `origemDados({viaApiKey:{}}) === 'bot'`; `origemDados({}) === 'manual'`; `origemDados({}, 'api') === 'api'`; `origemDados({viaApiKey:{}}, 'manual') === 'bot'`
+- [x] Gate check passes: `npx vitest run test/api_key_auth.test.js` (7 testes)
 **Tests**: unit
 **Gate**: quick
 **Commit**: `feat(auth): helper origemDados e POST /v1/lives/manual liberado para chave`

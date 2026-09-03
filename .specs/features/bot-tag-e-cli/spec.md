@@ -238,7 +238,7 @@ etc., para errar menos que com rota crua.
 | BOT-04 | P1: origem bot em live criada pelo ingest (AC5) | Tasks | Pending |
 | BOT-05 | P1: origem bot em lote de import (AC6) | Tasks | Pending |
 | BOT-06 | P1: origem bot em revisão de GMV (AC7) | Tasks | Pending |
-| BOT-07 | P1: JWT continua 'manual' (AC9) | Tasks | Pending |
+| BOT-07 | P1: JWT continua 'manual' (AC9) | Done | Done (T2 helper; rotas em T3–T6) |
 | BOT-08 | P1: PATCH não reescreve origem (AC8) | Tasks | Pending |
 | BOT-09 | P1: GETs devolvem origem_dados (AC10) | Tasks | Pending |
 | BOT-10 | P1: CHECK no banco (AC11) | Done | Done (T1, migration 140) |

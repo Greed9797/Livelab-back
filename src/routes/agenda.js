@@ -226,7 +226,7 @@ async function getConflictingTurnos(db, { tenantId, apresentadoraId, dataInicio,
         AND t.data_fim    > $3::timestamptz
         AND ae.status = ANY($5::text[])
         AND ($6::uuid IS NULL OR ae.id <> $6::uuid)`,
-    [tenantId, apresentadoraId, dataInicio, dataFim, conflictBlockingStatuses, excludeId ?? null],
+    [tenantId, apresentadoraId, dataInicio, dataFim, conflictBlockingStatuses, excludeId || null],
   )
   return q.rows
 }

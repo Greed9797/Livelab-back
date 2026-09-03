@@ -15,8 +15,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Não há DELETE nenhum, e de fora ficam usuários, financeiro, boletos,
 // contratos e configurações (esta última guarda as chaves do gateway de
 // pagamento).
+// Regra de casamento: GET casa por prefixo; POST/PATCH sem barra final casa EXATO;
+// PATCH com barra final casa só `<prefixo><uuid>` — nunca sub-rota (encerrar,
+// publicar, faixas-comissao, apresentadoras do vínculo).
 const ROTAS_API_KEY = [
   ['POST', '/v1/analytics/imports'],
+  ['POST', '/v1/analytics/imports/ingest'],
   ['GET', '/v1/analytics/'],
   ['GET', '/v1/lives'],
   ['POST', '/v1/lives'],
@@ -32,7 +36,12 @@ const ROTAS_API_KEY = [
 
 export function chaveAlcancaRota(metodo, caminho) {
   const limpo = String(caminho ?? '').split('?')[0]
-  return ROTAS_API_KEY.some(([m, prefixo]) => m === metodo && limpo.startsWith(prefixo))
+  return ROTAS_API_KEY.some(([m, rota]) => {
+    if (m !== metodo) return false
+    if (m === 'GET') return limpo.startsWith(rota)
+    if (!rota.endsWith('/')) return limpo === rota
+    return limpo.startsWith(rota) && UUID_RE.test(limpo.slice(rota.length))
+  })
 }
 
 export const hashDaChave = (chave) => createHash('sha256').update(chave, 'utf8').digest('hex')
@@ -172,7 +181,9 @@ async function authPlugin(app) {
       return reply.code(403).send({ error: 'Esta chave não tem acesso a esta rota' })
     }
 
-    request.user = { sub: `apikey:${chave.id}`, tenant_id: chave.tenant_id, papel: chave.papel }
+    // `sub` entra em colunas UUID com FK para users (alterado_por, criado_por): tem
+    // de ser um usuário real ou NULL. A chave em si fica em viaApiKey para auditoria.
+    request.user = { sub: chave.criado_por ?? null, tenant_id: chave.tenant_id, papel: chave.papel }
     request.viaApiKey = chave
     // requirePapel, quando empilhado depois, pula o jwtVerify — não existe JWT
     // nesta request e tentar verificar um daria 401 numa chave válida.

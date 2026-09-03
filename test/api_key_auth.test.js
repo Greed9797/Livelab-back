@@ -55,7 +55,11 @@ describe('allowlist da chave de API', () => {
   it('libera só o que está na lista, e nunca DELETE', () => {
     expect(chaveAlcancaRota('POST', '/v1/analytics/imports/ingest')).toBe(true)
     expect(chaveAlcancaRota('GET', '/v1/lives?status=encerrada')).toBe(true)
-    expect(chaveAlcancaRota('PATCH', '/v1/marcas/abc')).toBe(true)
+    expect(chaveAlcancaRota('PATCH', '/v1/marcas/66666666-6666-4666-8666-666666666666')).toBe(true)
+    // sub-rota de escrita e id que não é uuid ficam de fora, mesmo com prefixo na lista
+    expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666/encerrar')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/lives/manual')).toBe(false)
+    expect(chaveAlcancaRota('PATCH', '/v1/marcas/abc')).toBe(false)
 
     // O que não pode: o dinheiro, as pessoas e as chaves do gateway.
     expect(chaveAlcancaRota('GET', '/v1/financeiro/dashboard')).toBe(false)
@@ -79,7 +83,8 @@ describe('autenticação por chave de API', () => {
     expect(res.json()).toEqual({
       tenant_id: tenantId,
       papel: 'automacao',
-      sub: `apikey:${keyId}`,
+      // criado_por NULL no mock: sub tem de ser usuário real ou NULL (colunas com FK para users)
+      sub: null,
     })
     // A busca é pelo hash: a chave em texto nunca vai ao banco.
     const [sql, params] = query.mock.calls.find(([s]) => s.includes('FROM api_keys'))

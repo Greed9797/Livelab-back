@@ -177,11 +177,20 @@ async function dbPlugin(app) {
   // captureException é obrigatório: com o listener no lugar a barreira do server.js
   // deixa de ver esse evento. Sem mandar pro Sentry aqui, trocaríamos um crash
   // barulhento por uma falha silenciosa — que é pior.
+  // Teto por statement no servidor. Sem ele uma query travada segura a conexão para
+  // sempre, o pool esgota e a API para de responder sem log nenhum. Em session mode
+  // o SET persiste na conexão: custa 1 RTT por conexão NOVA, não por request.
+  const STATEMENT_TIMEOUT_MS = Number(process.env.DB_STATEMENT_TIMEOUT_MS ?? 30_000)
   const observarClient = (nome) => (client) => {
     client.on('error', (err) => {
       app.log.error({ err, pool: nome }, 'conexão EM USO quebrou (client checked-out)')
       if (process.env.SENTRY_DSN) Sentry.captureException(err)
     })
+    if (STATEMENT_TIMEOUT_MS > 0) {
+      client.query(`SET statement_timeout = ${STATEMENT_TIMEOUT_MS}`).catch((err) => {
+        app.log.warn({ err, pool: nome }, 'não conseguiu aplicar statement_timeout na conexão')
+      })
+    }
   }
   pool.on('connect', observarClient('tenant'))
   systemPool.on('connect', observarClient('system'))

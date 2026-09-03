@@ -830,6 +830,7 @@ export async function analyticsRoutes(app) {
             `SELECT id, applied_rows FROM analytics_import_batches
               WHERE tenant_id = $1::uuid
                 AND file_hash = $2
+                AND status = 'applied'
                 AND created_at > NOW() - INTERVAL '24 hours'
               ORDER BY created_at DESC
               LIMIT 1`,

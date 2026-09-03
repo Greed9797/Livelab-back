@@ -139,7 +139,7 @@ T10 → T16
 
 ---
 
-### T4: marcas.js grava e devolve origem
+### T4: marcas.js grava e devolve origem ✅ DONE
 
 **What**: INSERT de marca ganha `origem_dados` via `origemDados(request)`; `marcaCols` ganha `m.origem_dados`.
 **Where**: `src/routes/marcas.js`
@@ -150,16 +150,16 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Teste: POST com `viaApiKey` → params do INSERT contêm `'bot'`; sem chave → `'manual'`
-- [ ] Teste: GET `/v1/marcas` SQL contém `m.origem_dados`
-- [ ] Gate check passes: `npx vitest run test/marca_obrigatoria.test.js`
+- [x] Teste: POST com `viaApiKey` → params do INSERT contêm `'bot'`; sem chave → `'manual'`
+- [x] Teste: GET `/v1/marcas` SQL contém `m.origem_dados`
+- [x] Gate check passes: `npx vitest run test/marca_obrigatoria.test.js`
 **Tests**: integration
 **Gate**: quick
 **Commit**: `feat(marcas): origem_dados='bot' quando criada por chave de API`
 
 ---
 
-### T5: apresentadoras.js grava e devolve origem
+### T5: apresentadoras.js grava e devolve origem ✅ DONE
 
 **What**: INSERT (`:80`) ganha `origem_dados` passado pela rota POST; `COLS` ganha `origem_dados`.
 **Where**: `src/routes/apresentadoras.js`
@@ -170,16 +170,16 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Teste: POST com `viaApiKey` → `'bot'`; sem chave → `'manual'`
-- [ ] Teste: GET SQL contém `origem_dados`
-- [ ] Gate check passes: `npx vitest run test/apresentadoras_permissions.test.js`
+- [x] SPEC_DEVIATION: POST /v1/apresentadoras responde 410 para todo mundo (cadastro só via convite de usuário) — não há escrita por chave para marcar
+- [x] Teste: GET SQL contém `origem_dados` e a resposta devolve o campo
+- [x] Gate check passes: `npx vitest run test/apresentadoras_permissions.test.js`
 **Tests**: integration
 **Gate**: quick
 **Commit**: `feat(apresentadoras): origem_dados='bot' quando criada por chave de API`
 
 ---
 
-### T6: analytics.js — lote e live do ingest com origem
+### T6: analytics.js — lote e live do ingest com origem ✅ DONE
 
 **What**: `criarLoteDeImportacao` e `resolveTargetLive` recebem `origem`; `ingest`/`preview` passam `origemDados(request)`; literal `'api'` da live criada vira o parâmetro; GET `/v1/analytics/imports` devolve `b.origem_dados`.
 **Where**: `src/routes/analytics.js`
@@ -190,9 +190,9 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Teste: `ingest` com `viaApiKey` → INSERT do lote contém `'bot'`; sem chave → `'manual'`
-- [ ] Teste: `ingest` com `criar_lives=true` e chave → INSERT em `lives` contém `'bot'`; sem chave mantém `'api'`
-- [ ] Gate check passes: `npx vitest run test/analytics_import_ingest.test.js test/analytics_import_routes.test.js`
+- [x] Teste: `ingest` com `viaApiKey` → INSERT do lote contém `'bot'`; sem chave → `'manual'`
+- [x] Teste: `ingest` com `criar_lives=true` e chave → INSERT em `lives` contém `'bot'`; sem chave mantém `'api'`
+- [x] Gate check passes: `npx vitest run test/analytics_import_ingest.test.js test/analytics_import_routes.test.js`
 **Tests**: integration
 **Gate**: full
 **Commit**: `feat(analytics): origem_dados='bot' em lote e live criados pelo ingest por chave`

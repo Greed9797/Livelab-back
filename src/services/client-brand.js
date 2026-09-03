@@ -12,7 +12,7 @@
  */
 export async function ensureClienteMarca(
   db,
-  { tenantId, clienteId, activateExisting = true, observacoes = 'Marca de cliente criada automaticamente.' } = {},
+  { tenantId, clienteId, activateExisting = true, observacoes = 'Marca de cliente criada automaticamente.', origem = 'manual' } = {},
 ) {
   if (!tenantId || !clienteId) return null
 
@@ -59,9 +59,9 @@ export async function ensureClienteMarca(
   // aqui criaria @ desatualizado se o cliente trocar o usuário depois.
   const inserted = await db.query(
     `INSERT INTO marcas (
-       tenant_id, cliente_id, nome, tipo, status, tiktok_username, site, logo_url, observacoes
+       tenant_id, cliente_id, nome, tipo, status, tiktok_username, site, logo_url, observacoes, origem_dados
      )
-     VALUES ($1,$2,$3,'cliente','ativa',NULL,$4,$5,$6)
+     VALUES ($1,$2,$3,'cliente','ativa',NULL,$4,$5,$6,$7)
      RETURNING id`,
     [
       tenantId,
@@ -70,6 +70,7 @@ export async function ensureClienteMarca(
       row.site ?? null,
       row.logo_url ?? null,
       observacoes,
+      origem,
     ],
   )
   return inserted.rows[0]?.id ?? null

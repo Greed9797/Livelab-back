@@ -618,7 +618,7 @@ export async function livesRoutes(app) {
 
         // ── Marca obrigatória: toda live tem marca (exige-ou-erra) ──
         if (!resolvedMarcaId && resolvedTipo === 'cliente' && resolvedClienteId) {
-          resolvedMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: resolvedClienteId })
+          resolvedMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: resolvedClienteId, origem: origemDados(request) })
         }
         if (!resolvedMarcaId) {
           await db.query('ROLLBACK')
@@ -844,7 +844,7 @@ export async function livesRoutes(app) {
 
         // ── Marca obrigatória (exige-ou-erra) ──
         if (!resolvedMarcaId && d.tipo === 'cliente' && resolvedClienteId) {
-          resolvedMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: resolvedClienteId })
+          resolvedMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: resolvedClienteId, origem: origemDados(request) })
         }
         if (!resolvedMarcaId) {
           await db.query('ROLLBACK')

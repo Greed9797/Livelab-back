@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { performance } from 'node:perf_hooks'
 import { READ_MARCAS, WRITE_MARCAS } from '../config/role_groups.js'
+import { origemDados } from '../plugins/auth.js'
 import { buildCacheKey, invalidateTenant, setCacheControl, withCache } from '../lib/dashboard-cache.js'
 import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
@@ -20,7 +21,7 @@ const marcaCols = `
   ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username, m.site, m.marketplace_url, m.logo_url, m.cor,
   m.comissao_franquia_pct, m.comissao_franqueadora_pct, m.valor_fixo_minimo, m.tipo_cobranca,
   m.data_inicio, m.data_fim,
-  m.observacoes, m.criado_em, m.atualizado_em,
+  m.observacoes, m.origem_dados, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
   COALESCE(am_agg.apresentadoras, '[]'::json) AS apresentadoras
 `
@@ -230,7 +231,7 @@ export async function marcasRoutes(app) {
         // reusamos a existente e aplicamos os campos enviados (upsert idempotente).
         let createdMarcaId = null
         if (d.tipo === 'cliente' && d.cliente_id) {
-          createdMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: d.cliente_id })
+          createdMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: d.cliente_id, origem: origemDados(request) })
         }
 
         // A pré-checagem de nome duplicado NÃO vale no caminho tipo='cliente':
@@ -273,9 +274,9 @@ export async function marcasRoutes(app) {
                  tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
                  marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
                  observacoes, logo_url, valor_fixo_minimo, cor, tipo_cobranca,
-                 data_inicio, data_fim
+                 data_inicio, data_fim, origem_dados
                )
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
                RETURNING *`,
               [
                 tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
@@ -284,6 +285,7 @@ export async function marcasRoutes(app) {
                 d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
                 d.cor ?? null, d.tipo_cobranca ?? 'fixo_mais_comissao',
                 d.data_inicio ?? null, d.data_fim ?? null,
+                origemDados(request),
               ],
             )
         if (d.tiktok_username !== undefined) {

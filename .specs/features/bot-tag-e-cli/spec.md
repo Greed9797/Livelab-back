@@ -46,6 +46,8 @@ que monta `curl` à mão erra header, base64 e multipart.
 | Histórico de GMV | Coluna "Alterado por" mostra `BOT` quando `origem_dados = 'bot'`, senão o nome do usuário | Hoje `alterado_por` é NULL para a chave e a coluna mostra "—" | y |
 | Papel `automacao` em `/v1/lives/manual` | Entra na lista `gestorRoleAccess` de `lives.js` e a rota entra na allowlist como POST exato | Decisão do Vitor: liberar manual (não o iniciar) | y |
 
+| `POST /v1/apresentadoras` responde 410 para qualquer papel (apresentadora nasce do convite em Configurações > Usuários) | Chave não cria apresentadora; a coluna existe e é devolvida nos GETs | Descoberto na implementação (T5); usuários ficam fora da allowlist por desenho | n |
+
 **Open questions:** none - all resolved or logged above.
 
 ---
@@ -232,15 +234,15 @@ etc., para errar menos que com rota crua.
 
 | Requirement ID | Story | Phase | Status |
 |---|---|---|---|
-| BOT-01 | P1: origem bot em marcas (AC1) | Tasks | Pending |
-| BOT-02 | P1: origem bot em apresentadoras (AC2) | Tasks | Pending |
+| BOT-01 | P1: origem bot em marcas (AC1) | Done | Done (T4, inclui marca-espelho de cliente) |
+| BOT-02 | P1: origem bot em apresentadoras (AC2) | Done | SPEC_DEVIATION (T5): POST é 410 para todos; só leitura do campo |
 | BOT-03 | P1: origem bot em lives manual + iniciar (AC3, AC4) | Done | Done (T3) |
-| BOT-04 | P1: origem bot em live criada pelo ingest (AC5) | Tasks | Pending |
-| BOT-05 | P1: origem bot em lote de import (AC6) | Tasks | Pending |
+| BOT-04 | P1: origem bot em live criada pelo ingest (AC5) | Done | Done (T6) |
+| BOT-05 | P1: origem bot em lote de import (AC6) | Done | Done (T6) |
 | BOT-06 | P1: origem bot em revisão de GMV (AC7) | Done | Done (T3) |
 | BOT-07 | P1: JWT continua 'manual' (AC9) | Done | Done (T2 helper; rotas em T3–T6) |
 | BOT-08 | P1: PATCH não reescreve origem (AC8) | Done | Done (T3) |
-| BOT-09 | P1: GETs devolvem origem_dados (AC10) | Tasks | Pending |
+| BOT-09 | P1: GETs devolvem origem_dados (AC10) | Done | Done (T3–T6) |
 | BOT-10 | P1: CHECK no banco (AC11) | Done | Done (T1, migration 140) |
 | MAN-01 | P1: lives/manual na allowlist + papel (AC1–AC3) | Done | Done (T3) |
 | CLI-01 | P1: arquivo único stdlib (AC1) | Tasks | Pending |

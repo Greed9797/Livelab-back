@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_ANALYTICS, WRITE_LIVES } from '../config/role_groups.js'
+import { origemDados } from '../plugins/auth.js'
 import {
   loadAnalyticsImportCandidates,
   matchAnalyticsImportRows,
@@ -341,7 +342,7 @@ async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabineP
        tipo, status_publicacao, origem_dados, tiktok_room_id, resumo
      )
      VALUES ($1::uuid, $2::uuid, $3::uuid, 'encerrada', $4::timestamptz, $5::timestamptz,
-             'cliente', 'rascunho', 'api', $6, $7)
+             'cliente', 'rascunho', $8, $6, $7)
      RETURNING id`,
     [
       tenantId,
@@ -351,6 +352,8 @@ async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabineP
       normalized.ended_at,
       normalized.room_id ?? null,
       normalized.room_title ?? null,
+      // Live que o lote criou herda a origem do lote: bot mandou, live é bot.
+      batch.origem_dados === 'bot' ? 'bot' : 'api',
     ],
   )
   return inserted.rows[0].id
@@ -441,15 +444,15 @@ function rowsDateRange(rows) {
 // entre os dois.
 async function criarLoteDeImportacao(db, {
   tenantId, sub, upload, sourceType, matchedRows, summary,
-  marcaId, apresentadoraId, fileHash = null, decisaoDe,
+  marcaId, apresentadoraId, fileHash = null, decisaoDe, origem = 'manual',
 }) {
   const batchQ = await db.query(
     `INSERT INTO analytics_import_batches (
        tenant_id, filename, source_type, marca_id, apresentadora_id,
        total_rows, matched_rows, ambiguous_rows,
-       unmatched_rows, skipped_rows, invalid_rows, summary, created_by, file_hash
+       unmatched_rows, skipped_rows, invalid_rows, summary, created_by, file_hash, origem_dados
      )
-     VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14)
+     VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15)
      RETURNING id`,
     [
       tenantId,
@@ -466,6 +469,7 @@ async function criarLoteDeImportacao(db, {
       JSON.stringify(summary),
       sub ?? null,
       fileHash,
+      origem,
     ],
   )
   const batchId = batchQ.rows[0].id
@@ -542,7 +546,7 @@ class ErroDeImportacao extends Error {
 // trás sem ninguém notar.
 async function aplicarLoteDeImportacao(db, { tenantId, batchId, sub }) {
   const batchQ = await db.query(
-    `SELECT id, status, source_type, marca_id, apresentadora_id
+    `SELECT id, status, source_type, marca_id, apresentadora_id, origem_dados
        FROM analytics_import_batches
       WHERE id = $1::uuid
         AND tenant_id = $2::uuid
@@ -830,6 +834,7 @@ export async function analyticsRoutes(app) {
             summary,
             marcaId,
             apresentadoraId,
+            origem: origemDados(request),
             decisaoDe: (row) => defaultDecisionFor(row.match_status),
           })
 
@@ -975,6 +980,7 @@ export async function analyticsRoutes(app) {
             summary,
             marcaId,
             apresentadoraId,
+            origem: origemDados(request),
             fileHash,
             decisaoDe: (row) => decisaoAutomatica(row, { criarLives }),
           })
@@ -1046,7 +1052,8 @@ export async function analyticsRoutes(app) {
         `SELECT b.id, b.filename, b.source_type, b.status, b.marca_id, b.apresentadora_id,
                 m.nome AS marca_nome,
                 b.total_rows, b.matched_rows, b.ambiguous_rows, b.unmatched_rows,
-                b.skipped_rows, b.invalid_rows, b.applied_rows, b.created_at, b.applied_at
+                b.skipped_rows, b.invalid_rows, b.applied_rows, b.created_at, b.applied_at,
+                b.origem_dados
            FROM analytics_import_batches b
            LEFT JOIN marcas m ON m.id = b.marca_id AND m.tenant_id = b.tenant_id
           WHERE b.tenant_id = $1::uuid

@@ -17,12 +17,16 @@ const keyId = '66666666-6666-4666-8666-666666666666'
 const batchId = '33333333-3333-4333-8333-333333333333'
 const liveId = '55555555-5555-4555-8555-555555555555'
 
-function buildApp(queryMock) {
+function buildApp(queryMock, { jwt = false } = {}) {
   const app = Fastify()
   const release = vi.fn()
   // Quem chama é uma chave de API: o `sub` é sintético e o id da chave é que
-  // vai para as colunas de autoria.
+  // vai para as colunas de autoria. Com `jwt`, é uma pessoa logada.
   const comoChave = (request) => {
+    if (jwt) {
+      request.user = { tenant_id: tenantId, sub: 'user-1', papel: 'franqueado' }
+      return
+    }
     request.user = { tenant_id: tenantId, sub: `apikey:${keyId}`, papel: 'automacao' }
     request.viaApiKey = { id: keyId, nome: 'grok bot' }
   }
@@ -175,5 +179,88 @@ describe('POST /v1/analytics/imports/ingest', () => {
     expect(res.json().error).toMatch(/Divida o arquivo/)
     // Nada foi gravado antes da recusa.
     expect(queryMock.mock.calls.some(([s]) => s.includes('INSERT'))).toBe(false)
+  })
+})
+
+describe('origem_dados do ingest (BOT)', () => {
+  const ingest = (app, extra = {}) => app.inject({
+    method: 'POST',
+    url: '/v1/analytics/imports/ingest',
+    payload: { filename: 'tiktok.csv', content_base64: csvBase64(), ...extra },
+  })
+  const insertLote = (q) => q.mock.calls.find(([sql]) => sql.includes('INSERT INTO analytics_import_batches'))
+
+  it("lote criado por chave grava origem_dados='bot'", async () => {
+    const queryMock = queryPadrao()
+    const app = buildApp(queryMock)
+    await app.register(analyticsRoutes)
+
+    const res = await ingest(app)
+
+    expect(res.statusCode).toBe(200)
+    expect(insertLote(queryMock)[0]).toContain('origem_dados')
+    expect(insertLote(queryMock)[1]).toContain('bot')
+  })
+
+  it("lote criado por pessoa logada grava origem_dados='manual'", async () => {
+    const queryMock = queryPadrao()
+    const app = buildApp(queryMock, { jwt: true })
+    await app.register(analyticsRoutes)
+
+    const res = await ingest(app)
+
+    expect(res.statusCode).toBe(200)
+    expect(insertLote(queryMock)[1]).toContain('manual')
+    expect(insertLote(queryMock)[1]).not.toContain('bot')
+  })
+
+  const linhaParaCriar = {
+    id: 'row-2',
+    row_index: 2,
+    matched_live_id: null,
+    normalized: {
+      live_date: '2026-05-29', duration_seconds: 21600, ads_gmv: 700, attributed_orders: 5,
+      started_at: '2026-05-29T18:00:00.000Z', ended_at: '2026-05-30T00:00:00.000Z',
+    },
+    decisao: 'criar',
+    marca_id: '44444444-4444-4444-8444-444444444444',
+    apresentadoras: null,
+    cabine_id: '22222222-2222-4222-8222-222222222222',
+  }
+  const mockCriaLive = (origemDoLote) => {
+    const padrao = queryPadrao({ linhasAplicaveis: [linhaParaCriar] })
+    return vi.fn(async (sql, args) => {
+      if (sql.includes('FROM analytics_import_batches') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: batchId, status: 'preview', source_type: 'tiktok_ads', marca_id: null, apresentadora_id: null, origem_dados: origemDoLote }] }
+      }
+      if (sql.includes('SELECT 1 FROM cabines')) return { rowCount: 1, rows: [{ ok: 1 }] }
+      if (sql.includes('INSERT INTO lives')) return { rows: [{ id: 'live-nova' }] }
+      try { return await padrao(sql, args) } catch { return { rowCount: 0, rows: [] } }
+    })
+  }
+  const insertLives = (q) => q.mock.calls.find(([sql]) => sql.includes('INSERT INTO lives'))
+
+  it("live criada pelo ingest de um lote bot nasce com origem_dados='bot'", async () => {
+    const queryMock = mockCriaLive('bot')
+    const app = buildApp(queryMock)
+    await app.register(analyticsRoutes)
+
+    const res = await ingest(app, { criar_lives: true })
+
+    expect(res.statusCode).toBe(200)
+    expect(insertLives(queryMock)).toBeTruthy()
+    expect(insertLives(queryMock)[1]).toContain('bot')
+  })
+
+  it("live criada pelo ingest de um lote manual continua 'api'", async () => {
+    const queryMock = mockCriaLive('manual')
+    const app = buildApp(queryMock, { jwt: true })
+    await app.register(analyticsRoutes)
+
+    const res = await ingest(app, { criar_lives: true })
+
+    expect(res.statusCode).toBe(200)
+    expect(insertLives(queryMock)[1]).toContain('api')
+    expect(insertLives(queryMock)[1]).not.toContain('bot')
   })
 })

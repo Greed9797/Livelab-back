@@ -354,7 +354,7 @@ T10 → T16
 
 ---
 
-### T15: React — lotes de import
+### T15: React — lotes de import ✅ DONE
 
 **What**: `BotBadge` na linha do lote na lista de importações.
 **Where**: `~/dev/Livelab-Front/react-app/src/pages/AnalyticsPage.tsx`
@@ -365,9 +365,9 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Lote bot mostra chip
-- [ ] `visual-check` da lista de lives e de imports com um registro bot
-- [ ] Gate check passes: `npm run typecheck && npx vitest run`
+- [x] Lote bot mostra chip (AnalyticsImportSection: o front não tem lista de lotes, só o lote aberto)
+- [ ] (pendente, ver validação) `visual-check` da lista de lives e de imports com um registro bot
+- [x] Gate check passes: `npm run typecheck && npx vitest run`
 **Tests**: none
 **Gate**: build
 **Commit**: `feat(analytics): chip BOT no lote de import`

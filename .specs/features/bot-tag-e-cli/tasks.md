@@ -219,7 +219,7 @@ T10 → T16
 
 ---
 
-### T8: CLI — comandos nomeados
+### T8: CLI — comandos nomeados ✅ DONE
 
 **What**: subcomandos `lives list|get|criar|editar`, `marcas list|criar|editar`, `apresentadoras list|criar|editar`, `comissoes list`, `imports get` que montam método+rota e delegam ao caminho de `api`; `--help` por comando com campos do body.
 **Where**: `cli/livelab.py`
@@ -230,8 +230,8 @@ T10 → T16
 - MCP: NONE
 - Skill: NONE
 **Done when**:
-- [ ] Teste: `lives criar -d {...}` bate em `POST /v1/lives/manual`; `marcas editar <id> -d` bate em `PATCH /v1/marcas/<id>`; `lives list -q` em `GET /v1/lives?...`
-- [ ] Gate check passes: `npx vitest run test/cli_livelab.test.js`
+- [x] Teste: `lives criar -d {...}` bate em `POST /v1/lives/manual`; `marcas editar <id> -d` bate em `PATCH /v1/marcas/<id>`; `lives list -q` em `GET /v1/lives?...`
+- [x] Gate check passes: `npx vitest run test/cli_livelab.test.js`
 **Tests**: integration
 **Gate**: quick
 **Commit**: `feat(cli): comandos nomeados lives/marcas/apresentadoras/comissoes/imports`

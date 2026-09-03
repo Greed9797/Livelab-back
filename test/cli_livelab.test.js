@@ -163,4 +163,34 @@ describe.skipIf(!temPython)('cli/livelab.py', () => {
     expect(ing.status).toBe(0)
     for (const f of ['--marca-id', '--apresentadora-id', '--criar-lives', '--preview']) expect(ing.stdout).toContain(f)
   })
+
+  it('comandos nomeados traduzem para método e rota e delegam ao mesmo caminho', async () => {
+    const criar = await cli(['lives', 'criar', '-d', '{"cabine_id":"x","data":"2026-09-01"}'])
+    expect(criar.status).toBe(0)
+    expect(ultima()).toMatchObject({ method: 'POST', url: '/v1/lives/manual', body: { cabine_id: 'x', data: '2026-09-01' } })
+
+    const editar = await cli(['marcas', 'editar', UUID, '-d', '{"status":"pausada"}'])
+    expect(editar.status).toBe(0)
+    expect(ultima()).toMatchObject({ method: 'PATCH', url: `/v1/marcas/${UUID}`, body: { status: 'pausada' } })
+
+    const lista = await cli(['lives', 'list', '-q', 'status=encerrada'])
+    expect(lista.status).toBe(0)
+    expect(ultima()).toMatchObject({ method: 'GET', url: '/v1/lives?status=encerrada' })
+
+    const lote = await cli(['imports', 'get', UUID])
+    expect(lote.status).toBe(0)
+    expect(ultima()).toMatchObject({ method: 'GET', url: `/v1/analytics/imports/${UUID}` })
+
+    const semId = await cli(['lives', 'get'])
+    expect(semId.status).toBe(2)
+    expect(semId.stderr).toContain('precisa do id')
+  })
+
+  it('--help de cada comando nomeado descreve os campos do body', async () => {
+    const r = await cli(['marcas', '--help'])
+    expect(r.status).toBe(0)
+    for (const campo of ['nome', 'tipo', 'cliente_id', 'comissao_franquia_pct']) expect(r.stdout).toContain(campo)
+    const l = await cli(['lives', '--help'])
+    for (const campo of ['/v1/lives/manual', 'hora_inicio', 'fat_gerado', 'ads_gmv']) expect(l.stdout).toContain(campo)
+  })
 })

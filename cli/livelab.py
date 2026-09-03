@@ -184,6 +184,54 @@ def cmd_ingest(args):
     return chamar('POST', rota, None, body, getattr(args, 'verbose', False))
 
 
+# Comandos nomeados: açúcar sobre `api`. Cada um só escolhe método e rota e
+# delega ao mesmo caminho; -q/-d/-f valem igual.
+NOMEADOS = {
+    'lives': {
+        'list': ('GET', '/v1/lives', 'Listar lives. Filtros em -q: data_inicio, data_fim, status, marca_id, apresentadora_id'),
+        'get': ('GET', '/v1/lives/{id}', 'Ver uma live'),
+        'criar': ('POST', '/v1/lives/manual',
+                  'Cadastrar live já encerrada. Body: cabine_id*, data* (AAAA-MM-DD), hora_inicio*, hora_fim* (HH:MM), '
+                  'fat_gerado*, qtd_pedidos*, marca_id ou cliente_id, apresentador_id, apresentador2_id, resumo, '
+                  'manual_views, manual_likes, manual_comments, manual_shares, manual_orders, manual_gmv, tipo (cliente|afiliado|teste)'),
+        'editar': ('PATCH', '/v1/lives/{id}', 'Editar live. Body: qualquer campo do criar, mais ads_gmv, status_publicacao (rascunho|revisado|publicado)'),
+    },
+    'marcas': {
+        'list': ('GET', '/v1/marcas', 'Listar marcas. Filtros em -q: status, tipo, cliente_id, q'),
+        'get': ('GET', '/v1/marcas/{id}', 'Ver uma marca'),
+        'criar': ('POST', '/v1/marcas',
+                  'Cadastrar marca. Body: nome*, tipo* (cliente|afiliada|propria|parceira; cliente exige cliente_id), '
+                  'status (ativa|inativa|pausada), tiktok_username, site, marketplace_url, comissao_franquia_pct, '
+                  'comissao_franqueadora_pct, observacoes. Procure pelo nome em list antes: "Haag" e "HAAG" viram duas marcas'),
+        'editar': ('PATCH', '/v1/marcas/{id}', 'Editar marca. Body: os mesmos campos do criar'),
+    },
+    'apresentadoras': {
+        'list': ('GET', '/v1/apresentadoras', 'Listar apresentadoras'),
+        'get': ('GET', '/v1/apresentadoras/{id}', 'Ver uma apresentadora'),
+        'editar': ('PATCH', '/v1/apresentadoras/{id}', 'Editar apresentadora. Body: nome, telefone, email, cidade, comissao_pct, observacoes, data_inicio, data_fim. '
+                   'Não há criar: apresentadora nasce do convite de usuário no painel'),
+    },
+    'comissoes': {
+        'list': ('GET', '/v1/comissoes', 'Ler comissão calculada. Filtros em -q: mes (AAAA-MM), apresentadora_id'),
+    },
+    'imports': {
+        'list': ('GET', '/v1/analytics/imports', 'Listar lotes de import'),
+        'get': ('GET', '/v1/analytics/imports/{id}', 'Ver um lote e o estado de cada linha'),
+    },
+}
+
+
+def cmd_nomeado(args):
+    metodo, rota, _ = NOMEADOS[args.entidade][args.acao]
+    if '{id}' in rota:
+        if not args.id:
+            falhar('%s %s precisa do id' % (args.entidade, args.acao), SAIDA_USO)
+        rota = rota.replace('{id}', args.id)
+    elif args.id:
+        falhar('%s %s não recebe id' % (args.entidade, args.acao), SAIDA_USO)
+    return chamar(metodo, rota, ler_query(args.query), ler_body(args), getattr(args, 'verbose', False))
+
+
 def cmd_rotas(args):
     largura = max(len(r[1]) for r in ROTAS)
     for metodo, rota, uso in ROTAS:
@@ -222,6 +270,18 @@ def montar_parser():
     p_ing.add_argument('--criar-lives', action='store_true', help='cria live para linha que não casou com nenhuma')
     p_ing.add_argument('--preview', action='store_true', help='só analisa, não aplica')
     p_ing.set_defaults(func=cmd_ingest)
+
+    for entidade, acoes in NOMEADOS.items():
+        p_ent = sub.add_parser(entidade, parents=[comum],
+                               help='%s: %s' % (entidade, '|'.join(acoes)),
+                               formatter_class=argparse.RawDescriptionHelpFormatter,
+                               description='\n'.join('%-7s %-5s %s\n        %s' % (acao, m, r, uso) for acao, (m, r, uso) in acoes.items()))
+        p_ent.add_argument('acao', choices=list(acoes))
+        p_ent.add_argument('id', nargs='?', help='uuid, quando a ação pede')
+        p_ent.add_argument('-q', '--query', action='append', metavar='k=v', help='parâmetro de query; repetível')
+        p_ent.add_argument('-d', '--data', metavar='JSON', help='body JSON inline')
+        p_ent.add_argument('-f', '--file', metavar='ARQUIVO', help="body JSON lido de arquivo ('-' = stdin)")
+        p_ent.set_defaults(func=cmd_nomeado, entidade=entidade)
 
     p_rotas = sub.add_parser('rotas', parents=[comum], help='lista o que a chave alcança')
     p_rotas.set_defaults(func=cmd_rotas)

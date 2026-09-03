@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "promote_threshold": 2,
+  "window_days": 45,
+  "quarantine_threshold": 2,
+  "next_id": 4,
+  "lessons": [
+    {
+      "id": "L-001",
+      "key": "spec_deviation::antes de escrever ac de escrita para uma rota abrir o handler post v1 apresentadoras era 410 para todo papel e o ac nasceu inviavel",
+      "text": "Antes de escrever AC de escrita para uma rota, abrir o handler: POST /v1/apresentadoras era 410 para todo papel e o AC nasceu inviável.",
+      "signal": "spec_deviation",
+      "scope": "src/routes",
+      "status": "candidate",
+      "features": [
+        "bot-tag-e-cli"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "SPEC_DEVIATION BOT-02 (src/routes/apresentadoras.js:307) (src/routes)"
+      ],
+      "created": "2026-09-03T21:15:44Z",
+      "last_seen": "2026-09-03T21:15:44Z"
+    },
+    {
+      "id": "L-002",
+      "key": "spec_precision_gap::ac que cita campo por nome precisa conferir em qual rota o campo e gravado status publicacao so gera revisao em publicar fora da allowlist",
+      "text": "AC que cita campo por nome precisa conferir em qual rota o campo é gravado; status_publicacao só gera revisão em /publicar, fora da allowlist.",
+      "signal": "spec_precision_gap",
+      "scope": ".specs",
+      "status": "candidate",
+      "features": [
+        "bot-tag-e-cli"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "spec.md P1 tag BOT AC7 (.specs)"
+      ],
+      "created": "2026-09-03T21:15:44Z",
+      "last_seen": "2026-09-03T21:15:44Z"
+    },
+    {
+      "id": "L-003",
+      "key": "ac_gap::doc e allowlist divergem em silencio post v1 analytics imports nao existia teste que compara a tabela publicada com chavealcancarota nos dois sentidos pega isso",
+      "text": "Doc e allowlist divergem em silêncio (POST /v1/analytics/imports não existia); teste que compara a tabela publicada com chaveAlcancaRota nos dois sentidos pega isso.",
+      "signal": "ac_gap",
+      "scope": "src/plugins/auth.js",
+      "status": "candidate",
+      "features": [
+        "bot-tag-e-cli"
+      ],
+      "recurrence": 1,
+      "harmful": 0,
+      "evidence": [
+        "test/cli_livelab.test.js:139 (allowlist vs docs) (src/plugins/auth.js)"
+      ],
+      "created": "2026-09-03T21:15:44Z",
+      "last_seen": "2026-09-03T21:15:44Z"
+    }
+  ]
+}

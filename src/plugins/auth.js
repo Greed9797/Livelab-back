@@ -19,7 +19,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // PATCH com barra final casa só `<prefixo><uuid>` — nunca sub-rota (encerrar,
 // publicar, faixas-comissao, apresentadoras do vínculo).
 const ROTAS_API_KEY = [
-  ['POST', '/v1/analytics/imports'],
+  ['POST', '/v1/analytics/imports/preview'],
   ['POST', '/v1/analytics/imports/ingest'],
   ['GET', '/v1/analytics/'],
   ['GET', '/v1/lives'],

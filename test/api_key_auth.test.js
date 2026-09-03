@@ -54,6 +54,8 @@ const chaveViva = {
 describe('allowlist da chave de API', () => {
   it('libera só o que está na lista, e nunca DELETE', () => {
     expect(chaveAlcancaRota('POST', '/v1/analytics/imports/ingest')).toBe(true)
+    expect(chaveAlcancaRota('POST', '/v1/analytics/imports/preview')).toBe(true)
+    expect(chaveAlcancaRota('POST', '/v1/analytics/imports/abc/apply')).toBe(false)
     expect(chaveAlcancaRota('GET', '/v1/lives?status=encerrada')).toBe(true)
     expect(chaveAlcancaRota('PATCH', '/v1/marcas/66666666-6666-4666-8666-666666666666')).toBe(true)
     // sub-rota de escrita e id que não é uuid ficam de fora, mesmo com prefixo na lista

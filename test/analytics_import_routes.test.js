@@ -248,4 +248,47 @@ describe('analytics imports routes', () => {
 
     await app.close()
   })
+  /**
+   * Linha sem hora de término e sem duração não diz quanto a live durou. Criar a live com
+   * `encerrado_em = iniciado_em` produzia um registro 'encerrada' de duração ZERO: a
+   * apresentadora ficava com 0h naquele dia e a fileira de assiduidade a pintava de VERMELHO
+   * — acusação de falta com a live dela dentro do sistema. Falhar a linha devolve o problema
+   * para quem pode corrigir a planilha.
+   */
+  it('recusa criar live sem hora de término em vez de gravar duração zero', async () => {
+    const { calcularComissoesDaLive } = await import('../src/services/commission-engine.js')
+    calcularComissoesDaLive.mockClear()
+    calcularComissoesDaLive.mockImplementation(async () => ([]))
+
+    const sqls = []
+    // started_at existe, ended_at não: é o que a planilha entrega quando falta End Time e a
+    // coluna Duration vem vazia (normalizeRowStudio deixa ended_at null).
+    const normalized = { started_at: '2026-05-04T14:00:00-03:00', ended_at: null, ads_gmv: 500, room_id: null }
+    const queryMock = vi.fn(async (sql) => {
+      sqls.push(sql)
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql) || sql.includes('SAVEPOINT')) return { rows: [] }
+      if (sql.includes('FROM analytics_import_batches') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: batchId, status: 'preview', source_type: 'tiktok_studio', marca_id: '66666666-6666-4666-8666-666666666666' }] }
+      }
+      if (sql.includes('FROM analytics_import_rows') && sql.includes("decisao IN ('vincular', 'criar')")) {
+        return { rows: [{ id: rowId, row_index: 1, matched_live_id: null, normalized, decisao: 'criar', marca_id: null, apresentadoras: null, cabine_id: '77777777-7777-4777-8777-777777777777' }] }
+      }
+      if (sql.includes('UPDATE analytics_import_rows')) return { rows: [] }
+      if (sql.includes('UPDATE analytics_import_batches')) return { rows: [] }
+      throw new Error(`Unexpected SQL: ${sql}`)
+    })
+
+    const app = buildApp(queryMock)
+    await app.register(analyticsRoutes)
+    const res = await app.inject({ method: 'POST', url: `/v1/analytics/imports/${batchId}/apply` })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().applied_rows).toBe(0)
+    expect(res.json().failed_rows).toHaveLength(1)
+    expect(res.json().failed_rows[0].error).toMatch(/termino/i)
+    // E o principal: nenhuma live nasceu.
+    expect(sqls.some((sql) => sql.includes('INSERT INTO lives'))).toBe(false)
+
+    await app.close()
+  })
 })

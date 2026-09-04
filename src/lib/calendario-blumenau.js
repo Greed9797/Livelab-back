@@ -35,9 +35,36 @@ function isoDe(ano, mes, dia) {
   return `${ano}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`
 }
 
+const ISO_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * Porta de entrada única do módulo: devolve [ano, mes, dia] ou LANÇA.
+ *
+ * Existe porque a falha silenciosa aqui cai sempre para o lado que acusa: sem esta checagem,
+ * classificarDia('lixo') fazia Number('lixo') = NaN, o teste de fim de semana com NaN dava
+ * falso e a função devolvia { tipo: 'util' } — a ÚNICA classificação que pode virar vermelho.
+ * E '2026-13-45' recebia classificação definitiva ('fim_de_semana') porque Date.UTC rola o mês
+ * para fevereiro de 2027. Um módulo cujo erro é acusar alguém de faltar não pode ter 'util'
+ * como fallback de lixo: erro alto e visível é melhor que vermelho silencioso.
+ *
+ * O round-trip (remontar a string e comparar) é o que pega a data que não existe: 2026-02-30
+ * vira 2026-03-02 ao remontar e não bate.
+ */
+function partesDaData(iso) {
+  if (typeof iso !== 'string' || !ISO_RE.test(iso)) {
+    throw new TypeError(`Data invalida no calendario: ${JSON.stringify(iso)} (esperado 'YYYY-MM-DD')`)
+  }
+  const [a, m, d] = iso.split('-').map(Number)
+  const dt = new Date(Date.UTC(a, m - 1, d))
+  if (isoDe(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate()) !== iso) {
+    throw new TypeError(`Data inexistente no calendario: ${iso}`)
+  }
+  return [a, m, d]
+}
+
 /** Soma dias a uma data 'YYYY-MM-DD' usando UTC puro — sem fuso, sem horário de verão. */
 export function somarDias(iso, dias) {
-  const [a, m, d] = iso.split('-').map(Number)
+  const [a, m, d] = partesDaData(iso)
   const t = Date.UTC(a, m - 1, d) + dias * 86400000
   const dt = new Date(t)
   return isoDe(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate())
@@ -45,7 +72,7 @@ export function somarDias(iso, dias) {
 
 /** 0 = domingo … 6 = sábado. Em UTC, porque a string já É o dia local. */
 export function diaDaSemana(iso) {
-  const [a, m, d] = iso.split('-').map(Number)
+  const [a, m, d] = partesDaData(iso)
   return new Date(Date.UTC(a, m - 1, d)).getUTCDay()
 }
 
@@ -75,13 +102,25 @@ export function feriadosDoAno(ano) {
     [`${ano}-10-12`]: 'Nossa Senhora Aparecida',
     [`${ano}-11-02`]: 'Finados',
     [`${ano}-11-15`]: 'Proclamação da República',
-    // Nacional desde a Lei 14.759/2023 — antes disso era estadual/municipal em parte do país.
-    [`${ano}-11-20`]: 'Consciência Negra',
     [`${ano}-12-25`]: 'Natal',
     // Municipais de Blumenau.
     [`${ano}-09-02`]: 'Aniversário de Blumenau',      // Lei municipal 1.222/1964
     [`${ano}-10-31`]: 'Dia da Reforma',               // Lei municipal 5.564/2000
   }
+
+  // Consciência Negra só virou feriado NACIONAL com a Lei 14.759, sancionada em dezembro de
+  // 2023 — vale de 2024 em diante. Antes disso não havia feriado estadual em SC nem municipal
+  // em Blumenau na data, então 20/11/2023 (uma segunda-feira) era dia de trabalho normal.
+  // Aplicar a chave a qualquer ano pintava de cinza uma falta real na comparação histórica.
+  if (ano >= 2024) fixos[`${ano}-11-20`] = 'Consciência Negra'
+
+  // 25/11 — Santa Catarina de Alexandria, padroeira do estado — NÃO entra: não é feriado.
+  // Desde 2004 lei estadual a rebaixou a data comemorativa oficial, justamente para permitir as
+  // celebrações "com manutenção das atividades econômicas". O calendário 2026 do Sindilojas-SC,
+  // que rege o comércio da região, lista só o 11/08 como feriado estadual e não cita o 25/11.
+  // Há projeto na Alesc para transformá-la em feriado; enquanto não virar lei, é dia de trabalho
+  // e pintá-la de folga esconderia falta real. Se o projeto passar, acrescentar aqui com a
+  // condição de ano, como foi feito com a Consciência Negra.
 
   const moveis = {
     [somarDias(pascoa, -2)]: 'Sexta-feira Santa',
@@ -104,7 +143,9 @@ function feriadosCacheados(ano) {
 
 /** Nome do feriado nessa data, ou null. */
 export function feriadoEm(iso) {
-  const ano = Number(iso.slice(0, 4))
+  // Valida ANTES de olhar o cache: com 'lixo' o Number(...) dava NaN e criava uma entrada de
+  // cache sob a chave NaN, com feriados de 'NaN-NaN-NaN'. Lixo não pode virar dado.
+  const [ano] = partesDaData(iso)
   return feriadosCacheados(ano)[iso] ?? null
 }
 
@@ -128,6 +169,10 @@ export function ehDiaUtil(iso) {
 
 /** Lista inclusiva de datas 'YYYY-MM-DD' entre início e fim. */
 export function intervaloDeDias(inicioIso, fimIso) {
+  // As duas pontas passam pelo validador: com fim inválido o laço acima só compararia strings e
+  // devolveria uma janela silenciosamente torta (ou infinita), em vez de acusar a entrada ruim.
+  partesDaData(inicioIso)
+  partesDaData(fimIso)
   const dias = []
   for (let d = inicioIso; d <= fimIso; d = somarDias(d, 1)) dias.push(d)
   return dias

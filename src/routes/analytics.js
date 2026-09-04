@@ -9,7 +9,7 @@ import {
 } from '../services/analytics-import.js'
 import { aplicarRetroLiftDoMes, calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
-import { apresentadoraHorasSql, liveGmvSql } from '../lib/metric-sql.js'
+import { apresentadoraHorasPresencaSql, liveGmvSql } from '../lib/metric-sql.js'
 import { classificarDia, intervaloDeDias, somarDias } from '../lib/calendario-blumenau.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { applyApresentadorasToLive, rateioAbsoluto } from '../lib/live-rateio.js'
@@ -310,6 +310,15 @@ async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabineP
   const marcaId = row.marca_id ?? batch.marca_id
   if (!marcaId) throw new Error('Marca obrigatoria para criar a live')
   if (!normalized.started_at) throw new Error('Linha sem data/hora de inicio')
+  // Sem hora de término E sem duração a linha não diz quanto a live durou. Gravar
+  // `encerrado_em = iniciado_em` (o que se fazia aqui) cria uma live de duração ZERO já
+  // 'encerrada': as horas da apresentadora ficam 0, o dia dela sai VERMELHO com a live no
+  // sistema, e GMV/h passa a dividir por zero. Falhar a linha com mensagem — que o apply já
+  // devolve na tela, linha a linha — deixa o operador corrigir a planilha em vez de persistir
+  // um registro que ninguém consegue distinguir de uma falta.
+  if (!normalized.ended_at) {
+    throw new Error('Linha sem hora de termino nem duracao: nao da para criar a live')
+  }
 
   // Cabine confirmada na revisão manda; o palpite do lote é só o fallback.
   const cabineId = row.cabine_id ?? cabinePadraoId
@@ -339,7 +348,7 @@ async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabineP
       cabineId,
       marcaId,
       normalized.started_at,
-      normalized.ended_at ?? normalized.started_at,
+      normalized.ended_at,
       normalized.room_id ?? null,
       normalized.room_title ?? null,
     ],
@@ -696,11 +705,56 @@ const ASSIDUIDADE_JANELA_MAX_DIAS = 366
  * `horas` chega já arredondada (a mesma que a resposta devolve) de propósito: se a classificação
  * usasse o valor cru, a tela mostraria "5,5h" pintado de amarelo e ninguém entenderia por quê.
  */
-function statusAssiduidade(horas, tipoDeDia) {
+function statusAssiduidade(horas, tipoDeDia, diaEmCurso = false) {
   const folga = tipoDeDia !== 'util'
-  if (horas <= 0) return folga ? 'cinza' : 'vermelho'
+  if (horas <= 0) {
+    if (folga) return 'cinza'
+    // O dia de HOJE ainda não acabou: a live pode nem ter começado, ou estar no ar neste
+    // instante (a CTE só enxerga status='encerrada'). Cobrar falta de um dia em curso pintava
+    // de vermelho a equipe INTEIRA toda manhã de dia útil, inclusive quem estava ao vivo.
+    // 'em_curso' não entra no contador de faltas e vira o veredito real quando o dia fecha.
+    return diaEmCurso ? 'em_curso' : 'vermelho'
+  }
   const meta = folga ? ASSIDUIDADE_META_FOLGA_HORAS : ASSIDUIDADE_META_DIA_UTIL_HORAS
-  return horas >= meta ? 'verde' : 'amarelo'
+  if (horas >= meta) return 'verde'
+  // Abaixo da meta num dia que ainda corre não é "abaixo da meta": ainda dá tempo de bater.
+  return diaEmCurso ? 'em_curso' : 'amarelo'
+}
+
+/** Menor/maior data 'YYYY-MM-DD' ignorando nulos — comparação lexicográfica basta no formato ISO. */
+function menorData(...datas) {
+  const validas = datas.filter(Boolean)
+  return validas.length ? validas.reduce((a, b) => (a < b ? a : b)) : null
+}
+function maiorData(...datas) {
+  const validas = datas.filter(Boolean)
+  return validas.length ? validas.reduce((a, b) => (a > b ? a : b)) : null
+}
+
+/**
+ * Janela de vínculo da apresentadora — fora dela, nenhum dia pode ser cobrado como falta.
+ *
+ * `apresentadoras.data_inicio`/`data_fim` (migration 041) são o vínculo declarado e já são
+ * load-bearing no rateio do fixo salarial (financeiro.js usa prorateFatorSql com as mesmas
+ * colunas). A folha respeitava a vigência e a assiduidade não: contratada dia 25 levava
+ * vermelho nos 14 dias úteis anteriores, desligada dia 14 levava vermelho até o fim do mês.
+ *
+ * Sem `data_inicio` declarada, `criado_em` só vale como início QUANDO há histórico operacional.
+ * Perfil que nunca teve live nenhuma e não tem data de início não é prova de ausência — é
+ * cadastro recém-criado ou perfil DUPLICADO (a migration 110 insere um segundo perfil quando o
+ * e-mail não casa, e ele nasce ativo, sem live, com o mesmo nome). Acusar 21 faltas nesse perfil
+ * é inventar. Sem vínculo comprovado, nenhum dia é cobrado.
+ */
+function janelaDeVinculo({ dataInicio, dataFim, criadoEmDia, temHistorico, primeiroDiaComHoras, ultimoDiaComHoras }) {
+  let inicio = dataInicio ?? null
+  if (!inicio) {
+    // Live registrada é prova de vínculo mais forte que a data de cadastro: quem tem live antes
+    // do próprio criado_em (histórico importado) já trabalhava, e o vínculo começa antes.
+    inicio = (temHistorico || primeiroDiaComHoras) ? menorData(criadoEmDia, primeiroDiaComHoras) : null
+  }
+  // Live DEPOIS do desligamento significa que a data de saída está velha — o fato ganha do campo.
+  const fim = dataFim ? maiorData(dataFim, ultimoDiaComHoras) : null
+  return { inicio, fim }
 }
 
 /** Dias inclusivos entre duas datas 'YYYY-MM-DD' — só para checar o teto, sem materializar a lista. */
@@ -2314,12 +2368,18 @@ export async function analyticsRoutes(app) {
     const { tenant_id } = request.user
     const hoje = saoPauloDateInput(new Date())
 
+    const fimSolicitado = request.query?.fim ? String(request.query.fim) : hoje
+    if (!isValidDateString(fimSolicitado)) {
+      return reply.code(400).send({ error: 'inicio/fim must be YYYY-MM-DD' })
+    }
+    // A janela padrão é ancorada no FIM pedido, não em hoje: com `?fim=2026-03-31` sozinho o
+    // início vinha de hoje-29, ficava DEPOIS do fim e a rota respondia 400 numa requisição
+    // perfeitamente válida.
     const inicio = request.query?.inicio
       ? String(request.query.inicio)
-      : somarDias(hoje, -(ASSIDUIDADE_JANELA_PADRAO_DIAS - 1))
-    const fimSolicitado = request.query?.fim ? String(request.query.fim) : hoje
+      : somarDias(fimSolicitado, -(ASSIDUIDADE_JANELA_PADRAO_DIAS - 1))
 
-    if (!isValidDateString(inicio) || !isValidDateString(fimSolicitado)) {
+    if (!isValidDateString(inicio)) {
       return reply.code(400).send({ error: 'inicio/fim must be YYYY-MM-DD' })
     }
     if (inicio > fimSolicitado) {
@@ -2341,29 +2401,90 @@ export async function analyticsRoutes(app) {
             -- Com LIMIT 1 a principal ficaria com 100% das horas e quem só revezou sumiria do
             -- dia — viraria falta de quem estava lá.
             SELECT
-              COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
+              COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
               (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
-              SUM(${apresentadoraHorasSql()}) AS horas
+              SUM(${apresentadoraHorasPresencaSql()}) AS horas
             FROM lives l
             LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
+            -- Terceira identidade possível, e a única que guarda apresentadoras.id de verdade
+            -- quando a live não tem apresentador_id nem linha em v2 (import de Ads sem
+            -- apresentadora; migration 091 tolera o estado com um RAISE NOTICE). Sem ela as
+            -- horas caíam num grupo NULL, sumiam sem log, e o dia de quem fez a live virava
+            -- vermelho. Mesmo COALESCE de três termos que a query irmã de lives.js já usa.
+            LEFT JOIN agenda_eventos ae ON ae.id = l.agenda_evento_id AND ae.tenant_id = l.tenant_id
             LEFT JOIN LATERAL (
-              SELECT lav.apresentadora_id, lav.segundos_rateio, lav.percentual_rateio, lav.papel
+              SELECT lav.apresentadora_id, lav.segundos_rateio, lav.percentual_rateio, lav.gmv_rateado
               FROM live_apresentadoras_v2 lav
               WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+              UNION ALL
+              -- Legado live_apresentadores: o lançamento manual grava a 2ª apresentadora SÓ
+              -- aqui quando o seed de turnos escreveu uma linha só (src/routes/lives.js), e o
+              -- PATCH de edição faz o mesmo. A tabela é legado para DINHEIRO, mas para PRESENÇA
+              -- ela é prova: sem esta metade, quem só aparece na V1 contribui 0h e leva vermelho
+              -- num dia em que fez a live inteira ao lado da outra.
+              SELECT ap_v1.id, NULL::int, NULL::numeric, NULL::numeric
+              FROM live_apresentadores la
+              JOIN apresentadoras ap_v1
+                ON ap_v1.user_id = la.apresentador_id AND ap_v1.tenant_id = l.tenant_id
+              WHERE la.live_id = l.id
+                AND NOT EXISTS (
+                  SELECT 1 FROM live_apresentadoras_v2 dup
+                  WHERE dup.live_id = l.id AND dup.tenant_id = l.tenant_id
+                    AND dup.apresentadora_id = ap_v1.id
+                )
             ) ap_v2 ON true
+            -- Turno dela na agenda: tempo de CALENDÁRIO, o único sinal que separa
+            -- co-apresentação (turnos sobrepostos — cada uma ficou a live inteira) de
+            -- revezamento (turnos em sequência — cada uma ficou a sua fatia). O percentual
+            -- planejado não distingue os dois: o denominador é a soma dos turnos.
+            LEFT JOIN LATERAL (
+              SELECT SUM(EXTRACT(EPOCH FROM (aea.data_fim - aea.data_inicio))) / 3600.0 AS horas_turno
+              FROM agenda_evento_apresentadoras aea
+              WHERE aea.agenda_evento_id = l.agenda_evento_id
+                AND aea.tenant_id = l.tenant_id
+                AND aea.apresentadora_id = ap_v2.apresentadora_id
+            ) turno ON true
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               -- Live em andamento não conta, e a live que vira a madrugada é do dia em que
-              -- começou (mesmo critério de todos os agregados de horas do produto).
+              -- começou (mesmo critério de todos os agregados de horas do produto). O dia
+              -- corrente, que por isso soma 0h até alguém encerrar, sai como 'em_curso' na
+              -- classificação — nunca como falta.
               AND l.status = 'encerrada'
-              AND l.iniciado_em >= ($1::date) AT TIME ZONE '${ANALYTICS_TZ}'
-              AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE '${ANALYTICS_TZ}'
-            GROUP BY COALESCE(ap_v2.apresentadora_id, ap_user.id), (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date
+              -- ::timestamp, e nao ::date: x AT TIME ZONE z e acucar para timezone(z, x), e com
+              -- um date a resolução de overload escolhe timezone(text, timestamptz), lendo a data como
+              -- meia-noite no TimeZone da SESSÃO (UTC no Supabase) antes de converter. O
+              -- deslocamento saía aplicado duas vezes e a janela terminava às 18:00 do último
+              -- dia — descartando a live das 19h de hoje e pintando o dia de vermelho.
+              AND l.iniciado_em >= ($1::timestamp) AT TIME ZONE '${ANALYTICS_TZ}'
+              AND l.iniciado_em < (($2::timestamp) + INTERVAL '1 day') AT TIME ZONE '${ANALYTICS_TZ}'
+            GROUP BY COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id), (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date
+          ),
+          -- Quem já apareceu em ALGUMA live, em qualquer época — não só na janela. É o que
+          -- separa "apresentadora de verdade sem data_inicio preenchida" de "perfil que nunca
+          -- foi usado" (o duplicado da migration 110, ou o cadastro recém-criado). Sai como CTE,
+          -- e não como EXISTS correlacionado no SELECT: lá ele seria reavaliado uma vez por
+          -- apresentadora POR DIA da janela, e live_apresentadoras_v2 não tem índice por
+          -- apresentadora_id.
+          historico AS (
+            SELECT v.apresentadora_id AS id
+            FROM live_apresentadoras_v2 v
+            WHERE v.tenant_id = current_setting('app.tenant_id', true)::uuid
+            UNION
+            SELECT ap_h.id
+            FROM lives lv
+            JOIN apresentadoras ap_h ON ap_h.user_id = lv.apresentador_id AND ap_h.tenant_id = lv.tenant_id
+            WHERE lv.tenant_id = current_setting('app.tenant_id', true)::uuid
           )
           -- Presença é física, não pertence a marca: nenhum filtro de marca aqui. Com marca_id,
           -- quem naquele dia fez live de outra marca sumiria e viraria vermelho falso.
-          SELECT a.id, a.nome, h.dia, h.horas
+          SELECT a.id, a.nome, h.dia, h.horas,
+                 a.data_inicio::text AS data_inicio,
+                 a.data_fim::text AS data_fim,
+                 (a.criado_em AT TIME ZONE '${ANALYTICS_TZ}')::date::text AS criado_em_dia,
+                 (hist.id IS NOT NULL) AS tem_historico
           FROM apresentadoras a
           LEFT JOIN horas_por_dia h ON h.apresentadora_id = a.id
+          LEFT JOIN historico hist ON hist.id = a.id
           WHERE a.tenant_id = current_setting('app.tenant_id', true)::uuid
             -- Ativas de hoje MAIS quem fez live na janela: sem a segunda metade, desligar alguém
             -- apagaria retroativamente o histórico dela do período inteiro.
@@ -2385,7 +2506,15 @@ export async function analyticsRoutes(app) {
         for (const row of result.rows) {
           let item = porApresentadora.get(row.id)
           if (!item) {
-            item = { id: row.id, nome: row.nome, horasPorDia: new Map() }
+            item = {
+              id: row.id,
+              nome: row.nome,
+              dataInicio: row.data_inicio ?? null,
+              dataFim: row.data_fim ?? null,
+              criadoEmDia: row.criado_em_dia ?? null,
+              temHistorico: row.tem_historico === true,
+              horasPorDia: new Map(),
+            }
             porApresentadora.set(row.id, item)
           }
           if (!row.dia) continue
@@ -2393,11 +2522,30 @@ export async function analyticsRoutes(app) {
           item.horasPorDia.set(data, round2(row.horas))
         }
 
+        // O último dia da janela é hoje sempre que ninguém pediu um fim no passado (o corte
+        // acima garante isso), e hoje ainda não terminou.
+        const diaCorrente = fim === hoje ? hoje : null
+
         const apresentadoras = [...porApresentadora.values()].map((item) => {
-          const resumo = { verde: 0, amarelo: 0, vermelho: 0, cinza: 0, horas_total: 0 }
+          const comHoras = [...item.horasPorDia.entries()].filter(([, horas]) => horas > 0).map(([data]) => data)
+          const vinculo = janelaDeVinculo({
+            dataInicio: item.dataInicio,
+            dataFim: item.dataFim,
+            criadoEmDia: item.criadoEmDia,
+            temHistorico: item.temHistorico,
+            primeiroDiaComHoras: menorData(...comHoras),
+            ultimoDiaComHoras: maiorData(...comHoras),
+          })
+
+          const resumo = { verde: 0, amarelo: 0, vermelho: 0, cinza: 0, em_curso: 0, fora_do_vinculo: 0, horas_total: 0 }
           const diasDela = dias.map(({ data, tipo }) => {
             const horas = item.horasPorDia.get(data) ?? 0
-            const status = statusAssiduidade(horas, tipo)
+            // Hora registrada ganha do vínculo: se ela fez live nesse dia, estava trabalhando —
+            // não interessa o que os campos de data dizem.
+            const foraDoVinculo = horas <= 0 && (!vinculo.inicio || data < vinculo.inicio || (vinculo.fim && data > vinculo.fim))
+            const status = foraDoVinculo
+              ? 'fora_do_vinculo'
+              : statusAssiduidade(horas, tipo, data === diaCorrente)
             resumo[status] += 1
             resumo.horas_total = round2(resumo.horas_total + horas)
             return { data, horas, status }

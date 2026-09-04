@@ -264,3 +264,70 @@ describe('intervaloDeDias', () => {
     expect(intervaloDeDias('2026-09-03', '2026-09-01')).toEqual([])
   })
 })
+
+/**
+ * Estes três blocos existem por causa da regra do dono: 'util' é a ÚNICA classificação que pode
+ * virar vermelho, e vermelho acusa uma pessoa real de ter faltado. Nenhum caminho pode chegar em
+ * 'util' por acidente.
+ */
+describe('classificarDia — entrada inválida não pode virar dia cobrado', () => {
+  it('lança em vez de classificar lixo como dia útil', () => {
+    // Antes: Number('lixo'.slice(0,4)) = NaN, o teste de fim de semana com NaN dava falso e a
+    // função devolvia { tipo: 'util' } — exatamente a classificação que pinta VERMELHO.
+    for (const lixo of ['lixo', '', '2026-9-1', '03/09/2026', null, undefined, 20260903]) {
+      expect(() => classificarDia(lixo)).toThrow(TypeError)
+    }
+  })
+
+  it('lança na data que não existe, em vez de rolar para outro dia', () => {
+    // Date.UTC(2026, 12, 45) rola para 2027-02-14 (um domingo) e a data inexistente recebia
+    // classificação definitiva.
+    expect(() => classificarDia('2026-13-45')).toThrow(/inexistente/i)
+    expect(() => classificarDia('2026-02-30')).toThrow(/inexistente/i)
+    expect(() => somarDias('2026-02-30', 1)).toThrow(TypeError)
+    expect(() => diaDaSemana('2026-00-10')).toThrow(TypeError)
+  })
+
+  it('intervaloDeDias valida as duas pontas', () => {
+    expect(() => intervaloDeDias('2026-09-01', 'lixo')).toThrow(TypeError)
+    expect(() => intervaloDeDias('lixo', '2026-09-07')).toThrow(TypeError)
+  })
+
+  it('não polui o cache de feriados com a chave NaN', () => {
+    expect(() => feriadoEm('lixo')).toThrow(TypeError)
+    // Se o ano NaN tivesse entrado no cache, o ano seguinte poderia ler a lista errada.
+    expect(feriadosDoAno(2026)['2026-12-25']).toBe('Natal')
+  })
+})
+
+describe('Consciência Negra — nacional só a partir de 2024', () => {
+  it('não é feriado nos anos anteriores à Lei 14.759/2023', () => {
+    // 20/11/2023 caiu numa segunda-feira e era dia de trabalho normal: não havia lei nacional,
+    // estadual de SC nem municipal de Blumenau. Marcá-lo de cinza escondia falta real.
+    for (const ano of [2021, 2022, 2023]) {
+      expect(feriadosDoAno(ano)[`${ano}-11-20`]).toBeUndefined()
+    }
+    expect(classificarDia('2023-11-20')).toEqual({ tipo: 'util', feriado: null })
+  })
+
+  it('é feriado de 2024 em diante', () => {
+    for (const ano of [2024, 2025, 2026]) {
+      expect(feriadosDoAno(ano)[`${ano}-11-20`]).toBe('Consciência Negra')
+    }
+  })
+})
+
+describe('25/11 — Santa Catarina de Alexandria', () => {
+  it('é dia útil: a padroeira é data comemorativa, não feriado', () => {
+    // Lei estadual de 2004 rebaixou o 25/11 a data comemorativa oficial, exatamente para manter
+    // as atividades econômicas — e o calendário do Sindilojas-SC, que rege o comércio da região,
+    // lista só o 11/08 como feriado estadual. Pintar de folga esconderia falta real: é o erro
+    // oposto ao que este módulo mais teme, mas ainda é erro.
+    // Há projeto na Alesc para virar feriado; se passar, entra com condição de ano como a
+    // Consciência Negra, e este teste muda junto.
+    expect(classificarDia('2026-11-25')).toEqual({ tipo: 'util', feriado: null })
+    for (const ano of [2025, 2026, 2027]) {
+      expect(feriadosDoAno(ano)[`${ano}-11-25`]).toBeUndefined()
+    }
+  })
+})

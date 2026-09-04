@@ -50,3 +50,56 @@ export function apresentadoraHorasSql({ live = 'l', rateio = 'ap_v2' } = {}) {
           ELSE 0
         END`
 }
+
+/**
+ * Horas de PRESENÇA de uma apresentadora numa live — régua separada da de cima, de propósito.
+ *
+ * `apresentadoraHorasSql` mede PRODUTIVIDADE e está certa para o que faz: alimenta GMV/h, meta
+ * e ranking, e por isso usa `percentual_rateio`. Só que percentual_rateio é instrumento de
+ * dividir DINHEIRO: no rateio pós-live por valor ele sai de `gmv/gmvTotal`
+ * (src/lib/live-rateio.js, distribuirPercentuais), então quem ficou 6h no ar e vendeu R$ 0
+ * recebe percentual 0,00 → 0 hora → o painel de assiduidade a acusa de não ter aparecido.
+ * Medir PRESENÇA com a régua do dinheiro é o falso positivo mais caro desta tela.
+ *
+ * A cascata aqui é de sinais de TEMPO, do mais forte para o mais fraco:
+ *   1. `segundos_rateio` — tempo medido de verdade, informado na revisão do rateio.
+ *      NULLIF(...,0) porque zero ali nunca é "ela ficou zero segundo": vem de live importada com
+ *      encerrado_em = iniciado_em (duração 0) ou de campo em branco. Zero é ausência de
+ *      informação, e ausência de informação não pode ganhar do resto da cascata.
+ *   2. o turno dela em `agenda_evento_apresentadoras` — é tempo de calendário, imune ao rateio.
+ *      Resolve a co-apresentação: dois turnos SOBREPOSTOS de 5h numa live de 5h dão percentual
+ *      50/50 (o denominador de calcularRateioPlanejado é a SOMA dos turnos), e pelo percentual
+ *      cada uma levaria 2,5h de uma live em que ficou 5h. Pelo turno, cada uma leva as 5h dela.
+ *      Capado pela duração da live para o plano não inventar hora que não houve. O CASE em
+ *      volta do LEAST não é decoração: `LEAST(NULL, 5.0)` é 5.0 no Postgres, então sem ele toda
+ *      live SEM turno cairia neste degrau com a duração cheia e engoliria os degraus 3 e 4.
+ *   3. duração × `percentual_rateio` SÓ quando o rateio é PLANEJADO (`gmv_rateado IS NULL`, a
+ *      assinatura do seed de agenda-turnos.js): ali o percentual veio do TEMPO dos turnos, então
+ *      é sinal de tempo legítimo — e é o que mantém o revezamento sequencial correto.
+ *   4. rateio de DINHEIRO sem tempo informado: o percentual não diz nada sobre presença. Ter
+ *      linha na live já prova presença, então credita-se a live inteira.
+ * Sem linha nenhuma sobra a live inteira: é o caso mono-apresentadora, igual à régua de cima.
+ */
+export function apresentadoraHorasPresencaSql({ live = 'l', rateio = 'ap_v2', turno = 'turno' } = {}) {
+  // Duração blindada, diferente da régua de produtividade: o CASE devolve 0 quando a live não
+  // tem fim conhecido ou tem fim ANTES do início. Sem ele, `LEAST(NULL, 24.0)` é 24.0 no
+  // Postgres (LEAST ignora NULL) e uma live sem encerrado_em creditaria 24h; e encerrado_em
+  // corrompido (migration 107 documenta o caso em produção) creditaria hora negativa, que
+  // subtrai as horas de outra live do mesmo dia e fabrica vermelho.
+  const duracaoCapada = `CASE
+              WHEN COALESCE(${live}.encerrado_em, ${live}.previsto_fim) > ${live}.iniciado_em
+                THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(${live}.encerrado_em, ${live}.previsto_fim) - ${live}.iniciado_em)) / 3600.0, 24.0)
+              ELSE 0 END`
+  return `CASE
+          WHEN ${rateio}.apresentadora_id IS NOT NULL
+            THEN COALESCE(
+              NULLIF(${rateio}.segundos_rateio, 0) / 3600.0,
+              CASE WHEN ${turno}.horas_turno IS NOT NULL
+                   THEN LEAST(${turno}.horas_turno, ${duracaoCapada}) END,
+              CASE WHEN ${rateio}.gmv_rateado IS NULL
+                   THEN ${duracaoCapada} * ${rateio}.percentual_rateio / 100.0 END,
+              ${duracaoCapada}
+            )
+          ELSE ${duracaoCapada}
+        END`
+}

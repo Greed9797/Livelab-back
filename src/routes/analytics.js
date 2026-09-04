@@ -9,7 +9,9 @@ import {
 } from '../services/analytics-import.js'
 import { aplicarRetroLiftDoMes, calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
-import { liveGmvSql } from '../lib/metric-sql.js'
+import { apresentadoraHorasSql, liveGmvSql } from '../lib/metric-sql.js'
+import { classificarDia, intervaloDeDias, somarDias } from '../lib/calendario-blumenau.js'
+import { saoPauloDateInput } from '../lib/timezone.js'
 import { applyApresentadorasToLive, rateioAbsoluto } from '../lib/live-rateio.js'
 import { performance } from 'node:perf_hooks'
 import { createHash } from 'node:crypto'
@@ -668,6 +670,42 @@ async function aplicarLoteDeImportacao(db, { tenantId, batchId, sub }) {
   )
 
   return { applied, failures, gmvsPreservados, touchedLiveIds }
+}
+
+// ── Assiduidade ──────────────────────────────────────────────────────────────────────────────
+// Limiares definidos pelo dono da operação, não derivados de nenhuma tabela: a jornada combinada
+// é de 5h30 em dia útil; em fim de semana e feriado a escala é curta e a presença é voluntária,
+// então bastam 4h para o dia contar como cheio.
+const ASSIDUIDADE_META_DIA_UTIL_HORAS = 5.5
+const ASSIDUIDADE_META_FOLGA_HORAS = 4.0
+
+// Janela padrão de quem não manda período (a Home usa esta): 30 dias terminando hoje.
+const ASSIDUIDADE_JANELA_PADRAO_DIAS = 30
+
+// Teto da janela. Uma requisição de 10 anos varreria a tabela de lives inteira sem servir a
+// ninguém — 366 cobre o maior caso legítimo, "o ano passado inteiro", inclusive bissexto.
+const ASSIDUIDADE_JANELA_MAX_DIAS = 366
+
+/**
+ * Cor do palitinho do dia.
+ *
+ * Em fim de semana e feriado, zero hora é CINZA e nunca vermelho: ninguém é cobrado por não
+ * trabalhar na folga. Em dia útil, zero hora é falta — não existe escala individual, todas
+ * trabalham seg–sex, então dia útil sem live é ausência e ponto.
+ *
+ * `horas` chega já arredondada (a mesma que a resposta devolve) de propósito: se a classificação
+ * usasse o valor cru, a tela mostraria "5,5h" pintado de amarelo e ninguém entenderia por quê.
+ */
+function statusAssiduidade(horas, tipoDeDia) {
+  const folga = tipoDeDia !== 'util'
+  if (horas <= 0) return folga ? 'cinza' : 'vermelho'
+  const meta = folga ? ASSIDUIDADE_META_FOLGA_HORAS : ASSIDUIDADE_META_DIA_UTIL_HORAS
+  return horas >= meta ? 'verde' : 'amarelo'
+}
+
+/** Dias inclusivos entre duas datas 'YYYY-MM-DD' — só para checar o teto, sem materializar a lista. */
+function contarDiasInclusivo(inicioIso, fimIso) {
+  return Math.round((Date.parse(`${fimIso}T00:00:00Z`) - Date.parse(`${inicioIso}T00:00:00Z`)) / 86400000) + 1
 }
 
 export async function analyticsRoutes(app) {
@@ -2245,6 +2283,145 @@ export async function analyticsRoutes(app) {
       return value
     } catch (err) {
       request.log.error({ err }, 'analytics/diario error')
+      return reply.code(500).send({ error: err.message })
+    }
+  })
+
+  /**
+   * Assiduidade — uma fileira de palitinhos por apresentadora, um palitinho por dia da janela.
+   *
+   * O STATUS SAI DAQUI, não do front: o calendário de feriados de Blumenau mora no backend e a
+   * Home e o Analytics precisam pintar o mesmo dia da mesma cor. Se cada tela classificasse por
+   * conta própria, um feriado municipal viraria folga numa e falta na outra.
+   *
+   * Não reusa getPerformanceRanking de propósito: o HAVING dele descarta a apresentadora com GMV
+   * e pedidos zerados — exatamente quem veio, trabalhou e não vendeu, que aqui viraria vermelho
+   * falso.
+   */
+  app.get('/v1/analytics/assiduidade', {
+    preHandler: [app.authenticate, app.requirePapel(READ_ANALYTICS)],
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          inicio: { type: 'string' },
+          fim: { type: 'string' },
+        },
+        additionalProperties: true,
+      },
+    },
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const hoje = saoPauloDateInput(new Date())
+
+    const inicio = request.query?.inicio
+      ? String(request.query.inicio)
+      : somarDias(hoje, -(ASSIDUIDADE_JANELA_PADRAO_DIAS - 1))
+    const fimSolicitado = request.query?.fim ? String(request.query.fim) : hoje
+
+    if (!isValidDateString(inicio) || !isValidDateString(fimSolicitado)) {
+      return reply.code(400).send({ error: 'inicio/fim must be YYYY-MM-DD' })
+    }
+    if (inicio > fimSolicitado) {
+      return reply.code(400).send({ error: 'inicio must be before or equal to fim' })
+    }
+    if (contarDiasInclusivo(inicio, fimSolicitado) > ASSIDUIDADE_JANELA_MAX_DIAS) {
+      return reply.code(400).send({ error: `Janela máxima de ${ASSIDUIDADE_JANELA_MAX_DIAS} dias` })
+    }
+
+    // Dia que ainda não aconteceu não é falta. Sem este corte, escolher "o mês" no filtro do
+    // Analytics pintaria de vermelho todo o resto do mês corrente.
+    const fim = fimSolicitado > hoje ? hoje : fimSolicitado
+
+    try {
+      return await app.withTenant(tenant_id, async (db) => {
+        const result = await db.query(`
+          WITH horas_por_dia AS (
+            -- LATERAL SEM LIMIT 1 de propósito: uma linha por apresentadora da live (fan-out).
+            -- Com LIMIT 1 a principal ficaria com 100% das horas e quem só revezou sumiria do
+            -- dia — viraria falta de quem estava lá.
+            SELECT
+              COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
+              (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
+              SUM(${apresentadoraHorasSql()}) AS horas
+            FROM lives l
+            LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
+            LEFT JOIN LATERAL (
+              SELECT lav.apresentadora_id, lav.segundos_rateio, lav.percentual_rateio, lav.papel
+              FROM live_apresentadoras_v2 lav
+              WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+            ) ap_v2 ON true
+            WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+              -- Live em andamento não conta, e a live que vira a madrugada é do dia em que
+              -- começou (mesmo critério de todos os agregados de horas do produto).
+              AND l.status = 'encerrada'
+              AND l.iniciado_em >= ($1::date) AT TIME ZONE '${ANALYTICS_TZ}'
+              AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE '${ANALYTICS_TZ}'
+            GROUP BY COALESCE(ap_v2.apresentadora_id, ap_user.id), (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date
+          )
+          -- Presença é física, não pertence a marca: nenhum filtro de marca aqui. Com marca_id,
+          -- quem naquele dia fez live de outra marca sumiria e viraria vermelho falso.
+          SELECT a.id, a.nome, h.dia, h.horas
+          FROM apresentadoras a
+          LEFT JOIN horas_por_dia h ON h.apresentadora_id = a.id
+          WHERE a.tenant_id = current_setting('app.tenant_id', true)::uuid
+            -- Ativas de hoje MAIS quem fez live na janela: sem a segunda metade, desligar alguém
+            -- apagaria retroativamente o histórico dela do período inteiro.
+            AND (
+              (a.ativo IS TRUE AND COALESCE(a.arquivada, false) = false)
+              OR h.apresentadora_id IS NOT NULL
+            )
+          ORDER BY a.nome ASC, h.dia ASC
+        `, [inicio, fim])
+
+        const dias = intervaloDeDias(inicio, fim).map((data) => {
+          const { tipo, feriado } = classificarDia(data)
+          return { data, tipo, feriado }
+        })
+
+        // O SQL só devolve dia COM live. A janela cheia é montada aqui: sem isto, dia sem live
+        // simplesmente não existiria na resposta em vez de virar vermelho (ou cinza na folga).
+        const porApresentadora = new Map()
+        for (const row of result.rows) {
+          let item = porApresentadora.get(row.id)
+          if (!item) {
+            item = { id: row.id, nome: row.nome, horasPorDia: new Map() }
+            porApresentadora.set(row.id, item)
+          }
+          if (!row.dia) continue
+          const data = typeof row.dia === 'string' ? row.dia : row.dia.toISOString().slice(0, 10)
+          item.horasPorDia.set(data, round2(row.horas))
+        }
+
+        const apresentadoras = [...porApresentadora.values()].map((item) => {
+          const resumo = { verde: 0, amarelo: 0, vermelho: 0, cinza: 0, horas_total: 0 }
+          const diasDela = dias.map(({ data, tipo }) => {
+            const horas = item.horasPorDia.get(data) ?? 0
+            const status = statusAssiduidade(horas, tipo)
+            resumo[status] += 1
+            resumo.horas_total = round2(resumo.horas_total + horas)
+            return { data, horas, status }
+          })
+          return { id: item.id, nome: item.nome, dias: diasDela, resumo }
+        })
+
+        // Os limiares viajam junto porque a tela precisa deles para a legenda ("5,5h em dia
+        // útil"). Sem isso o front teria que repetir os números, e mudar o limiar aqui
+        // deixaria a legenda mentindo — o mesmo tipo de divergência que fez a expressão de
+        // horas existir em 4 cópias discordantes neste repo.
+        return {
+          inicio,
+          fim,
+          metas: {
+            dia_util_horas: ASSIDUIDADE_META_DIA_UTIL_HORAS,
+            folga_horas: ASSIDUIDADE_META_FOLGA_HORAS,
+          },
+          dias,
+          apresentadoras,
+        }
+      })
+    } catch (err) {
+      request.log.error({ err }, 'analytics/assiduidade error')
       return reply.code(500).send({ error: err.message })
     }
   })

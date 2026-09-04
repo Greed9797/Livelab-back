@@ -1,4 +1,5 @@
 import { presenterFixedCapSql } from '../config/presenter_defaults.js'
+import { apresentadoraHorasSql } from './metric-sql.js'
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
 
@@ -237,17 +238,7 @@ export async function getPerformanceRanking(db, {
           END
         )::int AS pedidos,
         COALESCE(live_commission.comissao_apresentadora, 0) AS comissao_apresentadora,
-        CASE
-          WHEN ap_v2.apresentadora_id IS NOT NULL
-            THEN COALESCE(
-              ap_v2.segundos_rateio / 3600.0,
-              LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) * ap_v2.percentual_rateio / 100.0,
-              CASE WHEN ap_v2.papel = 'principal' THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) ELSE 0 END
-            )
-          WHEN COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
-            THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
-          ELSE 0
-        END AS horas
+        ${apresentadoraHorasSql()} AS horas
       FROM lives l
       LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
       LEFT JOIN LATERAL (

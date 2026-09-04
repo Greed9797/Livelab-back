@@ -1545,6 +1545,21 @@ export async function livesRoutes(app) {
         `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
                 l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
+                -- Comissão da apresentadora: fonte é o motor (vendas_atribuidas, faixas por GMV
+                -- mensal + 2% fim de semana), o mesmo que Financeiro e /comissoes leem. O snapshot
+                -- lives.comissao_apresentadora_* vem do apresentadoras.comissao_pct chapado (0 em
+                -- 13 de 18 cadastros) e fica só como fallback de live ainda sem venda atribuída.
+                COALESCE(
+                  (SELECT SUM(va_c.comissao_apresentadora) FROM vendas_atribuidas va_c
+                    WHERE va_c.tenant_id = l.tenant_id AND va_c.origem = 'live' AND va_c.origem_id = l.id),
+                  l.comissao_apresentadora_valor
+                ) AS comissao_apresentadora,
+                COALESCE(
+                  (SELECT ROUND(SUM(va_c.comissao_apresentadora) / NULLIF(SUM(va_c.gmv), 0) * 100, 2)
+                     FROM vendas_atribuidas va_c
+                    WHERE va_c.tenant_id = l.tenant_id AND va_c.origem = 'live' AND va_c.origem_id = l.id),
+                  l.comissao_apresentadora_pct
+                ) AS pct_apresentadora,
                 l.final_orders_count, l.final_peak_viewers,
                 l.final_total_likes, l.final_total_comments,
                 l.final_total_shares, l.final_gifts_diamonds,
@@ -1871,8 +1886,21 @@ export async function livesRoutes(app) {
         `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
                 l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
-                l.comissao_apresentadora_valor AS comissao_apresentadora,
-                l.comissao_apresentadora_pct AS pct_apresentadora,
+                -- Comissão da apresentadora: fonte é o motor (vendas_atribuidas, faixas por GMV
+                -- mensal + 2% fim de semana), o mesmo que Financeiro e /comissoes leem. O snapshot
+                -- lives.comissao_apresentadora_* vem do apresentadoras.comissao_pct chapado (0 em
+                -- 13 de 18 cadastros) e fica só como fallback de live ainda sem venda atribuída.
+                COALESCE(
+                  (SELECT SUM(va_c.comissao_apresentadora) FROM vendas_atribuidas va_c
+                    WHERE va_c.tenant_id = l.tenant_id AND va_c.origem = 'live' AND va_c.origem_id = l.id),
+                  l.comissao_apresentadora_valor
+                ) AS comissao_apresentadora,
+                COALESCE(
+                  (SELECT ROUND(SUM(va_c.comissao_apresentadora) / NULLIF(SUM(va_c.gmv), 0) * 100, 2)
+                     FROM vendas_atribuidas va_c
+                    WHERE va_c.tenant_id = l.tenant_id AND va_c.origem = 'live' AND va_c.origem_id = l.id),
+                  l.comissao_apresentadora_pct
+                ) AS pct_apresentadora,
                 l.final_orders_count, l.final_peak_viewers,
                 l.final_total_likes, l.final_total_comments,
                 l.final_total_shares, l.final_gifts_diamonds,

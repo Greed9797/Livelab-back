@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { READ_VENDAS_ATRIBUIDAS, WRITE_VENDAS_ATRIBUIDAS } from '../config/role_groups.js'
 import { NIL_UUID, resolvePresenterCommissionPct } from '../services/presenter-commission.js'
+import { sincronizarSnapshotComissaoApresentadora } from '../services/comissao-snapshot.js'
 
 const vendaSchema = z.object({
   origem: z.enum(['live', 'video']),
@@ -96,6 +97,7 @@ export async function upsertVendaAtribuida(db, payload) {
         current.rows[0].id, payload.tenantId,
       ],
     )
+    await sincronizarSnapshotDaVenda(db, payload.tenantId, updated.rows[0])
     return updated.rows[0]
   }
 
@@ -112,7 +114,14 @@ export async function upsertVendaAtribuida(db, payload) {
       comissoes.comissao_apresentadora, comissoes.comissao_franquia, comissoes.comissao_franqueadora,
     ],
   )
+  await sincronizarSnapshotDaVenda(db, payload.tenantId, inserted.rows[0])
   return inserted.rows[0]
+}
+
+/** Venda de live alterada → snapshot da live segue o motor. Vídeo não tem snapshot por live. */
+async function sincronizarSnapshotDaVenda(db, tenantId, venda) {
+  if (!venda || venda.origem !== 'live') return
+  await sincronizarSnapshotComissaoApresentadora(db, { tenantId, liveIds: [venda.origem_id] })
 }
 
 // mesReferencia opcional ('YYYY-MM'): default é o mês corrente — meses passados
@@ -143,6 +152,7 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
   )
 
   let updated = 0
+  const livesTocadas = []
   for (const venda of vendas.rows) {
     const comissoes = await calcularComissoesAtribuidas(db, {
       tenantId,
@@ -170,9 +180,12 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
         tenantId,
       ],
     )
+    if (venda.origem === 'live') livesTocadas.push(venda.origem_id)
     updated += 1
   }
 
+  // Retro-lift muda a comissão de lives já gravadas no mês: o snapshot delas acompanha.
+  await sincronizarSnapshotComissaoApresentadora(db, { tenantId, liveIds: livesTocadas })
   return { updated }
 }
 
@@ -284,6 +297,7 @@ export async function vendasAtribuidasRoutes(app) {
          RETURNING *`,
         values,
       )
+      await sincronizarSnapshotDaVenda(db, tenant_id, result.rows[0])
       app.audit?.log?.(request, { action: 'vendas_atribuidas.edit', entity_type: 'venda_atribuida', entity_id: request.params.id, metadata: { updated_fields: fields, marca_id: next.marca_id, apresentadora_id: next.apresentadora_id ?? null, data: next.data, gmv: next.gmv, ...comissoes } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return result.rows[0]
     })

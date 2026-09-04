@@ -16,6 +16,7 @@ import { NIL_UUID, resolvePresenterCommissionPct } from './presenter-commission.
 import { calcularComissaoFranquia } from './comissao.js'
 import { MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
 import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
+import { sincronizarSnapshotComissaoApresentadora } from './comissao-snapshot.js'
 
 /**
  * Calcula e persiste comissões para uma live encerrada.
@@ -235,6 +236,9 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
     `UPDATE lives SET comissao_calculada = $1 WHERE id = $2 AND tenant_id = $3::uuid`,
     [comissaoFranquiaPersistida, liveId, tenantId],
   )
+  // Snapshot por live (lives.comissao_apresentadora_*) é derivado daqui — único caminho
+  // legítimo de escrita; ver src/services/comissao-snapshot.js.
+  await sincronizarSnapshotComissaoApresentadora(db, { tenantId, liveIds: [liveId] })
 
   // 6. Retro-lift do cliff: a escada usa o GMV MENSAL acumulado, então esta venda
   //    pode ter empurrado a apresentadora para uma faixa maior — e as vendas

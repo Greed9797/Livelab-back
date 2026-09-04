@@ -135,6 +135,7 @@ export const MIGRATIONS_LIST = [
   '138_api_keys.sql',
   '139_agenda_evento_apresentadoras.sql',
   '140_origem_dados_bot.sql',
+  '141_comissao_apresentadora_snapshot_do_motor.sql',
 ]
 
 async function ensureMigrationsTable(client) {

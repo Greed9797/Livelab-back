@@ -127,8 +127,12 @@ início), `fat_gerado` (número ou string "12500.00"), `qtd_pedidos`. Um de
 `manual_comments`, `manual_shares`, `manual_orders`, `manual_gmv`, `tipo`
 (`cliente` | `afiliado` | `teste`).
 
-**Live (editar)** — os mesmos, mais `ads_gmv` e `status_publicacao`
-(`rascunho` | `revisado` | `publicado`).
+**Live (editar)** — os mesmos, mais `ads_gmv`, `status_publicacao`
+(`rascunho` | `revisado` | `publicado`) e as métricas de funil do TikTok
+Studio, que importam logo depois do GMV: `live_impressions`,
+`product_impressions`, `product_clicks`, `new_followers`,
+`avg_viewing_duration` (segundos) e `ads_cost` (verba investida, número).
+Inteiros sem separador de milhar.
 
 **Marca** — obrigatórios: `nome`, `tipo` (`cliente` | `afiliada` | `propria` |
 `parceira`; `cliente` exige `cliente_id`). Opcionais: `status` (`ativa` |

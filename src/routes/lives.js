@@ -73,6 +73,12 @@ const encerrarSchema = z.object({
   manual_diamonds:    integerMetricSchema.optional(),
   manual_orders:      integerMetricSchema.optional(),
   manual_gmv:         moneySchema.optional(),
+  ads_cost:             moneySchema.optional().nullable(),
+  live_impressions:     integerMetricSchema.optional().nullable(),
+  product_impressions:  integerMetricSchema.optional().nullable(),
+  product_clicks:       integerMetricSchema.optional().nullable(),
+  avg_viewing_duration: z.preprocess(parseIntegerMetric, z.number().min(0)).optional().nullable(),
+  new_followers:        integerMetricSchema.optional().nullable(),
   status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
   origem_dados:       z.enum(['manual', 'api']).optional().default('manual'),
 })
@@ -98,6 +104,12 @@ const liveManualSchema = z.object({
   manual_diamonds:    integerMetricSchema.optional(),
   manual_orders:      integerMetricSchema.optional(),
   manual_gmv:         moneySchema.optional(),
+  ads_cost:             moneySchema.optional().nullable(),
+  live_impressions:     integerMetricSchema.optional().nullable(),
+  product_impressions:  integerMetricSchema.optional().nullable(),
+  product_clicks:       integerMetricSchema.optional().nullable(),
+  avg_viewing_duration: z.preprocess(parseIntegerMetric, z.number().min(0)).optional().nullable(),
+  new_followers:        integerMetricSchema.optional().nullable(),
   tipo:               z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
   status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
   origem_dados:       z.enum(['manual', 'api']).optional().default('manual'),
@@ -923,8 +935,11 @@ export async function livesRoutes(app) {
               manual_views, manual_likes, manual_comments, manual_shares, manual_diamonds,
               manual_orders, manual_gmv,
               tipo, status_publicacao, origem_dados, agenda_evento_id, marca_id,
-              comissao_apresentadora_pct, comissao_apresentadora_valor)
-           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+              comissao_apresentadora_pct, comissao_apresentadora_valor,
+              ads_cost, live_impressions, product_impressions, product_clicks,
+              avg_viewing_duration, new_followers)
+           VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
+                   $26,$27,$28,$29,$30,$31)
            RETURNING id`,
           [
             tenant_id, d.cabine_id, resolvedClienteId ?? null, apresentadorUserId, gestorId,
@@ -934,6 +949,8 @@ export async function livesRoutes(app) {
             d.manual_orders ?? null, d.manual_gmv ?? null,
             d.tipo, d.status_publicacao, origemDados(request, d.origem_dados), d.agenda_evento_id ?? null, resolvedMarcaId,
             comApresManual.pct, comApresManual.valor,
+            d.ads_cost ?? null, d.live_impressions ?? null, d.product_impressions ?? null,
+            d.product_clicks ?? null, d.avg_viewing_duration ?? null, d.new_followers ?? null,
           ]
         )
         const liveId = ins.rows[0].id
@@ -2259,7 +2276,13 @@ export async function livesRoutes(app) {
                manual_shares      = COALESCE($16, manual_shares),
                manual_diamonds    = COALESCE($17, manual_diamonds),
                comissao_apresentadora_pct   = $18,
-               comissao_apresentadora_valor = $19
+               comissao_apresentadora_valor = $19,
+               ads_cost             = COALESCE($20, ads_cost),
+               live_impressions     = COALESCE($21, live_impressions),
+               product_impressions  = COALESCE($22, product_impressions),
+               product_clicks       = COALESCE($23, product_clicks),
+               avg_viewing_duration = COALESCE($24, avg_viewing_duration),
+               new_followers        = COALESCE($25, new_followers)
            WHERE id = $5 AND tenant_id = $12::uuid`,
           [
             parsed.data.fat_gerado,
@@ -2281,6 +2304,12 @@ export async function livesRoutes(app) {
             parsed.data.manual_diamonds ?? null,
             comApresEncerrar.pct,
             comApresEncerrar.valor,
+            parsed.data.ads_cost ?? null,
+            parsed.data.live_impressions ?? null,
+            parsed.data.product_impressions ?? null,
+            parsed.data.product_clicks ?? null,
+            parsed.data.avg_viewing_duration ?? null,
+            parsed.data.new_followers ?? null,
           ]
         )
 

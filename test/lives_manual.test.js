@@ -268,6 +268,43 @@ describe('POST /v1/lives/manual', () => {
     expect(insertArgs[16]).toBe(1234)
   })
 
+  // Impressões e cliques são as métricas que importam logo depois do GMV: o CSV do TikTok
+  // Studio já as grava pelo import, mas o cadastro manual as descartava em silêncio.
+  it('persists TikTok funnel metrics (impressions, clicks, ads cost) on manual lives', async () => {
+    let insertArgs = null
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })                                   // BEGIN
+      .mockResolvedValueOnce({ rows: [{ id: 'marca-id-1', status: 'ativa' }] }) // ensureClienteMarca
+      .mockResolvedValueOnce({ rows: [{ status: 'ativo' }] })                // cliente status
+      .mockResolvedValueOnce({ rows: [{ comissao_pct: '0' }] })             // cabine/contrato
+      .mockResolvedValueOnce({ rows: [{ user_id: 'user-ap-1' }] })          // apresentadoras lookup ap1
+      .mockImplementationOnce((sql, args) => { insertArgs = args; return { rows: [{ id: 'id-funil' }] } }) // INSERT lives
+      .mockResolvedValueOnce({ rows: [] })                                   // INSERT live_apresentadoras_v2
+      .mockResolvedValueOnce({ rows: [] })                                   // SELECT marcas
+      .mockResolvedValueOnce({ rows: [] })                                   // COMMIT
+
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/lives/manual',
+      payload: {
+        ...basePayload,
+        live_impressions: '12.500',
+        product_impressions: 3200,
+        product_clicks: 410,
+        new_followers: 55,
+        avg_viewing_duration: 95,
+        ads_cost: '150,00',
+      },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(insertArgs.length).toBe(31)
+    expect(insertArgs.slice(25)).toEqual([150, 12500, 3200, 410, 95, 55])
+  })
+
   it('allows manual affiliate live using marca_id without cliente_id', async () => {
     const marcaId = '55555555-5555-4555-8555-555555555555'
     let insertArgs = null

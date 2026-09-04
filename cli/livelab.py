@@ -193,10 +193,9 @@ NOMEADOS = {
         'criar': ('POST', '/v1/lives/manual',
                   'Cadastrar live já encerrada. Body: cabine_id*, data* (AAAA-MM-DD), hora_inicio*, hora_fim* (HH:MM), '
                   'fat_gerado*, qtd_pedidos*, marca_id ou cliente_id, apresentador_id, apresentador2_id, resumo, '
-                  'manual_views, manual_likes, manual_comments, manual_shares, manual_orders, manual_gmv, tipo (cliente|afiliado|teste)'),
-        'editar': ('PATCH', '/v1/lives/{id}', 'Editar live. Body: qualquer campo do criar, mais ads_gmv, status_publicacao (rascunho|revisado|publicado) '
-                   'e o funil do TikTok Studio: live_impressions, product_impressions, product_clicks, new_followers, '
-                   'avg_viewing_duration (segundos), ads_cost'),
+                  'manual_views, manual_likes, manual_comments, manual_shares, manual_orders, manual_gmv, tipo (cliente|afiliado|teste), '
+                  'funil do TikTok Studio: live_impressions, product_impressions, product_clicks, new_followers, avg_viewing_duration (segundos), ads_cost'),
+        'editar': ('PATCH', '/v1/lives/{id}', 'Editar live. Body: qualquer campo do criar, mais ads_gmv, status_publicacao (rascunho|revisado|publicado)'),
     },
     'marcas': {
         'list': ('GET', '/v1/marcas', 'Listar marcas. Filtros em -q: status, tipo, cliente_id, q'),

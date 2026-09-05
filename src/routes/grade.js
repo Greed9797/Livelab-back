@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { READ_AGENDA, WRITE_AGENDA } from '../config/role_groups.js'
+import { carregarAcompanhamento } from '../lib/grade-acompanhamento.js'
 
 // Grade visual de agenda por cabine — 100% desacoplada de agenda_eventos/lives.
 // grade_padrao = template semanal (dia_semana 0=domingo, convenção extract(dow)
@@ -84,6 +85,10 @@ const gradeQuerySchema = z.object({
   apresentadora_id: z.string().uuid().optional(),
 }).refine((d) => d.data_fim >= d.data_inicio, {
   message: 'data_fim deve ser igual ou posterior a data_inicio',
+})
+
+const acompanhamentoQuerySchema = z.object({
+  data: dataSchema.refine((data) => listarDias(data, data)[0] === data, 'Data inválida (YYYY-MM-DD)'),
 })
 
 // "08:00:00" | "08:00" → "08:00" (chave de match e formato de resposta)
@@ -255,6 +260,29 @@ export async function gradeRoutes(app) {
       }
 
       return { dias }
+    })
+  })
+
+  // GET /v1/grade/acompanhamento — agenda planejada x execução real por cabine.
+  // A leitura só confirma vínculo por IDs explícitos. Coincidência de cabine/horário
+  // é devolvida como pendência para evitar transformar uma associação ambígua em falta.
+  app.get('/v1/grade/acompanhamento', { preHandler: readAccess }, async (request, reply) => {
+    const parsed = acompanhamentoQuerySchema.safeParse(request.query ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      const [acompanhamento, [gradeDia]] = await Promise.all([
+        carregarAcompanhamento(db, tenant_id, parsed.data.data),
+        carregarGradeResolvida(db, tenant_id, parsed.data.data, parsed.data.data),
+      ])
+      return {
+        ...acompanhamento,
+        cabines: acompanhamento.cabines.map((cabine) => {
+          const programacaoGrade = gradeDia.celulas.filter((celula) => celula.cabine_id === cabine.id)
+          return { ...cabine, programacao_grade: programacaoGrade }
+        }),
+      }
     })
   })
 

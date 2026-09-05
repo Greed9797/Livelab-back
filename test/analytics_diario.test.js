@@ -34,6 +34,9 @@ describe('analytics diario', () => {
       expect(sql).toContain("va.origem = 'video'")
       expect(sql).toContain('FULL OUTER JOIN video_daily')
       expect(sql).toContain('COALESCE(ld.marca_nome, vd.marca_nome')
+      expect(sql).toContain("l.iniciado_em >= ($1::timestamp) AT TIME ZONE 'America/Sao_Paulo'")
+      expect(sql).toContain("l.iniciado_em < (($2::timestamp) + INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo'")
+      expect(sql).not.toContain("l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'")
       expect(params).toEqual(['2026-05-01', '2026-05-31', marcaId, apresentadoraId])
       return {
         rows: [{

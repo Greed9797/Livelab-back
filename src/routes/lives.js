@@ -1701,16 +1701,20 @@ export async function livesRoutes(app) {
   })
 
   // GET /v1/lives
-  app.get('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request) => {
+  app.get('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
     const { tenant_id, papel, sub } = request.user
     const statusFilter = request.query?.status // 'em_andamento' | 'encerrada' | undefined
     const reqLimit = Math.min(200, Math.max(10, parseInt(request.query?.limit ?? '50', 10)))
     const reqOffset = Math.max(0, parseInt(request.query?.page ?? '0', 10)) * reqLimit
     const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+    if (request.query?.cabine_id && (typeof request.query.cabine_id !== 'string' || !UUID_RE.test(request.query.cabine_id))) {
+      return reply.code(400).send({ error: 'Selecione uma cabine válida.' })
+    }
     const dateRe = /^\d{4}-\d{2}-\d{2}$/
     const fDataInicio = dateRe.test(request.query?.data_inicio ?? '') ? request.query.data_inicio : null
     const fDataFim = dateRe.test(request.query?.data_fim ?? '') ? request.query.data_fim : null
     const fMarcaId = UUID_RE.test(request.query?.marca_id ?? '') ? request.query.marca_id : null
+    const fCabineId = UUID_RE.test(request.query?.cabine_id ?? '') ? request.query.cabine_id : null
     const fApresentadoraId = UUID_RE.test(request.query?.apresentadora_id ?? '') ? request.query.apresentadora_id : null
     const fQ = String(request.query?.q ?? '').trim().slice(0, 120)
     const paginado = String(request.query?.paginado ?? '') === '1'
@@ -1722,6 +1726,10 @@ export async function livesRoutes(app) {
         where += ` AND l.status = $${params.length}`
       }
       // Filtros opcionais da barra de "Lives realizadas" (server-side).
+      if (fCabineId) {
+        params.push(fCabineId)
+        where += ` AND l.cabine_id = $${params.length}::uuid`
+      }
       if (fDataInicio) {
         params.push(fDataInicio)
         where += ` AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date >= $${params.length}::date`

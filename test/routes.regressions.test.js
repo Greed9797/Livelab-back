@@ -695,6 +695,8 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(payload.ranking_apresentadoras[0]).toMatchObject({ apresentadora_nome: 'Ana', gmv_total: 1500, pedidos: 15 })
     expect(payload.ranking_marcas[0]).toMatchObject({ marca_nome: 'Marca A', gmv_total: 1500, pedidos: 15 })
     expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
+    expect(queryMock.mock.calls[0][0]).toContain("l.iniciado_em >= ($1::timestamp) AT TIME ZONE 'America/Sao_Paulo'")
+    expect(queryMock.mock.calls[1][0]).toContain("l.iniciado_em < (($2::timestamp) + INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo'")
     expect(queryMock.mock.calls[2][0]).toContain('FROM lives l')
     expect(queryMock.mock.calls[3][0]).toContain('FROM video_registros vr')
     expect(releaseMock).toHaveBeenCalledTimes(1)

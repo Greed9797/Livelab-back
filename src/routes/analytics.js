@@ -28,6 +28,20 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const MONTH_RE = /^\d{4}-\d{2}$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/**
+ * Range inclusivo de dias locais sobre uma coluna timestamptz.
+ *
+ * O cast para timestamp precisa ocorrer antes de AT TIME ZONE. Com ::date, o
+ * PostgreSQL pode escolher o overload que primeiro interpreta a meia-noite no
+ * fuso da sessão (UTC no Supabase), deslocando novamente a borda de São Paulo.
+ */
+export function analyticsLiveRangeSql(alias = 'l', fromParam = '$1', toParam = '$2') {
+  return `
+    AND ${alias}.iniciado_em >= (${fromParam}::timestamp) AT TIME ZONE '${ANALYTICS_TZ}'
+    AND ${alias}.iniciado_em < ((${toParam}::timestamp) + INTERVAL '1 day') AT TIME ZONE '${ANALYTICS_TZ}'
+  `
+}
+
 function round2(value) {
   return parseFloat(Number(value ?? 0).toFixed(2))
 }
@@ -1562,14 +1576,9 @@ export async function analyticsRoutes(app) {
           AND va.data >= $1::date
           AND va.data <= $2::date
         `
-        // Sargável: range cru no timestamptz com semântica de dia em São Paulo
-        // IDÊNTICA ao cast ::date (dia inclusivo). Upper bound = dia seguinte
-        // (exclusivo) para preservar a inclusão de $2. Usa o índice btree em
-        // lives(tenant_id, status, iniciado_em) em vez de seq scan.
-        const liveRange = `
-          AND l.iniciado_em >= ($1::date) AT TIME ZONE '${ANALYTICS_TZ}'
-          AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE '${ANALYTICS_TZ}'
-        `
+        // Sargável: range cru no timestamptz com semântica de dia em São Paulo.
+        // Upper bound = dia seguinte (exclusivo), preservando a inclusão de $2.
+        const liveRange = analyticsLiveRangeSql('l')
         const videoRange = `
           AND vr.data >= $1::date
           AND vr.data <= $2::date
@@ -1625,8 +1634,7 @@ export async function analyticsRoutes(app) {
               FROM lives l
               WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
                 AND l.status = 'encerrada'
-                AND l.iniciado_em >= ($1::date) AT TIME ZONE '${ANALYTICS_TZ}'
-                AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE '${ANALYTICS_TZ}'
+                ${analyticsLiveRangeSql('l')}
                 ${clienteLiveFilter}
             ),
             video_sales AS (
@@ -2369,8 +2377,7 @@ export async function analyticsRoutes(app) {
             ) live_sales ON true
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
-              AND l.iniciado_em >= ($1::date) AT TIME ZONE '${ANALYTICS_TZ}'
-              AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE '${ANALYTICS_TZ}'
+              ${analyticsLiveRangeSql('l')}
               AND ($3::uuid IS NULL OR l.marca_id = $3::uuid)
               AND ($4::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $4::uuid)
           ),

@@ -88,8 +88,13 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
               ${liveOrdersSql('l')} AS pedidos,
               l.encerrado_em
        FROM lives l
+       LEFT JOIN marcas marca_cliente ON marca_cliente.id = l.marca_id
+         AND marca_cliente.tenant_id = l.tenant_id
        WHERE l.tenant_id = $2::uuid
-         AND l.cliente_id = $1
+         AND (
+           l.cliente_id = $1
+           OR (l.cliente_id IS NULL AND marca_cliente.cliente_id = $1)
+         )
          AND l.id NOT IN (
            SELECT origem_id FROM vendas_atribuidas
            WHERE tenant_id = $2::uuid AND origem = 'live'
@@ -125,17 +130,19 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
          AND m.cliente_id = $1
        ORDER BY va.origem_id, va.atualizado_em DESC
      )
-     SELECT l.id, l.cabine_id, l.cliente_id, vl.marca_id, l.iniciado_em, l.encerrado_em,
+     SELECT l.id, l.cabine_id, l.cliente_id, COALESCE(vl.marca_id, marca_cliente.id) AS marca_id, l.iniciado_em, l.encerrado_em,
             l.status, l.status_publicacao,
             ${liveGmvSql('l')} AS gmv,
             ${liveOrdersSql('l')} AS pedidos,
             l.fat_gerado, l.final_orders_count,
             c.numero AS cabine_numero,
-            vl.marca_nome,
+            COALESCE(vl.marca_nome, marca_cliente.nome) AS marca_nome,
             COALESCE(a.nome, u.nome) AS apresentadora_nome
      FROM lives l
      LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
      LEFT JOIN venda_live_marca vl ON vl.live_id = l.id
+     LEFT JOIN marcas marca_cliente ON marca_cliente.id = l.marca_id
+       AND marca_cliente.tenant_id = l.tenant_id
      -- LATERAL com LIMIT 1 em vez de JOIN direto: live com DUAS linhas papel='principal'
      -- (dado que já existe em produção) duplicava a live inteira na lista, dobrando GMV
      -- e horas na tela. Mesmo molde de src/lib/performance-rollups.js:119-127.
@@ -149,7 +156,14 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
      LEFT JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = l.tenant_id
      LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
      WHERE l.tenant_id = $2::uuid
-       AND (l.cliente_id = $1 OR vl.live_id IS NOT NULL)
+       AND (
+         l.cliente_id = $1
+         -- A venda atribuída é a fonte já existente para lives tratadas pelo motor,
+         -- inclusive quando sua marca diverge do cliente explícito legado da live.
+         OR vl.live_id IS NOT NULL
+         -- Sem venda atribuída, a live legada só herda a marca se não tiver cliente explícito.
+         OR (l.cliente_id IS NULL AND marca_cliente.cliente_id = $1)
+       )
      ORDER BY COALESCE(l.encerrado_em, l.iniciado_em) DESC NULLS LAST
      LIMIT 50`,
     [clienteId, tenantId],

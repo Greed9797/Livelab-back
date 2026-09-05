@@ -320,7 +320,7 @@ export async function financeiroRoutes(app) {
       // Lives e vídeos reais; live sem marca mas com cliente é atribuída ao cliente.
       const porCliente = await db.query(`
         WITH base AS (
-          SELECT l.cliente_id, l.marca_id,
+          SELECT COALESCE(l.cliente_id, marca_cliente.cliente_id) AS cliente_id, l.marca_id,
                  ${liveGmvSql('l')} AS gmv,
                  -- comissão de franquia inline (gmv × pct da marca resolvida), não da coluna
                  -- pré-calculada/estagnada do motor — mantém o breakdown por cliente coerente
@@ -329,6 +329,8 @@ export async function financeiroRoutes(app) {
                  1 AS is_live, 0 AS is_video
           FROM lives l
           ${marcaResolveLateralSql('$3')}
+          LEFT JOIN marcas marca_cliente ON marca_cliente.id = l.marca_id
+            AND marca_cliente.tenant_id = l.tenant_id
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND l.iniciado_em::date >= $1::date
@@ -345,23 +347,31 @@ export async function financeiroRoutes(app) {
             AND vr.data <= $2::date
         ),
         agg AS (
-          SELECT COALESCE(cliente_id, marca_id) AS group_id,
+          SELECT cliente_id,
+                 CASE WHEN cliente_id IS NULL THEN marca_id END AS marca_id,
                  COALESCE(SUM(gmv), 0) AS total,
                  COALESCE(SUM(comissao_franquia), 0) AS receita_liquida,
                  COALESCE(SUM(is_live), 0)::int AS lives_mes,
                  COALESCE(SUM(is_video), 0)::int AS videos_mes
           FROM base
-          GROUP BY COALESCE(cliente_id, marca_id)
+          GROUP BY cliente_id, CASE WHEN cliente_id IS NULL THEN marca_id END
         )
         SELECT
-          agg.group_id AS id,
+          COALESCE(agg.cliente_id, agg.marca_id) AS id,
           COALESCE(cl.nome, m.nome, 'Sem marca') AS nome,
           COALESCE(cl.nicho, m.tipo) AS nicho,
           CASE WHEN cl.id IS NOT NULL THEN 'cliente_ecommerce' ELSE COALESCE(m.tipo, 'sem_marca') END AS tipo_operacional,
+          CASE
+            WHEN cl.id IS NOT NULL THEN 'cliente'
+            WHEN m.id IS NOT NULL THEN 'marca'
+            ELSE 'sem_marca'
+          END AS tipo_entidade,
+          cl.id AS cliente_id,
+          m.id AS marca_id,
           agg.total, agg.receita_liquida, agg.lives_mes, agg.videos_mes
         FROM agg
-        LEFT JOIN clientes cl ON cl.id = agg.group_id AND cl.tenant_id = $3::uuid
-        LEFT JOIN marcas m ON m.id = agg.group_id AND m.tenant_id = $3::uuid
+        LEFT JOIN clientes cl ON cl.id = agg.cliente_id AND cl.tenant_id = $3::uuid
+        LEFT JOIN marcas m ON m.id = agg.marca_id AND m.tenant_id = $3::uuid
         ORDER BY agg.total DESC
       `, [startDate, endDate, tenant_id])
 

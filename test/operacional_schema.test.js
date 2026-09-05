@@ -7,26 +7,19 @@ const clienteId = '22222222-2222-4222-8222-222222222222'
 const marcaId = '33333333-3333-4333-8333-333333333333'
 const range = { startDate: '2026-05-01', endDate: '2026-05-31' }
 
-function buildDb(responses, { guardMarcaId = true } = {}) {
+function buildDb(responses) {
   const calls = []
   return {
     calls,
     query: vi.fn(async (sql, params) => {
       calls.push({ sql, params })
-      // Guard histórico: lives.marca_id não existia (pré-migration 093). Hoje existe e,
-      // pós-invariante 115 + auto-cura, é confiável — o detalhe da MARCA passa a listar
-      // lives por l.marca_id (inclui recentes sem comissão). O caminho do CLIENTE segue
-      // sem depender de l.marca_id (lista por cliente_id), então mantém o guard.
-      if (guardMarcaId && /\bl\.marca_id\b/.test(sql)) {
-        throw new Error('Query must not depend on lives.marca_id (caminho cliente)')
-      }
       return responses.shift() ?? { rows: [] }
     }),
   }
 }
 
 describe('operacional helpers', () => {
-  it('builds cliente detail without querying lives.marca_id', async () => {
+  it('builds cliente detail with tenant-scoped brand fallback for legacy lives', async () => {
     const db = buildDb([
       { rows: [{ id: clienteId, nome: 'Cliente' }] },
       { rows: [{ id: marcaId, nome: 'Marca', cliente_id: clienteId }] },
@@ -40,7 +33,9 @@ describe('operacional helpers', () => {
 
     expect(result.metrics.gmv_mes).toBe(1142)
     expect(result.lives).toHaveLength(1)
-    expect(db.calls.some(({ sql }) => /\bl\.marca_id\b/.test(sql))).toBe(false)
+    expect(db.calls[2].sql).toContain('marca_cliente.id = l.marca_id')
+    expect(db.calls[2].sql).toContain('marca_cliente.tenant_id = l.tenant_id')
+    expect(db.calls[2].sql).toContain('l.cliente_id IS NULL AND marca_cliente.cliente_id = $1')
     expect(db.calls[2].sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv')
     expect(db.calls[2].sql).toContain('COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos')
     expect(db.calls[2].sql).toContain('SUM(ll.gmv)')
@@ -56,7 +51,7 @@ describe('operacional helpers', () => {
       { rows: [{ id: 'live-1', marca_id: marcaId, fat_gerado: 1142 }] },
       { rows: [] },
       { rows: [] },
-    ], { guardMarcaId: false })
+    ])
 
     const result = await getMarcaOperacional(db, { tenantId, marcaId, ...range })
 

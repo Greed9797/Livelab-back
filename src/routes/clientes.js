@@ -17,6 +17,8 @@ import { SECURITY } from '../config/security.js'
 // Aceita só URL https:// ou data URI de imagem. Teto de 100KB evita que um
 // base64 gigante entre no banco por esse campo (upload real usa /upload).
 const MAX_IMAGE_FIELD_BYTES = 100 * 1024
+const MARCA_NOME_DUPLICADA = 'Já existe uma marca com este nome nesta unidade. Escolha outro nome.'
+const CLIENTE_MARCA_SYNC_CONFLICT = 'A marca operacional vinculada mudou. Recarregue o cadastro e tente novamente.'
 // O que precisa ser barrado aqui é blob gigante e esquema que executa script
 // (javascript:, data:text/html). http:// e caminho relativo não são vetor de
 // injeção e JÁ EXISTEM em linhas antigas — barrá-los faria um PATCH de cliente
@@ -587,48 +589,109 @@ export async function clientesRoutes(app) {
     const keys = Object.keys(updates)
     const vals = Object.values(updates)
     const set  = keys.map((k, i) => `${k} = $${i + 1}`).join(', ')
+    const hasNome = Object.prototype.hasOwnProperty.call(updates, 'nome')
 
     return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `UPDATE clientes SET ${set}, atualizado_em = NOW()
-         WHERE id = $${keys.length + 1} AND tenant_id = $${keys.length + 2} RETURNING id, nome, status, onboarding_step, tiktok_username, logo_url`,
-        [...vals, request.params.id, tenant_id]
-      )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
-
-      // Mantém a invariante cliente->marca também em updates (idempotente). Reativa a
-      // marca quando o cliente volta a ficar ativo; desativa quando é cancelado.
-      const clienteCancelado = updates.status === 'cancelado'
-      await ensureClienteMarca(db, {
-        tenantId: tenant_id,
-        clienteId: request.params.id,
-        activateExisting: !clienteCancelado,
-      })
-      if (clienteCancelado) {
-        await db.query(
-          `UPDATE marcas SET status = 'inativa', atualizado_em = NOW()
-           WHERE cliente_id = $1 AND tenant_id = $2::uuid AND tipo = 'cliente'`,
-          [request.params.id, tenant_id],
+      await db.query('BEGIN')
+      try {
+        // Comercial reenvia nome mesmo ao editar só o contato. Trava e compara antes
+        // do UPDATE para não transformar um PATCH sem troca de nome em backfill de uma
+        // marca antiga que ficou diferente do cliente.
+        let nomeMudou = false
+        if (hasNome) {
+          const clienteAtual = await db.query(
+            `SELECT nome FROM clientes
+             WHERE id = $1::uuid AND tenant_id = $2::uuid
+             FOR UPDATE`,
+            [request.params.id, tenant_id],
+          )
+          if (!clienteAtual.rows[0]) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Cliente não encontrado' })
+          }
+          nomeMudou = updates.nome !== clienteAtual.rows[0].nome
+        }
+        const result = await db.query(
+          `UPDATE clientes SET ${set}, atualizado_em = NOW()
+           WHERE id = $${keys.length + 1} AND tenant_id = $${keys.length + 2} RETURNING id, nome, status, onboarding_step, tiktok_username, logo_url`,
+          [...vals, request.params.id, tenant_id]
         )
-      }
+        if (!result.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Cliente não encontrado' })
+        }
 
-      if (Object.prototype.hasOwnProperty.call(updates, 'logo_url')) {
-        await db.query(
-          `UPDATE marcas
-           SET logo_url = $1, atualizado_em = NOW()
-           WHERE cliente_id = $2
-             AND tenant_id = $3::uuid
-             AND tipo = 'cliente'`,
-          [updates.logo_url ?? null, request.params.id, tenant_id],
-        )
+        // Mantém a invariante cliente->marca também em updates (idempotente). Reativa a
+        // marca quando o cliente volta a ficar ativo; desativa quando é cancelado.
+        const clienteCancelado = updates.status === 'cancelado'
+        const marcaId = await ensureClienteMarca(db, {
+          tenantId: tenant_id,
+          clienteId: request.params.id,
+          activateExisting: !clienteCancelado,
+        })
+        // Nome do cliente é também o nome da única marca operacional vinculada. Atualiza
+        // apenas a marca que o helper escolheu/criou, sem tocar marcas de outros clientes.
+        if (nomeMudou) {
+          if (!marcaId) throw Object.assign(new Error(CLIENTE_MARCA_SYNC_CONFLICT), { code: 'CLIENTE_MARCA_SYNC_CONFLICT' })
+          // A migration pode não ter criado o índice único em tenants que já tinham
+          // duplicatas. Mantém a validação explícita da rota de marcas e deixa o índice
+          // como proteção adicional para uma corrida entre transações.
+          const nomeJaExiste = await db.query(
+            `SELECT 1 FROM marcas
+              WHERE tenant_id = $1::uuid
+                AND lower(nome) = lower($2)
+                AND ($3::uuid IS NULL OR id <> $3::uuid)
+              LIMIT 1`,
+            [tenant_id, updates.nome, marcaId],
+          )
+          if (nomeJaExiste.rows[0]) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
+          }
+          const marcaAtualizada = await db.query(
+            `UPDATE marcas SET nome = $1, atualizado_em = NOW()
+             WHERE id = $2::uuid AND tenant_id = $3::uuid AND cliente_id = $4::uuid AND tipo = 'cliente'
+             RETURNING id`,
+            [updates.nome, marcaId, tenant_id, request.params.id],
+          )
+          if (!marcaAtualizada.rows[0]) throw Object.assign(new Error(CLIENTE_MARCA_SYNC_CONFLICT), { code: 'CLIENTE_MARCA_SYNC_CONFLICT' })
+        }
+        if (clienteCancelado) {
+          await db.query(
+            `UPDATE marcas SET status = 'inativa', atualizado_em = NOW()
+             WHERE cliente_id = $1 AND tenant_id = $2::uuid AND tipo = 'cliente'`,
+            [request.params.id, tenant_id],
+          )
+        }
+
+        if (Object.prototype.hasOwnProperty.call(updates, 'logo_url')) {
+          await db.query(
+            `UPDATE marcas
+             SET logo_url = $1, atualizado_em = NOW()
+             WHERE cliente_id = $2
+               AND tenant_id = $3::uuid
+               AND tipo = 'cliente'`,
+            [updates.logo_url ?? null, request.params.id, tenant_id],
+          )
+        }
+        await db.query('COMMIT')
+        // Log status change separately if applicable
+        if (updates.status !== undefined) {
+          app.audit?.log?.(request, { action: 'clientes.status_alterado', entity_type: 'cliente', entity_id: request.params.id, metadata: { new_status: updates.status } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        } else {
+          app.audit?.log?.(request, { action: 'clientes.update', entity_type: 'cliente', entity_id: request.params.id, metadata: { changed_fields: keys } })?.catch(err => app.log.error({ err }, 'audit log failed'))
+        }
+        return result.rows[0]
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {})
+        if (err?.code === '23505' && err?.constraint === 'uniq_marca_nome_por_tenant') {
+          return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
+        }
+        if (err?.code === 'CLIENTE_MARCA_SYNC_CONFLICT') {
+          return reply.code(409).send({ error: CLIENTE_MARCA_SYNC_CONFLICT, code: 'CLIENTE_MARCA_SYNC_CONFLICT' })
+        }
+        throw err
       }
-      // Log status change separately if applicable
-      if (updates.status !== undefined) {
-        app.audit?.log?.(request, { action: 'clientes.status_alterado', entity_type: 'cliente', entity_id: request.params.id, metadata: { new_status: updates.status } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      } else {
-        app.audit?.log?.(request, { action: 'clientes.update', entity_type: 'cliente', entity_id: request.params.id, metadata: { changed_fields: keys } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      }
-      return result.rows[0]
     })
   })
 

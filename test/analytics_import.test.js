@@ -5,6 +5,7 @@ import {
   normalizeBrandName,
   parseAnalyticsImportBuffer,
   parseDurationToSeconds,
+  recoverImportMetrics,
 } from '../src/services/analytics-import.js'
 
 describe('analytics import parser and matcher', () => {
@@ -83,6 +84,33 @@ describe('analytics import parser and matcher', () => {
     expect(row.errors).toEqual([])
     expect(row.normalized.duration_seconds).toBe(454)
     expect(row.normalized.ads_gmv).toBeNull()
+    expect(row.normalized.metric_presence.ads_gmv).toBe('missing')
+  })
+
+  it('distinguishes an omitted metric from explicit zero', () => {
+    const parse = (orders) => parseAnalyticsImportBuffer({
+      filename: 'ads.csv',
+      buffer: Buffer.from([
+        'MARCA,Start time,,Duration,Attributed orders,Views,Ads GMV',
+        `HAAG,46170,0.625,21600,${orders},,`,
+      ].join('\n')),
+    }).rows[0].normalized
+    expect(parse('   ').attributed_orders).toBeNull()
+    expect(parse('   ').metric_presence.attributed_orders).toBe('missing')
+    expect(parse('0').attributed_orders).toBe(0)
+    expect(parse('0').metric_presence.attributed_orders).toBe('zero')
+  })
+
+  it('recovers presence from raw for legacy rows without trusting normalized zero', () => {
+    const recovered = recoverImportMetrics(
+      { views: 0, attributed_orders: 0, ads_gmv: 0 },
+      { Views: '', 'Attributed orders': '0', 'Ads GMV': 'R$' },
+      'tiktok_ads',
+    )
+    expect(recovered.views).toBeNull()
+    expect(recovered.attributed_orders).toBe(0)
+    expect(recovered.ads_gmv).toBeNull()
+    expect(recovered.metric_presence).toMatchObject({ views: 'missing', attributed_orders: 'zero', ads_gmv: 'unknown', official_gmv: 'unknown' })
   })
 })
 

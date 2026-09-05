@@ -5,6 +5,7 @@ import {
   loadAnalyticsImportCandidates,
   matchAnalyticsImportRows,
   parseAnalyticsImportBuffer,
+  recoverImportMetrics,
   summarizeImportRows,
   SOURCE_TIKTOK_STUDIO,
 } from '../services/analytics-import.js'
@@ -224,6 +225,7 @@ function decisaoAutomatica(row, { criarLives = false } = {}) {
 }
 
 function rowResponse(row) {
+  const presence = row.normalized?.metric_presence ?? {}
   return {
     id: row.id ?? null,
     row_index: row.row_index,
@@ -234,6 +236,7 @@ function rowResponse(row) {
     room_id: row.normalized?.room_id ?? null,
     room_title: row.normalized?.room_title ?? null,
     attributed_gmv: row.normalized?.attributed_gmv ?? null,
+    official_gmv: officialGmvOf(row.normalized),
     likes: row.normalized?.likes ?? null,
     comments: row.normalized?.comments ?? null,
     like_rate: row.normalized?.studio_metrics?.like_rate ?? null,
@@ -241,6 +244,29 @@ function rowResponse(row) {
     ads_cost: row.normalized?.ads_cost ?? null,
     attributed_orders: row.normalized?.attributed_orders ?? null,
     views: row.normalized?.views ?? null,
+    shares: row.normalized?.shares ?? null,
+    live_impressions: row.normalized?.live_impressions ?? null,
+    product_impressions: row.normalized?.product_impressions ?? null,
+    product_clicks: row.normalized?.product_clicks ?? null,
+    avg_viewing_duration: row.normalized?.avg_viewing_duration ?? null,
+    new_followers: row.normalized?.new_followers ?? null,
+    studio_metrics: row.normalized?.studio_metrics ?? null,
+    metric_presence: presence,
+    current_metrics: row.current_official_gmv == null ? null : {
+      official_gmv: Number(row.current_official_gmv),
+      attributed_orders: Number(row.current_orders ?? 0),
+      views: row.current_views ?? null,
+      live_impressions: row.current_live_impressions ?? null,
+      product_impressions: row.current_product_impressions ?? null,
+      product_clicks: row.current_product_clicks ?? null,
+      ads_cost: row.current_ads_cost ?? null,
+      likes: row.current_likes ?? null,
+      comments: row.current_comments ?? null,
+      shares: row.current_shares ?? null,
+      new_followers: row.current_new_followers ?? null,
+      avg_viewing_duration: row.current_avg_viewing_duration ?? null,
+    },
+    gmv_manually_corrected: Boolean(row.gmv_manually_corrected),
     match_status: row.match_status,
     match_reason: row.match_reason,
     match_confidence: row.match_confidence ?? null,
@@ -369,34 +395,39 @@ async function applyMetricsToLive(db, { tenantId, liveId, normalized: n, batchId
   const updated = await db.query(
     `UPDATE lives
         SET ads_gmv = CASE
+              WHEN $1::numeric IS NULL THEN ads_gmv
               WHEN EXISTS (
                 SELECT 1 FROM live_metric_revisions r
                  WHERE r.live_id = lives.id
                    AND r.tenant_id = lives.tenant_id
                    AND r.campo = 'ads_gmv'
               ) THEN ads_gmv
-              ELSE $1
+              ELSE $1::numeric
             END,
             ads_cost = COALESCE($2, ads_cost),
-            live_impressions = $3,
-            product_impressions = $4,
-            product_clicks = $5,
-            avg_viewing_duration = $6,
-            new_followers = $7,
-            manual_views = $8,
-            manual_comments = $9,
-            manual_likes = $10,
-            manual_shares = $11,
-            manual_orders = $12,
+            live_impressions = COALESCE($3, live_impressions),
+            product_impressions = COALESCE($4, product_impressions),
+            product_clicks = COALESCE($5, product_clicks),
+            avg_viewing_duration = COALESCE($6, avg_viewing_duration),
+            new_followers = COALESCE($7, new_followers),
+            manual_views = COALESCE($8, manual_views),
+            manual_comments = COALESCE($9, manual_comments),
+            manual_likes = COALESCE($10, manual_likes),
+            manual_shares = COALESCE($11, manual_shares),
+            manual_orders = COALESCE($12, manual_orders),
             tiktok_room_id = COALESCE($13, tiktok_room_id),
-            studio_metrics = COALESCE($14::jsonb, studio_metrics),
+            studio_metrics = CASE WHEN $14::jsonb IS NULL THEN studio_metrics
+                                  ELSE COALESCE(studio_metrics, '{}'::jsonb) || $14::jsonb END,
             encerrado_em = COALESCE($15::timestamptz, encerrado_em),
             ads_import_batch_id = $16::uuid,
             ads_import_row_id = $17::uuid,
             ads_metrics_updated_at = NOW()
       WHERE id = $18::uuid
         AND tenant_id = $19::uuid
-    RETURNING ads_gmv, (ads_gmv IS DISTINCT FROM $1) AS gmv_preservado`,
+    RETURNING ads_gmv,
+              COALESCE(ads_gmv, manual_gmv, fat_gerado, 0) AS gmv_efetivo,
+              COALESCE(manual_orders, final_orders_count, 0) AS pedidos_efetivos,
+              ($1::numeric IS NOT NULL AND ads_gmv IS DISTINCT FROM $1::numeric) AS gmv_preservado`,
     [
       officialGmvOf(n),
       n.ads_cost ?? null,
@@ -427,7 +458,10 @@ async function applyMetricsToLive(db, { tenantId, liveId, normalized: n, batchId
   const linha = updated.rows[0]
   return {
     gmvPreservado: Boolean(linha?.gmv_preservado),
-    gmvOficial: linha?.ads_gmv == null ? null : Number(linha.ads_gmv),
+    gmvOficial: linha?.gmv_efetivo == null
+      ? (linha?.ads_gmv == null ? 0 : Number(linha.ads_gmv))
+      : Number(linha.gmv_efetivo),
+    pedidosEfetivos: linha?.pedidos_efetivos == null ? 0 : Number(linha.pedidos_efetivos),
   }
 }
 
@@ -558,7 +592,7 @@ async function aplicarLoteDeImportacao(db, { tenantId, batchId, sub }) {
   if (batch.status === 'applied') throw new ErroDeImportacao(409, 'Importacao ja aplicada')
 
   const rowsQ = await db.query(
-    `SELECT id, row_index, matched_live_id, normalized, decisao, marca_id, apresentadoras, cabine_id
+    `SELECT id, row_index, matched_live_id, raw, normalized, decisao, marca_id, apresentadoras, cabine_id
        FROM analytics_import_rows
       WHERE tenant_id = $1::uuid
         AND batch_id = $2::uuid
@@ -587,7 +621,7 @@ async function aplicarLoteDeImportacao(db, { tenantId, batchId, sub }) {
   const retroLiftPendente = new Map()
 
   for (const row of rowsQ.rows) {
-    const n = row.normalized ?? {}
+    const n = recoverImportMetrics(row.normalized, row.raw, batch.source_type)
     await db.query('SAVEPOINT import_row')
     try {
       const liveId = await resolveTargetLive(db, {
@@ -603,7 +637,7 @@ async function aplicarLoteDeImportacao(db, { tenantId, batchId, sub }) {
       }
       livesDoLote.set(liveId, row.row_index)
 
-      const { gmvPreservado, gmvOficial } = await applyMetricsToLive(db, {
+      const { gmvPreservado, gmvOficial, pedidosEfetivos } = await applyMetricsToLive(db, {
         tenantId,
         liveId,
         normalized: n,
@@ -618,16 +652,17 @@ async function aplicarLoteDeImportacao(db, { tenantId, batchId, sub }) {
         duracaoPlanilha: n.duration_seconds ?? null,
       })
 
-      const gmv = gmvPreservado ? gmvOficial : officialGmvOf(n)
-      if (gmv != null) {
+      const gmvInformado = ['provided', 'zero'].includes(n.metric_presence?.official_gmv)
+      const pedidosInformados = ['provided', 'zero'].includes(n.metric_presence?.attributed_orders)
+      if (gmvInformado || pedidosInformados) {
         // retroLift: false — o recálculo do mês inteiro sai daqui e roda UMA vez
         // por (apresentadora, mês) depois do laço. Rodando por linha, cada uma
         // refazia o mês que a anterior acabou de refazer: 9 linhas custavam 177s.
         const vendas = await calcularComissoesDaLive(db, {
           liveId,
           tenantId,
-          gmv,
-          pedidos: n.attributed_orders ?? 0,
+          gmv: gmvOficial,
+          pedidos: pedidosEfetivos,
           retroLift: false,
         })
         for (const venda of Array.isArray(vendas) ? vendas : []) {
@@ -1085,13 +1120,31 @@ export async function analyticsRoutes(app) {
       if (!batch) return reply.code(404).send({ error: 'Importacao nao encontrada' })
 
       const rowsQ = await db.query(
-        `SELECT id, row_index, normalized, marca_nome, live_date, start_time, duration_seconds,
-                matched_live_id, matched_agenda_evento_id, match_status, match_confidence,
-                match_reason, candidates, decisao, marca_id, cabine_id, apresentadoras,
-                applied_at, error
-           FROM analytics_import_rows
-          WHERE batch_id = $1::uuid AND tenant_id = $2::uuid
-          ORDER BY row_index ASC`,
+        `SELECT r.id, r.row_index, r.raw, r.normalized, r.marca_nome, r.live_date, r.start_time, r.duration_seconds,
+                r.matched_live_id, r.matched_agenda_evento_id, r.match_status, r.match_confidence,
+                r.match_reason, r.candidates, r.decisao, r.marca_id, r.cabine_id, r.apresentadoras,
+                r.applied_at, r.error,
+                CASE WHEN l.id IS NULL THEN NULL ELSE COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) END AS current_official_gmv,
+                CASE WHEN l.id IS NULL THEN NULL ELSE COALESCE(l.manual_orders, l.final_orders_count, 0) END AS current_orders,
+                l.manual_views AS current_views,
+                l.live_impressions AS current_live_impressions,
+                l.product_impressions AS current_product_impressions,
+                l.product_clicks AS current_product_clicks,
+                l.ads_cost AS current_ads_cost,
+                l.manual_likes AS current_likes,
+                l.manual_comments AS current_comments,
+                l.manual_shares AS current_shares,
+                l.new_followers AS current_new_followers,
+                l.avg_viewing_duration AS current_avg_viewing_duration,
+                EXISTS (
+                  SELECT 1 FROM live_metric_revisions revision
+                   WHERE revision.live_id = l.id AND revision.tenant_id = l.tenant_id
+                     AND revision.campo = 'ads_gmv'
+                ) AS gmv_manually_corrected
+           FROM analytics_import_rows r
+           LEFT JOIN lives l ON l.id = r.matched_live_id AND l.tenant_id = r.tenant_id
+          WHERE r.batch_id = $1::uuid AND r.tenant_id = $2::uuid
+          ORDER BY r.row_index ASC`,
         [batchId, tenant_id],
       )
 
@@ -1105,14 +1158,17 @@ export async function analyticsRoutes(app) {
         apresentadora_id: batch.apresentadora_id,
         apresentadora_nome: batch.apresentadora_nome,
         summary: batch.summary,
-        rows: rowsQ.rows.map((row) => ({
-          ...rowResponse(row),
-          decisao: row.decisao,
-          marca_id: row.marca_id,
-          cabine_id: row.cabine_id,
-          apresentadoras: row.apresentadoras ?? [],
-          applied_at: row.applied_at,
-        })),
+        rows: rowsQ.rows.map((row) => {
+          const normalized = recoverImportMetrics(row.normalized, row.raw, batch.source_type)
+          return {
+            ...rowResponse({ ...row, normalized }),
+            decisao: row.decisao,
+            marca_id: row.marca_id,
+            cabine_id: row.cabine_id,
+            apresentadoras: row.apresentadoras ?? [],
+            applied_at: row.applied_at,
+          }
+        }),
       }
     })
   })

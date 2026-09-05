@@ -81,6 +81,77 @@ const FIELD_MAPS = {
   [SOURCE_TIKTOK_STUDIO]: FIELD_MAP_STUDIO,
 }
 
+// Métricas são parciais por natureza: uma exportação pode omitir uma coluna sem
+// querer zerar o dado já conferido na live. O JSON persistido leva a presença para
+// o apply distinguir ausência de zero explícito sem depender da interface.
+const IMPORT_METRIC_FIELDS = [
+  'attributed_gmv', 'ads_gmv', 'ads_cost', 'attributed_orders', 'views',
+  'live_impressions', 'product_impressions', 'product_clicks',
+  'avg_viewing_duration', 'new_followers', 'likes', 'comments', 'shares',
+  ...STUDIO_EXTRA_FIELDS.map(([key]) => key),
+]
+
+function metricValue(record, names, presence, key, kind = 'num') {
+  const raw = pick(record, names)
+  if (raw == null || (typeof raw === 'string' && raw.trim() === '')) {
+    presence[key] = 'missing'
+    return null
+  }
+  if (kind === 'text') {
+    const value = String(raw).trim()
+    if (!value) {
+      presence[key] = 'missing'
+      return null
+    }
+    presence[key] = 'provided'
+    return value
+  }
+  const parsed = parseImportNumber(raw)
+  if (parsed == null) {
+    presence[key] = 'unknown'
+    return null
+  }
+  const value = kind === 'int' ? Math.round(parsed) : parsed
+  presence[key] = value === 0 ? 'zero' : 'provided'
+  return value
+}
+
+function completeMetricPresence(presence) {
+  for (const field of IMPORT_METRIC_FIELDS) {
+    if (!(field in presence)) presence[field] = 'missing'
+  }
+  return presence
+}
+
+/**
+ * Lotes antigos guardaram zero para campos ausentes. Como o raw original existe,
+ * reconstituímos somente métricas para aplicar/mostrar sem tocar data, match ou
+ * demais escolhas feitas na revisão. Sem raw confiável, todo campo fica unknown
+ * e o apply preserva a live.
+ */
+export function recoverImportMetrics(normalized, raw, sourceType) {
+  const current = normalized ?? {}
+  // Lotes novos já carregam a intenção de cada campo; não reparsear evita mudar
+  // um preview que já foi revisado com esta versão do contrato.
+  if (current.metric_presence) return current
+  if (!raw || !FIELD_MAPS[sourceType]) {
+    return {
+      ...current,
+      ...Object.fromEntries(IMPORT_METRIC_FIELDS.map((field) => [field, null])),
+      studio_metrics: null,
+      metric_presence: Object.fromEntries([...IMPORT_METRIC_FIELDS, 'official_gmv'].map((field) => [field, 'unknown'])),
+    }
+  }
+  const recovered = normalizeRow(raw, current.row_index ?? 0, sourceType).normalized
+  const metrics = Object.fromEntries(IMPORT_METRIC_FIELDS.map((field) => [field, recovered[field] ?? null]))
+  return {
+    ...current,
+    ...metrics,
+    studio_metrics: recovered.studio_metrics,
+    metric_presence: recovered.metric_presence,
+  }
+}
+
 function xmlUnescape(value) {
   return String(value ?? '')
     .replace(/&lt;/g, '<')
@@ -266,6 +337,7 @@ export function parseImportNumber(value) {
   const raw = String(value).trim()
   if (!raw || raw === '#DIV/0!' || raw === '-' || raw.toLowerCase() === 'nan') return null
   let s = raw.replace(/\s/g, '').replace(/R\$/gi, '').replace(/%/g, '')
+  if (!s || s === '+' || s === '-') return null
   const hasComma = s.includes(',')
   const hasDot = s.includes('.')
   if (hasComma && hasDot) {
@@ -409,14 +481,10 @@ function normalizeRowStudio(record, rowIndex) {
   const roomId = String(pick(record, FIELD_MAP.room_id) ?? '').trim() || null
 
   const studioMetrics = {}
+  const metricPresence = {}
   for (const [key, header, kind] of STUDIO_EXTRA_FIELDS) {
-    const value = pick(record, [header])
-    if (value === null || value === undefined || value === '') continue
-    if (kind === 'text') studioMetrics[key] = String(value).trim()
-    else {
-      const parsed = parseImportNumber(value)
-      if (parsed != null) studioMetrics[key] = kind === 'int' ? Math.round(parsed) : parsed
-    }
+    const value = metricValue(record, [header], metricPresence, key, kind)
+    if (value != null) studioMetrics[key] = value
   }
 
   const normalized = {
@@ -432,20 +500,21 @@ function normalizeRowStudio(record, rowIndex) {
     ended_at: endedAt,
     duration_seconds: durationSeconds,
     duration_hours: durationSeconds > 0 ? durationSeconds / 3600 : null,
-    attributed_gmv: parseImportNumber(pick(record, FIELD_MAP.attributed_gmv)),
-    attributed_orders: Math.round(parseImportNumber(pick(record, FIELD_MAP.attributed_orders)) ?? 0),
-    views: Math.round(parseImportNumber(pick(record, FIELD_MAP.views)) ?? 0),
-    live_impressions: Math.round(parseImportNumber(pick(record, FIELD_MAP.live_impressions)) ?? 0),
-    product_clicks: Math.round(parseImportNumber(pick(record, FIELD_MAP.product_clicks)) ?? 0),
-    avg_viewing_duration: parseImportNumber(pick(record, FIELD_MAP.avg_viewing_duration)),
-    product_impressions: Math.round(parseImportNumber(pick(record, FIELD_MAP.product_impressions)) ?? 0),
-    new_followers: Math.round(parseImportNumber(pick(record, FIELD_MAP.new_followers)) ?? 0),
-    likes: Math.round(parseImportNumber(pick(record, FIELD_MAP.likes)) ?? 0),
-    comments: Math.round(parseImportNumber(pick(record, FIELD_MAP.comments)) ?? 0),
-    shares: Math.round(parseImportNumber(pick(record, FIELD_MAP.shares)) ?? 0),
+    attributed_gmv: metricValue(record, FIELD_MAP.attributed_gmv, metricPresence, 'attributed_gmv'),
+    attributed_orders: metricValue(record, FIELD_MAP.attributed_orders, metricPresence, 'attributed_orders', 'int'),
+    views: metricValue(record, FIELD_MAP.views, metricPresence, 'views', 'int'),
+    live_impressions: metricValue(record, FIELD_MAP.live_impressions, metricPresence, 'live_impressions', 'int'),
+    product_clicks: metricValue(record, FIELD_MAP.product_clicks, metricPresence, 'product_clicks', 'int'),
+    avg_viewing_duration: metricValue(record, FIELD_MAP.avg_viewing_duration, metricPresence, 'avg_viewing_duration'),
+    product_impressions: metricValue(record, FIELD_MAP.product_impressions, metricPresence, 'product_impressions', 'int'),
+    new_followers: metricValue(record, FIELD_MAP.new_followers, metricPresence, 'new_followers', 'int'),
+    likes: metricValue(record, FIELD_MAP.likes, metricPresence, 'likes', 'int'),
+    comments: metricValue(record, FIELD_MAP.comments, metricPresence, 'comments', 'int'),
+    shares: metricValue(record, FIELD_MAP.shares, metricPresence, 'shares', 'int'),
     ads_cost: null,
     ads_gmv: null,
-    studio_metrics: studioMetrics,
+    studio_metrics: Object.keys(studioMetrics).length ? studioMetrics : null,
+    metric_presence: { ...completeMetricPresence(metricPresence), official_gmv: metricPresence.attributed_gmv },
   }
 
   const errors = []
@@ -464,6 +533,7 @@ function normalizeRowAds(record, rowIndex) {
   const startedAt = liveDate && startTime ? `${liveDate}T${startTime}:00${TZ_OFFSET}` : null
   const endedAt = startedAt && durationSeconds > 0 ? addSecondsToIso(startedAt, durationSeconds) : null
 
+  const metricPresence = {}
   const normalized = {
     row_index: rowIndex,
     source_type: SOURCE_TIKTOK_ADS,
@@ -475,19 +545,20 @@ function normalizeRowAds(record, rowIndex) {
     ended_at: endedAt,
     duration_seconds: durationSeconds,
     duration_hours: durationSeconds > 0 ? durationSeconds / 3600 : null,
-    attributed_gmv: parseImportNumber(pick(record, FIELD_MAP.attributed_gmv)),
-    attributed_orders: Math.round(parseImportNumber(pick(record, FIELD_MAP.attributed_orders)) ?? 0),
-    views: Math.round(parseImportNumber(pick(record, FIELD_MAP.views)) ?? 0),
-    live_impressions: Math.round(parseImportNumber(pick(record, FIELD_MAP.live_impressions)) ?? 0),
-    product_clicks: Math.round(parseImportNumber(pick(record, FIELD_MAP.product_clicks)) ?? 0),
-    avg_viewing_duration: parseImportNumber(pick(record, FIELD_MAP.avg_viewing_duration)),
-    product_impressions: Math.round(parseImportNumber(pick(record, FIELD_MAP.product_impressions)) ?? 0),
-    new_followers: Math.round(parseImportNumber(pick(record, FIELD_MAP.new_followers)) ?? 0),
-    likes: Math.round(parseImportNumber(pick(record, FIELD_MAP.likes)) ?? 0),
-    comments: Math.round(parseImportNumber(pick(record, FIELD_MAP.comments)) ?? 0),
-    shares: Math.round(parseImportNumber(pick(record, FIELD_MAP.shares)) ?? 0),
-    ads_cost: parseImportNumber(pick(record, FIELD_MAP.ads_cost)),
-    ads_gmv: parseImportNumber(pick(record, FIELD_MAP.ads_gmv)),
+    attributed_gmv: metricValue(record, FIELD_MAP.attributed_gmv, metricPresence, 'attributed_gmv'),
+    attributed_orders: metricValue(record, FIELD_MAP.attributed_orders, metricPresence, 'attributed_orders', 'int'),
+    views: metricValue(record, FIELD_MAP.views, metricPresence, 'views', 'int'),
+    live_impressions: metricValue(record, FIELD_MAP.live_impressions, metricPresence, 'live_impressions', 'int'),
+    product_clicks: metricValue(record, FIELD_MAP.product_clicks, metricPresence, 'product_clicks', 'int'),
+    avg_viewing_duration: metricValue(record, FIELD_MAP.avg_viewing_duration, metricPresence, 'avg_viewing_duration'),
+    product_impressions: metricValue(record, FIELD_MAP.product_impressions, metricPresence, 'product_impressions', 'int'),
+    new_followers: metricValue(record, FIELD_MAP.new_followers, metricPresence, 'new_followers', 'int'),
+    likes: metricValue(record, FIELD_MAP.likes, metricPresence, 'likes', 'int'),
+    comments: metricValue(record, FIELD_MAP.comments, metricPresence, 'comments', 'int'),
+    shares: metricValue(record, FIELD_MAP.shares, metricPresence, 'shares', 'int'),
+    ads_cost: metricValue(record, FIELD_MAP.ads_cost, metricPresence, 'ads_cost'),
+    ads_gmv: metricValue(record, FIELD_MAP.ads_gmv, metricPresence, 'ads_gmv'),
+    metric_presence: { ...completeMetricPresence(metricPresence), official_gmv: metricPresence.ads_gmv },
   }
 
   const errors = []

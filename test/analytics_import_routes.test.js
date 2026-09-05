@@ -88,7 +88,41 @@ describe('analytics imports routes', () => {
     await app.close()
   })
 
-  it('applies only matched rows to lives ads metrics without changing billing fields', async () => {
+  it('returns recovered legacy presence and the matched live snapshot without N+1 queries', async () => {
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('FROM analytics_import_batches b')) return { rows: [{ id: batchId, source_type: 'tiktok_ads', status: 'preview' }] }
+      if (sql.includes('FROM analytics_import_rows r')) {
+        return { rows: [{
+          id: rowId, row_index: 1,
+          raw: { Views: '', 'Attributed orders': '0', 'Ads GMV': '' },
+          normalized: { source_type: 'tiktok_ads', views: 0, attributed_orders: 0, ads_gmv: 0 },
+          matched_live_id: liveId, candidates: [], apresentadoras: [],
+          current_official_gmv: '2419', current_orders: 9, gmv_manually_corrected: true,
+        }] }
+      }
+      throw new Error(`Unexpected SQL: ${sql}`)
+    })
+    const app = buildApp(queryMock)
+    await app.register(analyticsRoutes)
+    const res = await app.inject({ method: 'GET', url: `/v1/analytics/imports/${batchId}` })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().rows[0]).toMatchObject({
+      views: null,
+      attributed_orders: 0,
+      ads_gmv: null,
+      metric_presence: { views: 'missing', attributed_orders: 'zero', official_gmv: 'missing' },
+      current_metrics: { official_gmv: 2419, attributed_orders: 9 },
+      gmv_manually_corrected: true,
+    })
+    const rowsSql = queryMock.mock.calls.find(([sql]) => sql.includes('FROM analytics_import_rows r'))?.[0]
+    expect(rowsSql).toContain('LEFT JOIN lives')
+    expect(rowsSql).toContain('live_metric_revisions')
+    await app.close()
+  })
+
+  it('uses persisted orders when GMV arrives without orders', async () => {
+    const { calcularComissoesDaLive } = await import('../src/services/commission-engine.js')
+    calcularComissoesDaLive.mockClear()
     let updateLivesArgs = null
     const normalized = {
       ads_gmv: 1000,
@@ -102,7 +136,7 @@ describe('analytics imports routes', () => {
       comments: 120,
       likes: 6000,
       shares: 8,
-      attributed_orders: 9,
+      metric_presence: { official_gmv: 'provided', attributed_orders: 'missing' },
     }
     const queryMock = vi.fn(async (sql, args = []) => {
       if (['BEGIN', 'COMMIT'].includes(sql) || sql.includes('SAVEPOINT')) return { rows: [] }
@@ -115,7 +149,7 @@ describe('analytics imports routes', () => {
       if (sql.includes('SELECT id FROM lives WHERE id')) return { rows: [{ id: liveId }], rowCount: 1 }
       if (sql.includes('UPDATE lives')) {
         updateLivesArgs = args
-        return { rows: [{ ads_gmv: args[0], gmv_preservado: false }], rowCount: 1 }
+        return { rows: [{ ads_gmv: args[0], gmv_efetivo: args[0], pedidos_efetivos: 9, gmv_preservado: false }], rowCount: 1 }
       }
       if (sql.includes('UPDATE analytics_import_rows')) return { rows: [] }
       if (sql.includes('UPDATE analytics_import_batches')) return { rows: [] }
@@ -129,11 +163,33 @@ describe('analytics imports routes', () => {
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toMatchObject({ ok: true, batch_id: batchId, applied_rows: 1, failed_rows: [] })
-    expect(updateLivesArgs.slice(0, 12)).toEqual([1000, 200, 40000, 7000, 330, 27, 12, 3000, 120, 6000, 8, 9])
+    expect(updateLivesArgs.slice(0, 12)).toEqual([1000, 200, 40000, 7000, 330, 27, 12, 3000, 120, 6000, 8, null])
     const updateSql = queryMock.mock.calls.find(([sql]) => sql.includes('UPDATE lives'))?.[0]
-    expect(updateSql).not.toContain('fat_gerado')
+    expect(updateSql).not.toMatch(/fat_gerado\s*=/)
     expect(updateSql).not.toContain('comissao_calculada')
+    expect(calcularComissoesDaLive.mock.calls[0][1]).toMatchObject({ gmv: 1000, pedidos: 9 })
 
+    await app.close()
+  })
+
+  it('does not recalculate commission for an audience-only import', async () => {
+    const { calcularComissoesDaLive } = await import('../src/services/commission-engine.js')
+    calcularComissoesDaLive.mockClear()
+    const normalized = { views: 123, metric_presence: { official_gmv: 'missing', attributed_orders: 'missing' } }
+    const queryMock = vi.fn(async (sql) => {
+      if (['BEGIN', 'COMMIT'].includes(sql) || sql.includes('SAVEPOINT')) return { rows: [] }
+      if (sql.includes('FROM analytics_import_batches') && sql.includes('FOR UPDATE')) return { rows: [{ id: batchId, status: 'preview', source_type: 'tiktok_ads', marca_id: null }] }
+      if (sql.includes('FROM analytics_import_rows') && sql.includes("decisao IN ('vincular', 'criar')")) return { rows: [{ id: rowId, row_index: 1, matched_live_id: liveId, normalized, decisao: 'vincular', marca_id: null, apresentadoras: null }] }
+      if (sql.includes('SELECT id FROM lives WHERE id')) return { rows: [{ id: liveId }], rowCount: 1 }
+      if (sql.includes('UPDATE lives')) return { rows: [{ ads_gmv: 1000, gmv_efetivo: 1000, pedidos_efetivos: 9, gmv_preservado: false }] }
+      if (sql.includes('UPDATE analytics_import_rows') || sql.includes('UPDATE analytics_import_batches')) return { rows: [] }
+      throw new Error(`Unexpected SQL: ${sql}`)
+    })
+    const app = buildApp(queryMock)
+    await app.register(analyticsRoutes)
+    const res = await app.inject({ method: 'POST', url: `/v1/analytics/imports/${batchId}/apply` })
+    expect(res.statusCode).toBe(200)
+    expect(calcularComissoesDaLive).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -160,7 +216,7 @@ describe('analytics imports routes', () => {
       return porLinha[chamada] ?? []
     })
 
-    const normalized = { ads_gmv: 500, attributed_orders: 3 }
+    const normalized = { ads_gmv: 500, attributed_orders: 3, metric_presence: { official_gmv: 'provided', attributed_orders: 'provided' } }
     const linhas = [1, 2, 3].map((i) => ({
       id: `4444444${i}-4444-4444-8444-44444444444${i}`,
       row_index: i,
@@ -214,7 +270,7 @@ describe('analytics imports routes', () => {
     calcularComissoesDaLive.mockImplementation(async () => ([]))
 
     let updateSql = null
-    const normalized = { ads_gmv: 1000, attributed_orders: 9 }
+    const normalized = { ads_gmv: 1000, attributed_orders: 9, metric_presence: { official_gmv: 'provided', attributed_orders: 'provided' } }
     const queryMock = vi.fn(async (sql) => {
       if (['BEGIN', 'COMMIT'].includes(sql) || sql.includes('SAVEPOINT')) return { rows: [] }
       if (sql.includes('FROM analytics_import_batches') && sql.includes('FOR UPDATE')) {

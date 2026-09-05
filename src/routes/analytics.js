@@ -2006,9 +2006,12 @@ export async function analyticsRoutes(app) {
               END
             ), 0)::bigint AS pedidos,
             COALESCE(SUM(COALESCE(l.live_impressions, 0)), 0)::bigint AS impressoes,
+            COUNT(*) FILTER (WHERE l.live_impressions IS NOT NULL)::int AS lives_com_impressoes_registradas,
             COALESCE(SUM(COALESCE(l.manual_views, l.final_peak_viewers, 0)), 0)::bigint AS visualizacoes,
             COALESCE(SUM(COALESCE(l.product_impressions, 0)), 0)::bigint AS impressoes_produto,
+            COUNT(*) FILTER (WHERE l.product_impressions IS NOT NULL)::int AS lives_com_impressoes_produto_registradas,
             COALESCE(SUM(COALESCE(l.product_clicks, 0)), 0)::bigint AS cliques,
+            COUNT(*) FILTER (WHERE l.product_clicks IS NOT NULL)::int AS lives_com_cliques_produto_registrados,
             COALESCE(SUM(
               CASE
                 WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
@@ -2087,6 +2090,11 @@ export async function analyticsRoutes(app) {
           periodo: { from: fromDate, to: toDate, mesAno },
           filtros: { marca_id: marcaId, apresentadora_id: apresentadoraId },
           tem_dados_ads: impressoes > 0 || impressoesProduto > 0 || cliques > 0,
+          cobertura: {
+            lives_com_impressoes_registradas: toInt(r.lives_com_impressoes_registradas),
+            lives_com_impressoes_produto_registradas: toInt(r.lives_com_impressoes_produto_registradas),
+            lives_com_cliques_produto_registrados: toInt(r.lives_com_cliques_produto_registrados),
+          },
           resumo: {
             total_lives: totalLives,
             gmv,
@@ -2107,6 +2115,101 @@ export async function analyticsRoutes(app) {
     } catch (err) {
       request.log.error({ err }, 'analytics/funil error')
       return reply.code(500).send({ error: err.message })
+    }
+  })
+
+  // ── Audiência por marca ───────────────────────────────────────────────
+  // Comparação de dados brutos importados, sem rateio de apresentadora nem
+  // fallback de pico de espectadores. Um campo nulo permanece indisponível;
+  // zero só é devolvido quando há ao menos uma live com valor registrado.
+  app.get('/v1/analytics/audiencia-marcas', {
+    preHandler: [app.authenticate, app.requirePapel(READ_ANALYTICS)],
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          mesAno: { type: 'string' },
+          mes: { type: 'string' },
+          ano: { type: 'string' },
+          from: { type: 'string' },
+          to: { type: 'string' },
+          marca_id: { type: 'string' },
+        },
+        additionalProperties: true,
+      },
+    },
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const period = resolveAnalyticsPeriod(request.query)
+    if (period.error) return reply.code(400).send({ error: period.error })
+    const { fromDate, toDate, mesAno } = period
+
+    if (request.query?.apresentadora_id != null) {
+      return reply.code(400).send({ error: 'apresentadora_id is not supported for audience comparison' })
+    }
+    const marcaId = request.query?.marca_id ? String(request.query.marca_id) : null
+    if (marcaId && !UUID_RE.test(marcaId)) return reply.code(400).send({ error: 'marca_id must be a valid UUID' })
+
+    try {
+      return await app.withTenant(tenant_id, async (db) => {
+        const result = await db.query(`
+          SELECT
+            l.marca_id,
+            COALESCE(m.nome, 'Marca não identificada') AS marca_nome,
+            COUNT(*)::int AS lives_total,
+            COUNT(*) FILTER (WHERE l.ads_import_batch_id IS NOT NULL)::int AS lives_com_import,
+            SUM(l.live_impressions) FILTER (WHERE l.live_impressions IS NOT NULL)::bigint AS impressoes_live,
+            COUNT(*) FILTER (WHERE l.live_impressions IS NOT NULL)::int AS lives_com_impressoes_registradas,
+            SUM(l.manual_views) FILTER (WHERE l.manual_views IS NOT NULL)::bigint AS visualizacoes_manuais,
+            COUNT(*) FILTER (WHERE l.manual_views IS NOT NULL)::int AS lives_com_visualizacoes_registradas,
+            SUM(l.product_impressions) FILTER (WHERE l.product_impressions IS NOT NULL)::bigint AS impressoes_produto,
+            COUNT(*) FILTER (WHERE l.product_impressions IS NOT NULL)::int AS lives_com_impressoes_produto_registradas,
+            SUM(l.product_clicks) FILTER (WHERE l.product_clicks IS NOT NULL)::bigint AS cliques_produto,
+            COUNT(*) FILTER (WHERE l.product_clicks IS NOT NULL)::int AS lives_com_cliques_produto_registrados
+          FROM lives l
+          LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'encerrada'
+            AND COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
+            AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+            AND EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) >= 300
+            AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
+            AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
+            AND ($3::uuid IS NULL OR l.marca_id = $3::uuid)
+          GROUP BY l.marca_id, m.nome
+          ORDER BY marca_nome ASC
+        `, [fromDate, toDate, marcaId])
+
+        const numberOrNull = (value) => value == null ? null : Number(value)
+        const int = (value) => Number(value ?? 0)
+        const rows = result.rows.map((row) => ({
+          marca_id: row.marca_id ?? null,
+          marca_nome: row.marca_nome ?? 'Marca não identificada',
+          lives_total: int(row.lives_total),
+          lives_com_import: int(row.lives_com_import),
+          impressoes_live: numberOrNull(row.impressoes_live),
+          lives_com_impressoes_registradas: int(row.lives_com_impressoes_registradas),
+          visualizacoes_manuais: numberOrNull(row.visualizacoes_manuais),
+          lives_com_visualizacoes_registradas: int(row.lives_com_visualizacoes_registradas),
+          impressoes_produto: numberOrNull(row.impressoes_produto),
+          lives_com_impressoes_produto_registradas: int(row.lives_com_impressoes_produto_registradas),
+          cliques_produto: numberOrNull(row.cliques_produto),
+          lives_com_cliques_produto_registrados: int(row.lives_com_cliques_produto_registrados),
+        }))
+
+        return {
+          periodo: { from: fromDate, to: toDate, mesAno },
+          filtros: { marca_id: marcaId },
+          cobertura: {
+            descricao: 'Lives com valor registrado indicam que o campo não estava nulo na live.',
+            ressalva: 'Importações antigas podem gravar zero quando a coluna não existia no arquivo; essa contagem não comprova cobertura da fonte.',
+          },
+          rows,
+        }
+      })
+    } catch (err) {
+      request.log.error({ err }, 'analytics/audiencia-marcas error')
+      return reply.code(500).send({ error: 'Não foi possível carregar a audiência por marca.' })
     }
   })
 

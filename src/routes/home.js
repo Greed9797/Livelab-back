@@ -157,8 +157,8 @@ export async function homeRoutes(app) {
         JOIN contratos c ON c.cliente_id = l.cliente_id AND c.status = 'ativo' AND c.tenant_id = l.tenant_id
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
-          AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-              = date_trunc('month', $1::date)
+          AND l.iniciado_em >= ($1::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
+          AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `, [mesStart]),
         db.query(`
         SELECT COALESCE(SUM(valor), 0) AS valor
@@ -274,6 +274,8 @@ export async function homeRoutes(app) {
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND status = 'encerrada'
+          AND iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
+          AND iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `, [mesStart, cutoffDay]),
         db.query(`
         WITH live_metrics AS (
@@ -294,6 +296,8 @@ export async function homeRoutes(app) {
           FROM lives l
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status = 'encerrada'
+            AND l.iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
+            AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
         ),
         video_metrics AS (
           SELECT
@@ -355,8 +359,8 @@ export async function homeRoutes(app) {
         SELECT COUNT(id) AS lives_hoje
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND date_trunc('day', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
-              = date_trunc('day', NOW() AT TIME ZONE 'America/Sao_Paulo')
+          AND iniciado_em >= ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
+          AND iniciado_em < (((NOW() AT TIME ZONE 'America/Sao_Paulo')::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `),
         db.query(`
         SELECT COALESCE(AVG(viewer_count), 0) AS media
@@ -490,6 +494,8 @@ export async function homeRoutes(app) {
             AND status = 'encerrada'
             AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
             AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
+            AND iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
+            AND iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
         `, [mesStart, cutoffDay]),
         // Meta de GMV/h + cor por marca, para o mês exibido.
         // Precedência da meta (migration 124): marca_metas_hora do MESMO
@@ -596,7 +602,8 @@ export async function homeRoutes(app) {
             LIMIT 1
           ) ap_marca ON true
           WHERE ae.tenant_id = current_setting('app.tenant_id', true)::uuid
-            AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+            AND ae.data_inicio >= ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
+            AND ae.data_inicio < (((NOW() AT TIME ZONE 'America/Sao_Paulo')::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'America/Sao_Paulo')
           ORDER BY ae.data_inicio ASC
           LIMIT 50
         `).then((agendaQ) => agendaQ.rows.map(r => ({
@@ -648,6 +655,8 @@ export async function homeRoutes(app) {
             FROM lives l
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
+              AND l.iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
+              AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
               AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
                   IN (date_trunc('month', $1::date),
                       date_trunc('month', $1::date - INTERVAL '1 month'))

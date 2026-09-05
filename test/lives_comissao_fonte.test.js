@@ -19,8 +19,10 @@ describe('GET /v1/lives e /v1/lives/:id — comissão da apresentadora vem do mo
   for (const rota of ["app.get('/v1/lives',", "app.get('/v1/lives/:id',"]) {
     it(`${rota} soma vendas_atribuidas da live e só cai no snapshot como fallback`, () => {
       const bloco = blocoDaRota(rota)
-      expect(bloco).toMatch(/SUM\(va_c\.comissao_apresentadora\)[\s\S]*va_c\.origem = 'live'[\s\S]*va_c\.origem_id = l\.id[\s\S]*l\.comissao_apresentadora_valor\s*\)\s*AS comissao_apresentadora/)
-      expect(bloco).toMatch(/NULLIF\(SUM\(va_c\.gmv\), 0\)[\s\S]*l\.comissao_apresentadora_pct\s*\)\s*AS pct_apresentadora/)
+      expect(bloco).toMatch(/SUM\(va_c\.comissao_apresentadora\)[\s\S]*va_c\.origem = 'live'[\s\S]*va_c\.origem_id = l\.id/)
+      expect(bloco).toMatch(/NULLIF\(SUM\(va_c\.gmv\), 0\)/)
+      expect(bloco).toMatch(/COALESCE\(va_comissao\.comissao_apresentadora, l\.comissao_apresentadora_valor\) AS comissao_apresentadora/)
+      expect(bloco).toMatch(/COALESCE\(va_comissao\.pct_apresentadora, l\.comissao_apresentadora_pct\) AS pct_apresentadora/)
       // o snapshot cru não pode voltar a ser a fonte primária
       expect(bloco).not.toMatch(/^\s*l\.comissao_apresentadora_valor AS comissao_apresentadora/m)
     })

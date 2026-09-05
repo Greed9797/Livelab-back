@@ -138,6 +138,41 @@ function celulaFromRow(row, origem) {
   }
 }
 
+const GRADE_RESOLVIDA_SELECT = `
+  SELECT 'padrao'::text AS origem,
+         gp.dia_semana,
+         NULL::date AS data,
+         gp.id, gp.tenant_id, gp.cabine_id, gp.hora_inicio, gp.hora_fim,
+         gp.marca_id, gp.apresentadora_id, gp.observacao,
+         m.nome AS marca_nome,
+         m.cor AS marca_cor,
+         m.logo_url AS marca_logo_url,
+         a.nome AS apresentadora_nome,
+         c.numero AS cabine_numero
+  FROM grade_padrao gp
+  JOIN marcas m ON m.id = gp.marca_id AND m.tenant_id = gp.tenant_id
+  JOIN cabines c ON c.id = gp.cabine_id AND c.tenant_id = gp.tenant_id
+  LEFT JOIN apresentadoras a ON a.id = gp.apresentadora_id AND a.tenant_id = gp.tenant_id
+  WHERE gp.tenant_id = $1::uuid
+  UNION ALL
+  SELECT 'excecao'::text AS origem,
+         NULL::smallint AS dia_semana,
+         ge.data,
+         ge.id, ge.tenant_id, ge.cabine_id, ge.hora_inicio, ge.hora_fim,
+         ge.marca_id, ge.apresentadora_id, ge.observacao,
+         m.nome AS marca_nome,
+         m.cor AS marca_cor,
+         m.logo_url AS marca_logo_url,
+         a.nome AS apresentadora_nome,
+         c.numero AS cabine_numero
+  FROM grade_excecoes ge
+  LEFT JOIN marcas m ON m.id = ge.marca_id AND m.tenant_id = ge.tenant_id
+  JOIN cabines c ON c.id = ge.cabine_id AND c.tenant_id = ge.tenant_id
+  LEFT JOIN apresentadoras a ON a.id = ge.apresentadora_id AND a.tenant_id = ge.tenant_id
+  WHERE ge.tenant_id = $1::uuid
+    AND ge.data BETWEEN $2::date AND $3::date`
+
+// Reutilizado pela tela de configuração do padrão, que aceita ORDER BY externo.
 const PADRAO_SELECT = `
   SELECT gp.*,
          m.nome AS marca_nome,
@@ -150,20 +185,6 @@ const PADRAO_SELECT = `
   JOIN cabines c ON c.id = gp.cabine_id AND c.tenant_id = gp.tenant_id
   LEFT JOIN apresentadoras a ON a.id = gp.apresentadora_id AND a.tenant_id = gp.tenant_id
   WHERE gp.tenant_id = $1::uuid`
-
-const EXCECOES_SELECT = `
-  SELECT ge.*,
-         m.nome AS marca_nome,
-         m.cor AS marca_cor,
-         m.logo_url AS marca_logo_url,
-         a.nome AS apresentadora_nome,
-         c.numero AS cabine_numero
-  FROM grade_excecoes ge
-  LEFT JOIN marcas m ON m.id = ge.marca_id AND m.tenant_id = ge.tenant_id
-  JOIN cabines c ON c.id = ge.cabine_id AND c.tenant_id = ge.tenant_id
-  LEFT JOIN apresentadoras a ON a.id = ge.apresentadora_id AND a.tenant_id = ge.tenant_id
-  WHERE ge.tenant_id = $1::uuid
-    AND ge.data BETWEEN $2::date AND $3::date`
 
 // Merge padrão + exceções de um dia. Retorna células ordenadas por cabine/hora.
 function resolverDia(dataStr, padraoPorDow, excecoesPorData) {
@@ -181,20 +202,19 @@ function resolverDia(dataStr, padraoPorDow, excecoesPorData) {
 }
 
 async function carregarGradeResolvida(db, tenantId, dataInicio, dataFim) {
-  const [padraoQ, excecoesQ] = [
-    await db.query(PADRAO_SELECT, [tenantId]),
-    await db.query(EXCECOES_SELECT, [tenantId, dataInicio, dataFim]),
-  ]
+  // Uma conexão de withTenant serializa Promise.all. O UNION conserva os dois
+  // índices (tenant/dia e tenant/data) e elimina um round-trip da Grade.
+  const gradeQ = await db.query(GRADE_RESOLVIDA_SELECT, [tenantId, dataInicio, dataFim])
 
   const padraoPorDow = new Map()
-  for (const row of padraoQ.rows) {
+  for (const row of gradeQ.rows.filter((row) => row.origem === 'padrao')) {
     const dow = Number(row.dia_semana)
     if (!padraoPorDow.has(dow)) padraoPorDow.set(dow, [])
     padraoPorDow.get(dow).push(row)
   }
 
   const excecoesPorData = new Map()
-  for (const row of excecoesQ.rows) {
+  for (const row of gradeQ.rows.filter((row) => row.origem === 'excecao')) {
     const data = normalizeData(row.data)
     if (!excecoesPorData.has(data)) excecoesPorData.set(data, [])
     excecoesPorData.get(data).push(row)

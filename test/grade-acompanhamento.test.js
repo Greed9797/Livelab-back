@@ -184,7 +184,8 @@ describe('GET /v1/grade/acompanhamento', () => {
     const response = await app.inject({ method: 'GET', url: '/v1/grade/acompanhamento?data=2026-07-17' })
     expect(response.statusCode).toBe(200)
     expect(response.json().cabines[0]).toMatchObject({ id: cabine1, sem_reserva: true, programacao_grade: [] })
-    expect(query).toHaveBeenCalledTimes(5)
+    // padrão e exceções viajam no mesmo SELECT; withTenant tem um só client.
+    expect(query).toHaveBeenCalledTimes(4)
     for (const [, values] of query.mock.calls) expect(values[0]).toBe(tenantId)
     await app.close()
   })

@@ -350,6 +350,29 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('GET /v1/lives filtra datas com limites São Paulo sem transformar iniciado_em', async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/v1/lives?data_inicio=2018-11-03&data_fim=2018-11-04',
+    })
+
+    expect(res.statusCode).toBe(200)
+    const [sql, params] = queryMock.mock.calls[0]
+    expect(sql).toContain('l.iniciado_em >= $2::timestamptz')
+    expect(sql).toContain('l.iniciado_em < $3::timestamptz')
+    expect(sql).not.toContain("l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date")
+    expect(params).toEqual([
+      'tenant-1',
+      '2018-11-03T00:00:00 America/Sao_Paulo',
+      '2018-11-05T00:00:00 America/Sao_Paulo',
+    ])
+    await app.close()
+  })
+
   it('GET /v1/lives?paginado=1 returns { items, total, page, limit } and applies q search', async () => {
     const queryMock = vi.fn().mockResolvedValue({
       rows: [{ id: 'live-1', total_count: '42' }],

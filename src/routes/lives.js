@@ -8,7 +8,7 @@ import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { calcularComissaoApresentadora, isFimDeSemanaSP } from '../services/comissao.js'
 import { moneySchema } from '../lib/money.js'
 import { invalidateHomeDashboard } from './home.js'
-import { saoPauloDateInput, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
+import { saoPauloDateInput, saoPauloDayBounds, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
 import { applyApresentadorasToLive } from '../lib/live-rateio.js'
@@ -1549,17 +1549,8 @@ export async function livesRoutes(app) {
                 -- mensal + 2% fim de semana), o mesmo que Financeiro e /comissoes leem. O snapshot
                 -- lives.comissao_apresentadora_* vem do apresentadoras.comissao_pct chapado (0 em
                 -- 13 de 18 cadastros) e fica só como fallback de live ainda sem venda atribuída.
-                COALESCE(
-                  (SELECT SUM(va_c.comissao_apresentadora) FROM vendas_atribuidas va_c
-                    WHERE va_c.tenant_id = l.tenant_id AND va_c.origem = 'live' AND va_c.origem_id = l.id),
-                  l.comissao_apresentadora_valor
-                ) AS comissao_apresentadora,
-                COALESCE(
-                  (SELECT ROUND(SUM(va_c.comissao_apresentadora) / NULLIF(SUM(va_c.gmv), 0) * 100, 2)
-                     FROM vendas_atribuidas va_c
-                    WHERE va_c.tenant_id = l.tenant_id AND va_c.origem = 'live' AND va_c.origem_id = l.id),
-                  l.comissao_apresentadora_pct
-                ) AS pct_apresentadora,
+                COALESCE(va_comissao.comissao_apresentadora, l.comissao_apresentadora_valor) AS comissao_apresentadora,
+                COALESCE(va_comissao.pct_apresentadora, l.comissao_apresentadora_pct) AS pct_apresentadora,
                 l.final_orders_count, l.final_peak_viewers,
                 l.final_total_likes, l.final_total_comments,
                 l.final_total_shares, l.final_gifts_diamonds,
@@ -1640,6 +1631,14 @@ export async function livesRoutes(app) {
            ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
            LIMIT 1
          ) va_marca ON true
+         LEFT JOIN LATERAL (
+           SELECT SUM(va_c.comissao_apresentadora) AS comissao_apresentadora,
+                  ROUND(SUM(va_c.comissao_apresentadora) / NULLIF(SUM(va_c.gmv), 0) * 100, 2) AS pct_apresentadora
+           FROM vendas_atribuidas va_c
+           WHERE va_c.tenant_id = l.tenant_id
+             AND va_c.origem = 'live'
+             AND va_c.origem_id = l.id
+         ) va_comissao ON true
          LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id
          LEFT JOIN LATERAL (
            SELECT viewer_count, total_viewers, total_orders, gmv,
@@ -1711,8 +1710,15 @@ export async function livesRoutes(app) {
       return reply.code(400).send({ error: 'Selecione uma cabine válida.' })
     }
     const dateRe = /^\d{4}-\d{2}-\d{2}$/
-    const fDataInicio = dateRe.test(request.query?.data_inicio ?? '') ? request.query.data_inicio : null
-    const fDataFim = dateRe.test(request.query?.data_fim ?? '') ? request.query.data_fim : null
+    const rawDataInicio = request.query?.data_inicio ?? ''
+    const rawDataFim = request.query?.data_fim ?? ''
+    const fDataInicio = dateRe.test(rawDataInicio) ? rawDataInicio : null
+    const fDataFim = dateRe.test(rawDataFim) ? rawDataFim : null
+    const dataInicioBounds = fDataInicio ? saoPauloDayBounds(fDataInicio) : null
+    const dataFimBounds = fDataFim ? saoPauloDayBounds(fDataFim) : null
+    if ((fDataInicio && !dataInicioBounds) || (fDataFim && !dataFimBounds)) {
+      return reply.code(400).send({ error: 'Informe uma data válida (YYYY-MM-DD).' })
+    }
     const fMarcaId = UUID_RE.test(request.query?.marca_id ?? '') ? request.query.marca_id : null
     const fCabineId = UUID_RE.test(request.query?.cabine_id ?? '') ? request.query.cabine_id : null
     const fApresentadoraId = UUID_RE.test(request.query?.apresentadora_id ?? '') ? request.query.apresentadora_id : null
@@ -1730,13 +1736,13 @@ export async function livesRoutes(app) {
         params.push(fCabineId)
         where += ` AND l.cabine_id = $${params.length}::uuid`
       }
-      if (fDataInicio) {
-        params.push(fDataInicio)
-        where += ` AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date >= $${params.length}::date`
+      if (dataInicioBounds) {
+        params.push(dataInicioBounds.start)
+        where += ` AND l.iniciado_em >= $${params.length}::timestamptz`
       }
-      if (fDataFim) {
-        params.push(fDataFim)
-        where += ` AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date <= $${params.length}::date`
+      if (dataFimBounds) {
+        params.push(dataFimBounds.end)
+        where += ` AND l.iniciado_em < $${params.length}::timestamptz`
       }
       if (fMarcaId) {
         params.push(fMarcaId)
@@ -1850,6 +1856,16 @@ export async function livesRoutes(app) {
            ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
            LIMIT 1
          ) va_marca ON true`
+      // A lista mostra valor e percentual da mesma agregação. Uma única passada
+      // por vendas_atribuidas por live evita duas subconsultas correlacionadas.
+      const joinVaComissao = `LEFT JOIN LATERAL (
+           SELECT SUM(va_c.comissao_apresentadora) AS comissao_apresentadora,
+                  ROUND(SUM(va_c.comissao_apresentadora) / NULLIF(SUM(va_c.gmv), 0) * 100, 2) AS pct_apresentadora
+           FROM vendas_atribuidas va_c
+           WHERE va_c.tenant_id = l.tenant_id
+             AND va_c.origem = 'live'
+             AND va_c.origem_id = l.id
+         ) va_comissao ON true`
       const joinClTiktok = `LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id`
       const joinLs = `LEFT JOIN LATERAL (
            SELECT viewer_count, total_viewers, total_orders, gmv,
@@ -1898,17 +1914,8 @@ export async function livesRoutes(app) {
                 -- mensal + 2% fim de semana), o mesmo que Financeiro e /comissoes leem. O snapshot
                 -- lives.comissao_apresentadora_* vem do apresentadoras.comissao_pct chapado (0 em
                 -- 13 de 18 cadastros) e fica só como fallback de live ainda sem venda atribuída.
-                COALESCE(
-                  (SELECT SUM(va_c.comissao_apresentadora) FROM vendas_atribuidas va_c
-                    WHERE va_c.tenant_id = l.tenant_id AND va_c.origem = 'live' AND va_c.origem_id = l.id),
-                  l.comissao_apresentadora_valor
-                ) AS comissao_apresentadora,
-                COALESCE(
-                  (SELECT ROUND(SUM(va_c.comissao_apresentadora) / NULLIF(SUM(va_c.gmv), 0) * 100, 2)
-                     FROM vendas_atribuidas va_c
-                    WHERE va_c.tenant_id = l.tenant_id AND va_c.origem = 'live' AND va_c.origem_id = l.id),
-                  l.comissao_apresentadora_pct
-                ) AS pct_apresentadora,
+                COALESCE(va_comissao.comissao_apresentadora, l.comissao_apresentadora_valor) AS comissao_apresentadora,
+                COALESCE(va_comissao.pct_apresentadora, l.comissao_apresentadora_pct) AS pct_apresentadora,
                 l.final_orders_count, l.final_peak_viewers,
                 l.final_total_likes, l.final_total_comments,
                 l.final_total_shares, l.final_gifts_diamonds,
@@ -1948,6 +1955,7 @@ export async function livesRoutes(app) {
          ${joinApV2}
          ${joinApExtra}
          ${joinVaMarca}
+         ${joinVaComissao}
          ${joinClTiktok}
          ${joinLs}
          WHERE l.id = ANY($1::uuid[]) AND l.tenant_id = $2::uuid`,

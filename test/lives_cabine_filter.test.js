@@ -28,7 +28,12 @@ describe('lista de lives por cabine', () => {
       expect(response.statusCode).toBe(200)
       expect(response.json()).toEqual({ items: [{ id: liveId, cabine_id: cabine }], total: 12, page: 1, limit: 10 })
       const [sql, params] = query.mock.calls[0]
-      expect(params).toEqual([tenant, cabine, '2026-09-01', '2026-09-05'])
+      expect(params).toEqual([
+        tenant,
+        cabine,
+        '2026-09-01T00:00:00 America/Sao_Paulo',
+        '2026-09-06T00:00:00 America/Sao_Paulo',
+      ])
       expect(sql).toContain('WHERE l.tenant_id = $1::uuid AND l.cabine_id = $2::uuid')
       expect(sql).toContain('LIMIT 10 OFFSET 10')
       expect(query.mock.calls[1][1]).toEqual([[liveId], tenant])

@@ -59,6 +59,12 @@ function buildApp({ padrao = [], excecoes = [], onQuery } = {}) {
       const custom = onQuery(sql, values)
       if (custom) return custom
     }
+    if (String(sql).includes('FROM grade_padrao gp') && String(sql).includes('FROM grade_excecoes ge')) {
+      return { rows: [
+        ...padrao.map((row) => ({ ...row, origem: 'padrao', data: null })),
+        ...excecoes.map((row) => ({ ...row, origem: 'excecao', dia_semana: null })),
+      ] }
+    }
     if (String(sql).includes('FROM grade_padrao gp')) return { rows: padrao }
     if (String(sql).includes('FROM grade_excecoes ge')) return { rows: excecoes }
     if (String(sql).startsWith('SELECT id FROM')) return { rows: [{ id: 'ok' }] }
@@ -75,6 +81,17 @@ function buildApp({ padrao = [], excecoes = [], onQuery } = {}) {
 }
 
 describe('GET /v1/grade — resolução de dias', () => {
+  it('GET /v1/grade/padrao mantém a leitura do template configurável', async () => {
+    const { app } = buildApp({ padrao: [padraoRow()] })
+    await app.register(gradeRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/grade/padrao' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().celulas).toHaveLength(1)
+    expect(res.json().celulas[0]).toMatchObject({ cabine_id: cabine1, marca_nome: 'HAAG', origem: 'padrao' })
+    await app.close()
+  })
+
   it('dia útil: padrão puro aparece com origem=padrao', async () => {
     const { app } = buildApp({ padrao: [padraoRow()] })
     await app.register(gradeRoutes)

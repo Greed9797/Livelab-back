@@ -9,7 +9,7 @@
 
 import { describe, expect, it, vi } from 'vitest'
 
-import { isWeekendInSaoPaulo, saoPauloDateInput } from '../src/lib/timezone.js'
+import { isWeekendInSaoPaulo, saoPauloDateInput, saoPauloDayBounds } from '../src/lib/timezone.js'
 import { isFimDeSemanaSP } from '../src/services/comissao.js'
 import { calcularComissoesAtribuidas } from '../src/routes/vendas_atribuidas.js'
 
@@ -30,6 +30,23 @@ describe('timezone.js com string DATE (YYYY-MM-DD)', () => {
 
   it('saoPauloDateInput não shifta data-calendário', () => {
     expect(saoPauloDateInput('2026-06-01')).toBe('2026-06-01')
+  })
+
+  it('limites do dia usam intervalo semiaberto e preservam a virada de DST histórica', () => {
+    expect(saoPauloDayBounds('2026-06-01')).toEqual({
+      start: '2026-06-01T00:00:00 America/Sao_Paulo',
+      end: '2026-06-02T00:00:00 America/Sao_Paulo',
+    })
+    expect(saoPauloDayBounds('2018-11-03')).toEqual({
+      start: '2018-11-03T00:00:00 America/Sao_Paulo',
+      end: '2018-11-04T00:00:00 America/Sao_Paulo',
+    })
+    expect(saoPauloDayBounds('2026-02-30')).toBeNull()
+    expect(saoPauloDayBounds('0000-01-01')).toBeNull()
+    expect(saoPauloDayBounds('9999-12-31')).toEqual({
+      start: '9999-12-31T00:00:00 America/Sao_Paulo',
+      end: '10000-01-01T00:00:00 America/Sao_Paulo',
+    })
   })
 
   it('isFimDeSemanaSP (services/comissao.js) segue o mesmo contrato', () => {

@@ -2,7 +2,7 @@ import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 
 import { remuneracaoApresentadorasRoutes } from '../src/routes/remuneracao_apresentadoras.js'
-import { buscarFechamentoApresentadoras, dataEhFimDeSemana, dinheiroEmCentavos } from '../src/services/remuneracao-apresentadoras.js'
+import { buscarFechamentoApresentadoras, buscarHistoricoLivesApresentadora, dataEhFimDeSemana, dinheiroEmCentavos } from '../src/services/remuneracao-apresentadoras.js'
 
 const tenantId = '11111111-1111-4111-8111-111111111111'
 const presenterId = '22222222-2222-4222-8222-222222222222'
@@ -123,5 +123,53 @@ describe('remuneração de apresentadoras', () => {
     expect(dinheiroEmCentavos('10,25')).toBe(1025)
     expect(dinheiroEmCentavos('10.001')).toBeNull()
     expect(dinheiroEmCentavos('99999999999999.99')).toBeNull()
+  })
+
+  it('retorna histórico fechado sem fan-out e memória completa que reconcilia com a comissão', async () => {
+    const query = vi.fn(async (sql) => {
+      if (sql.startsWith('BEGIN') || sql === 'COMMIT') return { rows: [] }
+      if (sql.includes('WITH lives_atendidas')) {
+        expect(sql).toContain('UNION')
+        expect(sql).toContain('live_apresentadores la')
+        expect(sql).toContain('live_apresentadoras_v2 lav')
+        expect(sql).toContain("l.status = 'encerrada'")
+        expect(sql).toContain("AT TIME ZONE 'America/Sao_Paulo'")
+        expect(sql).toContain("<> 'reprovada'")
+        expect(sql).not.toMatch(/ORDER BY l\.iniciado_em ASC, l\.id ASC\s+LIMIT/i)
+        return { rows: [
+          { live_id: 'live-zero', data: '2026-09-05', marca_nome: 'Marca A', cabine_nome: 'Cabine 1', duracao_horas: '2', gmv: '0', gmv_atribuido: '0', horas_atribuidas: '2', pedidos: '0', comissao: '0' },
+          { live_id: 'live-split', data: '2026-09-06', marca_nome: 'Marca A', cabine_nome: 'Cabine 1', duracao_horas: '4', gmv: '1000', gmv_atribuido: '500', horas_atribuidas: '2', pedidos: '10', comissao: '20.25' },
+        ] }
+      }
+      expect(sql).toContain('FROM vendas_atribuidas va')
+      expect(sql).not.toMatch(/LIMIT\s+500/i)
+      expect(sql).toContain("<> 'reprovada'")
+      return { rows: [
+        { id: 'v-live', data: '2026-09-06', origem: 'live', marca_nome: 'Marca A', gmv: '500', comissao_apresentadora: '20.25', pct_aplicado: '4.05', base_gmv_mes: '550', faixa_gmv_inicio: '0', faixa_gmv_fim: null, faixa_pct: '4.05', fim_de_semana: true },
+        { id: 'v-video', data: '2026-09-07', origem: 'video', marca_nome: 'Marca A', gmv: '50', comissao_apresentadora: '2.75', pct_aplicado: '5.5', base_gmv_mes: '550', faixa_gmv_inicio: null, faixa_gmv_fim: null, faixa_pct: null, fim_de_semana: false },
+      ] }
+    })
+
+    const historico = await buscarHistoricoLivesApresentadora({ query }, { tenantId, apresentadoraId: presenterId, mes: '2026-09' })
+
+    expect(historico.total_variavel).toBe(23)
+    expect(historico.memoria_completa).toBe(true)
+    expect(historico.lives).toHaveLength(2)
+    expect(historico.lives[0]).toMatchObject({ live_id: 'live-zero', gmv: 0, comissao: 0 })
+    expect(historico.performance).toEqual({ total_lives: 2, horas_live: 4, gmv_lives: 500, gmv_por_hora: 125 })
+    expect(historico.memoria).toHaveLength(2)
+    expect(historico.memoria[1]).toMatchObject({ origem: 'video', comissao_apresentadora: 2.75, faixa: null })
+    expect(query.mock.calls.map(([sql]) => sql)).toContain('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    expect(query.mock.calls.map(([sql]) => sql)).toContain('COMMIT')
+  })
+
+  it('valida competência e apresentadora antes de consultar o histórico financeiro', async () => {
+    const { app, query } = buildApp()
+    const idInvalido = await app.inject({ method: 'GET', url: '/v1/financeiro/fechamento-apresentadoras/invalido/detalhes?mes=2026-09' })
+    const mesInvalido = await app.inject({ method: 'GET', url: `/v1/financeiro/fechamento-apresentadoras/${presenterId}/detalhes?mes=2026-13` })
+    expect(idInvalido.statusCode).toBe(400)
+    expect(mesInvalido.statusCode).toBe(400)
+    expect(query).not.toHaveBeenCalled()
+    await app.close()
   })
 })

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import {
-  buscarFechamentoApresentadoras, competenciaDoMes, dataEhFimDeSemana,
+  buscarFechamentoApresentadoras, buscarHistoricoLivesApresentadora, competenciaDoMes, dataEhFimDeSemana,
   dataEhValida, dinheiroEmCentavos, MES_RE,
 } from '../services/remuneracao-apresentadoras.js'
 
@@ -27,6 +27,18 @@ export async function remuneracaoApresentadorasRoutes(app) {
     if (!MES_RE.test(mes)) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
     const fechamento = await app.withTenant(request.user.tenant_id, (db) => buscarFechamentoApresentadoras(db, { tenantId: request.user.tenant_id, mes }))
     return { ...fechamento, pode_editar: WRITE_FINANCEIRO.includes(request.user.papel) }
+  })
+
+  app.get('/v1/financeiro/fechamento-apresentadoras/:id/detalhes', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
+    const apresentadoraId = String(request.params?.id ?? '')
+    const mes = String(request.query?.mes ?? '')
+    if (!z.string().uuid().safeParse(apresentadoraId).success) return reply.code(400).send({ error: 'id inválido' })
+    if (!MES_RE.test(mes)) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    return app.withTenant(request.user.tenant_id, (db) => buscarHistoricoLivesApresentadora(db, {
+      tenantId: request.user.tenant_id,
+      apresentadoraId,
+      mes,
+    }))
   })
 
   app.post('/v1/financeiro/adicionais-apresentadoras', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {

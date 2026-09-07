@@ -201,22 +201,11 @@ cron.schedule('0 3 * * *', async () => {
   }
 }, { timezone: 'America/Sao_Paulo' })
 
-// Daily 03:00 SP — offsite PostgreSQL backup → S3/R2
-// Only runs in production AND when BACKUP_S3_BUCKET is configured.
-// Uses nohup-style detached exec to avoid blocking the event loop.
+// Daily 03:00 SP — opt-in offsite backup, serialized across replicas.
 if (process.env.NODE_ENV === 'production' && process.env.BACKUP_S3_BUCKET) {
-  const { exec } = await import('node:child_process')
-  cron.schedule('0 3 * * *', () => {
-    const scriptPath = new URL('../../scripts/pg_dump_offsite.sh', import.meta.url).pathname
-    exec(`bash "${scriptPath}"`, { timeout: 30 * 60 * 1000 }, (err, stdout, stderr) => {
-      if (err) {
-        app.log.error({ stderr: stderr?.slice(0, 500) }, '[backup] pg_dump_offsite falhou')
-        return
-      }
-      app.log.info({ stdout: stdout?.slice(0, 500) }, '[backup] pg_dump_offsite concluído')
-    })
-  }, { timezone: 'America/Sao_Paulo' })
-  app.log.info('[backup] pg_dump_offsite cron agendado (03:00 SP diário)')
+  const { runOffsiteBackup } = await import('./jobs/offsite-backup.js')
+  cron.schedule('0 3 * * *', () => runOffsiteBackup(app), { timezone: 'America/Sao_Paulo', noOverlap: true })
+  app.log.info('[backup] offsite backup scheduled (03:00 São Paulo)')
 }
 
 // Graceful shutdown: o redeploy do Railway manda SIGTERM. Sem handler o processo

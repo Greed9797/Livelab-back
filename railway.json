@@ -6,7 +6,7 @@
   },
   "deploy": {
     "preDeployCommand": "node apply_migrations.js",
-    "healthcheckPath": "/healthz",
+    "healthcheckPath": "/readyz",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 3

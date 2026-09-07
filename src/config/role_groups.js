@@ -58,7 +58,7 @@ export const WRITE_LEADS = [...ADMIN_COMERCIAL, 'marketing']
 // importação promete. Isso não abre /v1/cabines para ela: a allowlist do plugin
 // de auth não tem esse caminho, e allowlist e papel precisam concordar.
 export const READ_CABINES = [
-  ...ADMIN, 'operacional', 'apresentador', 'apresentadora',
+  ...ADMIN, 'operacional',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
   AUTOMACAO,
 ]
@@ -66,12 +66,12 @@ export const WRITE_CABINES = [...ADMIN, 'operacional', 'produtor_live']
 
 // ─── LIVES ───────────────────────────────────────────────────────────
 export const READ_LIVES = [
-  ...ADMIN, 'operacional', 'apresentador', 'apresentadora',
+  ...ADMIN, 'operacional',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
   AUTOMACAO,
 ]
 export const WRITE_LIVES = [
-  ...ADMIN, 'operacional', 'apresentador', 'apresentadora', 'produtor_live', AUTOMACAO,
+  ...ADMIN, 'operacional', 'produtor_live', AUTOMACAO,
 ]
 
 // ─── APRESENTADORAS ──────────────────────────────────────────────────
@@ -104,7 +104,7 @@ export const READ_MARCAS = [...READ_CLIENTES, AUTOMACAO]
 export const WRITE_MARCAS = [...WRITE_CLIENTES, AUTOMACAO]
 
 export const READ_AGENDA = [
-  ...ADMIN, 'operacional', 'apresentador', 'apresentadora',
+  ...ADMIN, 'operacional',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',
 ]
 export const WRITE_AGENDA = [...ADMIN, 'operacional', 'produtor_live']

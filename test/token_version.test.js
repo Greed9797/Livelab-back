@@ -88,9 +88,9 @@ describe('token_version: revogação imediata de JWT', () => {
   it('app.authenticate rejeita JWT cujo token_version < DB.token_version', async () => {
     // Mock db: user-42 tem token_version=2, mas o JWT vai carregar token_version=1.
     const dbQuery = vi.fn().mockImplementation((sql, params) => {
-      if (/SELECT token_version FROM users/i.test(sql)) {
+      if (/SELECT token_version, ativo, papel, tenant_id FROM users/i.test(sql)) {
         expect(params).toEqual(['user-42'])
-        return Promise.resolve({ rows: [{ token_version: 2 }] })
+        return Promise.resolve({ rows: [{ token_version: 2, ativo: true, papel: 'franqueado', tenant_id: '11111111-1111-4111-8111-111111111111' }] })
       }
       return Promise.resolve({ rows: [] })
     })

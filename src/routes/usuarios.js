@@ -385,7 +385,9 @@ export async function usuariosRoutes(app) {
           return reply.code(400).send({ error: 'Campos de apresentadora exigem papel apresentadora.' })
         }
 
-        if (userFields.ativo === false) {
+        const revokeSessions = (userFields.ativo !== undefined && userFields.ativo !== currentUser.ativo)
+          || (userFields.papel !== undefined && userFields.papel !== currentUser.papel)
+        if (revokeSessions) {
           await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
         }
 
@@ -402,6 +404,7 @@ export async function usuariosRoutes(app) {
             }
           }
 
+          if (revokeSessions) updates.push('token_version = token_version + 1')
           values.push(request.params.id, request.user.tenant_id)
           const result = await db.query(
             `UPDATE users SET ${updates.join(', ')}
@@ -427,6 +430,8 @@ export async function usuariosRoutes(app) {
         }
 
         await db.query('COMMIT')
+
+        if (revokeSessions) app.invalidateTokenVersionCache?.(request.params.id)
 
         if (userFields.papel !== undefined && currentUser.papel !== null && currentUser.papel !== userFields.papel) {
           app.audit?.log?.(request, {
@@ -701,17 +706,26 @@ export async function usuariosRoutes(app) {
     }
 
     return app.withTenant(request.user.tenant_id, async (db) => {
-      await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
-
-      const result = await db.query(
-        `UPDATE users SET ativo = false
-         WHERE id = $1 AND tenant_id = $2
-         RETURNING id, nome, email, papel, ativo`,
-        [request.params.id, request.user.tenant_id]
-      )
-      if (result.rows.length === 0) {
-        return reply.code(404).send({ error: 'Usuário não encontrado' })
+      await db.query('BEGIN')
+      try {
+        // Prove tenant ownership before revoking any session, on the same transaction.
+        const result = await db.query(
+          `UPDATE users SET ativo = false, token_version = token_version + 1
+           WHERE id = $1 AND tenant_id = $2::uuid
+           RETURNING id, nome, email, papel, ativo`,
+          [request.params.id, request.user.tenant_id],
+        )
+        if (result.rows.length === 0) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Usuário não encontrado' })
+        }
+        await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+        await db.query('COMMIT')
+      } catch (error) {
+        await db.query('ROLLBACK')
+        throw error
       }
+      app.invalidateTokenVersionCache?.(request.params.id)
       app.audit?.log?.(request, { action: 'usuarios.delete', entity_type: 'user', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(204).send()
     })

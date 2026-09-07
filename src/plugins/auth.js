@@ -76,8 +76,8 @@ async function authPlugin(app) {
   // Se DB.token_version > JWT.token_version, o JWT foi invalidado por
   // /redefinir-senha ou /usuarios/:id/force-logout — retorna 401.
   //
-  // Tolerante a falhas: se a query falhar (db down) ou o user não existir,
-  // não bloqueia (cai pra comportamento atual). Se token_version não estiver
+  // Falha fechada: usuário ausente/inativo não autentica; indisponibilidade
+  // da verificação devolve 503 sem executar a operação. Se token_version não estiver
   // no payload (JWT antigo emitido antes do deploy), trata como version 1
   // (compatibilidade durante rollout — JWTs anteriores expiram em 15min).
   // Cache curto do token_version por usuário.
@@ -87,17 +87,17 @@ async function authPlugin(app) {
   // ~180ms a cada chamada de página. O TTL curto mantém a invalidação de sessão
   // (redefinir senha / force-logout) efetiva em poucos segundos.
   const TOKEN_VERSION_TTL_MS = Number(process.env.TOKEN_VERSION_CACHE_TTL_MS ?? 10_000)
-  const tokenVersionCache = new Map() // userId -> { version, expiresAt }
+  const tokenVersionCache = new Map() // userId -> { state, expiresAt }
 
-  async function _getTokenVersion(userId, fallback) {
+  async function _getTokenVersion(userId) {
     const hit = tokenVersionCache.get(userId)
-    if (hit && hit.expiresAt > Date.now()) return hit.version
+    if (hit && hit.expiresAt > Date.now()) return hit.state
     const { rows } = await app.db.query(
-      `SELECT token_version FROM users WHERE id = $1`,
+      `SELECT token_version, ativo, papel, tenant_id FROM users WHERE id = $1`,
       [userId]
     )
-    const version = rows[0]?.token_version ?? fallback
-    tokenVersionCache.set(userId, { version, expiresAt: Date.now() + TOKEN_VERSION_TTL_MS })
+    const state = rows[0] ?? null
+    tokenVersionCache.set(userId, { state, expiresAt: Date.now() + TOKEN_VERSION_TTL_MS })
     // Poda preguiçosa: evita crescer sem limite em tenants com muitos usuários.
     if (tokenVersionCache.size > 5000) {
       const now = Date.now()
@@ -105,7 +105,7 @@ async function authPlugin(app) {
         if (value.expiresAt <= now) tokenVersionCache.delete(key)
       }
     }
-    return version
+    return state
   }
 
   // Invalida o cache na hora quando a sessão é derrubada de propósito.
@@ -127,14 +127,15 @@ async function authPlugin(app) {
       ? request.user.token_version
       : 1
     try {
-      const dbVersion = await _getTokenVersion(userId, jwtVersion)
-      if (dbVersion > jwtVersion) {
+      const state = await _getTokenVersion(userId)
+      if (!state || state.ativo !== true || state.papel !== request.user.papel || state.tenant_id !== request.user.tenant_id || Number(state.token_version ?? 1) > jwtVersion) {
         return reply.code(401).send({ error: 'Sessão expirada' })
       }
     } catch (err) {
-      app.log.warn({ err }, 'token_version check falhou — permitindo (fail-open)')
+      app.log.warn({ code: err?.code }, 'Verificação de sessão indisponível')
+      return reply.code(503).send({ error: 'Não foi possível validar sua sessão. Tente novamente.' })
     }
-    // Sucesso (ou fail-open): marca para que o 2º middleware da mesma request
+    // Sucesso: marca para que o 2º middleware da mesma request
     // não repita o SELECT. Em caso de 401 acima já retornamos — a request morre.
     request._tokenVersionChecked = true
   }

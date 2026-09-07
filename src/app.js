@@ -59,6 +59,7 @@ import { videosRoutes } from './routes/videos.js'
 import { vendasAtribuidasRoutes } from './routes/vendas_atribuidas.js'
 import { comissoesRoutes } from './routes/comissoes.js'
 import { metaUnidadeRoutes } from './routes/meta_unidade.js'
+import { portalApresentadoraRoutes } from './routes/portal_apresentadora.js'
 import { metasRoutes } from './routes/metas.js'
 import { uploadsRoutes } from './routes/uploads.js'
 import { AppError } from './lib/errors.js'
@@ -370,6 +371,7 @@ export async function buildApp(opts = {}) {
   await app.register(vendasAtribuidasRoutes)
   await app.register(comissoesRoutes)
   await app.register(metaUnidadeRoutes)
+  await app.register(portalApresentadoraRoutes)
   await app.register(metasRoutes)
   await app.register(uploadsRoutes)
 

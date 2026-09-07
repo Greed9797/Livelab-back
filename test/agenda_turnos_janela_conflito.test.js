@@ -61,8 +61,8 @@ function buildApp({ turnosDoEvento = [], conflitoPorTurno = [] } = {}) {
   const query = vi.fn(async (sql, params = []) => {
     calls.push({ sql: String(sql), params })
     const text = String(sql)
-    if (text.includes('FROM marcas WHERE id')) return { rows: [{ id: marcaId }] }
-    if (text.includes('FROM apresentadoras WHERE id')) return { rows: [{ id: anaId }] }
+    if (text.includes('FROM marcas') && text.includes('WHERE m.id')) return { rows: [{ id: marcaId }] }
+    if (text.includes('FROM apresentadoras') && text.includes('WHERE id = $1::uuid')) return { rows: [{ id: anaId }] }
     if (text.includes('FROM agenda_eventos WHERE id')) return { rows: [evento] }
     if (text.includes('FROM agenda_evento_apresentadoras t')) return { rows: conflitoPorTurno }
     if (text.includes('FROM agenda_evento_apresentadoras\n')) return { rows: turnosDoEvento }

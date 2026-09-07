@@ -13,6 +13,7 @@ describe('portal da apresentadora — fronteiras de autorização', () => {
 
   it('registra a migração aditiva e mantém relato pendente fora de lives', async () => {
     expect(MIGRATIONS_LIST).toContain('144_portal_apresentadora_submissoes.sql')
+    expect(MIGRATIONS_LIST).toContain('146_portal_apresentadora_metricas.sql')
     const migration = await readFile(new URL('../migrations/144_portal_apresentadora_submissoes.sql', import.meta.url), 'utf8')
     expect(migration).toContain("status IN ('pendente', 'devolvida', 'aprovada', 'cancelada')")
     expect(migration).toContain('live_oficial_id UUID REFERENCES lives')
@@ -20,11 +21,21 @@ describe('portal da apresentadora — fronteiras de autorização', () => {
     expect(migration).toContain('snapshot JSONB NOT NULL')
   })
 
+  it('mantém métricas de funil opcionais e concede apenas as colunas canônicas ao runtime do portal', async () => {
+    const migration = await readFile(new URL('../migrations/146_portal_apresentadora_metricas.sql', import.meta.url), 'utf8')
+    for (const column of ['live_impressions_declaradas', 'manual_views_declaradas', 'live_impressions_oficiais', 'manual_views_oficiais']) {
+      expect(migration).toContain(column)
+    }
+    expect(migration).toContain('GRANT INSERT (live_impressions, manual_views) ON lives TO livelab_portal_runtime')
+    expect(migration).toContain('apresentadora_remuneracao_adicionais')
+  })
+
   it('persiste um snapshot allowlisted da versão, nunca um objeto vazio', async () => {
     const route = await readFile(new URL('../src/routes/portal_apresentadora.js', import.meta.url), 'utf8')
     const history = route.slice(route.indexOf('function recordHistory'), route.indexOf('async function inSubmissionTransaction'))
     expect(history).toContain('jsonb_build_object')
     expect(history).toContain("'gmv_declarado'")
+    expect(history).toContain("'live_impressions_oficiais'")
     expect(history).toContain("'live_oficial_id'")
     expect(history).not.toContain('JSON.stringify(snapshot)')
   })

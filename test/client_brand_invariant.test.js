@@ -21,20 +21,21 @@ describe('ensureClienteMarca (invariante cliente->marca)', () => {
     expect(query).toHaveBeenCalledTimes(1)
   })
 
-  it('reativa a marca quando ela está inativa', async () => {
+  it('reativa a marca quando isso é solicitado explicitamente', async () => {
     const calls = []
     const query = vi.fn(async (sql, params) => {
       calls.push(sql)
       if (sql.includes('SELECT id, status') && sql.includes('FROM marcas')) {
         return { rows: [{ id: 'marca-inativa', status: 'inativa' }] }
       }
+      if (sql.includes('FROM clientes')) return { rows: [{ status: 'ativo' }] }
       if (sql.includes('UPDATE marcas') && sql.includes("status = 'ativa'")) {
         return { rows: [{ id: params[0] }] }
       }
       throw new Error(`query inesperada: ${sql}`)
     })
 
-    const id = await ensureClienteMarca({ query }, { tenantId: 'tenant-a', clienteId: 'cliente-1' })
+    const id = await ensureClienteMarca({ query }, { tenantId: 'tenant-a', clienteId: 'cliente-1', activateExisting: true })
 
     expect(id).toBe('marca-inativa')
     expect(calls.some((s) => s.includes('UPDATE marcas'))).toBe(true)

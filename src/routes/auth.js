@@ -15,6 +15,7 @@ import {
 } from '../schemas/auth.schema.js'
 import { SECURITY } from '../config/security.js'
 import { notify, isEmailConfigured } from '../services/mailer.js'
+import { getAccountPhoto } from '../services/account-photo.js'
 
 const _frontendUrl = () =>
   (process.env.FRONTEND_URL ?? 'https://app.grupolivelab.com.br').replace(/\/+$/, '')
@@ -50,6 +51,8 @@ export async function authRoutes(app) {
       app.audit?.log?.(request, { action: 'auth.login_failed', metadata: { email, reason: 'wrong_password' } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(401).send({ error: 'Credenciais inválidas' })
     }
+
+    const fotoUrl = await getAccountPhoto(app.db, user)
 
     const payload = {
       sub: user.id,
@@ -88,6 +91,7 @@ export async function authRoutes(app) {
         papel: user.papel,
         tenant_id: user.tenant_id,
         tenant_nome: user.tenant_nome,
+        foto_url: fotoUrl,
         onboarding_completed: user.onboarding_completed ?? false,
       },
     }
@@ -158,6 +162,8 @@ export async function authRoutes(app) {
     }
     if (!rt.ativo) return reply.code(401).send({ error: 'Usuário inativo' })
 
+    const fotoUrl = await getAccountPhoto(app.db, { id: rt.user_id, tenant_id: rt.tenant_id, papel: rt.papel })
+
     // Revogar o token usado (rotação — previne reuso após comprometimento)
     await app.db.query(
       `UPDATE refresh_tokens SET revogado = true WHERE id = $1`,
@@ -184,7 +190,14 @@ export async function authRoutes(app) {
       [rt.user_id, newRefreshHash, newExpiresAt]
     )
 
-    return { access_token: accessToken, refresh_token: newRawRefresh }
+    return {
+      access_token: accessToken, refresh_token: newRawRefresh,
+      user: {
+        id: rt.user_id, tenant_id: rt.tenant_id, papel: rt.papel,
+        nome: rt.nome, email: rt.email, foto_url: fotoUrl,
+        onboarding_completed: rt.onboarding_completed ?? false,
+      },
+    }
   })
 
   // POST /v1/auth/logout
@@ -485,6 +498,7 @@ export async function authRoutes(app) {
         [user.tenant_id]
       )
       const tenantNome = tenantResult.rows[0]?.nome ?? null
+      const fotoUrl = await getAccountPhoto(app.db, user)
 
       // Auto-login: emite tokens igual ao /login.
       // aceitar-convite NÃO incrementa token_version (primeiro acesso, sem
@@ -525,6 +539,7 @@ export async function authRoutes(app) {
           papel: user.papel,
           tenant_id: user.tenant_id,
           tenant_nome: tenantNome,
+          foto_url: fotoUrl,
           onboarding_completed: user.onboarding_completed ?? false,
         },
       }

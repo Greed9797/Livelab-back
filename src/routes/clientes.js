@@ -621,13 +621,15 @@ export async function clientesRoutes(app) {
           return reply.code(404).send({ error: 'Cliente não encontrado' })
         }
 
-        // Mantém a invariante cliente->marca também em updates (idempotente). Reativa a
-        // marca quando o cliente volta a ficar ativo; desativa quando é cancelado.
-        const clienteCancelado = updates.status === 'cancelado'
+        // Mantém a invariante cliente->marca também em updates (idempotente). Uma
+        // edição comum não reativa uma marca arquivada/inativa: apenas a transição
+        // explícita para ativo pode fazê-lo.
+        const clienteCancelado = ['cancelado', 'cancelado_automaticamente'].includes(updates.status)
+        const clienteArquivado = updates.status === 'arquivado'
         const marcaId = await ensureClienteMarca(db, {
           tenantId: tenant_id,
           clienteId: request.params.id,
-          activateExisting: !clienteCancelado,
+          activateExisting: updates.status === 'ativo',
         })
         // Nome do cliente é também o nome da única marca operacional vinculada. Atualiza
         // apenas a marca que o helper escolheu/criou, sem tocar marcas de outros clientes.
@@ -659,6 +661,12 @@ export async function clientesRoutes(app) {
         if (clienteCancelado) {
           await db.query(
             `UPDATE marcas SET status = 'inativa', atualizado_em = NOW()
+             WHERE cliente_id = $1 AND tenant_id = $2::uuid AND tipo = 'cliente'`,
+            [request.params.id, tenant_id],
+          )
+        } else if (clienteArquivado) {
+          await db.query(
+            `UPDATE marcas SET status = 'arquivada', atualizado_em = NOW()
              WHERE cliente_id = $1 AND tenant_id = $2::uuid AND tipo = 'cliente'`,
             [request.params.id, tenant_id],
           )

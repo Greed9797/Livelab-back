@@ -54,7 +54,10 @@ const valorResposta = (centavos) => centavos / 100
 
 // Fonte privada do fechamento. Mantém exatamente o fixo histórico do DRE, mas não
 // reutiliza rankings públicos (eles excluem vendas de GMV zero via HAVING).
-export async function buscarFechamentoApresentadoras(db, { tenantId, mes }) {
+export async function buscarFechamentoApresentadoras(db, { tenantId, mes, apresentadoraId }) {
+  if (apresentadoraId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(apresentadoraId)) {
+    throw new TypeError('apresentadoraId inválido')
+  }
   const competencia = competenciaDoMes(mes)
   const fim = ultimoDiaDoMes(mes)
   const [fixos, comissoes, adicionais] = await Promise.all([
@@ -66,8 +69,9 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes }) {
       WHERE a.tenant_id = $1::uuid
         AND a.ativo IS TRUE
         AND COALESCE(a.arquivada, false) = false
+        ${apresentadoraId ? 'AND a.id = $3::uuid' : ''}
       ORDER BY a.nome ASC
-    `, [tenantId, fim]),
+    `, apresentadoraId ? [tenantId, fim, apresentadoraId] : [tenantId, fim]),
     db.query(`
       SELECT va.apresentadora_id, a.nome,
              COALESCE(SUM(va.comissao_apresentadora), 0) AS valor
@@ -77,9 +81,10 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes }) {
         AND va.data >= $2::date AND va.data <= $3::date
         AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
         AND va.apresentadora_id IS NOT NULL
+        ${apresentadoraId ? 'AND va.apresentadora_id = $4::uuid' : ''}
       GROUP BY va.apresentadora_id, a.nome
       ORDER BY a.nome ASC
-    `, [tenantId, competencia, fim]),
+    `, apresentadoraId ? [tenantId, competencia, fim, apresentadoraId] : [tenantId, competencia, fim]),
     db.query(`
       SELECT ara.id, ara.apresentadora_id, a.nome, ara.tipo, ara.descricao,
              ara.data_referencia::text AS data_referencia, ara.valor
@@ -87,8 +92,9 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes }) {
       JOIN apresentadoras a ON a.id = ara.apresentadora_id AND a.tenant_id = ara.tenant_id
       WHERE ara.tenant_id = $1::uuid AND ara.competencia = $2::date
         AND ara.cancelado_em IS NULL
+        ${apresentadoraId ? 'AND ara.apresentadora_id = $3::uuid' : ''}
       ORDER BY a.nome ASC, ara.data_referencia ASC NULLS LAST, ara.criado_em ASC
-    `, [tenantId, competencia]),
+    `, apresentadoraId ? [tenantId, competencia, apresentadoraId] : [tenantId, competencia]),
   ])
 
   const porId = new Map()

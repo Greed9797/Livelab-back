@@ -54,9 +54,9 @@ function buildApp({ handlers = {}, eventoRow = evento, apresentadorasEncontradas
     calls.push({ sql: String(sql), params })
     const text = String(sql)
     if (text.includes('FROM agenda_eventos WHERE id')) return { rows: eventoRow ? [eventoRow] : [] }
-    if (text.includes('FROM apresentadoras WHERE id = ANY')) {
-      const ids = apresentadorasEncontradas ?? params[0]
-      return { rows: ids.map((id) => ({ id })) }
+    if (text.includes('FROM apresentadoras') && text.includes('ANY($1::uuid[])')) {
+      const encontrados = apresentadorasEncontradas ?? params[0]
+      return { rows: params[0].filter((id) => encontrados.includes(id)).map((id) => ({ id })) }
     }
     if (text.includes('FROM agenda_eventos ae')) return { rows: handlers.espelho?.() ?? [] }
     if (text.includes('FROM agenda_evento_apresentadoras t')) return { rows: handlers.turnos?.() ?? [] }

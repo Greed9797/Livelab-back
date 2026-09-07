@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { READ_AGENDA, WRITE_AGENDA } from '../config/role_groups.js'
 import { calcularRateioPlanejado } from '../lib/agenda-turnos.js'
+import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 import { saoPauloDateInput, saoPauloTimeInput } from '../lib/timezone.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 import { applyAgendaStatusFilter } from '../lib/filters.js'
@@ -86,7 +87,15 @@ const turnosSchema = z.object({
 
 async function ensureAgendaRefs(db, reply, { tenantId, marcaId, clienteId, cabineId, apresentadoraId, apresentadoraIds }) {
   if (marcaId) {
-    const marca = await db.query('SELECT id FROM marcas WHERE id = $1 AND tenant_id = $2::uuid', [marcaId, tenantId])
+    const marca = await db.query(
+      `SELECT m.id
+       FROM marcas m
+       LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = m.tenant_id
+       WHERE m.id = $1::uuid
+         AND m.tenant_id = $2::uuid
+         AND ${marcaStatusOperacionalSql('m', 'cl')} = 'ativa'`,
+      [marcaId, tenantId],
+    )
     if (!marca.rows[0]) {
       reply.code(404).send({ error: 'Marca não encontrada' })
       return false
@@ -94,7 +103,14 @@ async function ensureAgendaRefs(db, reply, { tenantId, marcaId, clienteId, cabin
   }
 
   if (clienteId) {
-    const cliente = await db.query('SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2::uuid', [clienteId, tenantId])
+    const cliente = await db.query(
+      `SELECT id
+       FROM clientes
+       WHERE id = $1::uuid
+         AND tenant_id = $2::uuid
+         AND status IN ('ativo', 'inadimplente')`,
+      [clienteId, tenantId],
+    )
     if (!cliente.rows[0]) {
       reply.code(404).send({ error: 'Cliente não encontrado' })
       return false
@@ -110,7 +126,15 @@ async function ensureAgendaRefs(db, reply, { tenantId, marcaId, clienteId, cabin
   }
 
   if (apresentadoraId) {
-    const apresentadora = await db.query('SELECT id FROM apresentadoras WHERE id = $1 AND tenant_id = $2::uuid', [apresentadoraId, tenantId])
+    const apresentadora = await db.query(
+      `SELECT id
+       FROM apresentadoras
+       WHERE id = $1::uuid
+         AND tenant_id = $2::uuid
+         AND ativo IS DISTINCT FROM FALSE
+         AND arquivada IS NOT TRUE`,
+      [apresentadoraId, tenantId],
+    )
     if (!apresentadora.rows[0]) {
       reply.code(404).send({ error: 'Apresentadora não encontrada' })
       return false
@@ -124,7 +148,12 @@ async function ensureAgendaRefs(db, reply, { tenantId, marcaId, clienteId, cabin
   if (apresentadoraIds?.length) {
     const ids = [...new Set(apresentadoraIds)]
     const q = await db.query(
-      'SELECT id FROM apresentadoras WHERE id = ANY($1::uuid[]) AND tenant_id = $2::uuid',
+      `SELECT id
+       FROM apresentadoras
+       WHERE id = ANY($1::uuid[])
+         AND tenant_id = $2::uuid
+         AND ativo IS DISTINCT FROM FALSE
+         AND arquivada IS NOT TRUE`,
       [ids, tenantId],
     )
     if (q.rows.length !== ids.length) {
@@ -592,12 +621,33 @@ export async function agendaRoutes(app) {
           return reply.code(404).send({ error: 'Evento não encontrado' })
         }
 
+        // O editor envia o formulário completo. Referências que já pertencem ao
+        // evento histórico não podem impedir uma simples correção de texto/data
+        // só porque a entidade foi desativada depois da live.
+        let currentClienteId = null
+        if (clienteId && current.marca_id) {
+          const currentMarca = await db.query(
+            `SELECT cliente_id
+               FROM marcas
+              WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+            [current.marca_id, tenant_id],
+          )
+          currentClienteId = currentMarca.rows[0]?.cliente_id ?? null
+        }
+
+        if (clienteId && updates.marca_id === current.marca_id && currentClienteId !== clienteId) {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: 'Cliente não corresponde à marca selecionada' })
+        }
+
         const refsOk = await ensureAgendaRefs(db, reply, {
           tenantId: tenant_id,
-          marcaId: updates.marca_id,
-          clienteId,
-          cabineId: updates.cabine_id,
-          apresentadoraId: updates.apresentadora_id,
+          marcaId: updates.marca_id && updates.marca_id !== current.marca_id ? updates.marca_id : null,
+          clienteId: clienteId && clienteId !== currentClienteId ? clienteId : null,
+          cabineId: updates.cabine_id && updates.cabine_id !== current.cabine_id ? updates.cabine_id : null,
+          apresentadoraId: updates.apresentadora_id && updates.apresentadora_id !== current.apresentadora_id
+            ? updates.apresentadora_id
+            : null,
         })
         if (!refsOk) {
           await db.query('ROLLBACK')
@@ -605,7 +655,7 @@ export async function agendaRoutes(app) {
         }
 
         const patchUpdates = { ...updates }
-        if (clienteId && !patchUpdates.marca_id) {
+        if (clienteId && clienteId !== currentClienteId && !patchUpdates.marca_id) {
           patchUpdates.marca_id = await resolveAgendaMarcaId(db, tenant_id, { marcaId: patchUpdates.marca_id, clienteId })
         }
         const fields = Object.keys(patchUpdates)
@@ -823,9 +873,23 @@ export async function agendaRoutes(app) {
           return reply.code(404).send({ error: 'Evento não encontrado' })
         }
 
+        // Replace-all de turnos pode repetir vínculos históricos. Só valida como
+        // nova referência quem ainda não estava no evento; o principal escalar
+        // cobre agendas legadas criadas antes dos turnos de revezamento.
+        const turnosAtuais = await db.query(
+          `SELECT apresentadora_id
+             FROM agenda_evento_apresentadoras
+            WHERE agenda_evento_id = $1::uuid AND tenant_id = $2::uuid`,
+          [evento.id, tenant_id],
+        )
+        const apresentadorasAtuais = new Set(turnosAtuais.rows.map((row) => row.apresentadora_id))
+        if (evento.apresentadora_id) apresentadorasAtuais.add(evento.apresentadora_id)
+
         const refsOk = await ensureAgendaRefs(db, reply, {
           tenantId: tenant_id,
-          apresentadoraIds: turnos.map((turno) => turno.apresentadora_id),
+          apresentadoraIds: turnos
+            .map((turno) => turno.apresentadora_id)
+            .filter((id) => !apresentadorasAtuais.has(id)),
         })
         if (!refsOk) {
           await db.query('ROLLBACK')

@@ -140,6 +140,7 @@ export const MIGRATIONS_LIST = [
   '143_meta_unidade_horas_gmv_hora.sql',
   '144_portal_apresentadora_submissoes.sql',
   '145_portal_apresentadora_runtime_role.sql',
+  '146_portal_apresentadora_metricas.sql',
 ]
 
 async function ensureMigrationsTable(client) {

@@ -91,6 +91,22 @@ describe('POST /v1/marcas — upsert de marca cliente não re-zera comissões (b
     })
   }
 
+  it('upsert sem status preserva a desativação e só reativa com status explícito', async () => {
+    for (const status of [undefined, 'ativa']) {
+      const queryMock = upsertQueryMock({ id: 'marca-1', tipo: 'cliente', cliente_id: clienteId, nome: 'Make Zone', status: 'inativa' })
+      const app = buildApp(queryMock)
+      await app.register(marcasRoutes)
+      const response = await app.inject({ method: 'POST', url: '/v1/marcas', payload: {
+        nome: 'Make Zone', tipo: 'cliente', cliente_id: clienteId, ...(status ? { status } : {}),
+      } })
+      expect(response.statusCode).toBe(201)
+      const updateCall = queryMock.mock.calls.find(([sql]) => sql.includes('UPDATE marcas SET'))
+      expect(updateCall[0]).toContain('status = COALESCE($4, status)')
+      expect(updateCall[1][3]).toBe(status ?? null)
+      await app.close()
+    }
+  })
+
   it('POST sem comissao_*_pct/valor_fixo_minimo preserva os valores existentes', async () => {
     const queryMock = upsertQueryMock({
       id: 'marca-1', tipo: 'cliente', cliente_id: clienteId, nome: 'Posthaus',

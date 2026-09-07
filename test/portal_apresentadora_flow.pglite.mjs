@@ -7,17 +7,17 @@ import { withPortalPresenterDb } from '../src/services/portal-apresentadora-db.j
 const { PGlite } = await import(process.env.PGLITE_MODULE || '@electric-sql/pglite')
 const db = new PGlite()
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,'0')}`
-const tenant=id(1), otherTenant=id(2), user=id(3), peer=id(4), manager=id(5), presenter=id(6), peerPresenter=id(7), brand=id(8), cabin=id(9), client=id(10)
+const tenant=id(1), otherTenant=id(2), user=id(3), peer=id(4), manager=id(5), presenter=id(6), peerPresenter=id(7), brand=id(8), cabin=id(9), client=id(10), otherUser=id(15), otherPresenter=id(16), unassignedBrand=id(17), archivedBrand=id(18), archivedClient=id(19), inheritedArchivedBrand=id(20)
 await db.exec(`
  SET TIME ZONE 'UTC';
  CREATE TABLE tenants(id uuid PRIMARY KEY);
  CREATE TABLE users(id uuid PRIMARY KEY,tenant_id uuid,ativo boolean DEFAULT true,papel text);
- CREATE TABLE apresentadoras(id uuid PRIMARY KEY,tenant_id uuid,user_id uuid,nome text,ativo boolean DEFAULT true,arquivada boolean DEFAULT false,fixo numeric DEFAULT 2700,foto_url text,comissao_pct numeric);
+ CREATE TABLE apresentadoras(id uuid PRIMARY KEY,tenant_id uuid,user_id uuid,nome text,ativo boolean DEFAULT true,arquivada boolean DEFAULT false,fixo numeric DEFAULT 2700,foto_url text,comissao_pct numeric,data_inicio date,data_fim date);
  CREATE TABLE clientes(id uuid PRIMARY KEY,tenant_id uuid,status text);
  CREATE TABLE contratos(id uuid PRIMARY KEY,tenant_id uuid,status text,comissao_pct numeric);
  CREATE TABLE marcas(id uuid PRIMARY KEY,tenant_id uuid,cliente_id uuid,nome text,status text,tipo text,criado_em timestamptz DEFAULT now(),comissao_franquia_pct numeric DEFAULT 5,comissao_franqueadora_pct numeric DEFAULT 1,valor_fixo_minimo numeric DEFAULT 0);
  CREATE TABLE cabines(id uuid PRIMARY KEY,tenant_id uuid,nome text,numero int,ativo boolean DEFAULT true,contrato_id uuid);
- CREATE TABLE lives(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,cabine_id uuid,cliente_id uuid,apresentador_id uuid,gestor_id uuid,status text,iniciado_em timestamptz,encerrado_em timestamptz,previsto_fim timestamptz,fat_gerado numeric,final_orders_count int,resumo text,tipo text,status_publicacao text,origem_dados text,marca_id uuid,comissao_calculada numeric,comissao_apresentadora_pct numeric,comissao_apresentadora_valor numeric,agenda_evento_id uuid,ads_gmv numeric,manual_gmv numeric,manual_orders int);
+ CREATE TABLE lives(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,cabine_id uuid,cliente_id uuid,apresentador_id uuid,gestor_id uuid,status text,iniciado_em timestamptz,encerrado_em timestamptz,previsto_fim timestamptz,fat_gerado numeric,final_orders_count int,live_impressions bigint,manual_views int,resumo text,tipo text,status_publicacao text,origem_dados text,marca_id uuid,comissao_calculada numeric,comissao_apresentadora_pct numeric,comissao_apresentadora_valor numeric,agenda_evento_id uuid,ads_gmv numeric,manual_gmv numeric,manual_orders int);
  CREATE TABLE live_apresentadores(tenant_id uuid,live_id uuid,apresentador_id uuid);
  CREATE TABLE live_apresentadoras_v2(tenant_id uuid,live_id uuid,apresentadora_id uuid,papel text DEFAULT 'principal',gmv_rateado numeric,segundos_rateio numeric,percentual_rateio numeric,UNIQUE(live_id,apresentadora_id));
  CREATE TABLE apresentadora_marcas(tenant_id uuid,apresentadora_id uuid,marca_id uuid,ativo boolean DEFAULT true);
@@ -33,13 +33,19 @@ await db.exec(`
  ALTER TABLE clientes ADD COLUMN logo_url text;
  ALTER TABLE contratos ADD COLUMN cliente_id uuid;
 `)
+await db.exec(await readFile(new URL('../migrations/142_apresentadora_remuneracao_adicionais.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/144_portal_apresentadora_submissoes.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/145_portal_apresentadora_runtime_role.sql',import.meta.url),'utf8'))
+await db.exec(await readFile(new URL('../migrations/146_portal_apresentadora_metricas.sql',import.meta.url),'utf8'))
 await db.query(`INSERT INTO tenants VALUES ($1),($2)`,[tenant,otherTenant])
-await db.query(`INSERT INTO users(id,tenant_id,papel) VALUES ($1,$4,'apresentadora'),($2,$4,'apresentadora'),($3,$4,'gerente')`,[user,peer,manager,tenant])
-await db.query(`INSERT INTO apresentadoras(id,tenant_id,user_id,nome,fixo) VALUES ($1,$3,$4,'Ana',2850),($2,$3,$5,'Bia',3000)`,[presenter,peerPresenter,tenant,user,peer])
-await db.query(`INSERT INTO clientes VALUES ($1,$2,'ativo')`,[client,tenant])
-await db.query(`INSERT INTO marcas(id,tenant_id,cliente_id,nome,status,tipo) VALUES ($1,$2,$3,'Aurora','ativa','cliente')`,[brand,tenant,client])
+await db.query(`INSERT INTO users(id,tenant_id,papel) VALUES ($1,$4,'apresentadora'),($2,$4,'apresentadora'),($3,$4,'gerente'),($5,$6,'apresentadora')`,[user,peer,manager,tenant,otherUser,otherTenant])
+await db.query(`INSERT INTO apresentadoras(id,tenant_id,user_id,nome,fixo) VALUES ($1,$3,$4,'Ana',2850),($2,$3,$5,'Bia',3000),($6,$7,$8,'Outra',9999)`,[presenter,peerPresenter,tenant,user,peer,otherPresenter,otherTenant,otherUser])
+await db.query(`INSERT INTO apresentadora_remuneracao_adicionais (tenant_id,apresentadora_id,competencia,tipo,descricao,valor) VALUES
+  ($1,$2,'2026-09-01','bonificacao','Extra própria',100),
+  ($1,$3,'2026-09-01','bonificacao','Extra colega',900),
+  ($4,$5,'2026-09-01','bonificacao','Extra outra unidade',800)`,[tenant,presenter,peerPresenter,otherTenant,otherPresenter])
+await db.query(`INSERT INTO clientes VALUES ($1,$2,'ativo'),($3,$2,'arquivado')`,[client,tenant,archivedClient])
+await db.query(`INSERT INTO marcas(id,tenant_id,cliente_id,nome,status,tipo) VALUES ($1,$2,$3,'Aurora','ativa','cliente'),($4,$2,$3,'Disponível','ativa','cliente'),($5,$2,$3,'Arquivada','arquivada','cliente'),($6,$2,$7,'Herdada arquivada','ativa','cliente')`,[brand,tenant,client,unassignedBrand,archivedBrand,inheritedArchivedBrand,archivedClient])
 await db.query(`INSERT INTO cabines(id,tenant_id,nome,numero) VALUES($1,$2,'Norte',1)`,[cabin,tenant])
 await db.query(`INSERT INTO apresentadora_marcas VALUES($1,$2,$4,true),($1,$3,$4,true)`,[tenant,presenter,peerPresenter,brand])
 let failAudit=false, failCommit=false
@@ -77,10 +83,19 @@ await app.register(portalApresentadoraRoutes)
 const headers={'x-test-user':manager,'x-test-role':'gerente'}
 const inject=(method,url,payload,extra={})=>app.inject({method,url,...(payload===undefined?{}:{payload}),...extra})
 const own='/v1/portal/apresentadora/submissoes',review='/v1/lives/submissoes-apresentadoras'
-const payload={marca_id:brand,cabine_id:cabin,iniciado_em:'2026-09-05T12:00:00Z',encerrado_em:'2026-09-05T14:00:00Z',gmv_declarado:200,pedidos_declarados:2,request_id:id(11)}
+const payload={marca_id:unassignedBrand,cabine_id:cabin,iniciado_em:'2026-09-05T12:00:00Z',encerrado_em:'2026-09-05T14:00:00Z',gmv_declarado:200,pedidos_declarados:2,live_impressions_declaradas:500,manual_views_declaradas:100,request_id:id(11)}
 const counts=async()=> (await db.query(`SELECT (SELECT count(*)::int FROM lives) AS lives,(SELECT count(*)::int FROM vendas_atribuidas) AS sales,(SELECT count(*)::int FROM apresentadora_live_submissoes WHERE tenant_id='${tenant}'::uuid) AS submissions,(SELECT count(*)::int FROM apresentadora_live_submissao_historico WHERE tenant_id='${tenant}'::uuid) AS history`)).rows[0]
 const check=(r,status)=>{assert.equal(r.statusCode,status,r.body);return r.json()}
 try {
+ const options=check(await inject('GET','/v1/portal/apresentadora/opcoes'),200)
+ assert.ok(options.marcas.some(row=>row.id===unassignedBrand))
+ assert.equal(options.marcas.some(row=>row.id===archivedBrand),false)
+ assert.equal(options.marcas.some(row=>row.id===inheritedArchivedBrand),false)
+ check(await inject('POST',own,{...payload,marca_id:archivedBrand}),404)
+ check(await inject('POST',own,{...payload,marca_id:inheritedArchivedBrand}),404)
+ check(await inject('POST',own,{...payload,marca_id:undefined}),400)
+ check(await inject('POST',own,{...payload,gmv_declarado:undefined}),400)
+ check(await inject('POST',own,{...payload,pedidos_declarados:undefined}),400)
  failAudit=true;check(await inject('POST',own,payload),500)
  assert.deepEqual(await counts(),{lives:0,sales:0,submissions:0,history:0})
  failCommit=true;check(await inject('POST',own,payload),500)
@@ -103,7 +118,7 @@ try {
  assert.equal((await db.query('SELECT status FROM apresentadora_live_submissoes WHERE id=$1',[sid])).rows[0].status,'devolvida')
  check(await inject('POST',`${own}/${sid}/reenviar`),200)
  assert.equal((await counts()).lives,0);assert.equal((await counts()).sales,0)
- const official={marca_id:brand,cabine_id:cabin,iniciado_em:payload.iniciado_em,encerrado_em:payload.encerrado_em,gmv_oficial:150,pedidos_oficiais:1}
+ const official={marca_id:brand,cabine_id:cabin,iniciado_em:payload.iniciado_em,encerrado_em:payload.encerrado_em,gmv_oficial:150,pedidos_oficiais:1,live_impressions_oficiais:400,manual_views_oficiais:80}
  check(await inject('POST',`${review}/${sid}/aprovar`,{...official,encerrado_em:'2099-09-05T14:00:00Z'},{headers}),422)
  failAudit=true;check(await inject('POST',`${review}/${sid}/aprovar`,official,{headers}),500)
  assert.equal((await counts()).lives,0);assert.equal((await counts()).sales,0)
@@ -111,11 +126,12 @@ try {
  assert.equal((await counts()).lives,1);assert.equal((await counts()).sales,1)
  const sale=(await db.query('SELECT gmv,pedidos,comissao_apresentadora FROM vendas_atribuidas')).rows[0]
  assert.equal(Number(sale.gmv),150);assert.equal(sale.pedidos,1);assert.equal(Number(sale.comissao_apresentadora),3)
+ assert.deepEqual((await db.query('SELECT live_impressions,manual_views FROM lives')).rows,[{live_impressions:400,manual_views:80}])
  assert.equal((await db.query('SELECT count(*)::int AS n FROM agenda_eventos')).rows[0].n,1)
  const homeResponse=await inject('GET','/v1/portal/apresentadora/me?mes=2026-09')
  assert.equal(homeResponse.headers['cache-control'],'private, no-store')
  const home=check(homeResponse,200)
- assert.equal(home.remuneracao.fixo,2850);assert.equal(home.desempenho.gmv_lives,150)
+ assert.deepEqual(home.remuneracao,{mes:'2026-09',fixo:2850,comissao:3,adicionais:100,total:2953,extras:[{id:home.remuneracao.extras[0].id,tipo:'bonificacao',data_referencia:null,descricao:'Extra própria',valor:100}]});assert.equal(home.desempenho.gmv_lives,150)
  assert.equal(home.desempenho.total_lives,1)
  for(const row of home.ranking){
    for(const key of ['email','cpf_cnpj','telefone','comissao_apresentadora'])assert.equal(Object.hasOwn(row,key),false)
@@ -145,6 +161,8 @@ try {
  assert.equal((await db.query('SELECT status FROM apresentadora_live_submissoes WHERE id=$1',[cancellation.id])).rows[0].status,'cancelada')
  assert.equal((await counts()).lives,1);assert.equal((await counts()).sales,1)
  check(await inject('POST',`${own}/${cancellation.id}/reenviar`),404)
+ const noFunnel=check(await inject('POST',own,{...payload,live_impressions_declaradas:undefined,manual_views_declaradas:undefined,request_id:id(14)}),201)
+ assert.deepEqual((await db.query('SELECT live_impressions_declaradas,manual_views_declaradas FROM apresentadora_live_submissoes WHERE id=$1',[noFunnel.id])).rows,[{live_impressions_declaradas:null,manual_views_declaradas:null}])
  await db.query("UPDATE users SET papel='apresentadora' WHERE id=$1",[manager])
  check(await inject('GET',review,undefined,{headers}),403)
  check(await inject('POST',`${review}/${cancellation.id}/devolver`,{motivo:'stale manager'},{headers}),403)

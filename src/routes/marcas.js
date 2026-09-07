@@ -7,6 +7,7 @@ import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
+import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 
 // TTL longo de propósito: a invalidação por evento (writes) é quem mantém a
 // listagem fresca. Este TTL é só o limite de quanto um dado poderia ficar velho
@@ -17,7 +18,7 @@ const MARCAS_CACHE_TTL_MS = Number(process.env.MARCAS_CACHE_TTL_MS ?? 300_000)
 export const LISTAGEM_NAMESPACES = ['marcas:list', 'clientes:list']
 
 const marcaCols = `
-  m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, m.status,
+  m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, ${marcaStatusOperacionalSql()} AS status,
   ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username, m.site, m.marketplace_url, m.logo_url, m.cor,
   m.comissao_franquia_pct, m.comissao_franqueadora_pct, m.valor_fixo_minimo, m.tipo_cobranca,
   m.data_inicio, m.data_fim,
@@ -142,10 +143,10 @@ export async function marcasRoutes(app) {
         // bypass
       } else if (status) {
         values.push(status)
-        addFilter(filters, values, 'm.status = ?')
+        addFilter(filters, values, `${marcaStatusOperacionalSql()} = ?`)
       } else {
         // Arquivadas (e inativas) somem por padrão; ?status=arquivada lista.
-        filters.push(`m.status NOT IN ('inativa', 'arquivada')`)
+        filters.push(`${marcaStatusOperacionalSql()} NOT IN ('inativa', 'arquivada')`)
       }
       if (tipo && tipo !== 'all') {
         values.push(tipo)
@@ -184,6 +185,7 @@ export async function marcasRoutes(app) {
            WHERE am.marca_id = m.id
              AND am.tenant_id = m.tenant_id
              AND am.ativo = true
+             AND a.ativo IS NOT FALSE AND a.arquivada IS NOT TRUE
          ) am_agg ON true
          LEFT JOIN (
            SELECT id, COALESCE(SUM(gmv), 0) AS gmv_mes,
@@ -202,7 +204,7 @@ export async function marcasRoutes(app) {
            ) t GROUP BY id
          ) mtr ON mtr.id = m.id
          WHERE ${filters.join(' AND ')}
-         ORDER BY m.status = 'ativa' DESC, m.nome ASC`,
+         ORDER BY ${marcaStatusOperacionalSql()} = 'ativa' DESC, m.nome ASC`,
         values,
       )
       return result.rows
@@ -249,7 +251,7 @@ export async function marcasRoutes(app) {
         const result = createdMarcaId
           ? await db.query(
               `UPDATE marcas SET
-                 nome = $3, status = $4, site = $5, marketplace_url = $6,
+                 nome = $3, status = COALESCE($4, status), site = $5, marketplace_url = $6,
                  comissao_franquia_pct = COALESCE($7, comissao_franquia_pct),
                  comissao_franqueadora_pct = COALESCE($8, comissao_franqueadora_pct),
                  observacoes = $9, logo_url = COALESCE($10, logo_url),
@@ -262,7 +264,7 @@ export async function marcasRoutes(app) {
                WHERE id = $1 AND tenant_id = $2::uuid
                RETURNING *`,
               [
-                createdMarcaId, tenant_id, d.nome, d.status, d.site ?? null, d.marketplace_url ?? null,
+                createdMarcaId, tenant_id, d.nome, Object.hasOwn(request.body, 'status') ? d.status : null, d.site ?? null, d.marketplace_url ?? null,
                 d.comissao_franquia_pct ?? null, d.comissao_franqueadora_pct ?? null,
                 d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? null,
                 d.cor ?? null, d.tipo_cobranca ?? null,
@@ -433,6 +435,7 @@ export async function marcasRoutes(app) {
            WHERE am.marca_id = m.id
              AND am.tenant_id = m.tenant_id
              AND am.ativo = true
+             AND a.ativo IS NOT FALSE AND a.arquivada IS NOT TRUE
          ) am_agg ON true
          WHERE m.id = $1 AND m.tenant_id = $2::uuid`,
         [request.params.id, tenant_id],

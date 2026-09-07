@@ -4,6 +4,7 @@ import { seedRateioPlanejado } from '../lib/agenda-turnos.js'
 import { syncAgendaEventForLive } from '../lib/live-agenda-sync.js'
 import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
+import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 
 // Materializa um relato APROVADO dentro da transação do revisor. Não aceita
 // A identidade vem da submissão bloqueada; os valores oficiais foram conferidos
@@ -16,7 +17,7 @@ export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, sub
     JOIN users u ON u.id=a.user_id AND u.tenant_id=a.tenant_id AND u.ativo IS TRUE
     LEFT JOIN clientes cl ON cl.id=m.cliente_id AND cl.tenant_id=m.tenant_id
     LEFT JOIN contratos ct ON ct.id=c.contrato_id AND ct.tenant_id=c.tenant_id AND ct.status='ativo'
-    WHERE m.id=$2::uuid AND m.tenant_id=$1::uuid AND m.status='ativa'
+    WHERE m.id=$2::uuid AND m.tenant_id=$1::uuid AND ${marcaStatusOperacionalSql('m', 'cl')}='ativa'
       AND a.ativo IS TRUE AND a.arquivada IS DISTINCT FROM TRUE
       AND (m.cliente_id IS NULL OR cl.id IS NOT NULL)
       AND (c.contrato_id IS NULL OR EXISTS (SELECT 1 FROM contratos x WHERE x.id=c.contrato_id AND x.tenant_id=c.tenant_id))
@@ -37,9 +38,9 @@ export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, sub
   const gmv = Number(oficial.gmv_oficial)
   const pedidos = Number(oficial.pedidos_oficiais)
   const snapshot = calcularComissaoApresentadora({ fatGerado: gmv, apresentadoraPct: ref.apresentadora_pct == null ? null : Number(ref.apresentadora_pct), iniciadoEm: oficial.iniciado_em, temApresentadora: true })
-  const created = await db.query(`INSERT INTO lives (tenant_id,cabine_id,cliente_id,apresentador_id,gestor_id,status,iniciado_em,encerrado_em,fat_gerado,final_orders_count,resumo,tipo,status_publicacao,origem_dados,marca_id,comissao_calculada,comissao_apresentadora_pct,comissao_apresentadora_valor)
-    VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,'encerrada',$6::timestamptz,$7::timestamptz,$8::numeric,$9::int,$10,$12,'rascunho','manual',$11::uuid,$13,$14,$15) RETURNING id`,
-  [tenantId, oficial.cabine_id, ref.cliente_id, ref.user_id, revisorId, oficial.iniciado_em, oficial.encerrado_em, gmv, pedidos, submissao.observacao ?? null, oficial.marca_id, tipo, gmv * Number(ref.contrato_pct ?? 0) / 100, snapshot.pct, snapshot.valor])
+  const created = await db.query(`INSERT INTO lives (tenant_id,cabine_id,cliente_id,apresentador_id,gestor_id,status,iniciado_em,encerrado_em,fat_gerado,final_orders_count,live_impressions,manual_views,resumo,tipo,status_publicacao,origem_dados,marca_id,comissao_calculada,comissao_apresentadora_pct,comissao_apresentadora_valor)
+    VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::uuid,'encerrada',$6::timestamptz,$7::timestamptz,$8::numeric,$9::int,$10::bigint,$11::int,$12,$14,'rascunho','manual',$13::uuid,$15,$16,$17) RETURNING id`,
+  [tenantId, oficial.cabine_id, ref.cliente_id, ref.user_id, revisorId, oficial.iniciado_em, oficial.encerrado_em, gmv, pedidos, oficial.live_impressions_oficiais ?? null, oficial.manual_views_oficiais ?? null, submissao.observacao ?? null, oficial.marca_id, tipo, gmv * Number(ref.contrato_pct ?? 0) / 100, snapshot.pct, snapshot.valor])
   const liveId = created.rows[0].id
   const agendaId = await syncAgendaEventForLive(db, { tenantId, liveId, cabineId: oficial.cabine_id,
     marcaId: oficial.marca_id, apresentadoraId: submissao.apresentadora_id, dataInicio: oficial.iniciado_em,

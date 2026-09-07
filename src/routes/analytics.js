@@ -1512,6 +1512,109 @@ export async function analyticsRoutes(app) {
     })
   })
 
+  // Metas mensais da unidade não dependem dos filtros comparativos de marca ou
+  // apresentadora. O escopo é intencionalmente a unidade inteira, para que uma
+  // tela filtrada não pareça ter falhado uma meta configurada para toda a operação.
+  // Mantém a mesma permissão já usada em /v1/meta-unidade: ler metas não abre a
+  // configuração para os demais papéis que podem consultar Analytics.
+  app.get('/v1/analytics/unidade-mensal', {
+    preHandler: [
+      app.authenticate,
+      app.requirePapel(['franqueado', 'gerente']),
+    ],
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: { ano_mes: { type: 'string' } },
+        additionalProperties: false,
+      },
+    },
+  }, async (request, reply) => {
+    const mes = request.query.ano_mes || currentMonth()
+    if (!isValidMonthString(mes)) {
+      return reply.code(400).send({ error: 'ano_mes deve ter o formato YYYY-MM.' })
+    }
+
+    const hoje = saoPauloDateInput(new Date())
+    const mesAtual = hoje.slice(0, 7)
+    const diasNoMes = Number(monthEnd(mes).slice(-2))
+    const isMesAtual = mes === mesAtual
+    const isMesPassado = mes < mesAtual
+    // A quantidade de dias transcorridos inclui hoje: no primeiro dia, a
+    // projeção representa o ritmo de um dia completo, nunca divide por zero.
+    const diasDecorridos = isMesAtual ? Number(hoje.slice(-2)) : (isMesPassado ? diasNoMes : 0)
+    // O ritmo não pode olhar para lives com data futura, mesmo que um import
+    // inválido já as tenha marcado como encerradas. Para o mês futuro a faixa é
+    // vazia; o realizado permanece zero até o mês começar.
+    const fimRealizado = isMesAtual
+      ? hoje
+      : (isMesPassado ? monthEnd(mes) : addDays(`${mes}-01`, -1))
+
+    const { tenant_id } = request.user
+    const [realizadoQ, metasQ] = await app.withTenant(tenant_id, (db) => Promise.all([
+      db.query(`
+        SELECT
+          COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv,
+          COALESCE(SUM(
+            CASE
+              WHEN COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
+               AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
+                THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
+              ELSE 0
+            END
+          ), 0) AS horas_live
+        FROM lives l
+        WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+          -- A única fonte para GMV/h é live efetivamente encerrada; canceladas
+          -- e planejadas ficam fora, como no dashboard de Analytics.
+          AND l.status = 'encerrada'
+          ${analyticsLiveRangeSql('l', '$1', '$2')}
+      `, [`${mes}-01`, fimRealizado]),
+      db.query(`
+        SELECT meta_horas_live, meta_gmv_hora
+        FROM meta_unidade
+        WHERE tenant_id = $1 AND ano_mes = $2
+        LIMIT 1
+      `, [tenant_id, mes]),
+    ]))
+
+    // Só arredondamos a resposta. A taxa e a projeção nascem dos totais crus,
+    // senão uma duração fracionada poderia alterar GMV/h e a comparação da meta.
+    const horasLiveRaw = Number(realizadoQ.rows[0]?.horas_live ?? 0)
+    const gmvRaw = Number(realizadoQ.rows[0]?.gmv ?? 0)
+    const gmvPorHoraRaw = horasLiveRaw > 0 ? gmvRaw / horasLiveRaw : null
+    const meta = metasQ.rows[0] ?? {}
+    const projetar = isMesAtual && diasDecorridos > 0
+
+    return {
+      ano_mes: mes,
+      escopo: 'unidade',
+      periodo: {
+        inicio: `${mes}-01`,
+        fim: monthEnd(mes),
+        dias_no_mes: diasNoMes,
+        dias_decorridos: diasDecorridos,
+      },
+      realizado: {
+        horas_live: round2(horasLiveRaw),
+        gmv: round2(gmvRaw),
+        gmv_por_hora: gmvPorHoraRaw == null ? null : round2(gmvPorHoraRaw),
+      },
+      // A taxa é uma razão (GMV/h): ao extrapolar GMV e horas pelo mesmo ritmo,
+      // ela permanece igual. Ainda a retornamos para a UI não precisar inventar
+      // uma fórmula distinta daquela usada no realizado.
+      projecao: projetar ? {
+        horas_live: round2((horasLiveRaw / diasDecorridos) * diasNoMes),
+        gmv: round2((gmvRaw / diasDecorridos) * diasNoMes),
+        gmv_por_hora: gmvPorHoraRaw == null ? null : round2(gmvPorHoraRaw),
+      } : null,
+      metas: {
+        horas_live: meta.meta_horas_live == null ? null : round2(meta.meta_horas_live),
+        gmv_por_hora: meta.meta_gmv_hora == null ? null : round2(meta.meta_gmv_hora),
+      },
+    }
+  })
+
   app.get('/v1/analytics/dashboard', {
     preHandler: [
       app.authenticate,

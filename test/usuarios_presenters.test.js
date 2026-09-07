@@ -99,10 +99,34 @@ describe('usuarios presenter provisioning', () => {
       sql.includes('UPDATE apresentadoras') &&
       values[0] === userId &&
       values[1] === apresentadoraId &&
-      values[5] === 2700 &&
-      values[6] === 1.5
+      values[5] === true &&
+      values[6] === 2700 &&
+      values[7] === true &&
+      values[8] === 1.5
     )).toBe(true)
 
+    await app.close()
+  })
+
+  it('refuses linking an archived presenter profile', async () => {
+    const queryMock = vi.fn(async (sql, values = []) => {
+      if (sql === 'BEGIN' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('SELECT id FROM users')) return { rows: [] }
+      if (sql.includes('INSERT INTO users')) {
+        return { rows: [{ id: userId, nome: values[1], email: values[2], papel: values[4], ativo: true }] }
+      }
+      if (sql.includes('UPDATE apresentadoras')) return { rows: [], rowCount: 0 }
+      return { rows: [] }
+    })
+    const { app, query } = buildApp({ queryMock })
+    await app.register(usuariosRoutes)
+    const response = await app.inject({
+      method: 'POST', url: '/v1/usuarios/convidar',
+      payload: { ...baseInvitePayload(), apresentadora_id: apresentadoraId },
+    })
+    expect(response.statusCode).toBe(409)
+    const linkSql = query.mock.calls.find(([sql]) => sql.includes('UPDATE apresentadoras'))?.[0]
+    expect(linkSql).toContain('arquivada IS NOT TRUE')
     await app.close()
   })
 
@@ -166,7 +190,7 @@ describe('usuarios presenter provisioning', () => {
       if (sql.includes('UPDATE users')) {
         return { rows: [{ id: userId, nome: values[0], email: 'jady@example.com', papel: values[1], ativo: values[2], criado_em: '2026-05-22T00:00:00.000Z' }] }
       }
-      if (sql.includes('SELECT id FROM apresentadoras WHERE user_id')) return { rows: [{ id: apresentadoraId }] }
+      if (sql.includes('FROM apresentadoras') && sql.includes('user_id')) return { rows: [{ id: apresentadoraId }] }
       if (sql.includes('UPDATE apresentadoras')) return { rows: [{ id: apresentadoraId }], rowCount: 1 }
       return { rows: [] }
     })
@@ -195,6 +219,24 @@ describe('usuarios presenter provisioning', () => {
       values[9] === apresentadoraId
     )).toBe(true)
 
+    await app.close()
+  })
+
+  it('deactivates the linked profile when a user leaves a presenter role', async () => {
+    const queryMock = vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (sql.includes('FROM users') && sql.includes('FOR UPDATE')) return { rows: [{ id: userId, nome: 'Jady', email: 'jady@example.com', papel: 'apresentadora', ativo: true }] }
+      if (sql.includes('UPDATE users SET')) return { rows: [{ id: userId, nome: 'Jady', email: 'jady@example.com', papel: 'operacional', ativo: true }] }
+      if (sql.includes('FROM apresentadoras') && sql.includes('user_id')) return { rows: [{ id: apresentadoraId }] }
+      if (sql.includes('UPDATE apresentadoras SET ativo=false')) return { rows: [{ id: apresentadoraId }] }
+      return { rows: [] }
+    })
+    const { app, query } = buildApp({ queryMock })
+    await app.register(usuariosRoutes)
+    const response = await app.inject({ method: 'PATCH', url: `/v1/usuarios/${userId}`, payload: { papel: 'operacional' } })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ pode_apresentar_live: false })
+    expect(query.mock.calls.some(([sql]) => sql.includes('UPDATE apresentadoras SET ativo=false'))).toBe(true)
     await app.close()
   })
 })

@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { SECURITY } from '../config/security.js'
 import { DEFAULT_APRESENTADORA_FIXO, MAX_APRESENTADORA_FIXO, ensureDefaultPresenterCommissionTiers, presenterFixedSql } from '../config/presenter_defaults.js'
 import { notify } from '../services/mailer.js'
+import { isPresenterRole, linkedPresenterForUser } from '../services/presenter-identity.js'
 
 const PAPEL_LABELS = {
   gerente: 'Gerente',
@@ -16,7 +17,7 @@ const PAPEL_LABELS = {
 }
 
 const _frontendUrl = () =>
-  (process.env.FRONTEND_URL ?? 'https://livelab-3601f.web.app').replace(/\/+$/, '')
+  (process.env.FRONTEND_URL ?? 'https://app.grupolivelab.com.br').replace(/\/+$/, '')
 
 const imageUrlSchema = z.string().max(500000).nullable().optional()
 
@@ -49,10 +50,6 @@ const atualizarSchema = z.object({
   foto_url: imageUrlSchema,
 })
 
-function isPresenterRole(papel) {
-  return papel === 'apresentador' || papel === 'apresentadora'
-}
-
 function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj, key)
 }
@@ -67,13 +64,16 @@ async function ensurePresenterProfileForUser(db, {
   hasComissaoPct,
   hasFotoUrl,
 }) {
-  const existing = await db.query(
-    `SELECT id FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid`,
-    [user.id, tenantId],
-  )
+  const existing = await linkedPresenterForUser(db, tenantId, user.id, { forUpdate: true })
 
-  if (existing.rows[0]) {
-    const apresentadoraId = existing.rows[0].id
+  if (existing) {
+    if (existing.arquivada === true && user.ativo !== false) {
+      const error = new Error('Perfil de apresentadora arquivado exige revisão manual antes de reativar o acesso.')
+      error.statusCode = 409
+      error.code = 'PRESENTER_PROFILE_ARCHIVED'
+      throw error
+    }
+    const apresentadoraId = existing.id
     await db.query(
       `UPDATE apresentadoras
           SET nome = $1,
@@ -188,8 +188,6 @@ export async function usuariosRoutes(app) {
     }
     const { nome, email, papel, cliente_id, apresentadora_id, fixo, comissao_pct, foto_url, senha_temporaria } = parsed.data
     const tenantId = request.user.tenant_id
-    const presenterFixo = fixo ?? DEFAULT_APRESENTADORA_FIXO
-    const presenterComissaoPct = comissao_pct ?? 0
 
     // Criação direta: admin pode definir a senha temporária; se omitida (ex:
     // cadastro de apresentadora sem senha), o sistema gera uma forte e devolve
@@ -274,15 +272,16 @@ export async function usuariosRoutes(app) {
                   SET user_id = $1,
                       nome = $4,
                       email = $5,
-                      fixo = $6,
-                      comissao_pct = $7,
-                      foto_url = COALESCE($8, foto_url),
+                      fixo = CASE WHEN $6::boolean THEN $7 ELSE fixo END,
+                      comissao_pct = CASE WHEN $8::boolean THEN $9 ELSE comissao_pct END,
+                      foto_url = CASE WHEN $10::boolean THEN $11 ELSE foto_url END,
                       ativo = true
                 WHERE id = $2
                   AND tenant_id = $3
                   AND user_id IS NULL
+                  AND arquivada IS NOT TRUE
                 RETURNING id`,
-              [newUser.id, apresentadora_id, tenantId, nome, email, presenterFixo, presenterComissaoPct, foto_url ?? null]
+              [newUser.id, apresentadora_id, tenantId, nome, email, fixo !== undefined, fixo ?? null, comissao_pct !== undefined, comissao_pct ?? null, foto_url !== undefined, foto_url ?? null]
             )
             if (linked.rowCount === 0) {
               await db.query('ROLLBACK')
@@ -295,7 +294,7 @@ export async function usuariosRoutes(app) {
               `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, foto_url, ativo)
                VALUES ($1, $2, $3, $4, $5, $6, $7, true)
                RETURNING id`,
-              [tenantId, newUser.id, nome, email, presenterFixo, presenterComissaoPct, foto_url ?? null]
+              [tenantId, newUser.id, nome, email, fixo ?? DEFAULT_APRESENTADORA_FIXO, comissao_pct ?? 0, foto_url ?? null]
             )
             apresentadoraId = createdProfile.rows[0]?.id ?? null
             await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
@@ -427,6 +426,17 @@ export async function usuariosRoutes(app) {
             hasComissaoPct: hasOwn(fields, 'comissao_pct'),
             hasFotoUrl: hasOwn(fields, 'foto_url'),
           })
+        } else {
+          // A linked operational profile remains historical data, but can no
+          // longer be used for login/agenda when the user leaves presenter roles.
+          const linked = await linkedPresenterForUser(db, request.user.tenant_id, updatedUser.id, { forUpdate: true })
+          if (linked) {
+            await db.query(
+              `UPDATE apresentadoras SET ativo=false
+                WHERE id=$1::uuid AND tenant_id=$2::uuid`,
+              [linked.id, request.user.tenant_id],
+            )
+          }
         }
 
         await db.query('COMMIT')
@@ -460,20 +470,24 @@ export async function usuariosRoutes(app) {
       return reply.code(400).send({ error: 'Use /auth/senha para alterar sua própria senha' })
     }
 
-    const novaSenha = crypto.randomBytes(8).toString('hex')
+    const novaSenha = `Lv${crypto.randomBytes(6).toString('hex')}9`
     const senhaHash = await bcrypt.hash(novaSenha, 12)
 
     return app.withTenant(request.user.tenant_id, async (db) => {
-      const result = await db.query(
-        `UPDATE users SET senha_hash = $1
-         WHERE id = $2 AND tenant_id = $3
-         RETURNING id`,
-        [senhaHash, request.params.id, request.user.tenant_id]
-      )
-      if (result.rows.length === 0) {
-        return reply.code(404).send({ error: 'Usuário não encontrado' })
-      }
-      await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+      await db.query('BEGIN')
+      let result
+      try {
+        result = await db.query(
+          `UPDATE users SET senha_hash=$1, token_version=token_version+1
+           WHERE id=$2 AND tenant_id=$3::uuid
+           RETURNING id, token_version`,
+          [senhaHash, request.params.id, request.user.tenant_id],
+        )
+        if (result.rows.length === 0) { await db.query('ROLLBACK'); return reply.code(404).send({ error: 'Usuário não encontrado' }) }
+        await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+        await db.query('COMMIT')
+      } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error }
+      app.invalidateTokenVersionCache?.(request.params.id)
       app.audit?.log?.(request, { action: 'usuarios.reset_password', entity_type: 'user', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       // S-10: resposta contém senha — proibir cache em proxies/CDN
       reply.header('Cache-Control', 'no-store')
@@ -642,7 +656,7 @@ export async function usuariosRoutes(app) {
           )
 
           const inviteUrl = `${_frontendUrl()}/aceitar-convite?token=${encodeURIComponent(inviteRawToken)}`
-          notify({
+          const envio = await notify({
             app,
             tenantId: request.user.tenant_id,
             to: user.rows[0].email,
@@ -653,7 +667,12 @@ export async function usuariosRoutes(app) {
               invite_url: inviteUrl,
               expira_em: inviteExpiraEm.toLocaleString('pt-BR'),
             },
-          }).catch(err => app.log.error({ err }, 'Failed to send bulk invite email'))
+          }).catch(err => {
+            app.log.error({ err }, 'Failed to send bulk invite email')
+            return { ok: false }
+          })
+
+          if (envio?.ok !== true) throw new Error('Convite não pôde ser enviado')
 
           app.audit?.log?.(request, { action: 'usuarios.invite_resend_bulk', entity_type: 'user', entity_id: id })?.catch(err => app.log.error({ err }, 'audit log failed'))
           reenviados.push(id)
@@ -718,6 +737,14 @@ export async function usuariosRoutes(app) {
         if (result.rows.length === 0) {
           await db.query('ROLLBACK')
           return reply.code(404).send({ error: 'Usuário não encontrado' })
+        }
+        const linked = await linkedPresenterForUser(db, request.user.tenant_id, request.params.id, { forUpdate: true })
+        if (linked) {
+          await db.query(
+            `UPDATE apresentadoras SET ativo=false
+              WHERE id=$1::uuid AND tenant_id=$2::uuid`,
+            [linked.id, request.user.tenant_id],
+          )
         }
         await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
         await db.query('COMMIT')

@@ -40,8 +40,12 @@ function _emailBreadcrumb(level, template, to, extra = {}) {
   }
 }
 
+export function isEmailConfigured() {
+  return Boolean(process.env.RESEND_API_KEY?.trim())
+}
+
 function _client() {
-  if (!process.env.RESEND_API_KEY) return null
+  if (!isEmailConfigured()) return null
   if (!_resendClient) _resendClient = new Resend(process.env.RESEND_API_KEY)
   return _resendClient
 }

@@ -14,10 +14,10 @@ import {
   aceitarConviteSchema,
 } from '../schemas/auth.schema.js'
 import { SECURITY } from '../config/security.js'
-import { notify } from '../services/mailer.js'
+import { notify, isEmailConfigured } from '../services/mailer.js'
 
 const _frontendUrl = () =>
-  (process.env.FRONTEND_URL ?? 'https://livelab-3601f.web.app').replace(/\/+$/, '')
+  (process.env.FRONTEND_URL ?? 'https://app.grupolivelab.com.br').replace(/\/+$/, '')
 
 const _hashToken = (raw) => crypto.createHash('sha256').update(raw).digest('hex')
 
@@ -238,7 +238,8 @@ export async function authRoutes(app) {
   // F4: Recuperação de senha
   // ─────────────────────────────────────────────────────────────────
 
-  // POST /v1/auth/esqueci-senha — sempre retorna 200 (anti-enumeração)
+  // Indisponibilidade global retorna 503 antes de consultar a conta;
+  // com envio configurado, a resposta não revela se o e-mail existe.
   // Rate limit: 3/h por IP em prod, 100/h em dev. Limite extra por email
   // (no_op silencioso) aplicado no handler.
   app.post(
@@ -262,6 +263,13 @@ export async function authRoutes(app) {
       // Headers de privacidade — link nunca deve sair pelo Referer.
       reply.header('Referrer-Policy', 'no-referrer')
       reply.header('Cache-Control', 'no-store')
+
+      if (!isEmailConfigured()) {
+        return reply.code(503).send({
+          error: 'A recuperação por e-mail está indisponível. Peça ao responsável da unidade para redefinir sua senha.',
+          code: 'EMAIL_UNAVAILABLE',
+        })
+      }
 
       const parsed = esqueciSenhaSchema.safeParse(request.body)
       if (!parsed.success) {

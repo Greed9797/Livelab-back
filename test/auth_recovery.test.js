@@ -4,6 +4,11 @@ import crypto from 'node:crypto'
 
 import { authRoutes } from '../src/routes/auth.js'
 
+vi.mock('../src/services/mailer.js', async (importOriginal) => ({
+  ...await importOriginal(),
+  notify: vi.fn().mockResolvedValue({ ok: true }),
+}))
+
 const TENANT = '00000000-0000-0000-0000-000000000001'
 const USER_ID = '11111111-1111-1111-1111-111111111111'
 
@@ -22,10 +27,34 @@ function buildApp({ queryImpl } = {}) {
 }
 
 let envSnap
-beforeEach(() => { envSnap = process.env.NODE_ENV; process.env.NODE_ENV = 'test' })
-afterEach(() => { if (envSnap !== undefined) process.env.NODE_ENV = envSnap; else delete process.env.NODE_ENV })
+beforeEach(() => {
+  envSnap = process.env.NODE_ENV
+  process.env.NODE_ENV = 'test'
+  vi.stubEnv('RESEND_API_KEY', 'test-only-not-a-real-key')
+})
+afterEach(() => {
+  vi.unstubAllEnvs()
+  if (envSnap !== undefined) process.env.NODE_ENV = envSnap; else delete process.env.NODE_ENV
+})
 
 describe('POST /v1/auth/esqueci-senha (anti-enumeração)', () => {
+  it('503 uniforme sem configuração, sem consultar contas nem invalidar tokens', async () => {
+    vi.stubEnv('RESEND_API_KEY', '')
+    const { app, queryMock } = buildApp()
+    await app.register(authRoutes)
+    const responses = []
+    for (const email of ['j@x.com', 'ausente@x.com']) {
+      const res = await app.inject({ method: 'POST', url: '/v1/auth/esqueci-senha', payload: { email } })
+      expect(res.statusCode).toBe(503)
+      expect(res.headers['cache-control']).toBe('no-store')
+      expect(res.json().code).toBe('EMAIL_UNAVAILABLE')
+      responses.push(res.json())
+    }
+    expect(responses[0]).toEqual(responses[1])
+    expect(queryMock).not.toHaveBeenCalled()
+    await app.close()
+  })
+
   it('200 com mensagem genérica quando email não existe', async () => {
     const queryMock = vi.fn(async (sql) => {
       if (/SELECT id, nome, email, tenant_id/i.test(sql)) return { rows: [] }

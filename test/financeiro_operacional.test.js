@@ -28,7 +28,7 @@ function buildApp({ queryMock } = {}) {
 }
 
 // Mock que despacha pelo shape do SQL de cada uma das 5 queries do endpoint.
-function operacionalQueryMock() {
+function operacionalQueryMock({ adicionais = [] } = {}) {
   return vi.fn().mockImplementation(async (sql) => {
     const s = String(sql)
     if (s.includes('SUM(va.comissao_franquia)')) {
@@ -48,6 +48,9 @@ function operacionalQueryMock() {
         { id: 'c1', descricao: 'Aluguel galpão', valor: '1000.00', tipo: 'aluguel', competencia: '2026-06-01' },
         { id: 'c2', descricao: 'Material descartável', valor: '50.00', tipo: 'outros', competencia: '2026-06-10' },
       ] }
+    }
+    if (s.includes('FROM apresentadora_remuneracao_adicionais')) {
+      return { rows: adicionais }
     }
     return { rows: [] }
   })
@@ -129,6 +132,26 @@ describe('GET /v1/financeiro/operacional', () => {
     const marker = `m.tipo = 'cliente'` // WHERE da fonte compartilhada
     const calls = query.mock.calls.filter(([sql]) => String(sql).includes(marker) && String(sql).includes('meses_ativos'))
     expect(calls.length).toBeGreaterThanOrEqual(2) // uma no /operacional, uma no /resumo
+    await app.close()
+  })
+
+  it('adicionais ativos entram uma vez como saída variável; cancelados ficam fora do DRE', async () => {
+    const query = operacionalQueryMock({ adicionais: [
+      { id: 'x1', apresentadora_id: 'ap1', nome: 'Ana', tipo: 'fim_de_semana', descricao: 'Sábado', data_referencia: '2026-06-06', valor: '100.00' },
+      { id: 'x2', apresentadora_id: 'ap1', nome: 'Ana', tipo: 'bonificacao', descricao: 'Meta', data_referencia: null, valor: '25.50' },
+    ] })
+    const { app } = buildApp({ queryMock: query })
+    await app.register(financeiroRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/operacional?inicio=2026-06&fim=2026-06' })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    const extras = body.saidas.filter((item) => item.categoria === 'adicional_apresentadora')
+    expect(extras.map((item) => item.valor)).toEqual([100, 25.5])
+    // Base do fixture = 150 de variáveis; adicionais vivos somam 125,50 uma única vez.
+    expect(body.totais.despesas_variaveis).toBe(275.5)
+    expect(body.totais.resultado).toBe(550 - 3700 - 275.5)
+    const sql = String(query.mock.calls.find(([statement]) => String(statement).includes('FROM apresentadora_remuneracao_adicionais'))[0])
+    expect(sql).toContain('ara.cancelado_em IS NULL')
     await app.close()
   })
 

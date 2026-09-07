@@ -17,6 +17,7 @@ import { analyticsRoutes } from './routes/analytics.js'
 import { clientesRoutes } from './routes/clientes.js'
 import { contratosRoutes } from './routes/contratos.js'
 import { financeiroRoutes } from './routes/financeiro.js'
+import { remuneracaoApresentadorasRoutes } from './routes/remuneracao_apresentadoras.js'
 import { relatoriosRoutes } from './routes/relatorios.js'
 import { cabinesRoutes } from './routes/cabines.js'
 import { livesRoutes } from './routes/lives.js'
@@ -327,6 +328,7 @@ export async function buildApp(opts = {}) {
   await app.register(clientesRoutes)
   await app.register(contratosRoutes)
   await app.register(financeiroRoutes)
+  await app.register(remuneracaoApresentadorasRoutes)
   await app.register(relatoriosRoutes)
   await app.register(cabinesRoutes)
   await app.register(livesRoutes)

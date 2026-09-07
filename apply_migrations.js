@@ -136,6 +136,7 @@ export const MIGRATIONS_LIST = [
   '139_agenda_evento_apresentadoras.sql',
   '140_origem_dados_bot.sql',
   '141_comissao_apresentadora_snapshot_do_motor.sql',
+  '142_apresentadora_remuneracao_adicionais.sql',
 ]
 
 async function ensureMigrationsTable(client) {

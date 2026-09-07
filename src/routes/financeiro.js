@@ -5,6 +5,7 @@ import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { marcaResolveLateralSql, MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
 import { resolveMonthRange } from '../lib/operacional.js'
 import { presenterFixedAtSql } from '../config/presenter_defaults.js'
+import { prorateFatorSql } from '../lib/financeiro-remuneracao.js'
 import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl } from '../lib/dashboard-cache.js'
 
@@ -24,15 +25,6 @@ const toNum = (v) => Number(v ?? 0)
 // ponytail: rateio por dias (saiu dia 15 de 30 → 0.5; mês fora do contrato → 0). Exato quando
 // o range = 1 mês (o default dos painéis); em range multi-mês a marca soma fração por mês ativo
 // e a apresentadora usa só o mês de referência. Reusa o padrão EXTRACT(DAY) do home.js.
-function prorateFatorSql(mesExpr, inicioCol, fimCol) {
-  const ini = `(${mesExpr})::date`
-  const fim = `((${mesExpr}) + interval '1 month' - interval '1 day')::date`
-  return `GREATEST(0, LEAST(1.0,
-    (LEAST(${fim}, COALESCE(${fimCol}, ${fim})) - GREATEST(${ini}, COALESCE(${inicioCol}, ${ini})) + 1)::numeric
-    / EXTRACT(DAY FROM (${fim}))::numeric
-  ))`
-}
-
 // Fixo mensal das marcas tipo='cliente' (semântica migration 116): 1× por marca por mês
 // COM atividade (GMV/pedidos > 0 em lives ou vídeos). FONTE ÚNICA compartilhada entre
 // /resumo (soma agregada) e /operacional (1 lançamento por marca) — não duplicar.
@@ -511,13 +503,13 @@ export async function financeiroRoutes(app) {
       // todos os meses do intervalo — inclusive competências já fechadas.
       const fixoApresentadoras = await db.query(`
         SELECT a.id AS apresentadora_id, a.nome,
-               COALESCE((
+               ROUND(COALESCE((
                  SELECT SUM(
                    (${presenterFixedAtSql('a', "((gs.mes + interval '1 month' - interval '1 day')::date)")})
                    * ${prorateFatorSql('gs.mes', 'a.data_inicio', 'a.data_fim')}
                  )
                  FROM generate_series(date_trunc('month', $1::date), date_trunc('month', $3::date), interval '1 month') gs(mes)
-               ), 0) AS valor
+               ), 0), 2) AS valor
         FROM apresentadoras a
         WHERE a.tenant_id = $2::uuid AND a.ativo IS TRUE AND COALESCE(a.arquivada, false) = false
         ORDER BY valor DESC, a.nome ASC
@@ -530,6 +522,20 @@ export async function financeiroRoutes(app) {
         WHERE tenant_id = $3::uuid
           AND competencia >= $1::date AND competencia <= $2::date
         ORDER BY valor DESC
+      `, [startDate, endDate, tenant_id])
+
+      // SAÍDA: adicionais de apresentadora lançados manualmente no fechamento. Não são
+      // custos manuais e não entram em comissão: cada linha é descontada exatamente uma vez.
+      const adicionaisApresentadoras = await db.query(`
+        SELECT ara.id, ara.apresentadora_id, a.nome, ara.tipo, ara.descricao,
+               ara.data_referencia, ara.valor
+        FROM apresentadora_remuneracao_adicionais ara
+        JOIN apresentadoras a ON a.id = ara.apresentadora_id AND a.tenant_id = ara.tenant_id
+        WHERE ara.tenant_id = $3::uuid
+          AND ara.competencia >= date_trunc('month', $1::date)::date
+          AND ara.competencia <= date_trunc('month', $2::date)::date
+          AND ara.cancelado_em IS NULL
+        ORDER BY ara.valor DESC, ara.criado_em ASC
       `, [startDate, endDate, tenant_id])
 
       // Junta comissão variável + fixo mensal POR marca. tipo_cobranca decide a composição da
@@ -608,6 +614,18 @@ export async function financeiroRoutes(app) {
             nome: r.nome,
             gmv_atribuido: toNum(r.gmv),
             pct_medio: pctMedio(toNum(r.valor), toNum(r.gmv)),
+          },
+        })),
+        ...adicionaisApresentadoras.rows.map((r) => ({
+          categoria: 'adicional_apresentadora',
+          descricao: `${r.tipo === 'fim_de_semana' ? 'Diária fim de semana' : 'Bonificação'} — ${r.nome}: ${r.descricao}`,
+          valor: toNum(r.valor),
+          memoria: {
+            adicional_id: r.id,
+            apresentadora_id: r.apresentadora_id,
+            nome: r.nome,
+            tipo: r.tipo,
+            data_referencia: r.data_referencia,
           },
         })),
         ...custosManuais.rows.map((r) => ({

@@ -142,7 +142,7 @@ export async function portalApresentadoraRoutes(app) {
       if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
       const [items, pending] = await Promise.all([
         getOwnPortalPerformance(db, { tenantId: request.user.tenant_id, apresentadoraId: profile.id, range }),
-        db.query(`SELECT s.id, s.status, s.marca_id, s.cabine_id, s.iniciado_em, s.encerrado_em, s.observacao, s.marca_descricao, s.gmv_declarado, s.pedidos_declarados, s.live_impressions_declaradas, s.manual_views_declaradas, s.live_impressions_oficiais, s.manual_views_oficiais, s.motivo_devolucao, s.versao, m.nome AS marca_nome, c.nome AS cabine_nome
+        db.query(`SELECT s.id, s.status, s.marca_id, s.cabine_id, s.iniciado_em, s.encerrado_em, s.observacao, s.marca_descricao, s.gmv_declarado, s.pedidos_declarados, s.live_impressions_declaradas, s.manual_views_declaradas, s.live_impressions_oficiais, s.manual_views_oficiais, s.motivo_devolucao, s.versao, s.live_oficial_id, s.live_oficial_excluida_id, s.live_oficial_excluida_em, m.nome AS marca_nome, c.nome AS cabine_nome
           FROM apresentadora_live_submissoes s LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id LEFT JOIN cabines c ON c.id=s.cabine_id AND c.tenant_id=s.tenant_id
           WHERE s.tenant_id=$1::uuid AND s.apresentadora_id=$2::uuid AND s.iniciado_em >= ($3::date::timestamp AT TIME ZONE 'America/Sao_Paulo') AND s.iniciado_em < ($4::date::timestamp AT TIME ZONE 'America/Sao_Paulo') ORDER BY s.criado_em DESC`, [request.user.tenant_id, profile.id, range.start, range.end]),
       ])

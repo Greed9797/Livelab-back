@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import Fastify from 'fastify'
 import { portalApresentadoraRoutes } from '../src/routes/portal_apresentadora.js'
 import { withPortalPresenterDb } from '../src/services/portal-apresentadora-db.js'
+import { tombstoneApprovedSubmissionsForDeletedLive } from '../src/services/live-approved-submission-deletion.js'
 const { PGlite } = await import(process.env.PGLITE_MODULE || '@electric-sql/pglite')
 const db = new PGlite()
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12,'0')}`
@@ -37,6 +38,7 @@ await db.exec(await readFile(new URL('../migrations/142_apresentadora_remuneraca
 await db.exec(await readFile(new URL('../migrations/144_portal_apresentadora_submissoes.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/145_portal_apresentadora_runtime_role.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/146_portal_apresentadora_metricas.sql',import.meta.url),'utf8'))
+await db.exec(await readFile(new URL('../migrations/147_live_oficial_excluida_tombstone.sql',import.meta.url),'utf8'))
 await db.query(`INSERT INTO tenants VALUES ($1),($2)`,[tenant,otherTenant])
 await db.query(`INSERT INTO users(id,tenant_id,papel) VALUES ($1,$4,'apresentadora'),($2,$4,'apresentadora'),($3,$4,'gerente'),($5,$6,'apresentadora')`,[user,peer,manager,tenant,otherUser,otherTenant])
 await db.query(`INSERT INTO apresentadoras(id,tenant_id,user_id,nome,fixo) VALUES ($1,$3,$4,'Ana',2850),($2,$3,$5,'Bia',3000),($6,$7,$8,'Outra',9999)`,[presenter,peerPresenter,tenant,user,peer,otherPresenter,otherTenant,otherUser])
@@ -151,6 +153,22 @@ try {
  check(await inject('GET',`${own.replace('/submissoes','/lives')}?mes=2026-13`),400)
  const sameLink=check(await inject('POST',`${review}/${sid}/aprovar`,{live_id:approved.live_oficial_id},{headers}),200)
  assert.equal(sameLink.live_oficial_id,approved.live_oficial_id)
+ // Manager deletion detaches both split submissions atomically, preserves their
+ // approved decision and keeps the deleted live out of presenter performance.
+ await db.query('BEGIN')
+ await tombstoneApprovedSubmissionsForDeletedLive(db,{tenantId:tenant,liveId:approved.live_oficial_id,actorId:manager})
+ await db.query('DELETE FROM vendas_atribuidas WHERE tenant_id=$1 AND origem_id=$2',[tenant,approved.live_oficial_id])
+ await db.query('DELETE FROM live_apresentadoras_v2 WHERE tenant_id=$1 AND live_id=$2',[tenant,approved.live_oficial_id])
+ await db.query('DELETE FROM lives WHERE tenant_id=$1 AND id=$2',[tenant,approved.live_oficial_id])
+ await db.query('COMMIT')
+ const tombstonedHistory=check(await inject('GET','/v1/portal/apresentadora/lives?mes=2026-09'),200)
+ const tombstonedSub=tombstonedHistory.submissoes.find(row=>row.id===sid)
+ assert.equal(tombstonedSub.status,'aprovada')
+ assert.equal(tombstonedSub.live_oficial_id,null)
+ assert.equal(tombstonedSub.live_oficial_excluida_id,approved.live_oficial_id)
+ assert.ok(tombstonedSub.live_oficial_excluida_em)
+ assert.equal(tombstonedHistory.items.some(row=>row.id===approved.live_oficial_id),false)
+ check(await inject('POST',`${review}/${sid}/aprovar`,official,{headers}),409)
  const cancellation=check(await inject('POST',own,{...payload,request_id:id(13)}),201)
  check(await inject('DELETE',`${own}/${cancellation.id}`),404)
  check(await inject('POST',`${review}/${cancellation.id}/devolver`,{motivo:'Envio duplicado'},{headers}),200)
@@ -159,7 +177,7 @@ try {
  check(await inject('DELETE',`${own}/${cancellation.id}`,undefined,{headers:{'x-test-user':peer}}),404)
  check(await inject('DELETE',`${own}/${cancellation.id}`),200)
  assert.equal((await db.query('SELECT status FROM apresentadora_live_submissoes WHERE id=$1',[cancellation.id])).rows[0].status,'cancelada')
- assert.equal((await counts()).lives,1);assert.equal((await counts()).sales,1)
+ assert.equal((await counts()).lives,0);assert.equal((await counts()).sales,0)
  check(await inject('POST',`${own}/${cancellation.id}/reenviar`),404)
  const noFunnel=check(await inject('POST',own,{...payload,live_impressions_declaradas:undefined,manual_views_declaradas:undefined,request_id:id(14)}),201)
  assert.deepEqual((await db.query('SELECT live_impressions_declaradas,manual_views_declaradas FROM apresentadora_live_submissoes WHERE id=$1',[noFunnel.id])).rows,[{live_impressions_declaradas:null,manual_views_declaradas:null}])

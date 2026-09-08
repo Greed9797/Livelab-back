@@ -305,6 +305,7 @@ describe('LIVELAB operational routes', () => {
     const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
 
     expect(res.statusCode).toBe(204)
+    expect(queryMock.mock.calls.some(([sql]) => /UPDATE apresentadora_live_submissoes/i.test(sql) && /live_oficial_excluida_id/i.test(sql))).toBe(true)
     expect(queryMock.mock.calls.some(([sql]) => /DELETE FROM vendas_atribuidas/i.test(sql))).toBe(true)
     expect(queryMock.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(true)
     await app.close()
@@ -496,6 +497,15 @@ describe('LIVELAB operational routes', () => {
     expect(migration).toContain('CREATE TABLE IF NOT EXISTS metas_apresentadora')
     expect(migration).toContain('CREATE TABLE IF NOT EXISTS metas_supervisor')
     expect(migration).not.toContain('apresentadora_faixas_comissao')
+  })
+
+  it('registers the approved-live tombstone migration', () => {
+    const registry = readFileSync(new URL('../apply_migrations.js', import.meta.url), 'utf8')
+    const migration = readFileSync(new URL('../migrations/147_live_oficial_excluida_tombstone.sql', import.meta.url), 'utf8')
+
+    expect(registry).toContain('147_live_oficial_excluida_tombstone.sql')
+    expect(migration).toContain('live_oficial_excluida_id UUID')
+    expect(migration).toContain("'live_oficial_excluida'")
   })
 
   it('migration registry includes default presenter compensation backfill', () => {

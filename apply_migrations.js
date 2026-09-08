@@ -141,6 +141,7 @@ export const MIGRATIONS_LIST = [
   '144_portal_apresentadora_submissoes.sql',
   '145_portal_apresentadora_runtime_role.sql',
   '146_portal_apresentadora_metricas.sql',
+  '147_live_oficial_excluida_tombstone.sql',
 ]
 
 async function ensureMigrationsTable(client) {

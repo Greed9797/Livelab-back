@@ -14,6 +14,7 @@ import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername }
 import { ensureClienteMarca } from '../services/client-brand.js'
 import { applyApresentadorasToLive } from '../lib/live-rateio.js'
 import { seedRateioPlanejado } from '../lib/agenda-turnos.js'
+import { tombstoneApprovedSubmissionsForDeletedLive } from '../services/live-approved-submission-deletion.js'
 
 function parseIntegerMetric(value) {
   if (typeof value === 'number') return value
@@ -2052,6 +2053,12 @@ export async function livesRoutes(app) {
             )
           }
         }
+
+        await tombstoneApprovedSubmissionsForDeletedLive(db, {
+          tenantId: tenant_id,
+          liveId: live.id,
+          actorId: request.user.sub,
+        })
 
         await db.query(`DELETE FROM vendas_atribuidas WHERE origem = 'live' AND origem_id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])
         await db.query('DELETE FROM live_apresentadoras_v2 WHERE live_id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])

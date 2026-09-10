@@ -40,6 +40,7 @@ const convidarSchema = z.object({
 
 const atualizarSchema = z.object({
   nome: z.string().min(2).optional(),
+  email: z.string().email().optional(),
   papel: z.enum([
     'gerente', 'gerente_comercial', 'financeiro', 'operacional',
     'apresentador', 'apresentadora', 'cliente_parceiro',
@@ -382,6 +383,25 @@ export async function usuariosRoutes(app) {
         if (hasPresenterFields && !isPresenterRole(nextPapel)) {
           await db.query('ROLLBACK')
           return reply.code(400).send({ error: 'Campos de apresentadora exigem papel apresentadora.' })
+        }
+
+        // E-mail novo: checar colisão dentro do tenant (UNIQUE parcial em ativo IS NOT FALSE).
+        if (userFields.email !== undefined) {
+          const dup = await db.query(
+            `SELECT id FROM users
+              WHERE LOWER(email) = LOWER($1)
+                AND tenant_id = $2
+                AND id != $3
+                AND ativo IS NOT FALSE`,
+            [userFields.email, request.user.tenant_id, request.params.id],
+          )
+          if (dup.rows.length > 0) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({
+              error: 'E-mail já cadastrado e ativo neste tenant.',
+              code: 'EMAIL_ALREADY_ACTIVE',
+            })
+          }
         }
 
         const revokeSessions = (userFields.ativo !== undefined && userFields.ativo !== currentUser.ativo)

@@ -237,6 +237,68 @@ describe('usuarios presenter provisioning', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({ pode_apresentar_live: false })
     expect(query.mock.calls.some(([sql]) => sql.includes('UPDATE apresentadoras SET ativo=false'))).toBe(true)
+
+    await app.close()
+  })
+
+  it('updates presenter user email and syncs the presenter profile', async () => {
+    const queryMock = vi.fn(async (sql, values = []) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (sql.includes('LOWER(email)')) return { rows: [] }
+      if (sql.includes('FROM users') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: userId, nome: 'Jady', email: 'jady@example.com', papel: 'apresentadora' }] }
+      }
+      if (sql.includes('UPDATE users')) {
+        return { rows: [{ id: userId, nome: 'Jady', email: values[0], papel: 'apresentadora', ativo: true, criado_em: '2026-05-22T00:00:00.000Z' }] }
+      }
+      if (sql.includes('FROM apresentadoras') && sql.includes('user_id')) {
+        return { rows: [{ id: apresentadoraId, user_id: userId, nome: 'Jady', email: 'jady@example.com', ativo: true, arquivada: false, fixo: 2700, comissao_pct: 2, foto_url: null }] }
+      }
+      if (sql.includes('UPDATE apresentadoras')) return { rows: [{ id: apresentadoraId }], rowCount: 1 }
+      return { rows: [] }
+    })
+    const { app, query } = buildApp({ queryMock })
+    await app.register(usuariosRoutes)
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/v1/usuarios/${userId}`,
+      payload: { email: 'jady.nova@example.com' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ id: userId, email: 'jady.nova@example.com' })
+    expect(query.mock.calls.some(([sql, values]) =>
+      sql.includes('UPDATE users') && values[0] === 'jady.nova@example.com'
+    )).toBe(true)
+    expect(query.mock.calls.some(([sql, values]) =>
+      sql.includes('UPDATE apresentadoras') && values[1] === 'jady.nova@example.com'
+    )).toBe(true)
+
+    await app.close()
+  })
+
+  it('rejects a presenter email already used by an active user in the tenant', async () => {
+    const queryMock = vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT') return { rows: [] }
+      if (sql.includes('LOWER(email)')) return { rows: [{ id: '55555555-5555-4555-8555-555555555555' }] }
+      if (sql.includes('FROM users') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: userId, nome: 'Jady', email: 'jady@example.com', papel: 'apresentadora' }] }
+      }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(usuariosRoutes)
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/v1/usuarios/${userId}`,
+      payload: { email: 'outro@example.com' },
+    })
+
+    expect(response.statusCode).toBe(409)
+    expect(response.json()).toMatchObject({ code: 'EMAIL_ALREADY_ACTIVE' })
+
     await app.close()
   })
 })

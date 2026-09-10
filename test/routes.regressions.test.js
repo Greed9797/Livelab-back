@@ -1339,7 +1339,7 @@ describe('Route regressions: SQL and RBAC', () => {
       expect(resGerente.statusCode).toBe(200)
       await appGerente.close()
 
-      // Portal próprio substitui cabines genéricas: apresentador não vê a operação da unidade.
+      // apresentador deve acessar cabines
       const appApresentador = Fastify()
       const cabQueryMock = vi.fn().mockResolvedValue({ rows: [] })
       const cabReleaseMock = vi.fn()
@@ -1357,7 +1357,7 @@ describe('Route regressions: SQL and RBAC', () => {
       })
       await appApresentador.register(cabinesRoutes)
       const resApresentador = await appApresentador.inject({ method: 'GET', url: '/v1/cabines' })
-      expect(resApresentador.statusCode).toBe(403)
+      expect(resApresentador.statusCode).toBe(200)
       await appApresentador.close()
 
       // apresentador NÃO deve acessar financeiro

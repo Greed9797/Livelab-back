@@ -4,10 +4,14 @@ import { READ_AGENDA, READ_CABINES, READ_LIVES, WRITE_LIVES } from '../src/confi
 import { MIGRATIONS_LIST } from '../apply_migrations.js'
 
 describe('portal da apresentadora — fronteiras de autorização', () => {
-  it('não mantém apresentadora nas rotas operacionais genéricas', () => {
+  it('mantém apresentadora nas rotas operacionais genéricas até o front migrar ao portal', () => {
+    // O portal (/v1/portal/apresentadora/*) existe no backend, mas o front ainda
+    // consome as rotas genéricas (/v1/lives, /v1/agenda) na tela da apresentadora.
+    // Remover os papéis daqui quebra a produção (403 "Acesso não autorizado
+    // para este papel", ex.: Stela). Reavaliar quando o front usar o portal.
     for (const group of [READ_CABINES, READ_LIVES, WRITE_LIVES, READ_AGENDA]) {
-      expect(group).not.toContain('apresentador')
-      expect(group).not.toContain('apresentadora')
+      expect(group).toContain('apresentador')
+      expect(group).toContain('apresentadora')
     }
   })
 

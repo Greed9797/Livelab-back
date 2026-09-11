@@ -15,6 +15,7 @@ import { ensureClienteMarca } from '../services/client-brand.js'
 import { applyApresentadorasToLive } from '../lib/live-rateio.js'
 import { seedRateioPlanejado } from '../lib/agenda-turnos.js'
 import { tombstoneApprovedSubmissionsForDeletedLive } from '../services/live-approved-submission-deletion.js'
+import { buildResumoDia } from '../lib/resumo-dia.js'
 
 function parseIntegerMetric(value) {
   if (typeof value === 'number') return value
@@ -1840,6 +1841,93 @@ export async function livesRoutes(app) {
       // `total_count` vive só na query 1; o strip garante que ele nunca vaze no envelope.
       const items = ordered.map(({ total_count, ...rest }) => rest)
       return { items, total, page: Math.floor(reqOffset / reqLimit), limit: reqLimit }
+    })
+  })
+
+  // GET /v1/lives/resumo-dia — consolidado do dia com totais, marcas, apresentadoras e texto para WhatsApp
+  app.get('/v1/lives/resumo-dia', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/
+    const data = String(request.query?.data ?? '').trim()
+    if (!dateRe.test(data)) {
+      return reply.code(400).send({ error: 'Informe uma data válida (YYYY-MM-DD).' })
+    }
+    const dayBounds = saoPauloDayBounds(data)
+    if (!dayBounds) {
+      return reply.code(400).send({ error: 'Data inválida.' })
+    }
+    const status = String(request.query?.status ?? 'encerrada')
+
+    return app.withTenant(tenant_id, async (db) => {
+      const params = [tenant_id, dayBounds.start, dayBounds.end]
+      let where = 'WHERE l.tenant_id = $1::uuid AND l.iniciado_em >= $2::timestamptz AND l.iniciado_em < $3::timestamptz'
+      if (status && status !== 'todas') {
+        params.push(status)
+        where += ` AND l.status = $${params.length}`
+      }
+
+      const result = await db.query(
+        `SELECT l.id, l.iniciado_em, l.encerrado_em, l.previsto_fim,
+                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
+                COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos,
+                COALESCE(l.marca_id, va_marca.marca_id) AS marca_id,
+                COALESCE(va_marca.marca_nome, cl.nome, 'Sem marca') AS marca_nome,
+                COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END, 'Sem apresentadora') AS apresentadora_nome,
+                COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
+                ap_v2.apresentadoras
+         FROM lives l
+         JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+         LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
+         LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
+         LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
+         LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT ae2.id, ae2.apresentadora_id
+           FROM agenda_eventos ae2
+           WHERE (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.cabine_id = l.cabine_id)
+             AND ae2.tenant_id = l.tenant_id
+             AND ae2.tipo = 'live'
+             AND (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.data_inicio::date = l.iniciado_em::date)
+           ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
+           LIMIT 1
+         ) ae ON true
+         LEFT JOIN apresentadoras ap_agenda ON ap_agenda.id = ae.apresentadora_id AND ap_agenda.tenant_id = l.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT
+             (array_agg(a.nome ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC))[1] AS nome,
+             (array_agg(lav.apresentadora_id ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC))[1] AS apresentadora_id,
+             COUNT(*)::int AS total,
+             jsonb_agg(
+               jsonb_build_object(
+                 'apresentadora_id', lav.apresentadora_id,
+                 'nome', a.nome,
+                 'papel', lav.papel,
+                 'gmv', lav.gmv_rateado,
+                 'segundos', lav.segundos_rateio,
+                 'percentual', lav.percentual_rateio
+               ) ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
+             ) AS apresentadoras
+           FROM live_apresentadoras_v2 lav
+           JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
+           WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+         ) ap_v2 ON true
+         LEFT JOIN LATERAL (
+           SELECT m.id, m.nome AS marca_nome, m.cliente_id
+           FROM marcas m
+           LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id AND va.tenant_id = m.tenant_id AND va.origem = 'live' AND va.origem_id = l.id
+           WHERE m.tenant_id = l.tenant_id AND (m.id = l.marca_id OR va.id IS NOT NULL)
+           ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
+           LIMIT 1
+         ) va_marca ON true
+         ${where}
+         ORDER BY l.iniciado_em ASC`,
+        params
+      )
+
+      return buildResumoDia({
+        data,
+        lives: result.rows,
+      })
     })
   })
 

@@ -37,7 +37,7 @@ describe('todo escritor de vendas_atribuidas (origem=live) sincroniza o snapshot
   it('upsert, recálculo mensal (retro-lift) e PATCH da rota sincronizam', () => {
     // upsert: UPDATE e INSERT; PATCH /:id; recalcular: uma chamada com as lives tocadas
     expect(rota.match(/await sincronizarSnapshotDaVenda\(db, /g)?.length).toBe(3)
-    expect(rota).toContain("sincronizarSnapshotComissaoApresentadora(db, { tenantId, liveIds: livesTocadas })")
+    expect(rota).toContain("liveIds: changed.rows.filter(v => v.origem === 'live').map(v => v.origem_id)")
     // vídeo não tem snapshot por live
     expect(rota).toMatch(/if \(!venda \|\| venda\.origem !== 'live'\) return/)
   })

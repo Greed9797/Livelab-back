@@ -851,6 +851,10 @@ describe('LIVELAB operational routes', () => {
       data: '2026-05-19',
       gmv: '500000.00',
       pedidos: 1,
+      resolved_marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      gmv_excluding_origin: '0',
+      comissao_franquia_pct: '10',
+      comissao_franqueadora_pct: '2',
     }
     const queryMock = vi.fn(async (sql) => {
       if (sql.includes('SELECT id, origem, origem_id')) return { rows: [venda] }
@@ -859,7 +863,7 @@ describe('LIVELAB operational routes', () => {
       if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [] }
       if (sql.includes('FROM apresentadora_marcas')) return { rows: [{ comissao_live_pct: '0', comissao_video_pct: '0' }] }
       if (sql.includes('FROM apresentadoras')) return { rows: [{ comissao_pct: '1.5' }] }
-      if (sql.includes('UPDATE vendas_atribuidas')) return { rows: [{ id: 'venda-1' }] }
+      if (sql.includes('UPDATE vendas_atribuidas')) return { rows: [{ origem: 'video', origem_id: venda.origem_id }] }
       return { rows: [] }
     })
 
@@ -871,7 +875,7 @@ describe('LIVELAB operational routes', () => {
     expect(result).toEqual({ updated: 1 })
     const updateCall = queryMock.mock.calls.find(([sql]) => sql.includes('UPDATE vendas_atribuidas'))
     // 500k na escada nova do código (sem faixa própria nem default do tenant) → 2%
-    expect(updateCall?.[1]?.slice(0, 3)).toEqual([10000, 50000, 10000])
+    expect(JSON.parse(updateCall[1][2])).toEqual([{ id: 'venda-1', ap: 10000, franquia: 50000, franqueadora: 10000 }])
   })
 
   it('upsertVendaAtribuida does not overwrite approved sales', async () => {

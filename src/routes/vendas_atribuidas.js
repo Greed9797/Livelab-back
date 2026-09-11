@@ -138,55 +138,64 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
   const params = [tenantId, apresentadoraId]
   if (mesReferencia) params.push(`${mesReferencia}-01`)
 
+  // A janela inclui TODAS as vendas do mês, inclusive aprovadas, como o resolver
+  // individual. Excluir a origem inteira preserva a semântica mesmo com duplicatas.
   const vendas = await db.query(
-    `SELECT id, origem, origem_id, marca_id, apresentadora_id, data, gmv, pedidos
-     FROM vendas_atribuidas
-     WHERE tenant_id = $1::uuid
-       AND apresentadora_id = $2::uuid
-       AND origem IN ('live', 'video')
-       AND COALESCE(status_aprovacao, 'pendente_aprovacao') = 'pendente_aprovacao'
-       AND data >= ${mesInicioSql}
-       AND data < (${mesInicioSql} + interval '1 month')
-     ORDER BY data ASC, criado_em ASC`,
+    `SELECT va.*, m.comissao_franquia_pct, m.comissao_franqueadora_pct,
+            m.id AS resolved_marca_id
+       FROM (
+         SELECT id, origem, origem_id, marca_id, apresentadora_id, data, gmv,
+                status_aprovacao,
+                SUM(gmv) OVER () - SUM(gmv) OVER (PARTITION BY origem, origem_id) AS gmv_excluding_origin
+           FROM vendas_atribuidas
+          WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid
+            AND data >= ${mesInicioSql}
+            AND data < (${mesInicioSql} + interval '1 month')
+       ) va
+       LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = $1::uuid`,
     params,
   )
-
-  let updated = 0
-  const livesTocadas = []
-  for (const venda of vendas.rows) {
-    const comissoes = await calcularComissoesAtribuidas(db, {
-      tenantId,
-      origem: venda.origem,
-      origemId: venda.origem_id,
-      marcaId: venda.marca_id,
-      apresentadoraId: venda.apresentadora_id,
-      data: venda.data,
-      gmv: venda.gmv,
+  const pendentes = vendas.rows.filter(v => ['live', 'video'].includes(v.origem)
+    && (v.status_aprovacao ?? 'pendente_aprovacao') === 'pendente_aprovacao'
+    && v.resolved_marca_id)
+  if (!pendentes.length) return { updated: 0 }
+  const presenterBands = (await db.query(
+    `SELECT gmv_inicio, gmv_fim, comissao_pct FROM apresentadora_comissao_faixas
+      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND ativo = true
+      ORDER BY gmv_inicio DESC`, [tenantId, apresentadoraId],
+  )).rows
+  const defaultBands = (await db.query(
+    `SELECT gmv_inicio, gmv_fim, comissao_pct FROM tenant_comissao_faixas_default
+      WHERE tenant_id = $1::uuid ORDER BY gmv_inicio DESC`, [tenantId],
+  )).rows
+  const updates = []
+  for (const venda of pendentes) {
+    const pct = await resolvePresenterCommissionPct(db, {
+      tenantId, apresentadoraId, origem: venda.origem, origemId: venda.origem_id,
+      data: venda.data, gmv: venda.gmv,
+      monthlyContext: { gmvExcludingOrigin: venda.gmv_excluding_origin, presenterBands, defaultBands },
     })
-    if (!comissoes) continue
-
-    await db.query(
-      `UPDATE vendas_atribuidas
-       SET comissao_apresentadora = $1,
-           comissao_franquia = $2,
-           comissao_franqueadora = $3,
-           atualizado_em = NOW()
-       WHERE id = $4 AND tenant_id = $5::uuid`,
-      [
-        comissoes.comissao_apresentadora,
-        comissoes.comissao_franquia,
-        comissoes.comissao_franqueadora,
-        venda.id,
-        tenantId,
-      ],
-    )
-    if (venda.origem === 'live') livesTocadas.push(venda.origem_id)
-    updated += 1
+    const gmv = Number(venda.gmv ?? 0)
+    updates.push({ id: venda.id, ap: gmv * (pct / 100),
+      franquia: gmv * (Number(venda.comissao_franquia_pct ?? 0) / 100),
+      franqueadora: gmv * (Number(venda.comissao_franqueadora_pct ?? 0) / 100) })
   }
-
-  // Retro-lift muda a comissão de lives já gravadas no mês: o snapshot delas acompanha.
-  await sincronizarSnapshotComissaoApresentadora(db, { tenantId, liveIds: livesTocadas })
-  return { updated }
+  // Um único UPDATE substitui centenas de round trips. Revalida aprovação no
+  // momento da escrita para não sobrescrever uma venda aprovada em paralelo.
+  const changed = await db.query(
+    `UPDATE vendas_atribuidas va SET comissao_apresentadora = u.ap,
+       comissao_franquia = u.franquia, comissao_franqueadora = u.franqueadora,
+       atualizado_em = NOW()
+     FROM jsonb_to_recordset($3::jsonb) AS u(id uuid, ap numeric, franquia numeric, franqueadora numeric)
+     WHERE va.id = u.id AND va.tenant_id = $1::uuid AND va.apresentadora_id = $2::uuid
+       AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') = 'pendente_aprovacao'
+     RETURNING va.origem, va.origem_id`,
+    [tenantId, apresentadoraId, JSON.stringify(updates)],
+  )
+  await sincronizarSnapshotComissaoApresentadora(db, {
+    tenantId, liveIds: changed.rows.filter(v => v.origem === 'live').map(v => v.origem_id),
+  })
+  return { updated: changed.rows.length }
 }
 
 export async function vendasAtribuidasRoutes(app) {

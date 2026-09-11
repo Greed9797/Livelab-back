@@ -35,11 +35,23 @@ export async function resolvePresenterCommissionPct(db, {
   origemId,
   data,
   gmv,
+  monthlyContext,
 }) {
   if (!apresentadoraId) return 0
 
   if (origem === 'live' && data && isWeekendInSaoPaulo(data)) {
     return WEEKEND_LIVE_PRESENTER_COMMISSION_PCT
+  }
+
+  // Contexto restrito a uma execução de recálculo mensal: mesmas faixas e base,
+  // sem repetir consultas para cada venda. Nunca é recebido do payload HTTP.
+  if (monthlyContext) {
+    const baseGmv = toNumber(monthlyContext.gmvExcludingOrigin) + toNumber(gmv)
+    const matches = (faixa) => toNumber(faixa.gmv_inicio) <= baseGmv
+      && (faixa.gmv_fim == null || toNumber(faixa.gmv_fim) >= baseGmv)
+    const faixa = monthlyContext.presenterBands.find(matches)
+      ?? monthlyContext.defaultBands.find(matches)
+    return faixa ? toNumber(faixa.comissao_pct) : toNumber(defaultPresenterCommissionPct(baseGmv))
   }
 
   // GMV acumulado do mês (exclui a própria venda em recálculo p/ não duplicar).

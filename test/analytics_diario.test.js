@@ -23,6 +23,10 @@ function buildApp(queryMock) {
 describe('analytics diario', () => {
   it('returns daily rows and applies marca/apresentadora filters', async () => {
     const queryMock = vi.fn(async (sql, params = []) => {
+      if (sql.includes('FROM apresentadora_live_submissoes s')) {
+        expect(params).toEqual(['2026-05-01', '2026-05-31', marcaId, apresentadoraId])
+        return { rows: [] }
+      }
       expect(sql).not.toContain('generate_series')
       expect(sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
       expect(sql).toContain('($3::uuid IS NULL OR l.marca_id = $3::uuid)')
@@ -102,6 +106,17 @@ describe('analytics diario', () => {
 
     expect(res.statusCode).toBe(400)
     expect(queryMock).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('includes pending submissions in operational totals without commission', async () => {
+    const queryMock = vi.fn(async (sql) => sql.includes('FROM apresentadora_live_submissoes s')
+      ? { rows: [{ dia: '2026-05-28', marca_id: marcaId, marca_nome: 'Haag', apresentadora_id: apresentadoraId, apresentadora_nome: 'Edja', total_lives_pendentes: 1, gmv_pendente: '200', pedidos_pendentes: 2, horas_pendentes: '1' }] }
+      : { rows: [{ dia: '2026-05-28', marca_id: marcaId, marca_nome: 'Haag', apresentadora_id: apresentadoraId, apresentadora_nome: 'Edja', total_lives: 1, total_videos: 0, gmv_lives: '100', gmv_videos: '0', horas_live: '1', pedidos: 1, comissao_apresentadora: '5', comissao_gmv_base: '100' }] })
+    const app = buildApp(queryMock); await app.register(analyticsRoutes)
+    const res = await app.inject({ method: 'GET', url: `/v1/analytics/diario?mesAno=2026-05&marca_id=${marcaId}&apresentadora_id=${apresentadoraId}` })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().rows[0]).toMatchObject({ gmv_lives: 300, total_lives: 2, pedidos: 3, comissao_apresentadora: 5, gmv_pendente_aprovacao: 200, pendente_aprovacao: true })
     await app.close()
   })
 })

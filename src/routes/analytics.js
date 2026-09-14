@@ -2572,16 +2572,49 @@ export async function analyticsRoutes(app) {
           ORDER BY dia ASC, marca_nome ASC, apresentadora_nome ASC
         `, [fromDate, toDate, marcaId, apresentadoraId])
 
+        // Pending presenter submissions are operational data: they appear in
+        // reports with a clear marker, but never enter vendas_atribuidas or the
+        // commission CTE above. Merge them after the financial query so this
+        // boundary stays explicit.
+        const pending = await db.query(`SELECT
+            (s.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
+            s.marca_id, COALESCE(m.nome, 'Sem marca') AS marca_nome,
+            s.apresentadora_id, COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
+            COUNT(*)::int AS total_lives_pendentes,
+            COALESCE(SUM(s.gmv_declarado), 0) AS gmv_pendente,
+            COALESCE(SUM(s.pedidos_declarados), 0)::int AS pedidos_pendentes,
+            COALESCE(SUM(EXTRACT(EPOCH FROM (s.encerrado_em-s.iniciado_em))/3600.0), 0) AS horas_pendentes
+          FROM apresentadora_live_submissoes s
+          LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id
+          LEFT JOIN apresentadoras a ON a.id=s.apresentadora_id AND a.tenant_id=s.tenant_id
+          WHERE s.tenant_id=current_setting('app.tenant_id', true)::uuid AND s.status='pendente'
+            AND s.iniciado_em >= ($1::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
+            AND s.iniciado_em < (($2::date + 1)::timestamp AT TIME ZONE 'America/Sao_Paulo')
+            AND ($3::uuid IS NULL OR s.marca_id=$3::uuid)
+            AND ($4::uuid IS NULL OR s.apresentadora_id=$4::uuid)
+          GROUP BY dia,s.marca_id,m.nome,s.apresentadora_id,a.nome`, [fromDate, toDate, marcaId, apresentadoraId])
+        const merged = result.rows.map(row => ({ ...row, gmv_pendente: 0, pedidos_pendentes: 0, horas_pendentes: 0, total_lives_pendentes: 0 }))
+        for (const row of pending.rows) {
+          const dia = typeof row.dia === 'string' ? row.dia : row.dia.toISOString().slice(0, 10)
+          const existing = merged.find(item => (typeof item.dia === 'string' ? item.dia : item.dia.toISOString().slice(0, 10)) === dia && item.marca_id === row.marca_id && item.apresentadora_id === row.apresentadora_id)
+          if (existing) Object.assign(existing, row)
+          else merged.push({ ...row, total_lives: 0, total_videos: 0, gmv_lives: 0, gmv_videos: 0, horas_live: 0, pedidos: 0, comissao_apresentadora: 0, comissao_gmv_base: 0 })
+        }
+
         return {
           periodo: { from: fromDate, to: toDate, mesAno },
           filters: { marca_id: marcaId, apresentadora_id: apresentadoraId },
-          rows: result.rows.map((row) => {
-            const gmvLives = round2(row.gmv_lives)
+          rows: merged.map((row) => {
+            const gmvPendente = round2(row.gmv_pendente)
+            const pedidosPendentes = toInt(row.pedidos_pendentes)
+            const horasPendentes = round1(row.horas_pendentes)
+            const totalPendentes = toInt(row.total_lives_pendentes)
+            const gmvLives = round2(Number(row.gmv_lives ?? 0) + gmvPendente)
             const gmvVideos = round2(row.gmv_videos)
             const gmvTotal = round2(gmvLives + gmvVideos)
-            const totalLives = toInt(row.total_lives)
-            const horasLive = round1(row.horas_live)
-            const pedidos = toInt(row.pedidos)
+            const totalLives = toInt(row.total_lives) + totalPendentes
+            const horasLive = round1(Number(row.horas_live ?? 0) + horasPendentes)
+            const pedidos = toInt(row.pedidos) + pedidosPendentes
             const comissao = round2(row.comissao_apresentadora)
             const comissaoBase = round2(row.comissao_gmv_base)
             const comissaoPct = comissaoBase > 0 ? round2((comissao / comissaoBase) * 100) : 0
@@ -2604,6 +2637,10 @@ export async function analyticsRoutes(app) {
               ticket_medio: pedidos > 0 ? round2(gmvTotal / pedidos) : 0,
               comissao_apresentadora: comissao,
               comissao_pct: comissaoPct,
+              gmv_pendente_aprovacao: gmvPendente,
+              pedidos_pendentes_aprovacao: pedidosPendentes,
+              total_lives_pendentes_aprovacao: totalPendentes,
+              pendente_aprovacao: totalPendentes > 0,
             }
           }),
         }

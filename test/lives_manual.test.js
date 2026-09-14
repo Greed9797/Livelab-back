@@ -521,7 +521,7 @@ describe('POST /v1/lives/manual', () => {
 })
 
 describe('PATCH /v1/lives/:id (edição manual)', () => {
-  it('updates publication status through the manual edit endpoint', async () => {
+  it('rejects publication status through the generic manual edit endpoint', async () => {
     const liveId = 'live-edit-status'
     const updateArgs = []
     const queryMock = vi.fn()
@@ -551,8 +551,9 @@ describe('PATCH /v1/lives/:id (edição manual)', () => {
       payload: { status_publicacao: 'publicado' },
     })
 
-    expect(res.statusCode).toBe(200)
-    expect(updateArgs[0]).toContain('publicado')
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toMatch(/fluxo de publicação/i)
+    expect(updateArgs).toEqual([])
   })
 
   it('updates fat_gerado and recalculates comissao', async () => {
@@ -767,7 +768,7 @@ describe('origem_dados por chave de API (BOT)', () => {
     return { rows: [] }
   })
 
-  it('PATCH /v1/lives/:id por chave não reescreve origem_dados de registro existente', async () => {
+  it('PATCH /v1/lives/:id por chave não pode pular o fluxo de publicação', async () => {
     const queryMock = mockGenerico()
     const { app } = buildApp({ queryMock, papel: 'automacao', viaApiKey: chave })
     await registerLiveRoutes(app)
@@ -778,10 +779,9 @@ describe('origem_dados por chave de API (BOT)', () => {
       payload: { status_publicacao: 'publicado', origem_dados: 'manual' },
     })
 
-    expect(res.statusCode).toBe(200)
-    const update = queryMock.mock.calls.find(([sql]) => /UPDATE lives/.test(sql))
-    expect(update[0]).not.toContain('origem_dados')
-    expect(update[1]).toContain('publicado')
+    expect(res.statusCode).toBe(422)
+    expect(res.json().error).toMatch(/fluxo de publicação/i)
+    expect(queryMock.mock.calls.some(([sql]) => /UPDATE lives/.test(sql))).toBe(false)
   })
 
   it("PATCH ads_gmv por chave grava a revisão de GMV com origem_dados='bot'", async () => {

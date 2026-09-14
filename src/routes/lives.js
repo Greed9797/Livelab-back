@@ -667,9 +667,6 @@ export async function livesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const d = parsed.data
-    if (d.status_publicacao !== undefined) {
-      return reply.code(422).send({ error: 'Altere o status de publicação pelo fluxo de publicação da live.' })
-    }
     const { tenant_id, sub } = request.user
     const gestorId = d.gestor_id ?? sub
 
@@ -915,6 +912,9 @@ export async function livesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const d = parsed.data
+    if (d.status_publicacao !== undefined) {
+      return reply.code(422).send({ error: 'Altere o status de publicação pelo fluxo de publicação da live.' })
+    }
     const { tenant_id, sub } = request.user
     return app.withTenant(tenant_id, async (db) => {
       try {

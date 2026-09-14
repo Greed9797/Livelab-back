@@ -1,8 +1,7 @@
 import { apresentadoraHorasSql, liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
 
-// Performance is read only from official closed lives. Pending portal submissions
-// intentionally never participate in this query. UNION keeps legacy + v2 links
-// from counting a transmission twice for the same presenter.
+// Official lives remain the sole source for commission. Pending portal submissions
+// are added only to operational performance with an explicit provisional marker.
 export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, range }) {
   const result = await db.query(`
     WITH own_profile AS (
@@ -71,11 +70,25 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
   `, [tenantId, apresentadoraId, range.start, range.end])
 
   // A DTO allowlist prevents future SELECT extensions leaking financial data.
+  const pending = await db.query(`SELECT TRUE AS pendente_aprovacao,s.id,s.iniciado_em,s.encerrado_em,m.nome AS marca_nome,c.nome AS cabine_nome,
+      s.gmv_declarado AS gmv,s.pedidos_declarados AS pedidos
+    FROM apresentadora_live_submissoes s
+    LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id
+    LEFT JOIN cabines c ON c.id=s.cabine_id AND c.tenant_id=s.tenant_id
+    WHERE s.tenant_id=$1::uuid AND s.apresentadora_id=$2::uuid AND s.status='pendente'
+      AND s.iniciado_em >= ($3::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
+      AND s.iniciado_em < ($4::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
+    ORDER BY s.iniciado_em DESC,s.id`, [tenantId, apresentadoraId, range.start, range.end])
   const items = result.rows.map(row => ({
     id: row.id, iniciado_em: row.iniciado_em, encerrado_em: row.encerrado_em,
     marca_nome: row.marca_nome ?? null, cabine_nome: row.cabine_nome ?? null,
     gmv: Number(row.gmv ?? 0), horas: Math.max(0, Number(row.horas ?? 0)), pedidos: Number(row.pedidos ?? 0),
-  }))
+  })).concat(pending.rows.filter(row => row.pendente_aprovacao === true).map(row => ({
+    id: `submissao:${row.id}`, iniciado_em: row.iniciado_em, encerrado_em: row.encerrado_em,
+    marca_nome: row.marca_nome ?? null, cabine_nome: row.cabine_nome ?? null,
+    gmv: Number(row.gmv ?? 0), horas: Math.max(0, (new Date(row.encerrado_em).valueOf() - new Date(row.iniciado_em).valueOf()) / 3_600_000), pedidos: Number(row.pedidos ?? 0),
+    pendente_aprovacao: true,
+  })))
   const sums = items.reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, horas: sum.horas + item.horas, pedidos: sum.pedidos + item.pedidos }), { gmv: 0, horas: 0, pedidos: 0 })
   return { items, desempenho: {
     total_lives: items.length, gmv_lives: Math.round(sums.gmv * 100) / 100,

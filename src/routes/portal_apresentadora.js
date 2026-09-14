@@ -7,15 +7,17 @@ import { getOwnPortalPerformance } from '../services/portal-apresentadora-perfor
 import { withPortalPresenterDb } from '../services/portal-apresentadora-db.js'
 import { getOwnPortalRemuneration } from '../services/portal-apresentadora-remuneracao.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
+import { parsePortalCount, parsePortalMoney } from '../lib/portal-submission-input.js'
+import { saoPauloDateInput } from '../lib/timezone.js'
 
 const PORTAL_PAPEIS = ['apresentador', 'apresentadora']
 const REVIEW_PAPEIS = ['franqueador_master', 'franqueado', 'gerente', 'operacional', 'produtor_live']
 const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const uuid = z.string().uuid()
-const money = z.union([z.number().finite().min(0).max(9999999999999.99), z.string().regex(/^\d{1,13}(\.\d{1,2})?$/)])
-const orders = z.union([z.number().int().min(0).max(2147483647), z.string().regex(/^\d+$/)]).refine((value) => Number(value) <= 2147483647, 'pedidos inválidos')
-const impressions = z.union([z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), z.string().regex(/^\d{1,16}$/)]).refine((value) => Number.isSafeInteger(Number(value)), 'impressões inválidas')
-const views = z.union([z.number().int().min(0).max(2147483647), z.string().regex(/^\d+$/)]).refine((value) => Number(value) <= 2147483647, 'views inválidas')
+const money = z.union([z.number().finite(), z.string().trim().min(1).max(32)])
+const orders = z.union([z.number().finite(), z.string().trim().min(1).max(32)])
+const impressions = z.union([z.number().finite(), z.string().trim().min(1).max(32)])
+const views = z.union([z.number().finite(), z.string().trim().min(1).max(32)])
 const submissionSchema = z.object({
   marca_id: uuid,
   cabine_id: uuid.optional(),
@@ -24,8 +26,8 @@ const submissionSchema = z.object({
   observacao: z.string().trim().max(2000).optional(),
   gmv_declarado: money,
   pedidos_declarados: orders,
-  live_impressions_declaradas: impressions.optional(),
-  manual_views_declaradas: views.optional(),
+  live_impressions_declaradas: impressions,
+  manual_views_declaradas: views,
   request_id: uuid.optional(),
 }).strict()
 const reviewSchema = z.object({
@@ -39,6 +41,37 @@ const reviewSchema = z.object({
   manual_views_oficiais: views.optional(),
 }).strict()
 const devolucaoSchema = z.object({ motivo: z.string().trim().min(1).max(1000) }).strict()
+
+function normalizeSubmissionMetrics(data) {
+  const gmv = parsePortalMoney(data.gmv_declarado)
+  if (!gmv.ok) return { error: gmv.error, field: 'gmv_declarado' }
+  const pedidos = parsePortalCount(data.pedidos_declarados, 2147483647)
+  if (!pedidos.ok) return { error: pedidos.error, field: 'pedidos_declarados' }
+  const normalized = { ...data, gmv_declarado: gmv.value, pedidos_declarados: pedidos.value }
+  for (const [field, max] of [['live_impressions_declaradas', Number.MAX_SAFE_INTEGER], ['manual_views_declaradas', 2147483647]]) {
+    if (data[field] === undefined) continue
+    const count = parsePortalCount(data[field], max)
+    if (!count.ok) return { error: count.error, field }
+    normalized[field] = count.value
+  }
+  return { data: normalized }
+}
+
+function normalizeOfficialMetrics(data) {
+  const normalized = { ...data }
+  if (data.gmv_oficial !== undefined) {
+    const gmv = parsePortalMoney(data.gmv_oficial)
+    if (!gmv.ok) return { error: gmv.error, field: 'gmv_oficial' }
+    normalized.gmv_oficial = gmv.value
+  }
+  for (const [field, max] of [['pedidos_oficiais', 2147483647], ['live_impressions_oficiais', Number.MAX_SAFE_INTEGER], ['manual_views_oficiais', 2147483647]]) {
+    if (data[field] === undefined) continue
+    const count = parsePortalCount(data[field], max)
+    if (!count.ok) return { error: count.error, field }
+    normalized[field] = count.value
+  }
+  return { data: normalized }
+}
 
 function ownProfile(db, tenantId, userId, papel) {
   return db.query(
@@ -91,10 +124,18 @@ function monthOr400(query, reply) {
   return monthRangeFromQuery({ mes: mes ?? undefined })
 }
 
-function requiresPast({ iniciado_em, encerrado_em }) {
+function requiresPast({ iniciado_em, encerrado_em }, now = new Date()) {
   const start = new Date(iniciado_em)
   const end = new Date(encerrado_em)
-  return Number.isFinite(start.valueOf()) && Number.isFinite(end.valueOf()) && end > start && end <= new Date() && (end - start) <= 24 * 60 * 60 * 1000
+  return Number.isFinite(start.valueOf()) && Number.isFinite(end.valueOf()) && end > start && end <= now && (end - start) <= 24 * 60 * 60 * 1000
+}
+
+export function requiresCurrentPortalMonth({ iniciado_em, encerrado_em }, now = new Date()) {
+  if (!requiresPast({ iniciado_em, encerrado_em }, now)) return false
+  const inicio = saoPauloDateInput(iniciado_em)
+  const fim = saoPauloDateInput(encerrado_em)
+  const hoje = saoPauloDateInput(now)
+  return Boolean(inicio && fim && hoje && inicio === fim && inicio.slice(0, 7) === hoje.slice(0, 7))
 }
 
 export async function portalApresentadoraRoutes(app) {
@@ -152,11 +193,12 @@ export async function portalApresentadoraRoutes(app) {
 
   app.post('/v1/portal/apresentadora/submissoes', { preHandler: ownAccess }, async (request, reply) => {
     const parsed = submissionSchema.safeParse(request.body); if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
-    if (!requiresPast(parsed.data)) return reply.code(400).send({ error: 'Informe um intervalo já realizado e válido.' })
+    const normalized = normalizeSubmissionMetrics(parsed.data); if (!normalized.data) return reply.code(400).send({ error: normalized.error, field_errors: { [normalized.field]: normalized.error } })
+    if (!requiresCurrentPortalMonth(normalized.data)) return reply.code(400).send({ error: 'Registre uma live concluída do mês atual, em um único dia.' })
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
       const profile = await resolveOwnProfile(db, request.user.tenant_id, request.user.sub, request.user.papel)
       if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
-      const d = parsed.data
+      const d = normalized.data
       const valid = await db.query(`SELECT 1 FROM marcas m LEFT JOIN clientes cl ON cl.id=m.cliente_id AND cl.tenant_id=m.tenant_id WHERE m.id=$1::uuid AND m.tenant_id=$2::uuid AND ${marcaStatusOperacionalSql('m', 'cl')}='ativa' LIMIT 1`, [d.marca_id, request.user.tenant_id])
       if (!valid.rows[0]) return reply.code(404).send({ error: 'Marca ativa não encontrada nesta unidade.' })
       if (d.cabine_id) { const valid = await db.query(`SELECT 1 FROM cabines WHERE id=$1::uuid AND tenant_id=$2::uuid AND ativo IS DISTINCT FROM FALSE LIMIT 1`, [d.cabine_id, request.user.tenant_id]); if (!valid.rows[0]) return reply.code(404).send({ error: 'Cabine não encontrada.' }) }
@@ -180,10 +222,11 @@ export async function portalApresentadoraRoutes(app) {
   app.patch('/v1/portal/apresentadora/submissoes/:id', { preHandler: ownAccess }, async (request, reply) => {
     const idCheck = uuid.safeParse(request.params?.id); const parsed = submissionSchema.safeParse(request.body)
     if (!idCheck.success || !parsed.success) return reply.code(400).send({ error: !idCheck.success ? 'id inválido' : parsed.error.issues[0].message })
-    if (!requiresPast(parsed.data)) return reply.code(400).send({ error: 'Informe um intervalo já realizado e válido.' })
+    const normalized = normalizeSubmissionMetrics(parsed.data); if (!normalized.data) return reply.code(400).send({ error: normalized.error, field_errors: { [normalized.field]: normalized.error } })
+    if (!requiresCurrentPortalMonth(normalized.data)) return reply.code(400).send({ error: 'Registre uma live concluída do mês atual, em um único dia.' })
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
       const profile = await resolveOwnProfile(db, request.user.tenant_id, request.user.sub, request.user.papel); if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
-      const d = parsed.data
+      const d = normalized.data
       const valid = await db.query(`SELECT 1 FROM marcas m LEFT JOIN clientes cl ON cl.id=m.cliente_id AND cl.tenant_id=m.tenant_id WHERE m.id=$1::uuid AND m.tenant_id=$2::uuid AND ${marcaStatusOperacionalSql('m', 'cl')}='ativa' LIMIT 1`, [d.marca_id, request.user.tenant_id]); if (!valid.rows[0]) return reply.code(404).send({ error: 'Marca ativa não encontrada nesta unidade.' })
       if (d.cabine_id) { const valid = await db.query(`SELECT 1 FROM cabines WHERE id=$1::uuid AND tenant_id=$2::uuid AND ativo IS DISTINCT FROM FALSE LIMIT 1`, [d.cabine_id, request.user.tenant_id]); if (!valid.rows[0]) return reply.code(404).send({ error: 'Cabine não encontrada.' }) }
       return inSubmissionTransaction(db, async () => { const updated = await db.query(`UPDATE apresentadora_live_submissoes SET marca_id=$4::uuid,marca_descricao=NULL,cabine_id=$5::uuid,iniciado_em=$6::timestamptz,encerrado_em=$7::timestamptz,observacao=$8,gmv_declarado=$9::numeric,pedidos_declarados=$10::int,live_impressions_declaradas=$11::bigint,manual_views_declaradas=$12::int,atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id, d.marca_id, d.cabine_id ?? null, d.iniciado_em, d.encerrado_em, d.observacao ?? null, d.gmv_declarado, d.pedidos_declarados, d.live_impressions_declaradas ?? null, d.manual_views_declaradas ?? null])
@@ -235,6 +278,8 @@ export async function portalApresentadoraRoutes(app) {
 
   app.post('/v1/lives/submissoes-apresentadoras/:id/aprovar', { preHandler: reviewAccess }, async (request, reply) => {
     const idCheck = uuid.safeParse(request.params?.id); const parsed = reviewSchema.safeParse(request.body); if (!idCheck.success || !parsed.success) return reply.code(400).send({ error: !idCheck.success ? 'id inválido' : parsed.error.issues[0].message })
+    const normalized = normalizeOfficialMetrics(parsed.data); if (!normalized.data) return reply.code(400).send({ error: normalized.error, field_errors: { [normalized.field]: normalized.error } })
+    parsed.data = normalized.data
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
       const sub = await db.query(`SELECT * FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid FOR UPDATE`, [idCheck.data, request.user.tenant_id])
       if (!sub.rows[0]) return reply.code(409).send({ error: 'Submissão não encontrada ou já revisada.' })

@@ -23,7 +23,7 @@ const submissionSchema = z.object({
   cabine_id: uuid.optional(),
   iniciado_em: z.string().datetime({ offset: true }),
   encerrado_em: z.string().datetime({ offset: true }),
-  observacao: z.string().trim().max(2000).optional(),
+  observacao: z.string().trim().min(1).max(2000),
   gmv_declarado: money,
   pedidos_declarados: orders,
   live_impressions_declaradas: impressions,
@@ -239,7 +239,13 @@ export async function portalApresentadoraRoutes(app) {
     const idCheck = uuid.safeParse(request.params?.id); if (!idCheck.success) return reply.code(400).send({ error: 'id inválido' })
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
       const profile = await resolveOwnProfile(db, request.user.tenant_id, request.user.sub, request.user.papel); if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
-      return inSubmissionTransaction(db, async () => { const result = await db.query(`UPDATE apresentadora_live_submissoes SET status='pendente',motivo_devolucao=NULL,atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' AND marca_id IS NOT NULL AND gmv_declarado IS NOT NULL AND pedidos_declarados IS NOT NULL RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id])
+      return inSubmissionTransaction(db, async () => {
+      const current = await db.query(`SELECT iniciado_em,encerrado_em,marca_id,gmv_declarado,pedidos_declarados,live_impressions_declaradas,manual_views_declaradas,observacao FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' FOR UPDATE`, [idCheck.data, request.user.tenant_id, profile.id])
+      if (!current.rows[0]) return reply.code(404).send({ error: 'Submissão não encontrada ou não pode ser reenviada.' })
+      if (!requiresCurrentPortalMonth(current.rows[0]) || !current.rows[0].marca_id || current.rows[0].gmv_declarado == null || current.rows[0].pedidos_declarados == null || current.rows[0].live_impressions_declaradas == null || current.rows[0].manual_views_declaradas == null || !String(current.rows[0].observacao ?? '').trim()) {
+        return reply.code(400).send({ error: 'Corrija todos os campos obrigatórios e registre uma live concluída do mês atual, em um único dia.' })
+      }
+      const result = await db.query(`UPDATE apresentadora_live_submissoes SET status='pendente',motivo_devolucao=NULL,atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id])
       if (!result.rows[0]) return reply.code(404).send({ error: 'Submissão não encontrada ou não pode ser reenviada.' }); await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: result.rows[0].id, version: result.rows[0].versao, action: 'reenviada', actorId: request.user.sub }); return result.rows[0]
       })
     })
@@ -264,6 +270,30 @@ export async function portalApresentadoraRoutes(app) {
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
       const rows = await db.query(`SELECT s.*,a.nome AS apresentadora_nome,m.nome AS marca_nome,c.nome AS cabine_nome FROM apresentadora_live_submissoes s JOIN apresentadoras a ON a.id=s.apresentadora_id AND a.tenant_id=s.tenant_id LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id LEFT JOIN cabines c ON c.id=s.cabine_id AND c.tenant_id=s.tenant_id WHERE s.tenant_id=$1::uuid AND ($2='all' OR s.status=$2) ORDER BY s.criado_em ASC`, [request.user.tenant_id, status])
       return { items: rows.rows.map((row) => ({ ...row, gmv_declarado: row.gmv_declarado == null ? null : Number(row.gmv_declarado), pedidos_declarados: row.pedidos_declarados == null ? null : Number(row.pedidos_declarados), live_impressions_declaradas: row.live_impressions_declaradas == null ? null : Number(row.live_impressions_declaradas), manual_views_declaradas: row.manual_views_declaradas == null ? null : Number(row.manual_views_declaradas), live_impressions_oficiais: row.live_impressions_oficiais == null ? null : Number(row.live_impressions_oficiais), manual_views_oficiais: row.manual_views_oficiais == null ? null : Number(row.manual_views_oficiais) })) }
+    })
+  })
+
+  // The picker is deliberately scoped on the server. A crafted live_id still goes
+  // through the same check in /aprovar, but this prevents the UI from suggesting a
+  // live of another brand/day/presenter in the first place.
+  app.get('/v1/lives/submissoes-apresentadoras/:id/candidatas-vinculo', { preHandler: reviewAccess }, async (request, reply) => {
+    const idCheck = uuid.safeParse(request.params?.id)
+    if (!idCheck.success) return reply.code(400).send({ error: 'id inválido' })
+    return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
+      const sub = await db.query(`SELECT id,marca_id,apresentadora_id,iniciado_em FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='pendente' LIMIT 1`, [idCheck.data, request.user.tenant_id])
+      if (!sub.rows[0]) return reply.code(404).send({ error: 'Submissão pendente não encontrada.' })
+      const s = sub.rows[0]
+      const rows = await db.query(`SELECT l.id,l.iniciado_em,l.encerrado_em,l.marca_id,m.nome AS marca_nome,c.nome AS cabine_nome,c.numero AS cabine_numero,COALESCE(l.manual_gmv,l.fat_gerado,0)::numeric AS gmv,l.origem_dados
+        FROM lives l
+        LEFT JOIN marcas m ON m.id=l.marca_id AND m.tenant_id=l.tenant_id
+        LEFT JOIN cabines c ON c.id=l.cabine_id AND c.tenant_id=l.tenant_id
+        WHERE l.tenant_id=$1::uuid AND l.status='encerrada' AND l.marca_id=$2::uuid
+          AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date=(($3::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date)
+          AND (l.apresentador_id=(SELECT user_id FROM apresentadoras WHERE id=$4::uuid AND tenant_id=$1::uuid)
+            OR EXISTS (SELECT 1 FROM live_apresentadores la WHERE la.live_id=l.id AND la.tenant_id=l.tenant_id AND la.apresentador_id=(SELECT user_id FROM apresentadoras WHERE id=$4::uuid AND tenant_id=$1::uuid))
+            OR EXISTS (SELECT 1 FROM live_apresentadoras_v2 lav WHERE lav.live_id=l.id AND lav.tenant_id=l.tenant_id AND lav.apresentadora_id=$4::uuid))
+        ORDER BY l.iniciado_em ASC LIMIT 100`, [request.user.tenant_id, s.marca_id, s.iniciado_em, s.apresentadora_id])
+      return { items: rows.rows.map((row) => ({ ...row, gmv: Number(row.gmv ?? 0) })) }
     })
   })
 

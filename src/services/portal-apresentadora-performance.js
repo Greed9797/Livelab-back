@@ -90,10 +90,13 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
     pendente_aprovacao: true,
   })))
   const sums = items.reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, horas: sum.horas + item.horas, pedidos: sum.pedidos + item.pedidos }), { gmv: 0, horas: 0, pedidos: 0 })
+  const pendingSums = items.filter(item => item.pendente_aprovacao).reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, lives: sum.lives + 1 }), { gmv: 0, lives: 0 })
   return { items, desempenho: {
     total_lives: items.length, gmv_lives: Math.round(sums.gmv * 100) / 100,
     horas_live: Math.round(sums.horas * 100) / 100,
     gmv_por_hora: sums.horas > 0 ? Math.round(sums.gmv / sums.horas * 100) / 100 : null,
     pedidos: sums.pedidos,
+    gmv_pendente_aprovacao: Math.round(pendingSums.gmv * 100) / 100,
+    total_lives_pendentes_aprovacao: pendingSums.lives,
   } }
 }

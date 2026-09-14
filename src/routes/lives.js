@@ -667,6 +667,9 @@ export async function livesRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const d = parsed.data
+    if (d.status_publicacao !== undefined) {
+      return reply.code(422).send({ error: 'Altere o status de publicação pelo fluxo de publicação da live.' })
+    }
     const { tenant_id, sub } = request.user
     const gestorId = d.gestor_id ?? sub
 
@@ -1055,7 +1058,6 @@ export async function livesRoutes(app) {
         if (resolvedApresentadorId !== undefined) addField('apresentador_id', resolvedApresentadorId)
         if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
         if (d.tipo         !== undefined) addField('tipo',               d.tipo)
-        if (d.status_publicacao !== undefined) addField('status_publicacao', d.status_publicacao)
         if (d.fat_gerado      !== undefined) addField('fat_gerado', d.fat_gerado)
         if (gmvMudou) addField('comissao_calculada', comissao)
         // Intenção durável de recálculo, gravada na MESMA transação da edição.

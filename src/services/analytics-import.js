@@ -608,6 +608,7 @@ export async function loadAnalyticsImportCandidates(db, { fromDate, toDate }) {
     LEFT JOIN marcas m_agenda ON m_agenda.id = ae.marca_id AND m_agenda.tenant_id = l.tenant_id
     LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
     WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+      AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.uniao_id IS NULL
       AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date >= ($1::date - interval '1 day')::date
       AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date <= ($2::date + interval '1 day')::date
       AND l.status <> 'cancelada'

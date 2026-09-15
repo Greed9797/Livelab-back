@@ -16,6 +16,7 @@ import { applyApresentadorasToLive } from '../lib/live-rateio.js'
 import { seedRateioPlanejado } from '../lib/agenda-turnos.js'
 import { tombstoneApprovedSubmissionsForDeletedLive } from '../services/live-approved-submission-deletion.js'
 import { buildResumoDia } from '../lib/resumo-dia.js'
+import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { pendingCollisionSql, pendingRecord, pendingRows } from '../lib/presenter-pending.js'
 
 function parseIntegerMetric(value) {
@@ -1421,6 +1422,7 @@ export async function livesRoutes(app) {
       const result = await db.query(
         `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
+                l.uniao_id, l.uniao_destino_id, l.uniao_desfeita_em,
                 l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
                 -- Comissão da apresentadora: fonte é o motor (vendas_atribuidas, faixas por GMV
                 -- mensal + 2% fim de semana), o mesmo que Financeiro e /comissoes leem. O snapshot
@@ -1617,6 +1619,7 @@ export async function livesRoutes(app) {
         params.push(fCabineId)
         where += ` AND l.cabine_id = $${params.length}::uuid`
       }
+      where += ` AND ${activeLiveSql('l')}`
       if (dataInicioBounds) {
         params.push(dataInicioBounds.start)
         where += ` AND l.iniciado_em >= $${params.length}::timestamptz`
@@ -1820,6 +1823,7 @@ export async function livesRoutes(app) {
       const result = pageIds.length ? await db.query(
         `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
+                l.uniao_id, l.uniao_destino_id, l.uniao_desfeita_em,
                 l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
                 -- Comissão da apresentadora: fonte é o motor (vendas_atribuidas, faixas por GMV
                 -- mensal + 2% fim de semana), o mesmo que Financeiro e /comissoes leem. O snapshot
@@ -1911,7 +1915,7 @@ export async function livesRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       const params = [tenant_id, dayBounds.start, dayBounds.end]
-      let where = 'WHERE l.tenant_id = $1::uuid AND l.iniciado_em >= $2::timestamptz AND l.iniciado_em < $3::timestamptz'
+      let where = `WHERE l.tenant_id = $1::uuid AND ${activeLiveSql('l')} AND l.iniciado_em >= $2::timestamptz AND l.iniciado_em < $3::timestamptz`
       if (status && status !== 'todas') {
         params.push(status)
         where += ` AND l.status = $${params.length}`
@@ -2028,6 +2032,7 @@ export async function livesRoutes(app) {
           FROM lives l
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status <> 'cancelada'
+            AND ${activeLiveSql('l')}
             AND l.cabine_id IS NOT NULL
             AND l.iniciado_em >= NOW() - ($1::int || ' days')::interval
         )
@@ -2099,6 +2104,7 @@ export async function livesRoutes(app) {
         ) va_m ON true
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.id = ANY($1::uuid[])
+          AND ${activeLiveSql('l')}
       `, [ids])
 
       const byId = new Map(detalhe.rows.map((r) => [r.id, r]))
@@ -2626,11 +2632,14 @@ export async function livesRoutes(app) {
 
     return app.withTenant(tenant_id, async (db) => {
       const liveQ = await db.query(
-        `SELECT id, status_publicacao, marca_id, ads_gmv, manual_gmv, fat_gerado FROM lives WHERE id = $1`,
-        [request.params.id]
+        `SELECT id, status_publicacao, marca_id, ads_gmv, manual_gmv, fat_gerado, uniao_destino_id, uniao_desfeita_em FROM lives WHERE id = $1 AND tenant_id = $2::uuid`,
+        [request.params.id, tenant_id]
       )
       const live = liveQ.rows[0]
       if (!live) return reply.code(404).send({ error: 'Live não encontrada' })
+      if (live.uniao_destino_id || live.uniao_desfeita_em) {
+        return reply.code(409).send({ error: 'Live consolidada ou absorvida não pode ter a publicação alterada.', code: 'LIVE_UNIDA_IMUTAVEL' })
+      }
 
       // Validação de state machine: únicas transições permitidas são
       //   rascunho → revisado  e  revisado → publicado
@@ -2658,9 +2667,9 @@ export async function livesRoutes(app) {
       await db.query('BEGIN')
       try {
         const resultado = await db.query(
-          `UPDATE lives SET status_publicacao = $1 WHERE id = $2
+          `UPDATE lives SET status_publicacao = $1 WHERE id = $2 AND tenant_id = $3::uuid
            RETURNING id, status_publicacao`,
-          [status_publicacao, request.params.id]
+          [status_publicacao, request.params.id, tenant_id]
         )
 
         // Persiste motivo em live_metric_revisions, seguindo o mesmo padrão de fat_gerado/manual_gmv

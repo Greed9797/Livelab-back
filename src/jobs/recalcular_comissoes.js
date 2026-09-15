@@ -110,6 +110,7 @@ export async function runRecalcularComissoesTick(app) {
                 COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos
            FROM lives l
           WHERE l.status = 'encerrada'
+            AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
             AND COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) > 0
             AND NOT EXISTS (
               SELECT 1 FROM vendas_atribuidas va
@@ -164,6 +165,7 @@ export async function runRecalcularComissoesTick(app) {
                 COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos
            FROM lives l
           WHERE l.comissao_recalculo_pendente
+            AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
           ORDER BY l.encerrado_em DESC NULLS LAST
           LIMIT 100`,
         [],
@@ -184,7 +186,8 @@ export async function runRecalcularComissoesTick(app) {
           // Limpar fora daqui reabriria a janela que este mecanismo existe para fechar.
           await lc.query(
             `UPDATE lives SET comissao_recalculo_pendente = FALSE
-              WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+              WHERE id = $1::uuid AND tenant_id = $2::uuid
+                AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL`,
             [live.id, live.tenant_id],
           )
           await lc.query('COMMIT')

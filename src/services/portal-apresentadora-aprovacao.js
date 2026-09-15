@@ -31,6 +31,7 @@ export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, sub
   // Serialize portal approvals on the cabin and reject overlap with an existing
   // official live, including one created from another presenter's submission.
   const conflict = await db.query(`SELECT id FROM lives WHERE tenant_id=$1::uuid AND cabine_id=$2::uuid
+    AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
     AND status <> 'cancelada' AND iniciado_em < $4::timestamptz
     AND COALESCE(encerrado_em,previsto_fim,'infinity'::timestamptz) > $3::timestamptz LIMIT 1`,
   [tenantId, oficial.cabine_id, oficial.iniciado_em, oficial.encerrado_em])

@@ -4,6 +4,8 @@ export function pendingCollisionSql(alias = 's') {
   return `(EXISTS (SELECT 1 FROM lives pending_live
     WHERE pending_live.tenant_id=${alias}.tenant_id AND pending_live.marca_id=${alias}.marca_id
       AND pending_live.status IN ('encerrada','faturada')
+      AND pending_live.uniao_destino_id IS NULL
+      AND pending_live.uniao_desfeita_em IS NULL
       AND pending_live.iniciado_em < ${alias}.encerrado_em
       AND pending_live.encerrado_em > ${alias}.iniciado_em)
     OR EXISTS (SELECT 1 FROM apresentadora_live_submissoes pending_peer

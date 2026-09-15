@@ -34,6 +34,7 @@ export async function sincronizarSnapshotComissaoApresentadora(db, { tenantId, l
           GROUP BY origem_id
        ) agg
       WHERE l.id = agg.live_id
+        AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
         AND l.tenant_id = $1::uuid`,
     [tenantId, ids],
   )

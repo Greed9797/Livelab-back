@@ -21,7 +21,8 @@ await db.exec(`
   CREATE TABLE lives (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, apresentador_id uuid, cabine_id uuid, marca_id uuid,
     status text NOT NULL, iniciado_em timestamptz NOT NULL, encerrado_em timestamptz, previsto_fim timestamptz,
-    ads_gmv numeric, manual_gmv numeric, fat_gerado numeric, manual_orders int, final_orders_count int
+    ads_gmv numeric, manual_gmv numeric, fat_gerado numeric, manual_orders int, final_orders_count int,
+    uniao_id uuid, uniao_destino_id uuid, uniao_desfeita_em timestamptz
   );
   CREATE TABLE live_apresentadores (tenant_id uuid NOT NULL, live_id uuid NOT NULL, apresentador_id uuid);
   CREATE TABLE live_apresentadoras_v2 (

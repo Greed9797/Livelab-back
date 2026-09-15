@@ -8,6 +8,7 @@ import { presenterFixedAtSql } from '../config/presenter_defaults.js'
 import { prorateFatorSql } from '../lib/financeiro-remuneracao.js'
 import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl } from '../lib/dashboard-cache.js'
+import { activeLiveJoinSql, activeLiveSql } from '../lib/live-merge-sql.js'
 
 const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
 
@@ -45,6 +46,7 @@ function marcaFixoMensalSql() {
           SELECT l.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes
           FROM lives l
           WHERE l.tenant_id = $3::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
             AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
             AND (${liveGmvSql('l')} > 0 OR ${liveOrdersSql('l')} > 0)
@@ -146,6 +148,7 @@ export async function financeiroRoutes(app) {
           ${marcaResolveLateralSql('$3')}
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
             AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
         ),
@@ -175,6 +178,7 @@ export async function financeiroRoutes(app) {
           ${marcaResolveLateralSql('$3')}
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
             AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
             AND mc.id IS NOT NULL
@@ -273,6 +277,7 @@ export async function financeiroRoutes(app) {
       INNER JOIN users u ON u.tenant_id = t.id AND u.papel = 'franqueado'
       LEFT JOIN lives l ON l.tenant_id = t.id
         AND l.status = 'encerrada'
+        ${activeLiveJoinSql('l')}
         AND l.iniciado_em::date >= $1::date
         AND l.iniciado_em::date <= $2::date
       GROUP BY t.id, t.nome, t.cidade, t.uf, t.plano
@@ -325,6 +330,7 @@ export async function financeiroRoutes(app) {
             AND marca_cliente.tenant_id = l.tenant_id
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em::date >= $1::date
             AND l.iniciado_em::date <= $2::date
           UNION ALL
@@ -397,6 +403,7 @@ export async function financeiroRoutes(app) {
           FROM lives l
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em::date >= $1::date
             AND l.iniciado_em::date <= $2::date
           UNION ALL

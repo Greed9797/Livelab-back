@@ -200,6 +200,7 @@ export async function comissoesRoutes(app) {
            LEFT JOIN marcas mc   ON mc.id = l.marca_id   AND mc.tenant_id = l.tenant_id
           WHERE l.tenant_id = $1::uuid
             AND l.status = 'encerrada'
+            AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
             AND COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) > 0
             AND NOT EXISTS (
               SELECT 1 FROM vendas_atribuidas va

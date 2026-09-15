@@ -52,6 +52,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
      LEFT JOIN marcas m     ON m.tenant_id = $1::uuid
                             AND ${MARCA_RESOLVE_PREDICATE}
      WHERE l.id = $2 AND l.tenant_id = $1::uuid
+       AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
      ORDER BY m.criado_em ASC
      LIMIT 1`,
     [tenantId, liveId],
@@ -89,7 +90,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
   // que expõe só `id` e `user_id`.
   const apresentadorasQ = await db.query(
     `SELECT * FROM (
-       SELECT DISTINCT ap.id AS apresentadora_id, la.percentual_rateio, la.gmv_rateado, la.papel
+       SELECT DISTINCT ap.id AS apresentadora_id, la.percentual_rateio, la.gmv_rateado, la.papel, la.pedidos_rateados
        FROM (
          -- apresentadora principal (lives.apresentador_id → apresentadoras.user_id)
          SELECT ap2.id, ap2.user_id
@@ -151,13 +152,20 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
     ? 1 / Math.max(linhas.length, 1)
     : Math.max(0, 1 - rateioExplicitoTotal) / Math.max(semRateioExplicito.length, 1)
 
+  const pedidosExplicitados = linhas.map(ap => ap.pedidos_rateados == null ? null : Number(ap.pedidos_rateados))
+  const usaPedidosExplicitados = pedidosExplicitados.some(value => value !== null)
+  if (usaPedidosExplicitados && (
+    pedidosExplicitados.some(value => value === null || !Number.isSafeInteger(value) || value < 0)
+    || pedidosExplicitados.reduce((sum, value) => sum + value, 0) !== Number(pedidos ?? 0)
+  )) throw new Error('Pedidos do rateio não conferem com o total da live; revise a união antes de recalcular.')
+
   const resultados = []
 
   for (const [index, ap] of linhas.entries()) {
     const apresentadoraId = ap.apresentadora_id ?? null
     // P1-1: pedidos reais (antes era literal 0). Atribuídos 100% à apresentadora
     // principal (primeira linha) — evita rateio com arredondamento que não soma o total.
-    const pedidosLinha = index === 0 ? Math.round(Number(pedidos ?? 0)) : 0
+    const pedidosLinha = usaPedidosExplicitados ? pedidosExplicitados[index] : index === 0 ? Math.round(Number(pedidos ?? 0)) : 0
     const rateio      = usaPesoAbsoluto
       ? pesosAbsolutos[index] / somaPesosAbsolutos
       : ap.percentual_rateio !== null && ap.percentual_rateio !== undefined && ap.percentual_rateio !== ''

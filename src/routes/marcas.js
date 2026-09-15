@@ -5,6 +5,7 @@ import { origemDados } from '../plugins/auth.js'
 import { buildCacheKey, invalidateTenant, setCacheControl, withCache } from '../lib/dashboard-cache.js'
 import { getMarcaOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
@@ -195,6 +196,7 @@ export async function marcasRoutes(app) {
              SELECT l.marca_id AS id, ${liveGmvSql('l')} AS gmv, 1 AS is_live, 0 AS is_video
              FROM lives l
              WHERE l.tenant_id = $1::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
+               AND ${activeLiveSql('l')}
                AND l.iniciado_em::date >= $${startIdx}::date AND l.iniciado_em::date <= $${endIdx}::date
              UNION ALL
              SELECT vr.marca_id AS id, vr.gmv_atribuido AS gmv, 0 AS is_live, 1 AS is_video

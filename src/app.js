@@ -22,6 +22,7 @@ import { remuneracaoApresentadorasRoutes } from './routes/remuneracao_apresentad
 import { relatoriosRoutes } from './routes/relatorios.js'
 import { cabinesRoutes } from './routes/cabines.js'
 import { livesRoutes } from './routes/lives.js'
+import { liveMergeRoutes } from './routes/live-merge.js'
 import { clienteDashboardRoutes } from './routes/cliente_dashboard.js'
 import { leadsRoutes } from './routes/leads.js'
 import { crmRoutes } from './routes/crm.js'
@@ -162,6 +163,9 @@ export async function buildApp(opts = {}) {
   // dias) e a mensagem crua do Postgres ia direto para o navegador — inclusive o
   // "invalid input syntax for type uuid" do segundo incidente.
   app.setErrorHandler((error, request, reply) => {
+    if (error.code === '23514' && error.constraint === 'live_uniao_protected') {
+      return reply.code(409).send({ statusCode: 409, code: 'LIVE_UNION_PROTECTED', error: error.message, message: error.message })
+    }
     // Custom AppError subclasses: usa statusCode/sentryTag/reportable da classe
     const isAppError = error instanceof AppError
     const status = isAppError ? error.statusCode : (error.statusCode ?? 500)
@@ -334,6 +338,7 @@ export async function buildApp(opts = {}) {
   await app.register(relatoriosRoutes)
   await app.register(cabinesRoutes)
   await app.register(livesRoutes)
+  await app.register(liveMergeRoutes)
   await app.register(clienteDashboardRoutes)
   await app.register(leadsRoutes)
   await app.register(crmRoutes)

@@ -17,6 +17,7 @@ export async function excelenciaRoutes(app) {
 	               SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)) AS total
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
           AND encerrado_em IS NOT NULL
         GROUP BY 1 ORDER BY 1 DESC LIMIT 2
       `)

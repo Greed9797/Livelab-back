@@ -41,6 +41,7 @@ await db.exec(await readFile(new URL('../migrations/145_portal_apresentadora_run
 await db.exec(await readFile(new URL('../migrations/146_portal_apresentadora_metricas.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/147_live_oficial_excluida_tombstone.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/148_lives_origem_apresentadora.sql',import.meta.url),'utf8'))
+await db.exec(await readFile(new URL('../migrations/150_live_unioes.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/149_submission_archive_workflow.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/149_submission_archive_workflow.sql',import.meta.url),'utf8'))
 await db.query(`INSERT INTO tenants VALUES ($1),($2)`,[tenant,otherTenant])

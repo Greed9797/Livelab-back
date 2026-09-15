@@ -1,5 +1,6 @@
 import { liveGmvSql, liveOrdersSql } from './metric-sql.js'
 import { saoPauloDateInput } from './timezone.js'
+import { activeLiveSql } from './live-merge-sql.js'
 
 const toNum = (value) => Number(value ?? 0)
 
@@ -91,6 +92,7 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
        LEFT JOIN marcas marca_cliente ON marca_cliente.id = l.marca_id
          AND marca_cliente.tenant_id = l.tenant_id
        WHERE l.tenant_id = $2::uuid
+         AND ${activeLiveSql('l')}
          AND (
            l.cliente_id = $1
            OR (l.cliente_id IS NULL AND marca_cliente.cliente_id = $1)
@@ -156,6 +158,7 @@ export async function getClienteOperacional(db, { tenantId, clienteId, startDate
      LEFT JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = l.tenant_id
      LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
      WHERE l.tenant_id = $2::uuid
+       AND ${activeLiveSql('l')}
        AND (
          l.cliente_id = $1
          -- A venda atribuída é a fonte já existente para lives tratadas pelo motor,
@@ -259,6 +262,7 @@ export async function getMarcaOperacional(db, { tenantId, marcaId, startDate, en
      LEFT JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = l.tenant_id
      LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
      WHERE l.tenant_id = $2::uuid AND l.marca_id = $1
+       AND ${activeLiveSql('l')}
      ORDER BY COALESCE(l.encerrado_em, l.iniciado_em) DESC NULLS LAST
      LIMIT 50`,
     [marcaId, tenantId],

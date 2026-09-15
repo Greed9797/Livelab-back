@@ -233,6 +233,7 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
         AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
     ) comissao ON true
     WHERE l.status = 'encerrada'
+      AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
       AND l.iniciado_em >= ($3::date::timestamp) AT TIME ZONE 'America/Sao_Paulo'
       AND l.iniciado_em < (($4::date::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo')
     ORDER BY l.iniciado_em ASC, l.id ASC

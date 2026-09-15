@@ -1,5 +1,6 @@
 import { presenterFixedCapSql } from '../config/presenter_defaults.js'
 import { apresentadoraHorasSql } from './metric-sql.js'
+import { activeLiveSql } from './live-merge-sql.js'
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
 
@@ -141,6 +142,7 @@ export async function getPerformanceRanking(db, {
         ) live_commission ON true
         WHERE l.tenant_id = $1::uuid
           AND l.status = 'encerrada'
+          AND ${activeLiveSql('l')}
           AND l.iniciado_em >= ($2::date) AT TIME ZONE '${ANALYTICS_TZ}'
           AND l.iniciado_em < ($3::date) AT TIME ZONE '${ANALYTICS_TZ}'
           AND ($5::uuid IS NULL OR l.cliente_id = $5::uuid)
@@ -260,6 +262,7 @@ export async function getPerformanceRanking(db, {
       ) live_commission ON true
       WHERE l.tenant_id = $1::uuid
         AND l.status = 'encerrada'
+        AND ${activeLiveSql('l')}
         AND l.iniciado_em >= ($2::date) AT TIME ZONE '${ANALYTICS_TZ}'
         AND l.iniciado_em < ($3::date) AT TIME ZONE '${ANALYTICS_TZ}'
         AND ($5::uuid IS NULL OR l.cliente_id = $5::uuid)

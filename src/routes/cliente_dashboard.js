@@ -1,4 +1,5 @@
 import { getClienteId } from '../lib/cliente_resolver.js'
+import { activeLiveSql } from '../lib/live-merge-sql.js'
 
 const DASHBOARD_TZ = 'America/Sao_Paulo'
 
@@ -185,6 +186,8 @@ async function fetchClienteLives(db, tenantId, clienteId, periodo, custoHora) {
       SELECT SUM(lp.quantidade) AS itens
       FROM live_products lp
       WHERE lp.live_id = l.id
+         OR EXISTS (SELECT 1 FROM lives origem WHERE origem.id = lp.live_id AND origem.uniao_destino_id = l.id AND origem.uniao_desfeita_em IS NULL)
+         OR EXISTS (SELECT 1 FROM lives origem WHERE origem.id = lp.live_id AND origem.uniao_destino_id = l.id AND origem.uniao_desfeita_em IS NULL)
     ) prod ON true
     LEFT JOIN LATERAL (
       SELECT
@@ -199,6 +202,7 @@ async function fetchClienteLives(db, tenantId, clienteId, periodo, custoHora) {
     ) snap ON true
     WHERE l.tenant_id = $1
       AND l.cliente_id = $2
+      AND ${activeLiveSql('l')}
       AND l.status IN ('encerrada', 'em_andamento')
       AND l.iniciado_em >= p.inicio
       AND l.iniciado_em < p.fim
@@ -319,6 +323,7 @@ export async function clienteDashboardRoutes(app) {
         CROSS JOIN periodo p
         WHERE l.tenant_id = $1
           AND l.cliente_id = $2
+          AND l.uniao_desfeita_em IS NULL
           AND l.status IN ('encerrada', 'em_andamento')
       `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
 
@@ -349,6 +354,7 @@ export async function clienteDashboardRoutes(app) {
         ) ls ON true
         WHERE l.tenant_id = $1
           AND l.cliente_id = $2
+          AND ${activeLiveSql('l')}
           AND l.status = 'em_andamento'
         LIMIT 1
       `, [tenant_id, cliente_id])
@@ -390,6 +396,7 @@ export async function clienteDashboardRoutes(app) {
         CROSS JOIN periodo p
         WHERE l.tenant_id = $1
           AND l.cliente_id = $2
+          AND l.uniao_desfeita_em IS NULL
           AND l.iniciado_em >= p.inicio
           AND l.iniciado_em < p.fim
         GROUP BY lp.produto_nome
@@ -418,6 +425,7 @@ export async function clienteDashboardRoutes(app) {
           CROSS JOIN periodo p
           WHERE l.tenant_id = $1
             AND l.status IN ('encerrada', 'em_andamento')
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em >= p.inicio
             AND l.iniciado_em < p.fim
           GROUP BY l.cliente_id
@@ -446,6 +454,7 @@ export async function clienteDashboardRoutes(app) {
           JOIN clientes c ON c.id = l.cliente_id
           WHERE l.tenant_id = $1
             AND l.status = 'encerrada'
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em >= CURRENT_DATE - INTERVAL '90 days'
             AND c.status = 'ativo'
           GROUP BY l.cliente_id, c.nicho
@@ -535,11 +544,15 @@ export async function clienteDashboardRoutes(app) {
             LAG(COALESCE(ls.gmv, 0)) OVER (PARTITION BY ls.live_id ORDER BY ls.captured_at) AS prev_gmv,
             LAG(COALESCE(ls.total_orders, 0)) OVER (PARTITION BY ls.live_id ORDER BY ls.captured_at) AS prev_orders
           FROM lives l
-          JOIN live_snapshots ls ON ls.live_id = l.id
+          JOIN live_snapshots ls ON (
+            ls.live_id = l.id
+            OR EXISTS (SELECT 1 FROM lives origem WHERE origem.id = ls.live_id AND origem.uniao_destino_id = l.id AND origem.uniao_desfeita_em IS NULL)
+          )
           CROSS JOIN periodo p
           WHERE l.tenant_id = $1
             AND l.cliente_id = $2
             AND l.status IN ('encerrada', 'em_andamento')
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em >= p.inicio
             AND l.iniciado_em < p.fim
         ), deltas AS (
@@ -570,10 +583,13 @@ export async function clienteDashboardRoutes(app) {
             SELECT SUM(lp.quantidade) AS itens
             FROM live_products lp
             WHERE lp.live_id = l.id
+               OR EXISTS (SELECT 1 FROM lives origem WHERE origem.id = lp.live_id AND origem.uniao_destino_id = l.id AND origem.uniao_desfeita_em IS NULL)
+               OR EXISTS (SELECT 1 FROM lives origem WHERE origem.id = lp.live_id AND origem.uniao_destino_id = l.id AND origem.uniao_desfeita_em IS NULL)
           ) prod ON true
           WHERE l.tenant_id = $1
             AND l.cliente_id = $2
             AND l.status IN ('encerrada', 'em_andamento')
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em >= p.inicio
             AND l.iniciado_em < p.fim
             AND NOT EXISTS (SELECT 1 FROM snapshot_hours)
@@ -621,12 +637,14 @@ export async function clienteDashboardRoutes(app) {
           ON l.tenant_id = $1
          AND l.cliente_id = $2
          AND l.status IN ('encerrada', 'em_andamento')
+         AND ${activeLiveSql('l')}
          AND EXTRACT(YEAR FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int = m.ano
          AND EXTRACT(MONTH FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int = m.mes
         LEFT JOIN LATERAL (
           SELECT SUM(lp.quantidade) AS itens
           FROM live_products lp
           WHERE lp.live_id = l.id
+             OR EXISTS (SELECT 1 FROM lives origem WHERE origem.id = lp.live_id AND origem.uniao_destino_id = l.id AND origem.uniao_desfeita_em IS NULL)
         ) prod ON true
         GROUP BY m.ano, m.mes, m.mes_inicio
         ORDER BY m.mes_inicio
@@ -745,6 +763,7 @@ export async function clienteDashboardRoutes(app) {
         JOIN lives l ON l.id = lp.live_id
         WHERE l.tenant_id = $1
           AND l.cliente_id = $2
+          AND l.uniao_desfeita_em IS NULL
           AND EXTRACT(MONTH FROM l.iniciado_em) = $3
           AND EXTRACT(YEAR FROM l.iniciado_em) = $4
           AND l.status IN ('encerrada', 'em_andamento')
@@ -890,6 +909,7 @@ export async function clienteDashboardRoutes(app) {
           ) snap ON true
           LEFT JOIN users u ON u.id = l.apresentador_id
           WHERE l.id = $1 AND l.status = 'em_andamento'
+            AND ${activeLiveSql('l')}
         `, [cabine.live_atual_id])
 
         if (liveQ.rows[0]) {
@@ -927,6 +947,7 @@ export async function clienteDashboardRoutes(app) {
           AND l.cabine_id = $2
           AND l.cliente_id = $3
           AND l.status IN ('encerrada', 'em_andamento')
+          AND ${activeLiveSql('l')}
         ORDER BY l.iniciado_em DESC
         LIMIT 20
       `, [tenant_id, cabineId, cliente_id])

@@ -8,6 +8,7 @@ import crypto from 'node:crypto'
 import { z } from 'zod'
 import { SECURITY } from '../config/security.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { activeLiveSql } from '../lib/live-merge-sql.js'
 
 const criarFranquiaSchema = z.object({
   nome: z.string().min(2),
@@ -43,6 +44,7 @@ export async function tenantsRoutes(app) {
                COALESCE(SUM(${liveGmvSql('l')}), 0)::float AS gmv_mes
         FROM lives l
         WHERE l.iniciado_em >= date_trunc('month', NOW())
+          AND ${activeLiveSql('l')}
           AND l.iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
         GROUP BY l.tenant_id
       )
@@ -71,6 +73,7 @@ export async function tenantsRoutes(app) {
                COALESCE(SUM(${liveGmvSql('l')}), 0)::float AS gmv_mes
         FROM lives l
         WHERE l.tenant_id = $1
+          AND ${activeLiveSql('l')}
           AND l.iniciado_em >= date_trunc('month', NOW())
           AND l.iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
         GROUP BY l.tenant_id

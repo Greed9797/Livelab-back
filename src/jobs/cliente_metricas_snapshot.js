@@ -52,6 +52,7 @@ export async function snapshotMonth(app, ano, mes, { tenantId = null, log = true
         COALESCE(SUM(l.final_total_shares), 0)::bigint   AS shares_total
       FROM lives l
       WHERE l.cliente_id IS NOT NULL
+        AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
         AND l.status IN ('encerrada','em_andamento')
         AND EXTRACT(YEAR  FROM timezone('${TZ}', l.iniciado_em))::int = $1
         AND EXTRACT(MONTH FROM timezone('${TZ}', l.iniciado_em))::int = $2
@@ -65,6 +66,9 @@ export async function snapshotMonth(app, ano, mes, { tenantId = null, log = true
       FROM lives l
       JOIN live_products lp ON lp.live_id = l.id
       WHERE l.cliente_id IS NOT NULL
+        -- Products stay attached to original segments as historical evidence;
+        -- the consolidated live has no copied products, so count them once here.
+        AND l.uniao_desfeita_em IS NULL
         AND l.status IN ('encerrada','em_andamento')
         AND EXTRACT(YEAR  FROM timezone('${TZ}', l.iniciado_em))::int = $1
         AND EXTRACT(MONTH FROM timezone('${TZ}', l.iniciado_em))::int = $2

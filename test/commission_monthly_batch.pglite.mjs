@@ -9,7 +9,7 @@ CREATE TABLE marcas(id uuid,tenant_id uuid,comissao_franquia_pct numeric,comissa
 CREATE TABLE apresentadora_comissao_faixas(tenant_id uuid,apresentadora_id uuid,ativo boolean,gmv_inicio numeric,gmv_fim numeric,comissao_pct numeric);
 CREATE TABLE tenant_comissao_faixas_default(tenant_id uuid,gmv_inicio numeric,gmv_fim numeric,comissao_pct numeric);
 CREATE TABLE vendas_atribuidas(id uuid PRIMARY KEY,tenant_id uuid,apresentadora_id uuid,marca_id uuid,origem text,origem_id uuid,data date,gmv numeric,pedidos int,status_aprovacao text,comissao_apresentadora numeric DEFAULT 99,comissao_franquia numeric DEFAULT 99,comissao_franqueadora numeric DEFAULT 99,atualizado_em timestamptz,criado_em timestamptz DEFAULT now());
-CREATE TABLE lives(id uuid,tenant_id uuid,comissao_apresentadora_valor numeric,comissao_apresentadora_pct numeric);
+CREATE TABLE lives(id uuid,tenant_id uuid,comissao_apresentadora_valor numeric,comissao_apresentadora_pct numeric,uniao_destino_id uuid,uniao_desfeita_em timestamptz);
 `)
 await db.query('INSERT INTO marcas VALUES ($1,$2,10,2)', [id(3),id(1)])
 await db.query('INSERT INTO apresentadora_comissao_faixas VALUES ($1,$2,true,0,1000,1),($1,$2,true,1000,null,3)',[id(1),id(2)])

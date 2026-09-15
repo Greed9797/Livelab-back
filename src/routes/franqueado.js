@@ -1,4 +1,5 @@
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { activeLiveJoinSql, activeLiveSql } from '../lib/live-merge-sql.js'
 
 const MASTER_PIPELINE_STAGES = [
   'Lead captado',
@@ -229,6 +230,7 @@ async function fetchUnitSummaries(
           LIMIT 1
         ) ct ON TRUE
         WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
+          AND ${activeLiveSql('l')}
           AND COALESCE(l.encerrado_em, l.iniciado_em) < $4::date
         GROUP BY l.tenant_id
       ),
@@ -246,6 +248,7 @@ async function fetchUnitSummaries(
           LIMIT 1
         ) ct ON TRUE
         WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $3::date
+          AND ${activeLiveSql('l')}
           AND COALESCE(l.encerrado_em, l.iniciado_em) < $5::date
         GROUP BY l.tenant_id
       ),
@@ -392,6 +395,7 @@ async function fetchHistoryRows(app, masterTenantId, periodInfo, allowedTenantId
         FROM tenant_months tm
         LEFT JOIN lives l
           ON l.tenant_id = tm.tenant_id
+         AND ${activeLiveSql('l')}
          AND COALESCE(l.encerrado_em, l.iniciado_em) >= tm.month_start
          AND COALESCE(l.encerrado_em, l.iniciado_em) < (tm.month_start + interval '1 month')
         LEFT JOIN LATERAL (
@@ -495,6 +499,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
             LIMIT 1
           ) ct ON TRUE
           WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
+            AND ${activeLiveSql('l')}
             AND COALESCE(l.encerrado_em, l.iniciado_em) < $3::date
           GROUP BY l.tenant_id, l.cliente_id
         ),
@@ -572,6 +577,7 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
             LIMIT 1
           ) ct ON TRUE
           WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
+            AND ${activeLiveSql('l')}
             AND COALESCE(l.encerrado_em, l.iniciado_em) < $3::date
           GROUP BY l.tenant_id, l.cliente_id
         )
@@ -1063,6 +1069,7 @@ async function fetchMasterTotals(app, masterTenantId, periodInfo, allowedTenantI
         FROM lives
         WHERE tenant_id <> $1
           AND ($5::uuid[] IS NULL OR tenant_id = ANY($5::uuid[]))
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
           AND COALESCE(encerrado_em, iniciado_em) >= $2::date
           AND COALESCE(encerrado_em, iniciado_em) < $3::date
         GROUP BY tenant_id
@@ -1072,6 +1079,7 @@ async function fetchMasterTotals(app, masterTenantId, periodInfo, allowedTenantI
         FROM lives
         WHERE tenant_id <> $1
           AND ($5::uuid[] IS NULL OR tenant_id = ANY($5::uuid[]))
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
           AND COALESCE(encerrado_em, iniciado_em) >= $4::date
           AND COALESCE(encerrado_em, iniciado_em) < $2::date
       )
@@ -1227,6 +1235,7 @@ async function fetchNetworkRanking(app, {
 	               COALESCE(SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)), 0) AS gmv_mes
         FROM lives
         WHERE ($1::uuid IS NULL OR tenant_id <> $1::uuid)
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
           AND COALESCE(encerrado_em, iniciado_em) >= $2::date
           AND COALESCE(encerrado_em, iniciado_em) < $3::date
         GROUP BY tenant_id
@@ -1236,6 +1245,7 @@ async function fetchNetworkRanking(app, {
 	               COALESCE(SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)), 0) AS gmv_mes_anterior
         FROM lives
         WHERE ($1::uuid IS NULL OR tenant_id <> $1::uuid)
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
           AND COALESCE(encerrado_em, iniciado_em) >= $4::date
           AND COALESCE(encerrado_em, iniciado_em) < $2::date
         GROUP BY tenant_id
@@ -1377,6 +1387,7 @@ export async function franqueadoRoutes(app) {
             LEFT JOIN contratos ct ON ct.tenant_id = t.id
             LEFT JOIN lives l
               ON l.tenant_id = t.id
+             ${activeLiveJoinSql('l')}
              AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
             WHERE t.id != $1
               AND ($2::uuid[] IS NULL OR t.id = ANY($2::uuid[]))
@@ -1510,6 +1521,7 @@ export async function franqueadoRoutes(app) {
 	              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv
             FROM lives l
             WHERE l.tenant_id = $1
+              AND ${activeLiveSql('l')}
               AND COALESCE(l.encerrado_em, l.iniciado_em) >= date_trunc('month', NOW()) - interval '5 months'
               AND COALESCE(l.encerrado_em, l.iniciado_em) < date_trunc('month', NOW()) + interval '1 month'
             GROUP BY 1
@@ -1558,6 +1570,7 @@ export async function franqueadoRoutes(app) {
             FROM lives
             WHERE tenant_id <> $1
               AND ($4::uuid[] IS NULL OR tenant_id = ANY($4::uuid[]))
+              AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
               AND COALESCE(encerrado_em, iniciado_em) >= $2::date
             GROUP BY tenant_id
           ),
@@ -1566,6 +1579,7 @@ export async function franqueadoRoutes(app) {
             FROM lives
             WHERE tenant_id <> $1
               AND ($4::uuid[] IS NULL OR tenant_id = ANY($4::uuid[]))
+              AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
               AND COALESCE(encerrado_em, iniciado_em) >= $3::date
               AND COALESCE(encerrado_em, iniciado_em) < $2::date
             GROUP BY tenant_id
@@ -1594,6 +1608,7 @@ export async function franqueadoRoutes(app) {
                  MAX(COALESCE(l.encerrado_em, l.iniciado_em)) AS ultima_live
           FROM tenants t
           LEFT JOIN lives l ON l.tenant_id = t.id
+            ${activeLiveJoinSql('l')}
           WHERE t.id <> $1
             AND ($2::uuid[] IS NULL OR t.id = ANY($2::uuid[]))
             AND t.ativo = TRUE

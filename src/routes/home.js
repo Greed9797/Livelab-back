@@ -4,6 +4,7 @@ import { getOperationalRanking as getPerformanceRanking } from '../lib/operation
 import { pendingRows } from '../lib/presenter-pending.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { countWeekdaysInMonth, countWeekdaysUpTo } from '../lib/dias_uteis.js'
 
 // 45s (e não 30s) de propósito: o front faz refetch do dashboard a cada 30s
@@ -106,6 +107,7 @@ export async function homeRoutes(app) {
             FROM lives l
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
+              AND ${activeLiveSql('l')}
               AND COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) > 0
             UNION ALL
             SELECT date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo') AS m
@@ -164,6 +166,7 @@ export async function homeRoutes(app) {
         JOIN contratos c ON c.cliente_id = l.cliente_id AND c.status = 'ativo' AND c.tenant_id = l.tenant_id
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
+          AND ${activeLiveSql('l')}
           AND l.iniciado_em >= ($1::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
           AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `, [mesStart]),
@@ -202,6 +205,7 @@ export async function homeRoutes(app) {
             WHERE l.cabine_id = c.id
               AND l.tenant_id = c.tenant_id
               AND l.status = 'em_andamento'
+              AND ${activeLiveSql('l')}
             ORDER BY (l.id = c.live_atual_id) DESC, l.iniciado_em DESC
             LIMIT 1
         ) l ON true
@@ -223,6 +227,7 @@ export async function homeRoutes(app) {
 	            WHERE cabine_id = c.id
 	              AND tenant_id = c.tenant_id
 	              AND status = 'encerrada'
+	              AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
 	              AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
 	              AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
 	              AND date_trunc('day', iniciado_em) = date_trunc('day', NOW())
@@ -281,6 +286,7 @@ export async function homeRoutes(app) {
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND status = 'encerrada'
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
           AND iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
           AND iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `, [mesStart, cutoffDay]),
@@ -303,6 +309,7 @@ export async function homeRoutes(app) {
           FROM lives l
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status = 'encerrada'
+            AND ${activeLiveSql('l')}
             AND l.iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
             AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
         ),
@@ -366,6 +373,7 @@ export async function homeRoutes(app) {
         SELECT COUNT(id) AS lives_hoje
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
           AND iniciado_em >= ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
           AND iniciado_em < (((NOW() AT TIME ZONE 'America/Sao_Paulo')::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `),
@@ -440,10 +448,12 @@ export async function homeRoutes(app) {
           (SELECT COUNT(*) FROM lives
            WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
              AND status = 'em_andamento'
+             AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
              AND apresentador_id IS NULL) AS lives_sem_apresentador,
           (SELECT COUNT(*) FROM lives
            WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
              AND status = 'em_andamento'
+             AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
              AND iniciado_em < NOW() - INTERVAL '4 hours') AS lives_abertas_mais_4h,
           (SELECT COUNT(*)
            FROM lives l
@@ -470,6 +480,7 @@ export async function homeRoutes(app) {
           WHERE l.cabine_id = c.id
             AND l.tenant_id = c.tenant_id
             AND l.status = 'em_andamento'
+            AND ${activeLiveSql('l')}
           ORDER BY (l.id = c.live_atual_id) DESC, l.iniciado_em DESC
           LIMIT 1
         ) l ON true
@@ -498,8 +509,9 @@ export async function homeRoutes(app) {
             ), 0) AS horas_live_mes_anterior
           FROM lives
           WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-            AND status = 'encerrada'
-            AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
+          AND status = 'encerrada'
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
+          AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
             AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
             AND iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
             AND iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
@@ -663,6 +675,7 @@ export async function homeRoutes(app) {
             FROM lives l
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
+              AND ${activeLiveSql('l')}
               AND l.iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
               AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
               AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
@@ -747,6 +760,7 @@ export async function homeRoutes(app) {
             FROM lives l, hoje_sp
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
+              AND ${activeLiveSql('l')}
               AND (
                 (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date = hoje_sp.d
                 OR to_char(l.iniciado_em AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') = (SELECT mes_prev FROM prev_day)

@@ -144,6 +144,7 @@ export const MIGRATIONS_LIST = [
   '147_live_oficial_excluida_tombstone.sql',
   '148_lives_origem_apresentadora.sql',
   '149_submission_archive_workflow.sql',
+  '150_live_unioes.sql',
 ]
 
 async function ensureMigrationsTable(client) {

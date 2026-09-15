@@ -62,6 +62,7 @@ function billingPool(lock, { selected, releaseSelection } = {}) {
   }
   let connection = 0
   return {
+    billingClient,
     connect: vi.fn(async () => (connection++ === 0 ? lockClient : billingClient)),
     query: vi.fn(async (sql) => String(sql).includes('FROM tenants')
       ? { rows: [{ id: tenantId }] }
@@ -140,6 +141,11 @@ describe('billing e união serializam mudanças financeiras por tenant', () => {
     releaseMerge.resolve()
     await Promise.all([mergePromise, billingPromise])
     expect(raced).toBe(false)
+    const billingSql = pool.billingClient.query.mock.calls.map(([sql]) => String(sql))
+    expect(billingSql.findIndex((sql) => sql === 'BEGIN'))
+      .toBeLessThan(billingSql.findIndex((sql) => sql.includes('live-finance:tenant-lock')))
+    expect(billingSql.findIndex((sql) => sql.includes('live-finance:tenant-lock')))
+      .toBeLessThan(billingSql.findIndex((sql) => sql.includes('FROM lives')))
   })
 
   it('billing vencedor fecha seu snapshot antes de o merge consultar idempotência ou travar lives', async () => {

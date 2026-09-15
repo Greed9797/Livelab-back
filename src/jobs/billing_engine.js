@@ -2,6 +2,7 @@ import pg from 'pg'
 import 'dotenv/config'
 import cron from 'node-cron'
 import { buscarOuCriarCustomer, gerarIdempotencyKey, criarCobranca } from '../services/appmax.js'
+import { lockTenantLiveFinance } from '../lib/live-finance-lock.js'
 import { withAdvisoryLock } from './advisory_lock.js'
 
 // Para evitar problemas com timezone ao consultar as lives do banco
@@ -32,6 +33,7 @@ async function processTenantBilling(tenantId, day, spDate) {
     await db.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
 
     await db.query('BEGIN')
+    await lockTenantLiveFinance(db, tenantId)
 
     let inicioPeriodo, fimPeriodo, vencimentoStr, tituloFatura
 
@@ -72,9 +74,12 @@ async function processTenantBilling(tenantId, day, spDate) {
       SELECT cliente_id, id, comissao_calculada
       FROM lives 
       WHERE tenant_id = $1 
+        AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
         AND status = 'encerrada' 
         AND faturado_em IS NULL
         AND (encerrado_em AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') BETWEEN $2 AND $3
+      ORDER BY id
+      FOR UPDATE
     `, [tenantId, inicioPeriodo, fimPeriodo])
 
     const livesPorCliente = {}

@@ -109,6 +109,7 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
            FROM lives l
            LEFT JOIN live_apresentadores la ON la.live_id = l.id
           WHERE l.status IN ('em_andamento', 'agendada')
+            AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
             AND (l.apresentador_id = $1 OR la.apresentador_id = $1)
             AND l.iniciado_em <= ($3::date + interval '1 day')
             AND COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
@@ -309,6 +310,7 @@ export async function apresentadoraDisponibilidadeRoutes(app) {
              FROM lives l
              LEFT JOIN live_apresentadores la ON la.live_id = l.id
             WHERE l.status IN ('em_andamento', 'agendada')
+              AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
               AND (l.apresentador_id = $1 OR la.apresentador_id = $1)
               AND tstzrange(
                     l.iniciado_em,

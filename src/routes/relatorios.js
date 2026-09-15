@@ -13,6 +13,7 @@ import {
   buildClientePDFHtml,
 } from '../services/reports.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { activeLiveSql } from '../lib/live-merge-sql.js'
 
 const RATE = { rateLimit: { max: 10, timeWindow: '1 minute' } }
 
@@ -72,6 +73,7 @@ export async function relatoriosRoutes(app) {
            LEFT JOIN cabines cab       ON cab.id = l.cabine_id        AND cab.tenant_id = $1::uuid
            WHERE l.tenant_id = $1::uuid
              AND l.status   = 'encerrada'
+             AND ${activeLiveSql('l')}
              AND COALESCE(l.encerrada_em, l.iniciada_em, l.data_inicio)::date BETWEEN $2::date AND $3::date
            ORDER BY data ASC`,
           [tenant_id, range.startDate, range.endDate]
@@ -191,6 +193,7 @@ export async function relatoriosRoutes(app) {
            WHERE l.tenant_id = $1::uuid
              AND l.cliente_id = $2
              AND l.status = 'encerrada'
+             AND ${activeLiveSql('l')}
              AND COALESCE(l.encerrada_em, l.iniciada_em, l.data_inicio)::date BETWEEN $3::date AND $4::date
            ORDER BY data ASC`,
           [tenant_id, clienteId, range.startDate, range.endDate]

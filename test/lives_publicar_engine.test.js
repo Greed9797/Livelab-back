@@ -20,7 +20,7 @@ function buildApp({ liveRow }) {
   const query = vi.fn(async (sql) => {
     const s = String(sql)
     if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [] }
-    if (s.includes('SELECT id, status_publicacao, marca_id, ads_gmv, manual_gmv, fat_gerado FROM lives')) {
+    if (s.includes('SELECT id, status_publicacao, marca_id, ads_gmv, manual_gmv, fat_gerado, uniao_destino_id, uniao_desfeita_em FROM lives')) {
       return { rows: [liveRow] }
     }
     if (s.includes('UPDATE lives SET status_publicacao')) {

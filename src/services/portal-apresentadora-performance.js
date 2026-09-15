@@ -8,18 +8,18 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
     WITH own_profile AS (
       SELECT id, user_id FROM apresentadoras WHERE tenant_id=$1::uuid AND id=$2::uuid
     ), own_lives AS (
-      SELECT l.id FROM lives l JOIN own_profile a ON a.user_id=l.apresentador_id
+      SELECT COALESCE(l.uniao_destino_id,l.id) AS id FROM lives l JOIN own_profile a ON a.user_id=l.apresentador_id
       WHERE l.tenant_id=$1::uuid
       UNION
-      SELECT la.live_id FROM live_apresentadores la JOIN own_profile a ON a.user_id=la.apresentador_id
+      SELECT COALESCE(l.uniao_destino_id,l.id) AS id FROM live_apresentadores la JOIN own_profile a ON a.user_id=la.apresentador_id
       JOIN lives l ON l.id=la.live_id AND l.tenant_id=la.tenant_id
       WHERE la.tenant_id=$1::uuid
       UNION
-      SELECT lav.live_id FROM live_apresentadoras_v2 lav JOIN own_profile a ON a.id=lav.apresentadora_id
+      SELECT COALESCE(l.uniao_destino_id,l.id) AS id FROM live_apresentadoras_v2 lav JOIN own_profile a ON a.id=lav.apresentadora_id
       JOIN lives l ON l.id=lav.live_id AND l.tenant_id=lav.tenant_id
       WHERE lav.tenant_id=$1::uuid
     )
-    SELECT l.id, l.iniciado_em, l.encerrado_em, m.nome AS marca_nome, c.nome AS cabine_nome,
+    SELECT l.id, l.iniciado_em, l.encerrado_em, l.uniao_id, m.nome AS marca_nome, c.nome AS cabine_nome,
       CASE WHEN v2.apresentadora_id IS NOT NULL THEN COALESCE(
         v2.gmv_rateado, ${liveGmvSql('l')} * v2.percentual_rateio / 100.0,
         CASE WHEN v2.papel='principal' THEN ${liveGmvSql('l')} ELSE 0 END
@@ -65,6 +65,7 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
         END AS percentual_rateio
     ) attribution
     WHERE l.status='encerrada'
+      AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
       AND l.iniciado_em >= ($3::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
       AND l.iniciado_em < ($4::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
     ORDER BY l.iniciado_em DESC,l.id
@@ -83,6 +84,7 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
   const items = result.rows.map(row => ({
     id: row.id, iniciado_em: row.iniciado_em, encerrado_em: row.encerrado_em,
     marca_nome: row.marca_nome ?? null, cabine_nome: row.cabine_nome ?? null,
+    ...(row.uniao_id ? { uniao_id: row.uniao_id } : {}),
     gmv: Number(row.gmv ?? 0), horas: Math.max(0, Number(row.horas ?? 0)), pedidos: Number(row.pedidos ?? 0),
   })).concat(pending.rows.filter(row => row.pendente_aprovacao === true).map(row => ({
     id: `submissao:${row.id}`, iniciado_em: row.iniciado_em, encerrado_em: row.encerrado_em,

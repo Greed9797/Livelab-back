@@ -12,6 +12,7 @@ import {
 import { aplicarRetroLiftDoMes, calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getOperationalRanking as getPerformanceRanking } from '../lib/operational-ranking.js'
 import { apresentadoraHorasPresencaSql, liveGmvSql } from '../lib/metric-sql.js'
+import { activeLiveJoinSql, activeLiveSql } from '../lib/live-merge-sql.js'
 import { classificarDia, intervaloDeDias, somarDias } from '../lib/calendario-blumenau.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { applyApresentadorasToLive, rateioAbsoluto } from '../lib/live-rateio.js'
@@ -38,6 +39,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  */
 export function analyticsLiveRangeSql(alias = 'l', fromParam = '$1', toParam = '$2') {
   return `
+    AND ${activeLiveSql(alias)}
     AND ${alias}.iniciado_em >= (${fromParam}::timestamp) AT TIME ZONE '${ANALYTICS_TZ}'
     AND ${alias}.iniciado_em < ((${toParam}::timestamp) + INTERVAL '1 day') AT TIME ZONE '${ANALYTICS_TZ}'
   `
@@ -310,6 +312,7 @@ async function resolveCabinePadrao(db, tenantId, marcaId) {
     const daMarca = await db.query(
       `SELECT cabine_id FROM lives
         WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND cabine_id IS NOT NULL
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
         ORDER BY iniciado_em DESC LIMIT 1`,
       [tenantId, marcaId],
     )
@@ -334,7 +337,7 @@ async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabineP
   if (row.decisao === 'vincular') {
     if (!row.matched_live_id) throw new Error('Linha marcada para vincular sem live selecionada')
     const existe = await db.query(
-      'SELECT id FROM lives WHERE id = $1::uuid AND tenant_id = $2::uuid',
+      'SELECT id FROM lives WHERE id = $1::uuid AND tenant_id = $2::uuid AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL',
       [row.matched_live_id, tenantId],
     )
     if (existe.rowCount === 0) throw new Error('Live selecionada nao encontrada')
@@ -343,7 +346,7 @@ async function resolveTargetLive(db, { tenantId, row, normalized, batch, cabineP
 
   if (normalized.room_id) {
     const mesmoRoom = await db.query(
-      'SELECT id FROM lives WHERE tenant_id = $1::uuid AND tiktok_room_id = $2',
+      'SELECT id FROM lives WHERE tenant_id = $1::uuid AND tiktok_room_id = $2 AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL',
       [tenantId, normalized.room_id],
     )
     if (mesmoRoom.rows[0]?.id) return mesmoRoom.rows[0].id
@@ -1233,7 +1236,7 @@ export async function analyticsRoutes(app) {
       }
       if (patch.matched_live_id) {
         const q = await db.query(
-          'SELECT 1 FROM lives WHERE id = $1::uuid AND tenant_id = $2::uuid',
+          'SELECT 1 FROM lives WHERE id = $1::uuid AND tenant_id = $2::uuid AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL',
           [patch.matched_live_id, tenant_id],
         )
         if (q.rowCount === 0) return reply.code(400).send({ error: 'Live nao encontrada' })
@@ -1417,6 +1420,7 @@ export async function analyticsRoutes(app) {
             FROM lives l
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
+              AND ${activeLiveSql('l')}
               AND date_trunc('day', l.iniciado_em) = date_trunc('day', NOW())
           ) AS total_lives_hoje
         FROM snapshots_recentes sr
@@ -1431,6 +1435,7 @@ export async function analyticsRoutes(app) {
         JOIN users u ON u.id = l.apresentador_id
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
+          AND ${activeLiveSql('l')}
         GROUP BY u.id, u.nome
         ORDER BY gmv_total DESC, total_lives DESC, apresentador_nome ASC
         LIMIT 5
@@ -1445,6 +1450,7 @@ export async function analyticsRoutes(app) {
         JOIN clientes c ON c.id = l.cliente_id AND c.tenant_id = l.tenant_id
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
+          AND ${activeLiveSql('l')}
         GROUP BY c.id, c.nome
         ORDER BY gmv_total DESC, ultima_live DESC NULLS LAST, cliente_nome ASC
         LIMIT 5
@@ -1457,6 +1463,7 @@ export async function analyticsRoutes(app) {
         FROM lives l
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
+          AND ${activeLiveSql('l')}
         GROUP BY 1
         ORDER BY 1 ASC
       `),
@@ -1471,6 +1478,7 @@ export async function analyticsRoutes(app) {
           ON l.cabine_id = c.id
          AND l.tenant_id = c.tenant_id
          AND l.status = 'encerrada'
+         ${activeLiveJoinSql('l')}
         WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
         GROUP BY c.id, c.numero
         ORDER BY gmv_acumulado DESC, total_lives DESC, c.numero ASC
@@ -2251,6 +2259,7 @@ export async function analyticsRoutes(app) {
           ) live_sales ON true
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status = 'encerrada'
+            AND ${activeLiveSql('l')}
             AND COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
             AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
             AND EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) >= 300
@@ -2387,6 +2396,7 @@ export async function analyticsRoutes(app) {
           LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status = 'encerrada'
+            AND ${activeLiveSql('l')}
             AND COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
             AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
             AND EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) >= 300
@@ -2530,6 +2540,7 @@ export async function analyticsRoutes(app) {
             ) live_sales ON true
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
+              AND ${activeLiveSql('l')}
               ${analyticsLiveRangeSql('l')}
               AND ($3::uuid IS NULL OR l.marca_id = $3::uuid)
               AND ($4::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $4::uuid)
@@ -2847,6 +2858,7 @@ export async function analyticsRoutes(app) {
             FROM lives lv
             JOIN apresentadoras ap_h ON ap_h.user_id = lv.apresentador_id AND ap_h.tenant_id = lv.tenant_id
             WHERE lv.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND ${activeLiveSql('lv')}
           )
           -- Presença é física, não pertence a marca: nenhum filtro de marca aqui. Com marca_id,
           -- quem naquele dia fez live de outra marca sumiria e viraria vermelho falso.

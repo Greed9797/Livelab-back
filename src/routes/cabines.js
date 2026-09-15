@@ -122,6 +122,7 @@ export async function cabinesRoutes(app) {
            WHERE l2.cabine_id = c.id
              AND l2.tenant_id = c.tenant_id
              AND l2.status = 'em_andamento'
+             AND l2.uniao_destino_id IS NULL AND l2.uniao_desfeita_em IS NULL
              AND l2.iniciado_em >= NOW() - INTERVAL '24 hours'
            ORDER BY (l2.id = c.live_atual_id) DESC, l2.iniciado_em DESC
            LIMIT 1
@@ -547,6 +548,7 @@ export async function cabinesRoutes(app) {
         const liveAtivaQ = await db.query(
           `SELECT id FROM lives
            WHERE cabine_id = $1 AND tenant_id = $2::uuid AND status = 'em_andamento'
+             AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
            LIMIT 1`,
           [request.params.id, tenant_id]
         )
@@ -630,6 +632,7 @@ export async function cabinesRoutes(app) {
         JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
         WHERE l.cabine_id = $1
           AND l.tenant_id = $3::uuid
+          AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
           AND l.status = 'encerrada'
           AND l.iniciado_em > NOW() - ($2 * interval '1 day')
         GROUP BY cl.id, cl.nome
@@ -647,6 +650,7 @@ export async function cabinesRoutes(app) {
         WHERE cabine_id = $1
           AND tenant_id = $3::uuid
           AND status = 'encerrada'
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
           AND iniciado_em > NOW() - ($2 * interval '1 day')
         GROUP BY hora
         ORDER BY gmv_medio DESC
@@ -660,6 +664,7 @@ export async function cabinesRoutes(app) {
           COUNT(id) as total_lives
         FROM lives
         WHERE cabine_id = $1 AND tenant_id = $2::uuid AND status = 'encerrada'
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
         GROUP BY ano, mes
         ORDER BY ano DESC, mes DESC
         LIMIT 6
@@ -679,6 +684,7 @@ export async function cabinesRoutes(app) {
       const totaisQ = await db.query(`
         SELECT COUNT(id) as total_lives, SUM(COALESCE(ads_gmv, manual_gmv, fat_gerado, 0)) as gmv_total
         FROM lives WHERE cabine_id = $1 AND tenant_id = $2::uuid AND status = 'encerrada'
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
       `, [cabineId, tenant_id])
 
       const livesRecentesQ = await db.query(`
@@ -699,6 +705,7 @@ export async function cabinesRoutes(app) {
         LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
         WHERE l.cabine_id = $1
           AND l.tenant_id = $3::uuid
+          AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
           AND l.status = 'encerrada'
           AND l.iniciado_em > NOW() - ($2 * interval '1 day')
         ORDER BY l.iniciado_em DESC
@@ -763,6 +770,7 @@ export async function cabinesRoutes(app) {
       const liveQSearch = await db.query(`
         SELECT id FROM lives
         WHERE cabine_id = $1 AND tenant_id = $2 AND status = 'em_andamento'
+          AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
         ORDER BY iniciado_em DESC LIMIT 1
       `, [cabineId, tenant_id])
 
@@ -912,6 +920,7 @@ export async function cabinesRoutes(app) {
         `SELECT c.live_atual_id, l.apresentador_id
          FROM cabines c
          LEFT JOIN lives l ON l.id = c.live_atual_id AND l.tenant_id = c.tenant_id
+          AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
          WHERE c.id = $1 AND c.tenant_id = $2`,
         [cabineId, tenant_id]
       )
@@ -1077,6 +1086,7 @@ export async function cabinesRoutes(app) {
           WHERE tenant_id = $1::uuid
             AND cabine_id = $2::uuid
             AND status = 'encerrada'
+            AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
 	            AND COALESCE(ads_gmv, manual_gmv, fat_gerado) IS NOT NULL
           ORDER BY encerrado_em DESC NULLS LAST
           LIMIT 5

@@ -521,6 +521,15 @@ describe('POST /v1/lives/manual', () => {
 })
 
 describe('PATCH /v1/lives/:id (edição manual)', () => {
+  it('rejects erasing the presenter origin without writing the live', async () => {
+    const queryMock = vi.fn(async sql => ({ rows: sql.includes('FOR UPDATE OF l') ? [{ id: 'live-1', origem_dados: 'apresentadora', status: 'encerrada', status_publicacao: 'revisado' }] : [] }))
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+    const response = await app.inject({ method: 'PATCH', url: '/v1/lives/live-1', payload: { origem_dados: 'manual' } })
+    expect(response.statusCode).toBe(422)
+    expect(queryMock.mock.calls.some(([sql]) => sql.startsWith('UPDATE lives'))).toBe(false)
+    await app.close()
+  })
   it('rejects publication status through the generic manual edit endpoint', async () => {
     const liveId = 'live-edit-status'
     const updateArgs = []

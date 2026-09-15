@@ -25,6 +25,23 @@ function buildApp({ queryMock } = {}) {
 }
 
 describe('buildComissaoFilters — mes=YYYY-MM', () => {
+  it('operational rankings include pending while commission endpoints remain official-only', async () => {
+    const queryMock = vi.fn(async sql => ({ rows: sql.includes('SELECT s.*, TRUE AS pendente_aprovacao') ? [{
+      id: 's1', marca_id: 'brand1', marca_nome: 'Marca', apresentadora_id: 'p1', apresentadora_nome: 'Ana', pendente_aprovacao: true,
+      gmv_declarado: '19.99', pedidos_declarados: 1, iniciado_em: '2026-09-05T12:00Z', encerrado_em: '2026-09-05T13:00Z',
+    }] : [] }))
+    const { app } = buildApp({ queryMock })
+    await app.register(comissoesRoutes)
+    for (const kind of ['apresentadoras', 'marcas']) {
+      const response = await app.inject({ method: 'GET', url: `/v1/ranking/${kind}?mes=2026-09` })
+      expect(response.statusCode).toBe(200)
+      expect(response.json()[0]).toMatchObject({ gmv_total: 19.99, pendente_aprovacao: true, comissao_variavel: 0 })
+      const financial = await app.inject({ method: 'GET', url: `/v1/comissoes/${kind}?mes=2030-09` })
+      expect(financial.statusCode).toBe(200)
+      expect(financial.json()).toEqual([])
+    }
+    await app.close()
+  })
   it('expande mes=2026-05 em data >= 2026-05-01 AND data < 2026-06-01', async () => {
     const { app, query } = buildApp()
     await app.register(comissoesRoutes)

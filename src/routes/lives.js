@@ -16,6 +16,7 @@ import { applyApresentadorasToLive } from '../lib/live-rateio.js'
 import { seedRateioPlanejado } from '../lib/agenda-turnos.js'
 import { tombstoneApprovedSubmissionsForDeletedLive } from '../services/live-approved-submission-deletion.js'
 import { buildResumoDia } from '../lib/resumo-dia.js'
+import { pendingCollisionSql, pendingRecord, pendingRows } from '../lib/presenter-pending.js'
 
 function parseIntegerMetric(value) {
   if (typeof value === 'number') return value
@@ -945,6 +946,10 @@ export async function livesRoutes(app) {
           await db.query('ROLLBACK')
           return reply.code(409).send({ error: 'Live cancelada não pode ser editada' })
         }
+        if (live.origem_dados === 'apresentadora' && d.origem_dados !== undefined && d.origem_dados !== live.origem_dados) {
+          await db.query('ROLLBACK')
+          return reply.code(422).send({ error: 'A origem APRESENTADORA é preservada e não pode ser alterada na edição.' })
+        }
         if (d.apresentadoras !== undefined) {
           // Atribuições aprovadas são imutáveis no commission-engine. Permitir um novo
           // rateio aqui mudaria o v2 sem mudar as vendas aprovadas e deixaria Analytics
@@ -1596,6 +1601,10 @@ export async function livesRoutes(app) {
     const fApresentadoraId = UUID_RE.test(request.query?.apresentadora_id ?? '') ? request.query.apresentadora_id : null
     const fQ = String(request.query?.q ?? '').trim().slice(0, 120)
     const paginado = String(request.query?.paginado ?? '') === '1'
+    const registro = request.query?.registro === '1'
+    if (registro && !['franqueador_master','franqueado','gerente','operacional','produtor_live'].includes(papel)) {
+      return reply.code(403).send({ error: 'Acesso não autorizado ao registro de envios.' })
+    }
     return app.withTenant(tenant_id, async (db) => {
       const params = [tenant_id]
       let where = 'WHERE l.tenant_id = $1::uuid'
@@ -1761,7 +1770,35 @@ export async function livesRoutes(app) {
       if (fQ) pageJoins.push(joinApV2)
       if (needsMarca) pageJoins.push(joinVaMarca)
 
-      const pageResult = await db.query(
+      const officialPageSql = `SELECT l.id, l.iniciado_em, 'live'::text AS registro_tipo FROM lives l
+         ${pageJoins.join('\n')} ${where}`
+      let pageResult
+      if (registro) {
+        const pendingParams = [tenant_id, fMarcaId, fApresentadoraId, fCabineId,
+          dataInicioBounds?.start ?? null, dataFimBounds?.end ?? null,
+          fQ ? `%${fQ.replace(/[\\%_]/g, '\\$&')}%` : null, statusFilter ?? null]
+        const bind = pendingParams.map((_, i) => `$${params.length + i + 1}`)
+        pageResult = await db.query(`WITH registro AS (
+          ${officialPageSql}
+          UNION ALL
+          SELECT s.id,s.iniciado_em,'submissao'::text FROM apresentadora_live_submissoes s
+          LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id
+          LEFT JOIN apresentadoras a ON a.id=s.apresentadora_id AND a.tenant_id=s.tenant_id
+          WHERE s.tenant_id=${bind[0]}::uuid AND s.status IN ('pendente','devolvida')
+            AND (${bind[1]}::uuid IS NULL OR s.marca_id=${bind[1]}::uuid)
+            AND (${bind[2]}::uuid IS NULL OR s.apresentadora_id=${bind[2]}::uuid)
+            AND (${bind[3]}::uuid IS NULL OR s.cabine_id=${bind[3]}::uuid)
+            AND (${bind[4]}::timestamptz IS NULL OR s.iniciado_em>=${bind[4]}::timestamptz)
+            AND (${bind[5]}::timestamptz IS NULL OR s.iniciado_em<${bind[5]}::timestamptz)
+            AND (${bind[6]}::text IS NULL OR m.nome ILIKE ${bind[6]} OR a.nome ILIKE ${bind[6]} OR s.observacao ILIKE ${bind[6]})
+            AND (${bind[7]}::text IS NULL OR ${bind[7]} IN ('todas','encerrada'))
+        ), totals AS (SELECT COUNT(*) AS total_count FROM registro)
+        SELECT page.*,totals.total_count FROM totals
+        LEFT JOIN LATERAL (SELECT * FROM registro
+          ORDER BY iniciado_em DESC,registro_tipo,id LIMIT ${reqLimit} OFFSET ${reqOffset}) page ON TRUE
+        ORDER BY page.iniciado_em DESC,page.registro_tipo,page.id`,
+        [...params,...pendingParams])
+      } else pageResult = await db.query(
         `SELECT l.id${paginado ? ', COUNT(*) OVER() AS total_count' : ''}
          FROM lives l
          ${pageJoins.join('\n         ')}
@@ -1770,15 +1807,16 @@ export async function livesRoutes(app) {
         params
       )
 
-      const pageIds = pageResult.rows.map((r) => r.id)
-      // Mesmo quirk do código anterior: página fora do intervalo devolve total 0.
       const total = pageResult.rows.length > 0 ? Number(pageResult.rows[0].total_count ?? 0) : 0
-      if (pageIds.length === 0) {
+      pageResult.rows = pageResult.rows.filter(r => r.id)
+      const pageIds = pageResult.rows.filter(r => r.registro_tipo !== 'submissao').map((r) => r.id)
+      const submissionIds = pageResult.rows.filter(r => r.registro_tipo === 'submissao').map(r => r.id)
+      if (pageResult.rows.length === 0) {
         if (!paginado) return []
         return { items: [], total, page: Math.floor(reqOffset / reqLimit), limit: reqLimit }
       }
 
-      const result = await db.query(
+      const result = pageIds.length ? await db.query(
         `SELECT l.id, l.tenant_id, l.cabine_id, l.cliente_id, l.apresentador_id,
                 l.gestor_id, l.status, l.tipo, l.status_publicacao, l.origem_dados,
                 l.iniciado_em, l.encerrado_em, l.fat_gerado, l.comissao_calculada,
@@ -1832,11 +1870,21 @@ export async function livesRoutes(app) {
          ${joinLs}
          WHERE l.id = ANY($1::uuid[]) AND l.tenant_id = $2::uuid`,
         [pageIds, tenant_id]
-      )
+      ) : { rows: [] }
 
       // ANY() não preserva ordem — reordena pela ordem da query 1.
       const byId = new Map(result.rows.map((row) => [row.id, row]))
-      const ordered = pageIds.map((id) => byId.get(id)).filter(Boolean)
+      if (submissionIds.length) {
+        const pending = await db.query(`SELECT s.*,m.nome AS marca_nome,a.nome AS apresentadora_nome,
+            c.nome AS cabine_nome,c.numero AS cabine_numero,${pendingCollisionSql()} AS em_conciliacao
+          FROM apresentadora_live_submissoes s
+          LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id
+          LEFT JOIN apresentadoras a ON a.id=s.apresentadora_id AND a.tenant_id=s.tenant_id
+          LEFT JOIN cabines c ON c.id=s.cabine_id AND c.tenant_id=s.tenant_id
+          WHERE s.tenant_id=$1::uuid AND s.id=ANY($2::uuid[])`, [tenant_id,submissionIds])
+        for (const row of pending.rows) byId.set(`submissao:${row.id}`,pendingRecord(row))
+      }
+      const ordered = pageResult.rows.map(row => byId.get(row.registro_tipo === 'submissao' ? `submissao:${row.id}` : row.id)).filter(Boolean)
 
       // Sem `paginado`, o shape legado (array puro) fica intacto — há outros consumidores.
       if (!paginado) return ordered
@@ -1926,9 +1974,14 @@ export async function livesRoutes(app) {
         params
       )
 
+      const includeDeclarations = ['franqueador_master', 'franqueado', 'gerente', 'operacional', 'produtor_live'].includes(request.user.papel) && ['encerrada', 'todas'].includes(status)
+      const declarations = includeDeclarations ? await pendingRows(db, {
+        tenantId: tenant_id, start: data,
+        end: new Date(Date.parse(`${data}T12:00:00Z`) + 86400000).toISOString().slice(0, 10),
+      }) : []
       return buildResumoDia({
         data,
-        lives: result.rows,
+        lives: [...result.rows, ...declarations.filter(row => row.pendente_aprovacao === true).map(pendingRecord)],
       })
     })
   })

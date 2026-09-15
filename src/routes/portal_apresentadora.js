@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { getPerformanceRanking } from '../lib/performance-rollups.js'
+import { getOperationalRanking as getPerformanceRanking } from '../lib/operational-ranking.js'
 import { monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { presenterFixedSql } from '../config/presenter_defaults.js'
 import { criarLiveOficialDaSubmissao } from '../services/portal-apresentadora-aprovacao.js'
@@ -9,6 +9,8 @@ import { getOwnPortalRemuneration } from '../services/portal-apresentadora-remun
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 import { parsePortalCount, parsePortalMoney } from '../lib/portal-submission-input.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
+import { invalidateTenant } from '../lib/dashboard-cache.js'
+import { invalidateHomeDashboard } from './home.js'
 
 const PORTAL_PAPEIS = ['apresentador', 'apresentadora']
 const REVIEW_PAPEIS = ['franqueador_master', 'franqueado', 'gerente', 'operacional', 'produtor_live']
@@ -23,7 +25,7 @@ const submissionSchema = z.object({
   cabine_id: uuid.optional(),
   iniciado_em: z.string().datetime({ offset: true }),
   encerrado_em: z.string().datetime({ offset: true }),
-  observacao: z.string().trim().min(1).max(2000),
+  observacao: z.string().trim().max(2000).optional(),
   gmv_declarado: money,
   pedidos_declarados: orders,
   live_impressions_declaradas: impressions,
@@ -31,6 +33,8 @@ const submissionSchema = z.object({
   request_id: uuid.optional(),
 }).strict()
 const reviewSchema = z.object({
+  versao_esperada: z.number().int().positive().optional(),
+  motivo_revisao: z.string().trim().min(1).max(1000).optional(),
   live_id: uuid.optional(),
   marca_id: uuid.optional(), cabine_id: uuid.optional(),
   iniciado_em: z.string().datetime({ offset: true }).optional(),
@@ -139,6 +143,12 @@ export function requiresCurrentPortalMonth({ iniciado_em, encerrado_em }, now = 
 }
 
 export async function portalApresentadoraRoutes(app) {
+  app.addHook('onResponse', async (request, reply) => {
+    if (['POST','PATCH','DELETE'].includes(request.method) && reply.statusCode < 300 && request.user?.tenant_id) {
+      invalidateTenant(request.user.tenant_id)
+      invalidateHomeDashboard(request.user.tenant_id)
+    }
+  })
   // Personal performance, remuneration and review data must not enter a shared
   // HTTP cache. React Query is separately scoped to the authenticated account.
   app.addHook('onRequest', async (_request, reply) => {
@@ -161,7 +171,7 @@ export async function portalApresentadoraRoutes(app) {
         getOwnPortalRemuneration(db, { tenantId: request.user.tenant_id, apresentadoraId: profile.id, mes: range.start.slice(0, 7) }),
       ])
       const ranking = await getPerformanceRanking(db, { tenantId: request.user.tenant_id, range, limit: 50, groupBy: 'apresentadora' })
-      const safeRanking = ranking.map((row, index) => ({ posicao: index + 1, apresentadora_id: row.apresentadora_id, nome: row.nome, foto_url: row.foto_url, gmv_total: row.gmv_total, gmv_lives: row.gmv_lives, horas_live: row.horas_live, gmv_por_hora: row.gmv_por_hora, total_lives: row.total_lives, pedidos: row.pedidos, fixo: Number(row.fixo ?? 0), comissao_variavel: Number(row.comissao_variavel ?? 0), total_recebido: Number(row.total_recebido ?? 0) }))
+      const safeRanking = ranking.map((row, index) => ({ posicao: index + 1, apresentadora_id: row.apresentadora_id, nome: row.nome, foto_url: row.foto_url, gmv_total: row.gmv_total, gmv_lives: row.gmv_lives, horas_live: row.horas_live, gmv_por_hora: row.gmv_por_hora, total_lives: row.total_lives, pedidos: row.pedidos, pendente_aprovacao: row.pendente_aprovacao, gmv_pendente_aprovacao: row.gmv_pendente_aprovacao, em_conciliacao: row.em_conciliacao, total_provisorio: row.total_provisorio, fixo: Number(row.fixo ?? 0), comissao_variavel: Number(row.comissao_variavel ?? 0), total_recebido: Number(row.total_recebido ?? 0) }))
       return { perfil: { id: profile.id, nome: profile.nome, foto_url: profile.foto_url ?? null }, desempenho: own.desempenho, remuneracao, ranking: safeRanking }
     })
   })
@@ -242,7 +252,7 @@ export async function portalApresentadoraRoutes(app) {
       return inSubmissionTransaction(db, async () => {
       const current = await db.query(`SELECT iniciado_em,encerrado_em,marca_id,gmv_declarado,pedidos_declarados,live_impressions_declaradas,manual_views_declaradas,observacao FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' FOR UPDATE`, [idCheck.data, request.user.tenant_id, profile.id])
       if (!current.rows[0]) return reply.code(404).send({ error: 'Submissão não encontrada ou não pode ser reenviada.' })
-      if (!requiresCurrentPortalMonth(current.rows[0]) || !current.rows[0].marca_id || current.rows[0].gmv_declarado == null || current.rows[0].pedidos_declarados == null || current.rows[0].live_impressions_declaradas == null || current.rows[0].manual_views_declaradas == null || !String(current.rows[0].observacao ?? '').trim()) {
+      if (!requiresCurrentPortalMonth(current.rows[0]) || !current.rows[0].marca_id || current.rows[0].gmv_declarado == null || current.rows[0].pedidos_declarados == null || current.rows[0].live_impressions_declaradas == null || current.rows[0].manual_views_declaradas == null) {
         return reply.code(400).send({ error: 'Corrija todos os campos obrigatórios e registre uma live concluída do mês atual, em um único dia.' })
       }
       const result = await db.query(`UPDATE apresentadora_live_submissoes SET status='pendente',motivo_devolucao=NULL,atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id])
@@ -279,11 +289,13 @@ export async function portalApresentadoraRoutes(app) {
   app.get('/v1/lives/submissoes-apresentadoras/:id/candidatas-vinculo', { preHandler: reviewAccess }, async (request, reply) => {
     const idCheck = uuid.safeParse(request.params?.id)
     if (!idCheck.success) return reply.code(400).send({ error: 'id inválido' })
+    const page = Number(request.query?.page ?? 0)
+    if (!Number.isSafeInteger(page) || page < 0 || page > 100000) return reply.code(400).send({ error: 'Página inválida.' })
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
       const sub = await db.query(`SELECT id,marca_id,apresentadora_id,iniciado_em FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='pendente' LIMIT 1`, [idCheck.data, request.user.tenant_id])
       if (!sub.rows[0]) return reply.code(404).send({ error: 'Submissão pendente não encontrada.' })
       const s = sub.rows[0]
-      const rows = await db.query(`SELECT l.id,l.iniciado_em,l.encerrado_em,l.marca_id,m.nome AS marca_nome,c.nome AS cabine_nome,c.numero AS cabine_numero,COALESCE(l.manual_gmv,l.fat_gerado,0)::numeric AS gmv,l.origem_dados
+      const rows = await db.query(`WITH candidates AS (SELECT l.id,l.iniciado_em,l.encerrado_em,l.marca_id,m.nome AS marca_nome,c.nome AS cabine_nome,c.numero AS cabine_numero,COALESCE(l.ads_gmv,l.manual_gmv,l.fat_gerado,0)::numeric AS gmv,l.origem_dados
         FROM lives l
         LEFT JOIN marcas m ON m.id=l.marca_id AND m.tenant_id=l.tenant_id
         LEFT JOIN cabines c ON c.id=l.cabine_id AND c.tenant_id=l.tenant_id
@@ -292,8 +304,10 @@ export async function portalApresentadoraRoutes(app) {
           AND (l.apresentador_id=(SELECT user_id FROM apresentadoras WHERE id=$4::uuid AND tenant_id=$1::uuid)
             OR EXISTS (SELECT 1 FROM live_apresentadores la WHERE la.live_id=l.id AND la.tenant_id=l.tenant_id AND la.apresentador_id=(SELECT user_id FROM apresentadoras WHERE id=$4::uuid AND tenant_id=$1::uuid))
             OR EXISTS (SELECT 1 FROM live_apresentadoras_v2 lav WHERE lav.live_id=l.id AND lav.tenant_id=l.tenant_id AND lav.apresentadora_id=$4::uuid))
-        ORDER BY l.iniciado_em ASC LIMIT 100`, [request.user.tenant_id, s.marca_id, s.iniciado_em, s.apresentadora_id])
-      return { items: rows.rows.map((row) => ({ ...row, gmv: Number(row.gmv ?? 0) })) }
+          AND NOT EXISTS (SELECT 1 FROM apresentadora_live_submissoes linked WHERE linked.tenant_id=l.tenant_id AND linked.live_oficial_id=l.id AND linked.apresentadora_id=$4::uuid)
+        ) SELECT page.*,totals.total_count FROM (SELECT COUNT(*) AS total_count FROM candidates) totals
+        LEFT JOIN LATERAL (SELECT * FROM candidates ORDER BY ABS(EXTRACT(EPOCH FROM (iniciado_em-$3::timestamptz))),id LIMIT 25 OFFSET $5) page ON TRUE`, [request.user.tenant_id, s.marca_id, s.iniciado_em, s.apresentadora_id, page * 25])
+      return { items: rows.rows.filter(row => row.id).map(({ total_count, ...row }) => ({ ...row, gmv: Number(row.gmv ?? 0) })), total: Number(rows.rows[0]?.total_count ?? 0), page, limit: 25 }
     })
   })
 
@@ -314,7 +328,9 @@ export async function portalApresentadoraRoutes(app) {
       const sub = await db.query(`SELECT * FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid FOR UPDATE`, [idCheck.data, request.user.tenant_id])
       if (!sub.rows[0]) return reply.code(409).send({ error: 'Submissão não encontrada ou já revisada.' })
       if (sub.rows[0].status === 'aprovada' && parsed.data.live_id === sub.rows[0].live_oficial_id) return { id: sub.rows[0].id, status: sub.rows[0].status, live_oficial_id: sub.rows[0].live_oficial_id, revisado_em: sub.rows[0].revisado_em }
-      if (sub.rows[0].status !== 'pendente') return reply.code(409).send({ error: 'Submissão não encontrada ou já revisada.' })
+      if (!['pendente', 'devolvida'].includes(sub.rows[0].status)) return reply.code(409).send({ error: 'Submissão não encontrada ou já revisada.' })
+      if (parsed.data.versao_esperada !== undefined && parsed.data.versao_esperada !== sub.rows[0].versao) return reply.code(409).send({ error: 'O envio foi alterado. Atualize a lista e confira os dados novamente.' })
+      if (sub.rows[0].status === 'devolvida' && (parsed.data.versao_esperada === undefined || !parsed.data.motivo_revisao)) return reply.code(422).send({ error: 'Para validar um envio devolvido, confira a versão atual e informe o motivo da revisão.' })
       let liveId = parsed.data.live_id
       if (liveId) {
         const linked = await db.query(`SELECT id FROM apresentadora_live_submissoes WHERE tenant_id=$1::uuid AND apresentadora_id=$3::uuid AND live_oficial_id=$2::uuid FOR UPDATE`, [request.user.tenant_id, liveId, sub.rows[0].apresentadora_id])
@@ -331,9 +347,9 @@ export async function portalApresentadoraRoutes(app) {
         liveId = await criarLiveOficialDaSubmissao(db, { tenantId: request.user.tenant_id, revisorId: request.user.sub, submissao: sub.rows[0], oficial: parsed.data })
       }
       const createdOfficial = !parsed.data.live_id
-      const updated = await db.query(`UPDATE apresentadora_live_submissoes SET status='aprovada',live_oficial_id=$4::uuid,revisado_por=$3::uuid,revisado_em=NOW(),atualizado_em=NOW(),live_impressions_oficiais=CASE WHEN $5::boolean THEN $6::bigint ELSE live_impressions_oficiais END,manual_views_oficiais=CASE WHEN $5::boolean THEN $7::int ELSE manual_views_oficiais END WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='pendente' RETURNING id,status,live_oficial_id,revisado_em`, [idCheck.data, request.user.tenant_id, request.user.sub, liveId, createdOfficial, parsed.data.live_impressions_oficiais ?? null, parsed.data.manual_views_oficiais ?? null])
+      const updated = await db.query(`UPDATE apresentadora_live_submissoes SET status='aprovada',live_oficial_id=$4::uuid,revisado_por=$3::uuid,revisado_em=NOW(),atualizado_em=NOW(),live_impressions_oficiais=CASE WHEN $5::boolean THEN $6::bigint ELSE live_impressions_oficiais END,manual_views_oficiais=CASE WHEN $5::boolean THEN $7::int ELSE manual_views_oficiais END WHERE id=$1::uuid AND tenant_id=$2::uuid AND status IN ('pendente','devolvida') RETURNING id,status,live_oficial_id,revisado_em`, [idCheck.data, request.user.tenant_id, request.user.sub, liveId, createdOfficial, parsed.data.live_impressions_oficiais ?? null, parsed.data.manual_views_oficiais ?? null])
       if (!updated.rows[0]) throw Object.assign(new Error('Submissão já aprovada.'), { statusCode: 409 })
-      await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: updated.rows[0].id, version: sub.rows[0].versao, action: 'aprovada', actorId: request.user.sub })
+      await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: updated.rows[0].id, version: sub.rows[0].versao, action: 'aprovada', actorId: request.user.sub, motivo: parsed.data.motivo_revisao ?? null })
       return updated.rows[0]
     })
   })

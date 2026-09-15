@@ -16,6 +16,7 @@ function buildApp(queryMock) {
 describe('GET /v1/analytics/funil coverage', () => {
   it('keeps registered zero separate from a field missing in every live', async () => {
     const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('SELECT s.*, TRUE AS pendente_aprovacao')) return { rows: [] }
       expect(sql).toContain('COUNT(*) FILTER (WHERE l.live_impressions IS NOT NULL)')
       expect(sql).toContain('COUNT(*) FILTER (WHERE l.product_impressions IS NOT NULL)')
       expect(sql).toContain('COUNT(*) FILTER (WHERE l.product_clicks IS NOT NULL)')

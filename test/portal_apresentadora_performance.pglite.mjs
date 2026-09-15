@@ -17,6 +17,7 @@ const zeroLive = '88888888-8888-4888-8888-888888888888'
 await db.exec(`
   SET TIME ZONE 'UTC';
   CREATE TABLE apresentadoras (id uuid PRIMARY KEY, tenant_id uuid NOT NULL, user_id uuid, nome text);
+  CREATE TABLE apresentadora_live_submissoes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, apresentadora_id uuid, marca_id uuid, cabine_id uuid, status text, iniciado_em timestamptz, encerrado_em timestamptz, gmv_declarado numeric, pedidos_declarados int);
   CREATE TABLE lives (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, apresentador_id uuid, cabine_id uuid, marca_id uuid,
     status text NOT NULL, iniciado_em timestamptz NOT NULL, encerrado_em timestamptz, previsto_fim timestamptz,
@@ -73,7 +74,7 @@ await db.query(`INSERT INTO lives (id,tenant_id,apresentador_id,cabine_id,marca_
 await db.query(`INSERT INTO live_apresentadores VALUES ($1,$2,$3)`,[tenantA,legacyLive,user])
 const result=await getOwnPortalPerformance(db,{tenantId:tenantA,apresentadoraId:presenter,range:{start:'2026-09-01',end:'2026-10-01'}})
 assert.equal(result.items.length,5)
-assert.deepEqual(result.desempenho,{total_lives:5,gmv_lives:1200,horas_live:7,gmv_por_hora:171.43,pedidos:7})
+assert.deepEqual(result.desempenho,{gmv_validado:1200,total_lives:5,gmv_lives:1200,horas_live:7,gmv_por_hora:171.43,pedidos:7,em_conciliacao:false,total_provisorio:1200,gmv_pendente_aprovacao:0,total_lives_pendentes_aprovacao:0})
 assert.deepEqual(result.items.filter(r=>r.id===legacyLive).map(r=>[r.gmv,r.horas,r.pedidos]),[[500,2,0]])
 assert.equal(result.items.filter(r=>r.id===splitLive).length,1)
 assert.equal(result.items.find(r=>r.id===noDuration).horas,0)
@@ -84,5 +85,21 @@ const other=await getOwnPortalPerformance(db,{tenantId:tenantA,apresentadoraId:o
 assert.equal(other.items.length,1)
 assert.equal(other.items[0].gmv,500)
 assert.equal(other.items[0].horas,2)
+const beforeSales = await db.query('SELECT * FROM vendas_atribuidas ORDER BY id')
+await db.query(`INSERT INTO apresentadora_live_submissoes
+ (tenant_id,apresentadora_id,marca_id,status,iniciado_em,encerrado_em,gmv_declarado,pedidos_declarados) VALUES
+ ($1,$2,$3,'pendente','2026-09-11 12:00Z','2026-09-11 13:00Z',19.99,2),
+ ($1,$2,$3,'pendente','2026-09-06 12:00Z','2026-09-06 13:00Z',500,5),
+ ($1,$2,$3,'devolvida','2026-09-12 12:00Z','2026-09-12 13:00Z',800,8),
+ ($4,$2,$3,'pendente','2026-09-13 12:00Z','2026-09-13 13:00Z',900,9)`,[tenantA,presenter,brand,tenantB])
+const pending = await getOwnPortalPerformance(db,{tenantId:tenantA,apresentadoraId:presenter,range:{start:'2026-09-01',end:'2026-10-01'}})
+assert.equal(pending.desempenho.gmv_lives,1219.99)
+assert.equal(pending.desempenho.gmv_validado,1200)
+assert.equal(pending.desempenho.gmv_pendente_aprovacao,519.99)
+assert.equal(pending.desempenho.total_lives_pendentes_aprovacao,2)
+assert.equal(pending.desempenho.em_conciliacao,true)
+assert.equal(pending.desempenho.total_provisorio,null)
+assert.equal(pending.items.filter(item=>item.em_conciliacao).length,1)
+assert.deepEqual((await db.query('SELECT * FROM vendas_atribuidas ORDER BY id')).rows,beforeSales.rows)
 await db.close()
 console.log(JSON.stringify({passed:true,checks:['own-only','tenant-isolation','v2-deduplication','zero-GMV','legacy-shares','Sao-Paulo-month-boundary','zero-duration','safe-DTO'],performance:result.desempenho}))

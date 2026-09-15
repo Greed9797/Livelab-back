@@ -10,7 +10,7 @@ import {
   SOURCE_TIKTOK_STUDIO,
 } from '../services/analytics-import.js'
 import { aplicarRetroLiftDoMes, calcularComissoesDaLive } from '../services/commission-engine.js'
-import { getPerformanceRanking } from '../lib/performance-rollups.js'
+import { getOperationalRanking as getPerformanceRanking } from '../lib/operational-ranking.js'
 import { apresentadoraHorasPresencaSql, liveGmvSql } from '../lib/metric-sql.js'
 import { classificarDia, intervaloDeDias, somarDias } from '../lib/calendario-blumenau.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
@@ -19,6 +19,7 @@ import { performance } from 'node:perf_hooks'
 import { createHash } from 'node:crypto'
 import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
 import { invalidateHomeDashboard } from './home.js'
+import { pendingCollisionSql, pendingRows } from '../lib/presenter-pending.js'
 
 const ANALYTICS_DASHBOARD_CACHE_TTL_MS = Number(process.env.ANALYTICS_DASHBOARD_CACHE_TTL_MS ?? 60_000)
 const ANALYTICS_DIARIO_CACHE_TTL_MS = Number(process.env.ANALYTICS_DIARIO_CACHE_TTL_MS ?? 60_000)
@@ -1939,10 +1940,39 @@ export async function analyticsRoutes(app) {
           `, params),
         ])
 
-        const sales = salesCurQ.rows[0] ?? {}
+        const sales = { ...salesCurQ.rows[0] }
         const prevSales = salesPrevQ.rows[0] ?? {}
-        const liveOps = liveOpsQ.rows[0] ?? {}
+        const liveOps = { ...liveOpsQ.rows[0] }
         const videoOps = videoOpsQ.rows[0] ?? {}
+        const declarations = (await pendingRows(db, { tenantId: tenant_id, start: fromDate,
+          end: new Date(Date.parse(`${toDate}T12:00:00Z`) + 86400000).toISOString().slice(0, 10), clienteId: cliente_id ?? null })).filter(row => row.pendente_aprovacao === true)
+        const validatedGmv = round2(sales.gmv_total)
+        const pendingFlags = { pendente_aprovacao: declarations.length > 0,
+          em_conciliacao: declarations.some(row => row.em_conciliacao), gmv_validado: validatedGmv,
+          impressoes_pendentes_aprovacao: declarations.reduce((sum, row) => sum + Number(row.live_impressions_declaradas ?? 0), 0),
+          visualizacoes_pendentes_aprovacao: declarations.reduce((sum, row) => sum + Number(row.manual_views_declaradas ?? 0), 0),
+          gmv_pendente_aprovacao: round2(declarations.reduce((sum, row) => sum + Number(row.gmv_declarado ?? 0), 0)) }
+        const add = (target, key, value) => { target[key] = Number(target[key] ?? 0) + value }
+        const temporal = (rows, key, value) => {
+          let row = rows.find(item => String(item[key] instanceof Date ? item[key].toISOString().slice(0, 10) : item[key]) === value)
+          if (!row) { row = { [key]: value }; rows.push(row) }
+          return row
+        }
+        for (const item of declarations.filter(row => !row.em_conciliacao)) {
+          const gmv = Number(item.gmv_declarado ?? 0), orders = Number(item.pedidos_declarados ?? 0)
+          const hours = Math.max(0, (new Date(item.encerrado_em) - new Date(item.iniciado_em)) / 3600000)
+          const day = new Date(new Date(item.iniciado_em).valueOf() - 3 * 3600000).toISOString().slice(0, 10)
+          for (const key of ['gmv_total', 'gmv_lives']) add(sales, key, gmv)
+          for (const key of ['pedidos_total', 'pedidos_lives']) add(sales, key, orders)
+          add(liveOps, 'total_lives', 1); add(liveOps, 'horas_live', hours)
+          add(liveOps, 'viewers_total', Number(item.manual_views_declaradas ?? 0))
+          const month = temporal(monthlyQ.rows, 'mes', day.slice(0, 7))
+          add(month, 'gmv', gmv); add(month, 'gmv_lives', gmv); add(month, 'pedidos', orders); add(month, 'total_lives', 1)
+          const daily = temporal(hoursQ.rows, 'dia', day)
+          add(daily, 'gmv_lives', gmv); add(daily, 'pedidos_lives', orders); add(daily, 'horas', hours)
+        }
+        monthlyQ.rows.sort((a, b) => String(a.mes).localeCompare(String(b.mes)))
+        hoursQ.rows.sort((a, b) => String(a.dia).localeCompare(String(b.dia)))
 
         const gmvTotal = round2(sales.gmv_total)
         const pedidosTotal = toInt(sales.pedidos_total)
@@ -1982,6 +2012,7 @@ export async function analyticsRoutes(app) {
         }))
 
         const rankingApresentadoras = presenterRankingQ.map((row) => ({
+          pendente_aprovacao: row.pendente_aprovacao, em_conciliacao: row.em_conciliacao, gmv_pendente_aprovacao: row.gmv_pendente_aprovacao, total_provisorio: row.total_provisorio,
           apresentadora_id: row.apresentadora_id,
           apresentador_id: row.apresentadora_id,
           apresentadora_nome: row.apresentadora_nome,
@@ -1996,6 +2027,7 @@ export async function analyticsRoutes(app) {
         }))
 
         const rankingMarcas = brandRankingQ.map((row) => ({
+          pendente_aprovacao: row.pendente_aprovacao, em_conciliacao: row.em_conciliacao, gmv_pendente_aprovacao: row.gmv_pendente_aprovacao, total_provisorio: row.total_provisorio,
           marca_id: row.marca_id,
           marca_nome: row.marca_nome,
           nome: row.marca_nome,
@@ -2011,6 +2043,7 @@ export async function analyticsRoutes(app) {
         return {
           periodo: { from: fromDate, to: toDate, mesAno },
           kpis: {
+            ...pendingFlags, total_provisorio: pendingFlags.em_conciliacao ? null : gmvTotal,
             gmv_total: gmvTotal,
             faturamento_total: gmvTotal,
             gmv_lives: gmvLives,
@@ -2044,6 +2077,7 @@ export async function analyticsRoutes(app) {
             delta_vendas: pct(pedidosTotal, pedidosPrev),
             delta_ticket: pct(ticketMedio, ticketPrev),
           },
+          ...pendingFlags, total_provisorio: pendingFlags.em_conciliacao ? null : gmvTotal,
           gmv_total: gmvTotal,
           gmv_mes: gmvTotal,
           gmv_lives: gmvLives,
@@ -2226,7 +2260,22 @@ export async function analyticsRoutes(app) {
             AND ($4::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $4::uuid)
         `, [fromDate, toDate, marcaId, apresentadoraId])
 
-        const r = result.rows[0] || {}
+        const r = { ...result.rows[0] }
+        const declarations = (await pendingRows(db, { tenantId: tenant_id, start: fromDate,
+          end: new Date(Date.parse(`${toDate}T12:00:00Z`) + 86400000).toISOString().slice(0, 10),
+          marcaId, apresentadoraId })).filter(row => row.pendente_aprovacao === true)
+        const pendingFlags = { pendente_aprovacao: declarations.length > 0,
+          em_conciliacao: declarations.some(row => row.em_conciliacao), gmv_validado: round2(r.gmv),
+          gmv_pendente_aprovacao: round2(declarations.reduce((sum, row) => sum + Number(row.gmv_declarado ?? 0), 0)),
+          impressoes_pendentes_aprovacao: declarations.reduce((sum, row) => sum + Number(row.live_impressions_declaradas ?? 0), 0),
+          visualizacoes_pendentes_aprovacao: declarations.reduce((sum, row) => sum + Number(row.manual_views_declaradas ?? 0), 0) }
+        for (const item of declarations.filter(row => !row.em_conciliacao)) {
+          const values = { total_lives: 1, gmv: Number(item.gmv_declarado ?? 0), pedidos: Number(item.pedidos_declarados ?? 0),
+            impressoes: Number(item.live_impressions_declaradas ?? 0), visualizacoes: Number(item.manual_views_declaradas ?? 0),
+            lives_com_impressoes_registradas: item.live_impressions_declaradas == null ? 0 : 1,
+            horas_live: Math.max(0, (new Date(item.encerrado_em) - new Date(item.iniciado_em)) / 3600000) }
+          for (const [key, value] of Object.entries(values)) r[key] = Number(r[key] ?? 0) + value
+        }
         const impressoes = toInt(r.impressoes)
         const visualizacoes = toInt(r.visualizacoes)
         const impressoesProduto = toInt(r.impressoes_produto)
@@ -2256,6 +2305,7 @@ export async function analyticsRoutes(app) {
         return {
           periodo: { from: fromDate, to: toDate, mesAno },
           filtros: { marca_id: marcaId, apresentadora_id: apresentadoraId },
+          ...pendingFlags, total_provisorio: pendingFlags.em_conciliacao ? null : gmv,
           tem_dados_ads: impressoes > 0 || impressoesProduto > 0 || cliques > 0,
           cobertura: {
             lives_com_impressoes_registradas: toInt(r.lives_com_impressoes_registradas),
@@ -2580,10 +2630,15 @@ export async function analyticsRoutes(app) {
             (s.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
             s.marca_id, COALESCE(m.nome, 'Sem marca') AS marca_nome,
             s.apresentadora_id, COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
-            COUNT(*)::int AS total_lives_pendentes,
-            COALESCE(SUM(s.gmv_declarado), 0) AS gmv_pendente,
-            COALESCE(SUM(s.pedidos_declarados), 0)::int AS pedidos_pendentes,
-            COALESCE(SUM(EXTRACT(EPOCH FROM (s.encerrado_em-s.iniciado_em))/3600.0), 0) AS horas_pendentes
+            COUNT(*) FILTER (WHERE NOT ${pendingCollisionSql()})::int AS total_lives_pendentes,
+            COUNT(*)::int AS total_envios_pendentes,
+            BOOL_OR(${pendingCollisionSql()}) AS em_conciliacao,
+            COALESCE(SUM(s.gmv_declarado), 0) AS gmv_declarado_pendente,
+            COALESCE(SUM(s.live_impressions_declaradas), 0) AS impressoes_pendentes,
+            COALESCE(SUM(s.manual_views_declaradas), 0) AS visualizacoes_pendentes,
+            COALESCE(SUM(s.gmv_declarado) FILTER (WHERE NOT ${pendingCollisionSql()}), 0) AS gmv_pendente,
+            COALESCE(SUM(s.pedidos_declarados) FILTER (WHERE NOT ${pendingCollisionSql()}), 0)::int AS pedidos_pendentes,
+            COALESCE(SUM(EXTRACT(EPOCH FROM (s.encerrado_em-s.iniciado_em))/3600.0) FILTER (WHERE NOT ${pendingCollisionSql()}), 0) AS horas_pendentes
           FROM apresentadora_live_submissoes s
           LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id
           LEFT JOIN apresentadoras a ON a.id=s.apresentadora_id AND a.tenant_id=s.tenant_id
@@ -2635,12 +2690,17 @@ export async function analyticsRoutes(app) {
               gmv_por_hora: horasLive > 0 ? round2(gmvLives / horasLive) : 0,
               pedidos,
               ticket_medio: pedidos > 0 ? round2(gmvTotal / pedidos) : 0,
-              comissao_apresentadora: comissao,
+              comissao_apresentadora: toInt(row.total_envios_pendentes ?? totalPendentes) > 0 && toInt(row.total_lives) === 0 && toInt(row.total_videos) === 0 ? null : comissao,
               comissao_pct: comissaoPct,
-              gmv_pendente_aprovacao: gmvPendente,
+              gmv_validado: round2(row.gmv_lives),
+              gmv_pendente_aprovacao: round2(row.gmv_declarado_pendente ?? gmvPendente),
+              impressoes_pendentes_aprovacao: Number(row.impressoes_pendentes ?? 0),
+              visualizacoes_pendentes_aprovacao: Number(row.visualizacoes_pendentes ?? 0),
+              total_provisorio: row.em_conciliacao ? null : gmvTotal,
+              em_conciliacao: Boolean(row.em_conciliacao),
               pedidos_pendentes_aprovacao: pedidosPendentes,
-              total_lives_pendentes_aprovacao: totalPendentes,
-              pendente_aprovacao: totalPendentes > 0,
+              total_lives_pendentes_aprovacao: toInt(row.total_envios_pendentes ?? totalPendentes),
+              pendente_aprovacao: toInt(row.total_envios_pendentes ?? totalPendentes) > 0,
             }
           }),
         }

@@ -9,11 +9,14 @@ describe('portal submission input', () => {
     ['1.234,56', '1234.56'],
     ['1,234.56', '1234.56'],
     ['1.234', '1234.00'],
+    [0.29, '0.29'],
+    [1.1, '1.10'],
+    [19.99, '19.99'],
   ])('canonicalizes money %s', (input, value) => {
     expect(parsePortalMoney(input)).toEqual({ ok: true, value })
   })
 
-  it.each(['1,234', '1,2345', '1e3', '-1'])('rejects ambiguous or unsafe money %s', (input) => {
+  it.each(['1,234', '1,2345', '1e3', '-1', 1.234, 0.001, Infinity, NaN])('rejects ambiguous or unsafe money %s', (input) => {
     expect(parsePortalMoney(input)).toMatchObject({ ok: false })
   })
 

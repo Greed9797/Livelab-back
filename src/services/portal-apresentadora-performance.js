@@ -1,4 +1,5 @@
 import { apresentadoraHorasSql, liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
+import { pendingCollisionSql } from '../lib/presenter-pending.js'
 
 // Official lives remain the sole source for commission. Pending portal submissions
 // are added only to operational performance with an explicit provisional marker.
@@ -71,7 +72,7 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
 
   // A DTO allowlist prevents future SELECT extensions leaking financial data.
   const pending = await db.query(`SELECT TRUE AS pendente_aprovacao,s.id,s.iniciado_em,s.encerrado_em,m.nome AS marca_nome,c.nome AS cabine_nome,
-      s.gmv_declarado AS gmv,s.pedidos_declarados AS pedidos
+      s.gmv_declarado AS gmv,s.pedidos_declarados AS pedidos,${pendingCollisionSql()} AS em_conciliacao
     FROM apresentadora_live_submissoes s
     LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id
     LEFT JOIN cabines c ON c.id=s.cabine_id AND c.tenant_id=s.tenant_id
@@ -88,11 +89,16 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
     marca_nome: row.marca_nome ?? null, cabine_nome: row.cabine_nome ?? null,
     gmv: Number(row.gmv ?? 0), horas: Math.max(0, (new Date(row.encerrado_em).valueOf() - new Date(row.iniciado_em).valueOf()) / 3_600_000), pedidos: Number(row.pedidos ?? 0),
     pendente_aprovacao: true,
+    em_conciliacao: Boolean(row.em_conciliacao),
   })))
-  const sums = items.reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, horas: sum.horas + item.horas, pedidos: sum.pedidos + item.pedidos }), { gmv: 0, horas: 0, pedidos: 0 })
+  const activeItems = items.filter(item => !item.em_conciliacao)
+  const sums = activeItems.reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, horas: sum.horas + item.horas, pedidos: sum.pedidos + item.pedidos }), { gmv: 0, horas: 0, pedidos: 0 })
   const pendingSums = items.filter(item => item.pendente_aprovacao).reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, lives: sum.lives + 1 }), { gmv: 0, lives: 0 })
   return { items, desempenho: {
-    total_lives: items.length, gmv_lives: Math.round(sums.gmv * 100) / 100,
+    gmv_validado: Math.round(items.filter(item => !item.pendente_aprovacao).reduce((sum, item) => sum + item.gmv, 0) * 100) / 100,
+    total_lives: activeItems.length, gmv_lives: Math.round(sums.gmv * 100) / 100,
+    em_conciliacao: items.some(item => item.em_conciliacao),
+    total_provisorio: items.some(item => item.em_conciliacao) ? null : Math.round(sums.gmv * 100) / 100,
     horas_live: Math.round(sums.horas * 100) / 100,
     gmv_por_hora: sums.horas > 0 ? Math.round(sums.gmv / sums.horas * 100) / 100 : null,
     pedidos: sums.pedidos,

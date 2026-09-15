@@ -21,6 +21,41 @@ function buildApp(queryMock) {
 }
 
 describe('analytics diario', () => {
+  it('propagates pending declarations to dashboard KPIs and temporal series', async () => {
+    const queryMock = vi.fn(async sql => ({ rows: sql.includes('SELECT s.*, TRUE AS pendente_aprovacao') ? [{
+      id: 's1', marca_id: marcaId, apresentadora_id: apresentadoraId, pendente_aprovacao: true,
+      iniciado_em: '2031-09-05T12:00:00Z', encerrado_em: '2031-09-05T13:00:00Z', gmv_declarado: '19.99', pedidos_declarados: 2,
+      live_impressions_declaradas: 500, manual_views_declaradas: 100,
+    }] : [] }))
+    const app = buildApp(queryMock); await app.register(analyticsRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/analytics/dashboard?mesAno=2031-09' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().kpis).toMatchObject({ gmv_total: 19.99, total_lives: 1, horas_live: 1, pedidos_total: 2, pendente_aprovacao: true, viewers_total: 100, impressoes_pendentes_aprovacao: 500 })
+    expect(res.json().gmv_mensal[0]).toMatchObject({ mes: '2031-09', gmv_total: 19.99 })
+    expect(res.json().gmv_diario[0]).toMatchObject({ dia: '2031-09-05', gmv_total: 19.99 })
+    await app.close()
+  })
+  it('includes declared reach and views in the funnel, but excludes collisions from combined totals', async () => {
+    const queryMock = vi.fn(async sql => ({ rows: sql.includes('SELECT s.*, TRUE AS pendente_aprovacao') ? [
+      { id: 's1', pendente_aprovacao: true, iniciado_em: '2026-09-05T12:00Z', encerrado_em: '2026-09-05T13:00Z', gmv_declarado: 20, pedidos_declarados: 2, live_impressions_declaradas: 500, manual_views_declaradas: 100 },
+      { id: 's2', pendente_aprovacao: true, em_conciliacao: true, gmv_declarado: 50, live_impressions_declaradas: 200, manual_views_declaradas: 40 },
+    ] : [] }))
+    const app = buildApp(queryMock); await app.register(analyticsRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/analytics/funil?mesAno=2026-09' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ pendente_aprovacao: true, em_conciliacao: true, total_provisorio: null, gmv_pendente_aprovacao: 70 })
+    expect(res.json().resumo).toMatchObject({ gmv: 20, total_lives: 1, visualizacoes: 100, pedidos: 2 })
+    expect(res.json().etapas[0].valor).toBe(500)
+    await app.close()
+  })
+  it('reports pending-only commission as unknown, not zero', async () => {
+    const queryMock = vi.fn(async sql => ({ rows: sql.includes('FROM apresentadora_live_submissoes s') ? [{ dia: '2026-07-28', marca_id: marcaId, apresentadora_id: apresentadoraId, total_lives_pendentes: 1, gmv_pendente: '20', total_envios_pendentes: 1 }] : [] }))
+    const app = buildApp(queryMock); await app.register(analyticsRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/analytics/diario?mesAno=2026-07' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().rows[0].comissao_apresentadora).toBeNull()
+    await app.close()
+  })
   it('returns daily rows and applies marca/apresentadora filters', async () => {
     const queryMock = vi.fn(async (sql, params = []) => {
       if (sql.includes('FROM apresentadora_live_submissoes s')) {
@@ -111,12 +146,12 @@ describe('analytics diario', () => {
 
   it('includes pending submissions in operational totals without commission', async () => {
     const queryMock = vi.fn(async (sql) => sql.includes('FROM apresentadora_live_submissoes s')
-      ? { rows: [{ dia: '2026-05-28', marca_id: marcaId, marca_nome: 'Haag', apresentadora_id: apresentadoraId, apresentadora_nome: 'Edja', total_lives_pendentes: 1, gmv_pendente: '200', pedidos_pendentes: 2, horas_pendentes: '1' }] }
+      ? { rows: [{ dia: '2026-05-28', marca_id: marcaId, marca_nome: 'Haag', apresentadora_id: apresentadoraId, apresentadora_nome: 'Edja', total_lives_pendentes: 1, gmv_pendente: '200', pedidos_pendentes: 2, horas_pendentes: '1', impressoes_pendentes: '500', visualizacoes_pendentes: '100' }] }
       : { rows: [{ dia: '2026-05-28', marca_id: marcaId, marca_nome: 'Haag', apresentadora_id: apresentadoraId, apresentadora_nome: 'Edja', total_lives: 1, total_videos: 0, gmv_lives: '100', gmv_videos: '0', horas_live: '1', pedidos: 1, comissao_apresentadora: '5', comissao_gmv_base: '100' }] })
     const app = buildApp(queryMock); await app.register(analyticsRoutes)
     const res = await app.inject({ method: 'GET', url: `/v1/analytics/diario?mesAno=2026-05&marca_id=${marcaId}&apresentadora_id=${apresentadoraId}` })
     expect(res.statusCode).toBe(200)
-    expect(res.json().rows[0]).toMatchObject({ gmv_lives: 300, total_lives: 2, pedidos: 3, comissao_apresentadora: 5, gmv_pendente_aprovacao: 200, pendente_aprovacao: true })
+    expect(res.json().rows[0]).toMatchObject({ gmv_lives: 300, total_lives: 2, pedidos: 3, comissao_apresentadora: 5, gmv_pendente_aprovacao: 200, pendente_aprovacao: true, impressoes_pendentes_aprovacao: 500, visualizacoes_pendentes_aprovacao: 100 })
     await app.close()
   })
 })

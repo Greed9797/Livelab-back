@@ -642,7 +642,10 @@ describe('Route regressions: SQL and RBAC', () => {
 
   it('analytics dashboard returns content metrics from attributed sales and operational records', async () => {
     const app = Fastify()
-    const queryMock = vi.fn()
+    const queryMock = vi.fn(sql => {
+      if (sql.includes('SELECT s.*, TRUE AS pendente_aprovacao')) return Promise.resolve({ rows: [] })
+      throw new Error('Unexpected analytics query')
+    })
       .mockResolvedValueOnce({ rows: [{ gmv_total: '1500', gmv_lives: '1000', gmv_videos: '500', pedidos_total: '15', pedidos_lives: '10', pedidos_videos: '5' }] })
       .mockResolvedValueOnce({ rows: [{ gmv_total: '1000', pedidos_total: '10' }] })
       .mockResolvedValueOnce({ rows: [{ total_lives: '2', horas_live: '3.5', viewers_total: '120', likes_total: '90', comentarios_total: '12', shares_total: '8', diamonds_total: '3' }] })

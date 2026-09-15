@@ -35,8 +35,12 @@ function moneyParts(input) {
 
 export function parsePortalMoney(input) {
   if (typeof input === 'number') {
-    if (!Number.isFinite(input) || input < 0 || !Number.isInteger(input * 100)) return fail('GMV inválido.')
-    input = input.toFixed(2)
+    // Binary multiplication rejects valid JSON numbers such as 19.99.
+    // Inspect decimal places without rounding an extra decimal away.
+    if (!Number.isFinite(input) || input < 0) return fail('GMV inválido.')
+    const decimal = String(input)
+    if (!/^\d+(?:\.\d{1,2})?$/.test(decimal)) return fail('GMV inválido.')
+    input = decimal
   }
   if (typeof input !== 'string') return fail('GMV inválido.')
   const parts = moneyParts(input)

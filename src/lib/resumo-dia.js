@@ -63,6 +63,9 @@ export function formatSaoPauloTimestamp(date) {
 }
 
 export function buildResumoDia({ data, lives = [], now = new Date() }) {
+  const pendentes = lives.filter(live => live.registro_tipo === 'submissao' && live.revisao_status === 'pendente')
+  const emConciliacao = pendentes.some(live => live.em_conciliacao)
+  lives = lives.filter(live => live.registro_tipo !== 'submissao' || (live.revisao_status === 'pendente' && !live.em_conciliacao))
   const totalLives = lives.length
   let totalGmv = 0
   let totalPedidos = 0
@@ -214,7 +217,7 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
     lines.push('Nenhuma live registrada neste dia.')
     lines.push(separator)
   } else {
-    lines.push(`💰 *GMV Total:* ${formatMoneyBRL(totalGmv)}`)
+    lines.push(`💰 *${emConciliacao ? 'Subtotal (em conciliação)' : pendentes.length ? 'GMV provisório' : 'GMV Total'}:* ${formatMoneyBRL(totalGmv)}`)
     lines.push(`⚡ *GMV/h:* ${formatMoneyBRL(totalGmvPorHora)}/h`)
     lines.push(`🛒 *Vendas:* ${totalPedidos} ${totalPedidos === 1 ? 'pedido' : 'pedidos'}`)
     lines.push(`⏱️ *Tempo no Ar:* ${formatMinsToHours(totalMinutos)} (${totalLives} ${totalLives === 1 ? 'live' : 'lives'})`)
@@ -241,6 +244,11 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
     lines.push(separator)
   }
 
+  if (pendentes.length) {
+    lines.push('', '*APRESENTADORA · Pendente aprovação*', 'Sem comissão antes da validação pela gestão.')
+    for (const live of pendentes) lines.push(`${live.marca_nome ?? 'Marca'} · ${live.apresentadora_nome ?? 'Apresentadora'}: ${formatMoneyBRL(live.gmv)}${live.em_conciliacao ? ' — em conciliação; não somado ao subtotal' : ' — incluído no provisório'}`)
+    if (emConciliacao) lines.push('Total consolidado indisponível até conferir os possíveis vínculos.')
+  }
   const textoWhatsapp = lines.join('\n')
 
   return {
@@ -249,6 +257,10 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
     consolidado_em: (now instanceof Date ? now : new Date()).toISOString(),
     consolidado_em_formatado: timestampFormatted,
     totais: {
+      em_conciliacao: emConciliacao,
+      pendente_aprovacao: pendentes.length > 0,
+      total_provisorio: emConciliacao ? null : Math.round(totalGmv * 100) / 100,
+      gmv_pendente_aprovacao: Math.round(pendentes.reduce((sum, live) => sum + toNum(live.gmv), 0) * 100) / 100,
       gmv: Math.round(totalGmv * 100) / 100,
       pedidos: totalPedidos,
       minutos: totalMinutos,

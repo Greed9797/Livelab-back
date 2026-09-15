@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { READ_COMISSOES, READ_APRESENTADORAS, WRITE_APRESENTADORAS } from '../config/role_groups.js'
 import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
+import { getOperationalRanking } from '../lib/operational-ranking.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getTenantDefaultCommissionTiers } from '../config/presenter_defaults.js'
 import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
@@ -336,8 +337,15 @@ export async function comissoesRoutes(app) {
     const limit = limitFromQuery(request.query, 50)
 
     return app.withTenant(tenant_id, async (db) => {
-      return getPresenterRanking(db, { tenantId: tenant_id, range, limit })
+      return getOperationalRanking(db, { tenantId: tenant_id, range, limit, groupBy: 'apresentadora' })
     })
+  })
+
+  app.get('/v1/ranking/marcas', { preHandler: readAccess }, async (request) => {
+    const { tenant_id } = request.user
+    const range = monthRangeFromQuery(request.query)
+    const limit = limitFromQuery(request.query, 50)
+    return app.withTenant(tenant_id, db => getOperationalRanking(db, { tenantId: tenant_id, range, limit, groupBy: 'marca' }))
   })
 
   // Público (sem auth) — ranking de apresentadoras de um tenant com ranking público ativo.

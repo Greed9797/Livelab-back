@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks'
-import { getPresenterRanking, monthRangeFromQuery } from '../lib/presenter-ranking.js'
-import { getPerformanceRanking } from '../lib/performance-rollups.js'
+import { monthRangeFromQuery } from '../lib/presenter-ranking.js'
+import { getOperationalRanking as getPerformanceRanking } from '../lib/operational-ranking.js'
+import { pendingRows } from '../lib/presenter-pending.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { countWeekdaysInMonth, countWeekdaysUpTo } from '../lib/dias_uteis.js'
@@ -113,6 +114,11 @@ export async function homeRoutes(app) {
               AND va.origem = 'video'
               AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
               AND COALESCE(va.gmv, 0) > 0
+            UNION ALL
+            SELECT date_trunc('month', s.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS m
+            FROM apresentadora_live_submissoes s
+            WHERE s.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND s.status = 'pendente'
           )
           SELECT to_char(
             COALESCE(
@@ -133,6 +139,7 @@ export async function homeRoutes(app) {
         ?? mesEfetivoQ?.rows[0]?.mes
         ?? new Date().toISOString().slice(0, 7)
       const mesStart = `${effectiveMonth}-01`
+      const pendingPromise = pendingRows(db, { tenantId: tenant_id, ...monthRangeFromQuery({ mes: effectiveMonth }) })
 
       // MTD justo: quando o mês exibido é o corrente (parcial), o comparador do
       // mês anterior é recortado no mesmo dia (1..hoje vs 1..mesmo-dia-mês-anterior).
@@ -624,7 +631,8 @@ export async function homeRoutes(app) {
         return []
       })
 
-      const rankingApresentadorasMesPromise = getPresenterRanking(db, {
+      const rankingApresentadorasMesPromise = getPerformanceRanking(db, {
+          groupBy: 'apresentadora',
           tenantId: tenant_id,
           range: monthRangeFromQuery({ mes: effectiveMonth }),
           limit: 10,
@@ -787,6 +795,17 @@ export async function homeRoutes(app) {
         tenantMetaDiariaPromise,
         gmvIntradayPromise,
       ])
+      const pending = (await pendingPromise).filter(row => row.pendente_aprovacao === true)
+      const safePending = pending.filter(row => !row.em_conciliacao)
+      const pendingGmv = safePending.reduce((sum, row) => sum + Number(row.gmv_declarado ?? 0), 0)
+      const pendingOrders = safePending.reduce((sum, row) => sum + Number(row.pedidos_declarados ?? 0), 0)
+      const pendingHours = safePending.reduce((sum, row) => sum + Math.max(0, (new Date(row.encerrado_em) - new Date(row.iniciado_em)) / 3600000), 0)
+      const pendingByDay = new Map()
+      for (const row of safePending) {
+        const day = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', day: 'numeric' }).format(new Date(row.iniciado_em)))
+        const previous = pendingByDay.get(day) ?? { gmv: 0, pedidos: 0 }
+        pendingByDay.set(day, { gmv: previous.gmv + Number(row.gmv_declarado ?? 0), pedidos: previous.pedidos + Number(row.pedidos_declarados ?? 0) })
+      }
 
       const proximasLives = agendaHoje
         .filter((r) => r.tipo === 'live' && ['planejado', 'confirmado'].includes(r.status) && new Date(r.data_inicio) > new Date())
@@ -819,8 +838,8 @@ export async function homeRoutes(app) {
           const row = byDay[i + 1]
           return {
             dia: i + 1,
-            gmv: round2(row?.gmv ?? 0),
-            pedidos: Number(row?.pedidos ?? 0),
+            gmv: round2(Number(row?.gmv ?? 0) + (pendingByDay.get(i + 1)?.gmv ?? 0)),
+            pedidos: Number(row?.pedidos ?? 0) + (pendingByDay.get(i + 1)?.pedidos ?? 0),
             prev: round2(row?.prev ?? 0),
           }
         })
@@ -853,6 +872,10 @@ export async function homeRoutes(app) {
           site: r.site,
           cor: marcaMeta?.cor ?? null,
           marca_nome: r.marca_nome ?? r.nome,
+          pendente_aprovacao: r.pendente_aprovacao,
+          gmv_pendente_aprovacao: r.gmv_pendente_aprovacao,
+          em_conciliacao: r.em_conciliacao,
+          total_provisorio: r.total_provisorio,
           gmv: round2(r.gmv_total ?? r.gmv),
           gmv_total: round2(r.gmv_total ?? r.gmv),
           // Faturamento da marca = GMV total (lives + vídeos).
@@ -870,12 +893,12 @@ export async function homeRoutes(app) {
       })
 
       const gmvOperacional = gmvOperacionalQ.rows[0] ?? {}
-      const gmvMes = round2(gmvOperacional.gmv_total_mes ?? gmvOperacional.gmv_mes)
-      const gmvLivesMes = round2(gmvOperacional.gmv_lives_mes)
+      const gmvMes = round2(Number(gmvOperacional.gmv_total_mes ?? gmvOperacional.gmv_mes ?? 0) + pendingGmv)
+      const gmvLivesMes = round2(Number(gmvOperacional.gmv_lives_mes ?? 0) + pendingGmv)
       const gmvVideosMes = round2(gmvOperacional.gmv_videos_mes)
-      const pedidosLivesMes = Number(gmvOperacional.pedidos_lives_mes ?? 0)
+      const pedidosLivesMes = Number(gmvOperacional.pedidos_lives_mes ?? 0) + pendingOrders
       const pedidosVideosMes = Number(gmvOperacional.pedidos_videos_mes ?? 0)
-      const pedidosTotalMes = Number(gmvOperacional.pedidos_total_mes ?? (pedidosLivesMes + pedidosVideosMes))
+      const pedidosTotalMes = gmvOperacional.pedidos_total_mes == null ? pedidosLivesMes + pedidosVideosMes : Number(gmvOperacional.pedidos_total_mes) + pendingOrders
       const videosMes = Number(gmvOperacional.videos_mes ?? 0)
 
       // A série diária e o total do mês são duas queries diferentes sobre os mesmos dados.
@@ -892,7 +915,7 @@ export async function homeRoutes(app) {
         }, 'home: serie diaria zerada com total do mes positivo — grafico do mes vai desenhar reta em zero')
       }
       const videosMesAnterior = Number(gmvOperacional.videos_mes_anterior ?? 0)
-      const livesMes = Number(livesMesQ.rows[0].lives_mes)
+      const livesMes = Number(livesMesQ.rows[0].lives_mes) + safePending.length
       const livesMesAnterior = Number(livesMesQ.rows[0].lives_mes_anterior ?? 0)
       const gmvMesAnterior = round2(gmvOperacional.gmv_mes_anterior)
       const gmvLivesMesAnterior = round2(gmvOperacional.gmv_lives_mes_anterior)
@@ -966,7 +989,7 @@ export async function homeRoutes(app) {
 
       const liveCabinesAtivas = cabinesFormatadas.filter(c => c.status === 'ao_vivo')
       const gmvAoVivoAgora = round2(liveCabinesAtivas.reduce((acc, c) => acc + Number(c.gmv_atual ?? 0), 0))
-      const horasLiveMes = parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0).toFixed(1))
+      const horasLiveMes = parseFloat((Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0) + pendingHours).toFixed(1))
       const horasLiveMesAnterior = parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes_anterior ?? 0).toFixed(1))
       const gmvPorLiveMes = livesMes > 0 ? round2(gmvMes / livesMes) : 0
       // GMV/hora exclui vídeos — mesma convenção do analytics.js (gmv_lives / horas)
@@ -986,6 +1009,11 @@ export async function homeRoutes(app) {
       return {
         // Período de referência (mês efetivo: atual se tem dados, senão último com dados)
         mes_referencia: effectiveMonth,
+        pendente_aprovacao: pending.length > 0,
+        total_lives_pendentes_aprovacao: pending.length,
+        gmv_pendente_aprovacao: round2(pending.reduce((sum, row) => sum + Number(row.gmv_declarado ?? 0), 0)),
+        em_conciliacao: pending.some(row => row.em_conciliacao),
+        total_provisorio: pending.some(row => row.em_conciliacao) ? null : gmvMes,
 
         // Financeiro
         gmv_total_mes: gmvMes,

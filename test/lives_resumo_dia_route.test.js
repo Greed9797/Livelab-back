@@ -4,18 +4,18 @@ import { livesRoutes } from '../src/routes/lives.js'
 
 const tenantId = '11111111-1111-4111-8111-111111111111'
 
-function buildApp({ lives = [] } = {}) {
+function buildApp({ lives = [], pending = [], role = 'franqueado' } = {}) {
   const app = Fastify()
   const calls = []
 
   const query = vi.fn(async (sql, params = []) => {
     const text = String(sql)
     calls.push({ sql: text, params })
-    return { rows: lives }
+    return { rows: text.includes('SELECT s.*, TRUE AS pendente_aprovacao') ? pending : lives }
   })
 
   app.decorate('authenticate', async (request) => {
-    request.user = { tenant_id: tenantId, sub: 'user-1', papel: 'franqueado' }
+    request.user = { tenant_id: tenantId, sub: 'user-1', papel: role }
   })
   app.decorate('requirePapel', () => async (request) => {
     if (!request.user) request.user = { tenant_id: tenantId, sub: 'user-1', papel: 'franqueado' }
@@ -28,6 +28,19 @@ function buildApp({ lives = [] } = {}) {
 }
 
 describe('GET /v1/lives/resumo-dia', () => {
+  it('includes pending detail but does not double count collisions', async () => {
+    const { app, calls } = buildApp({ lives: [{ gmv: 100 }], pending: [
+      { id: 'safe', status: 'pendente', pendente_aprovacao: true, gmv_declarado: '19.99' },
+      { id: 'collision', status: 'pendente', pendente_aprovacao: true, em_conciliacao: true, gmv_declarado: '100' },
+    ] })
+    await livesRoutes(app)
+    const response = await app.inject({ method: 'GET', url: '/v1/lives/resumo-dia?data=2026-09-11' })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().totais).toMatchObject({ gmv: 119.99, gmv_pendente_aprovacao: 119.99, total_provisorio: null, em_conciliacao: true })
+    expect(response.json().texto_whatsapp).toContain('Sem comissão antes da validação')
+    expect(calls[1].params.slice(0, 3)).toEqual([tenantId, '2026-09-11', '2026-09-12'])
+    await app.close()
+  })
   it('rejects invalid date format with 400', async () => {
     const { app } = buildApp()
     await livesRoutes(app)

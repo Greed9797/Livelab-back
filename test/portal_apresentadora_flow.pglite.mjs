@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import Fastify from 'fastify'
 import { portalApresentadoraRoutes } from '../src/routes/portal_apresentadora.js'
+import { livesRoutes } from '../src/routes/lives.js'
 import { withPortalPresenterDb } from '../src/services/portal-apresentadora-db.js'
 import { tombstoneApprovedSubmissionsForDeletedLive } from '../src/services/live-approved-submission-deletion.js'
 const { PGlite } = await import(process.env.PGLITE_MODULE || '@electric-sql/pglite')
@@ -30,7 +31,7 @@ await db.exec(`
  CREATE TABLE tenant_comissao_faixas_default(tenant_id uuid,ativo boolean,gmv_inicio numeric,gmv_fim numeric,comissao_pct numeric);
  CREATE TABLE apresentadora_fixo_historico(id uuid,tenant_id uuid,apresentadora_id uuid,vigencia_inicio date,valor numeric);
  CREATE TABLE video_registros(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,marca_id uuid,apresentadora_id uuid,data date,gmv_atribuido numeric,pedidos_atribuidos int);
- ALTER TABLE marcas ADD COLUMN logo_url text, ADD COLUMN site text;
+ ALTER TABLE marcas ADD COLUMN logo_url text, ADD COLUMN site text, ADD COLUMN tiktok_username text;
  ALTER TABLE clientes ADD COLUMN logo_url text;
  ALTER TABLE contratos ADD COLUMN cliente_id uuid;
 `)
@@ -39,6 +40,7 @@ await db.exec(await readFile(new URL('../migrations/144_portal_apresentadora_sub
 await db.exec(await readFile(new URL('../migrations/145_portal_apresentadora_runtime_role.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/146_portal_apresentadora_metricas.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/147_live_oficial_excluida_tombstone.sql',import.meta.url),'utf8'))
+await db.exec(await readFile(new URL('../migrations/148_lives_origem_apresentadora.sql',import.meta.url),'utf8'))
 await db.query(`INSERT INTO tenants VALUES ($1),($2)`,[tenant,otherTenant])
 await db.query(`INSERT INTO users(id,tenant_id,papel) VALUES ($1,$4,'apresentadora'),($2,$4,'apresentadora'),($3,$4,'gerente'),($5,$6,'apresentadora')`,[user,peer,manager,tenant,otherUser,otherTenant])
 await db.query(`INSERT INTO apresentadoras(id,tenant_id,user_id,nome,fixo) VALUES ($1,$3,$4,'Ana',2850),($2,$3,$5,'Bia',3000),($6,$7,$8,'Outra',9999)`,[presenter,peerPresenter,tenant,user,peer,otherPresenter,otherTenant,otherUser])
@@ -104,6 +106,30 @@ try {
  assert.deepEqual(await counts(),{lives:0,sales:0,submissions:0,history:0})
  const created=check(await inject('POST',own,payload),201),sid=created.id
  assert.equal(created.status,'pendente');assert.deepEqual(await counts(),{lives:0,sales:0,submissions:1,history:1})
+ // Exercise the unified registry's actual SQL/pagination with tenant and brand
+ // filters. Official hydration is covered separately; this fixture has no lives.
+ const registry=Fastify()
+ registry.decorate('authenticate',async request=>{request.user={tenant_id:tenant,sub:manager,papel:'gerente'}})
+ registry.decorate('requirePapel',()=>async request=>{request.user={tenant_id:tenant,sub:manager,papel:'gerente'}})
+ registry.decorate('withTenant',async (_tenant,fn)=>fn({query:async(sql,params)=>sql.includes('WHERE l.id = ANY($1::uuid[])')?{rows:[]}:db.query(sql,params)}))
+ await registry.register(livesRoutes)
+ try {
+   const getRegistry=async suffix=>check(await registry.inject({method:'GET',url:`/v1/lives?registro=1&paginado=1&status=encerrada${suffix}`}),200)
+   const first=await getRegistry(`&marca_id=${unassignedBrand}`)
+   assert.equal(first.total,1);assert.equal(first.items[0].submissao_id,created.id)
+   assert.equal(first.items[0].status_publicacao,'rascunho');assert.equal(first.items[0].comissao_apresentadora,null)
+   assert.equal((await getRegistry(`&marca_id=${brand}`)).total,0)
+   assert.equal((await getRegistry('&data_inicio=2026-09-06&data_fim=2026-09-06')).total,0)
+   const beyond=await getRegistry('&page=10')
+   assert.equal(beyond.total,1);assert.deepEqual(beyond.items,[])
+ } finally {await registry.close()}
+ const pendingHome=check(await inject('GET','/v1/portal/apresentadora/me?mes=2026-09'),200)
+ const pendingRank=pendingHome.ranking.find(row=>row.apresentadora_id===presenter)
+ assert.equal(pendingRank.gmv_total,200)
+ assert.equal(pendingRank.pendente_aprovacao,true)
+ assert.equal(pendingRank.comissao_variavel,0)
+ assert.equal(pendingRank.fixo,2850)
+ assert.equal(pendingRank.total_recebido,2850)
  const replay=check(await inject('POST',own,payload),200);assert.equal(replay.id,sid)
  assert.deepEqual(await counts(),{lives:0,sales:0,submissions:1,history:1})
  check(await inject('POST',own,{...payload,gmv_declarado:201}),409)
@@ -146,8 +172,16 @@ try {
  assert.equal(audit.length,5);assert.equal(Number(audit.find(r=>r.acao==='criada').snapshot.pedidos_declarados),2);assert.equal(Number(audit.find(r=>r.acao==='editada').snapshot.pedidos_declarados),3)
  const repeated=await inject('POST',`${review}/${sid}/aprovar`,official,{headers});assert.ok([200,409].includes(repeated.statusCode));assert.equal((await counts()).lives,1)
  check(await inject('PATCH',`${own}/${sid}`,payload),404)
- const peerSub=check(await inject('POST',own,{...payload,request_id:id(12)},{headers:{'x-test-user':peer}}),201)
+ const wrongBrandSub=check(await inject('POST',own,{...payload,request_id:id(21)},{headers:{'x-test-user':peer}}),201)
+ check(await inject('POST',`${review}/${wrongBrandSub.id}/aprovar`,{live_id:approved.live_oficial_id},{headers}),422)
+ const peerSub=check(await inject('POST',own,{...payload,marca_id:brand,request_id:id(12)},{headers:{'x-test-user':peer}}),201)
  await db.query(`INSERT INTO live_apresentadoras_v2(tenant_id,live_id,apresentadora_id,papel,percentual_rateio) VALUES($1,$2,$3,'apoio',50)`,[tenant,approved.live_oficial_id,peerPresenter])
+ const candidates=check(await inject('GET',`${review}/${peerSub.id}/candidatas-vinculo`,undefined,{headers}),200)
+ assert.equal(candidates.total,1)
+ assert.equal(candidates.items[0].gmv,150)
+ const emptyCandidates=check(await inject('GET',`${review}/${peerSub.id}/candidatas-vinculo?page=10`,undefined,{headers}),200)
+ assert.deepEqual(emptyCandidates.items,[])
+ assert.equal(emptyCandidates.total,1)
  check(await inject('POST',`${review}/${peerSub.id}/aprovar`,{live_id:approved.live_oficial_id},{headers}),200)
  assert.equal((await counts()).lives,1);assert.equal((await counts()).sales,1)
  check(await inject('GET',`${own.replace('/submissoes','/lives')}?mes=2026-13`),400)
@@ -179,8 +213,26 @@ try {
  assert.equal((await db.query('SELECT status FROM apresentadora_live_submissoes WHERE id=$1',[cancellation.id])).rows[0].status,'cancelada')
  assert.equal((await counts()).lives,0);assert.equal((await counts()).sales,0)
  check(await inject('POST',`${own}/${cancellation.id}/reenviar`),404)
- const noFunnel=check(await inject('POST',own,{...payload,live_impressions_declaradas:undefined,manual_views_declaradas:undefined,request_id:id(14)}),201)
- assert.deepEqual((await db.query('SELECT live_impressions_declaradas,manual_views_declaradas FROM apresentadora_live_submissoes WHERE id=$1',[noFunnel.id])).rows,[{live_impressions_declaradas:null,manual_views_declaradas:null}])
+ check(await inject('POST',own,{...payload,live_impressions_declaradas:undefined,manual_views_declaradas:undefined,request_id:id(14)}),400)
+ const noObservation=check(await inject('POST',own,{...payload,observacao:undefined,request_id:id(14)}),201)
+ assert.equal((await db.query('SELECT observacao FROM apresentadora_live_submissoes WHERE id=$1',[noObservation.id])).rows[0].observacao,null)
+ // A historical returned submission remains reviewable by management, never by
+ // bypassing the portal's current-month rule or silently changing its date.
+ const historical=check(await inject('POST',own,{...payload,request_id:id(22)}),201)
+ check(await inject('POST',`${review}/${historical.id}/devolver`,{motivo:'Conferir dados'},{headers}),200)
+ await db.query(`UPDATE apresentadora_live_submissoes SET iniciado_em='2026-08-05T12:00Z',encerrado_em='2026-08-05T14:00Z' WHERE id=$1`,[historical.id])
+ const historicalOfficial={...official,iniciado_em:'2026-08-05T12:00:00Z',encerrado_em:'2026-08-05T14:00:00Z'}
+ check(await inject('POST',`${own}/${historical.id}/reenviar`),400)
+ check(await inject('POST',`${review}/${historical.id}/aprovar`,historicalOfficial,{headers}),422)
+ check(await inject('POST',`${review}/${historical.id}/aprovar`,{...historicalOfficial,versao_esperada:999,motivo_revisao:'Conferido com relatório'},{headers}),409)
+ const historicalReview={...historicalOfficial,versao_esperada:1,motivo_revisao:'Conferido com relatório original'}
+ check(await inject('POST',`${review}/${historical.id}/aprovar`,historicalReview),403)
+ const historicalApproved=check(await inject('POST',`${review}/${historical.id}/aprovar`,historicalReview,{headers}),200)
+ assert.equal(new Date((await db.query('SELECT iniciado_em FROM lives WHERE id=$1',[historicalApproved.live_oficial_id])).rows[0].iniciado_em).toISOString(),'2026-08-05T12:00:00.000Z')
+ assert.equal((await db.query("SELECT motivo FROM apresentadora_live_submissao_historico WHERE submissao_id=$1 AND acao='aprovada'",[historical.id])).rows[0].motivo,'Conferido com relatório original')
+ const historicalCounts=await counts()
+ check(await inject('POST',`${review}/${historical.id}/aprovar`,historicalReview,{headers}),409)
+ assert.deepEqual(await counts(),historicalCounts)
  await db.query("UPDATE users SET papel='apresentadora' WHERE id=$1",[manager])
  check(await inject('GET',review,undefined,{headers}),403)
  check(await inject('POST',`${review}/${cancellation.id}/devolver`,{motivo:'stale manager'},{headers}),403)

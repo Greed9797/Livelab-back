@@ -570,7 +570,10 @@ describe('LIVELAB operational routes', () => {
   })
 
   it('GET /v1/ranking/apresentadoras returns fixed plus variable totals by month', async () => {
-    const queryMock = vi.fn().mockResolvedValueOnce({
+    const queryMock = vi.fn(sql => {
+      if (sql.includes('SELECT s.*, TRUE AS pendente_aprovacao')) return Promise.resolve({ rows: [] })
+      throw new Error('Unexpected ranking query')
+    }).mockResolvedValueOnce({
       rows: [{
         apresentadora_id: 'ap-1',
         apresentadora_nome: 'Edja',

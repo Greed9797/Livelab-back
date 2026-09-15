@@ -1,9 +1,10 @@
 import { getPerformanceRanking } from './performance-rollups.js'
+import { saoPauloDateInput } from './timezone.js'
 
 export function monthRangeFromQuery(query = {}) {
   const mes = typeof query?.mes === 'string' && /^\d{4}-\d{2}$/.test(query.mes)
     ? query.mes
-    : new Date().toISOString().slice(0, 7)
+    : saoPauloDateInput(new Date()).slice(0, 7)
   const start = `${mes}-01`
   const endDate = new Date(`${start}T00:00:00.000Z`)
   endDate.setUTCMonth(endDate.getUTCMonth() + 1)

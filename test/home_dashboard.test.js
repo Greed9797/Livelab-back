@@ -158,6 +158,29 @@ function createHomeQueryMock({ metaCorRows } = {}) {
 }
 
 describe('home dashboard', () => {
+  it('includes safe pending GMV in operational KPIs without changing franchise revenue', async () => {
+    const baseQuery = createHomeQueryMock()
+    const query = vi.fn(async (sql, params) => sql.includes('SELECT s.*, TRUE AS pendente_aprovacao') ? { rows: [{
+      id: 'pending-1', pendente_aprovacao: true, status: 'pendente', marca_id: 'marca-1', apresentadora_id: 'ap-1',
+      marca_nome: 'Marca A', apresentadora_nome: 'Edja', gmv_declarado: '19.99', pedidos_declarados: 1,
+      iniciado_em: '2026-09-05T12:00:00Z', encerrado_em: '2026-09-05T13:00:00Z',
+    }] } : baseQuery(sql, params))
+    const { app } = buildApp(query, 'tenant-pending-test')
+    await app.register(homeRoutes)
+    const response = await app.inject({ method: 'GET', url: '/v1/home/dashboard?mes=2026-09' })
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body.gmv_total_mes).toBe(1620.49)
+    expect(body.gmv_lives_mes).toBe(1220.49)
+    expect(body.pedidos_total).toBe(7)
+    expect(body.horas_live_mes).toBe(11)
+    expect(body.lives_mes).toBe(3)
+    expect(body.gmv_pendente_aprovacao).toBe(19.99)
+    expect(body.ranking_apresentadoras_mes[0].gmv_total).toBe(819.99)
+    expect(body.ranking_apresentadoras_mes[0].comissao_variavel).toBe(16)
+    expect(body.fat_bruto).toBe(1100)
+    await app.close()
+  })
   it('scopes operational counts and rankings by tenant and returns live commerce fields', async () => {
     const queryMock = createHomeQueryMock()
     const { app, release, tenantIds } = buildApp(queryMock)

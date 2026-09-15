@@ -19,6 +19,10 @@ function buildApp(queryMock) {
 describe('analytics presenter split', () => {
   it('uses a selected support presenter rateio in the funnel without changing tenant scope', async () => {
     const queryMock = vi.fn(async (sql, params = []) => {
+      if (sql.includes('SELECT s.*, TRUE AS pendente_aprovacao')) {
+        expect(params).toEqual([tenantId, '2026-08-17', '2026-08-18', apresentadoraId, null, null])
+        return { rows: [] }
+      }
       expect(sql).toContain('current_setting(\'app.tenant_id\', true)::uuid')
       expect(sql).toContain('($4::uuid IS NULL OR lav.apresentadora_id = $4::uuid)')
       expect(sql).toContain('ap_v2.gmv_rateado')

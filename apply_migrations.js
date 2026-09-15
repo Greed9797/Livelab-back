@@ -143,6 +143,7 @@ export const MIGRATIONS_LIST = [
   '146_portal_apresentadora_metricas.sql',
   '147_live_oficial_excluida_tombstone.sql',
   '148_lives_origem_apresentadora.sql',
+  '149_submission_archive_workflow.sql',
 ]
 
 async function ensureMigrationsTable(client) {

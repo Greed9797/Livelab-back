@@ -44,7 +44,10 @@ const reviewSchema = z.object({
   live_impressions_oficiais: impressions.optional(),
   manual_views_oficiais: views.optional(),
 }).strict()
-const devolucaoSchema = z.object({ motivo: z.string().trim().min(1).max(1000) }).strict()
+const devolucaoSchema = z.object({ motivo: z.string().trim().min(1).max(1000), arquivar: z.boolean().optional(), versao_esperada: z.number().int().positive().optional() }).strict()
+  .refine(data => !data.arquivar || data.versao_esperada !== undefined, { message: 'Atualize o envio antes de solicitar arquivamento.' })
+const arquivamentoSchema = z.object({ acao: z.enum(['confirmar', 'contestar']), motivo: z.string().trim().min(1).max(1000).optional(), versao_esperada: z.number().int().positive() }).strict()
+  .refine(data => data.acao !== 'contestar' || Boolean(data.motivo), { message: 'Informe o motivo da contestação.' })
 
 function normalizeSubmissionMetrics(data) {
   const gmv = parsePortalMoney(data.gmv_declarado)
@@ -104,6 +107,7 @@ function recordHistory(db, { tenantId, submissionId, version, action, actorId, m
       'live_impressions_declaradas',s.live_impressions_declaradas,'manual_views_declaradas',s.manual_views_declaradas,
       'live_impressions_oficiais',s.live_impressions_oficiais,'manual_views_oficiais',s.manual_views_oficiais,
       'live_oficial_id',s.live_oficial_id,'motivo_devolucao',s.motivo_devolucao,
+      'arquivamento_status',s.arquivamento_status,'motivo_contestacao',s.motivo_contestacao,
       'revisado_por',s.revisado_por,'revisado_em',s.revisado_em)
     FROM apresentadora_live_submissoes s WHERE s.id=$2::uuid AND s.tenant_id=$1::uuid`, [tenantId, submissionId, version, action, actorId, motivo])
 }
@@ -193,7 +197,7 @@ export async function portalApresentadoraRoutes(app) {
       if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
       const [items, pending] = await Promise.all([
         getOwnPortalPerformance(db, { tenantId: request.user.tenant_id, apresentadoraId: profile.id, range }),
-        db.query(`SELECT s.id, s.status, s.marca_id, s.cabine_id, s.iniciado_em, s.encerrado_em, s.observacao, s.marca_descricao, s.gmv_declarado, s.pedidos_declarados, s.live_impressions_declaradas, s.manual_views_declaradas, s.live_impressions_oficiais, s.manual_views_oficiais, s.motivo_devolucao, s.versao, s.live_oficial_id, s.live_oficial_excluida_id, s.live_oficial_excluida_em, m.nome AS marca_nome, c.nome AS cabine_nome
+        db.query(`SELECT s.id, s.status, s.marca_id, s.cabine_id, s.iniciado_em, s.encerrado_em, s.observacao, s.marca_descricao, s.gmv_declarado, s.pedidos_declarados, s.live_impressions_declaradas, s.manual_views_declaradas, s.live_impressions_oficiais, s.manual_views_oficiais, s.arquivamento_status, s.motivo_contestacao, s.motivo_devolucao, s.versao, s.live_oficial_id, s.live_oficial_excluida_id, s.live_oficial_excluida_em, m.nome AS marca_nome, c.nome AS cabine_nome
           FROM apresentadora_live_submissoes s LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id LEFT JOIN cabines c ON c.id=s.cabine_id AND c.tenant_id=s.tenant_id
           WHERE s.tenant_id=$1::uuid AND s.apresentadora_id=$2::uuid AND s.iniciado_em >= ($3::date::timestamp AT TIME ZONE 'America/Sao_Paulo') AND s.iniciado_em < ($4::date::timestamp AT TIME ZONE 'America/Sao_Paulo') ORDER BY s.criado_em DESC`, [request.user.tenant_id, profile.id, range.start, range.end]),
       ])
@@ -239,7 +243,7 @@ export async function portalApresentadoraRoutes(app) {
       const d = normalized.data
       const valid = await db.query(`SELECT 1 FROM marcas m LEFT JOIN clientes cl ON cl.id=m.cliente_id AND cl.tenant_id=m.tenant_id WHERE m.id=$1::uuid AND m.tenant_id=$2::uuid AND ${marcaStatusOperacionalSql('m', 'cl')}='ativa' LIMIT 1`, [d.marca_id, request.user.tenant_id]); if (!valid.rows[0]) return reply.code(404).send({ error: 'Marca ativa não encontrada nesta unidade.' })
       if (d.cabine_id) { const valid = await db.query(`SELECT 1 FROM cabines WHERE id=$1::uuid AND tenant_id=$2::uuid AND ativo IS DISTINCT FROM FALSE LIMIT 1`, [d.cabine_id, request.user.tenant_id]); if (!valid.rows[0]) return reply.code(404).send({ error: 'Cabine não encontrada.' }) }
-      return inSubmissionTransaction(db, async () => { const updated = await db.query(`UPDATE apresentadora_live_submissoes SET marca_id=$4::uuid,marca_descricao=NULL,cabine_id=$5::uuid,iniciado_em=$6::timestamptz,encerrado_em=$7::timestamptz,observacao=$8,gmv_declarado=$9::numeric,pedidos_declarados=$10::int,live_impressions_declaradas=$11::bigint,manual_views_declaradas=$12::int,atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id, d.marca_id, d.cabine_id ?? null, d.iniciado_em, d.encerrado_em, d.observacao ?? null, d.gmv_declarado, d.pedidos_declarados, d.live_impressions_declaradas ?? null, d.manual_views_declaradas ?? null])
+      return inSubmissionTransaction(db, async () => { const updated = await db.query(`UPDATE apresentadora_live_submissoes SET marca_id=$4::uuid,marca_descricao=NULL,cabine_id=$5::uuid,iniciado_em=$6::timestamptz,encerrado_em=$7::timestamptz,observacao=$8,gmv_declarado=$9::numeric,pedidos_declarados=$10::int,live_impressions_declaradas=$11::bigint,manual_views_declaradas=$12::int,atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' AND arquivamento_status IS NULL RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id, d.marca_id, d.cabine_id ?? null, d.iniciado_em, d.encerrado_em, d.observacao ?? null, d.gmv_declarado, d.pedidos_declarados, d.live_impressions_declaradas ?? null, d.manual_views_declaradas ?? null])
       if (!updated.rows[0]) return reply.code(404).send({ error: 'Submissão não encontrada ou não pode ser alterada.' }); await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: updated.rows[0].id, version: updated.rows[0].versao, action: 'editada', actorId: request.user.sub }); return updated.rows[0]
       })
     })
@@ -250,13 +254,35 @@ export async function portalApresentadoraRoutes(app) {
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
       const profile = await resolveOwnProfile(db, request.user.tenant_id, request.user.sub, request.user.papel); if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
       return inSubmissionTransaction(db, async () => {
-      const current = await db.query(`SELECT iniciado_em,encerrado_em,marca_id,gmv_declarado,pedidos_declarados,live_impressions_declaradas,manual_views_declaradas,observacao FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' FOR UPDATE`, [idCheck.data, request.user.tenant_id, profile.id])
+      const current = await db.query(`SELECT iniciado_em,encerrado_em,marca_id,gmv_declarado,pedidos_declarados,live_impressions_declaradas,manual_views_declaradas,observacao FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' AND arquivamento_status IS NULL FOR UPDATE`, [idCheck.data, request.user.tenant_id, profile.id])
       if (!current.rows[0]) return reply.code(404).send({ error: 'Submissão não encontrada ou não pode ser reenviada.' })
       if (!requiresCurrentPortalMonth(current.rows[0]) || !current.rows[0].marca_id || current.rows[0].gmv_declarado == null || current.rows[0].pedidos_declarados == null || current.rows[0].live_impressions_declaradas == null || current.rows[0].manual_views_declaradas == null) {
         return reply.code(400).send({ error: 'Corrija todos os campos obrigatórios e registre uma live concluída do mês atual, em um único dia.' })
       }
-      const result = await db.query(`UPDATE apresentadora_live_submissoes SET status='pendente',motivo_devolucao=NULL,atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id])
+      const result = await db.query(`UPDATE apresentadora_live_submissoes SET status='pendente',motivo_devolucao=NULL,atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' AND arquivamento_status IS NULL RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id])
       if (!result.rows[0]) return reply.code(404).send({ error: 'Submissão não encontrada ou não pode ser reenviada.' }); await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: result.rows[0].id, version: result.rows[0].versao, action: 'reenviada', actorId: request.user.sub }); return result.rows[0]
+      })
+    })
+  })
+
+  app.post('/v1/portal/apresentadora/submissoes/:id/arquivamento', { preHandler: ownAccess }, async (request, reply) => {
+    const idCheck = uuid.safeParse(request.params?.id)
+    const parsed = arquivamentoSchema.safeParse(request.body)
+    if (!idCheck.success || !parsed.success) return reply.code(400).send({ error: !idCheck.success ? 'id inválido' : parsed.error.issues[0].message })
+    return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
+      const profile = await resolveOwnProfile(db, request.user.tenant_id, request.user.sub, request.user.papel)
+      if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
+      return inSubmissionTransaction(db, async () => {
+        const current = await db.query(`SELECT status,arquivamento_status,versao FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid FOR UPDATE`, [idCheck.data, request.user.tenant_id, profile.id])
+        const row = current.rows[0]
+        if (!row) return reply.code(404).send({ error: 'Submissão não encontrada.' })
+        if (row.status !== 'devolvida' || row.arquivamento_status !== 'solicitado' || row.versao !== parsed.data.versao_esperada) return reply.code(409).send({ error: 'O envio foi alterado. Atualize a lista antes de responder.' })
+        const contest = parsed.data.acao === 'contestar'
+        // Responding to an existing review is not a new registration: retain its
+        // real dates, including after a month boundary. Never accept metric edits here.
+        const result = await db.query(`UPDATE apresentadora_live_submissoes SET status=$4,arquivamento_status=$5,motivo_contestacao=$6,versao=versao+1,atualizado_em=NOW() WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid RETURNING id,status,arquivamento_status,motivo_contestacao,versao`, [idCheck.data, request.user.tenant_id, profile.id, contest ? 'pendente' : 'cancelada', contest ? null : 'confirmado', contest ? parsed.data.motivo : null])
+        await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: idCheck.data, version: result.rows[0].versao, action: contest ? 'reenviada' : 'cancelada', actorId: request.user.sub, motivo: contest ? parsed.data.motivo : 'Arquivamento confirmado pela apresentadora.' })
+        return result.rows[0]
       })
     })
   })
@@ -266,7 +292,7 @@ export async function portalApresentadoraRoutes(app) {
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
       const profile = await resolveOwnProfile(db, request.user.tenant_id, request.user.sub, request.user.papel); if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
       return inSubmissionTransaction(db, async () => {
-        const row = await db.query(`UPDATE apresentadora_live_submissoes SET status='cancelada',atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id])
+        const row = await db.query(`UPDATE apresentadora_live_submissoes SET status='cancelada',atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' AND arquivamento_status IS NULL RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id])
         if (!row.rows[0]) return reply.code(404).send({ error: 'Submissão não encontrada ou não pode ser cancelada.' })
         await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: row.rows[0].id, version: row.rows[0].versao, action: 'cancelada', actorId: request.user.sub })
         return { ok: true, ...row.rows[0] }
@@ -278,7 +304,7 @@ export async function portalApresentadoraRoutes(app) {
     const status = request.query?.status == null ? 'pendente' : String(request.query.status)
     if (!['pendente', 'devolvida', 'aprovada', 'cancelada', 'all'].includes(status)) return reply.code(400).send({ error: 'status inválido' })
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
-      const rows = await db.query(`SELECT s.*,a.nome AS apresentadora_nome,m.nome AS marca_nome,c.nome AS cabine_nome FROM apresentadora_live_submissoes s JOIN apresentadoras a ON a.id=s.apresentadora_id AND a.tenant_id=s.tenant_id LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id LEFT JOIN cabines c ON c.id=s.cabine_id AND c.tenant_id=s.tenant_id WHERE s.tenant_id=$1::uuid AND ($2='all' OR s.status=$2) ORDER BY s.criado_em ASC`, [request.user.tenant_id, status])
+      const rows = await db.query(`SELECT s.*,a.nome AS apresentadora_nome,m.nome AS marca_nome,c.nome AS cabine_nome FROM apresentadora_live_submissoes s JOIN apresentadoras a ON a.id=s.apresentadora_id AND a.tenant_id=s.tenant_id LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id LEFT JOIN cabines c ON c.id=s.cabine_id AND c.tenant_id=s.tenant_id WHERE s.tenant_id=$1::uuid AND ($2='all' OR s.status=$2) AND ($2='all' OR s.arquivamento_status IS NULL) ORDER BY s.criado_em ASC`, [request.user.tenant_id, status])
       return { items: rows.rows.map((row) => ({ ...row, gmv_declarado: row.gmv_declarado == null ? null : Number(row.gmv_declarado), pedidos_declarados: row.pedidos_declarados == null ? null : Number(row.pedidos_declarados), live_impressions_declaradas: row.live_impressions_declaradas == null ? null : Number(row.live_impressions_declaradas), manual_views_declaradas: row.manual_views_declaradas == null ? null : Number(row.manual_views_declaradas), live_impressions_oficiais: row.live_impressions_oficiais == null ? null : Number(row.live_impressions_oficiais), manual_views_oficiais: row.manual_views_oficiais == null ? null : Number(row.manual_views_oficiais) })) }
     })
   })
@@ -314,7 +340,7 @@ export async function portalApresentadoraRoutes(app) {
   app.post('/v1/lives/submissoes-apresentadoras/:id/devolver', { preHandler: reviewAccess }, async (request, reply) => {
     const idCheck = uuid.safeParse(request.params?.id); const parsed = devolucaoSchema.safeParse(request.body); if (!idCheck.success || !parsed.success) return reply.code(400).send({ error: !idCheck.success ? 'id inválido' : parsed.error.issues[0].message })
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
-      return inSubmissionTransaction(db, async () => { const row = await db.query(`UPDATE apresentadora_live_submissoes SET status='devolvida',motivo_devolucao=$4,revisado_por=$3::uuid,revisado_em=NOW(),atualizado_em=NOW() WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='pendente' RETURNING id,status,motivo_devolucao,versao`, [idCheck.data, request.user.tenant_id, request.user.sub, parsed.data.motivo])
+      return inSubmissionTransaction(db, async () => { const row = await db.query(`UPDATE apresentadora_live_submissoes SET status='devolvida',motivo_devolucao=$4,revisado_por=$3::uuid,revisado_em=NOW(),atualizado_em=NOW(),versao=versao+1,arquivamento_status=CASE WHEN $5::boolean THEN 'solicitado' ELSE NULL END,motivo_contestacao=NULL WHERE id=$1::uuid AND tenant_id=$2::uuid AND status='pendente' AND ($6::int IS NULL OR versao=$6) RETURNING id,status,motivo_devolucao,versao,arquivamento_status`, [idCheck.data, request.user.tenant_id, request.user.sub, parsed.data.motivo, parsed.data.arquivar ?? false, parsed.data.versao_esperada ?? null])
       if (!row.rows[0]) return reply.code(409).send({ error: 'Submissão não encontrada ou já revisada.' }); await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: row.rows[0].id, version: row.rows[0].versao, action: 'devolvida', actorId: request.user.sub, motivo: parsed.data.motivo }); return row.rows[0]
       })
     })
@@ -329,6 +355,7 @@ export async function portalApresentadoraRoutes(app) {
       if (!sub.rows[0]) return reply.code(409).send({ error: 'Submissão não encontrada ou já revisada.' })
       if (sub.rows[0].status === 'aprovada' && parsed.data.live_id === sub.rows[0].live_oficial_id) return { id: sub.rows[0].id, status: sub.rows[0].status, live_oficial_id: sub.rows[0].live_oficial_id, revisado_em: sub.rows[0].revisado_em }
       if (!['pendente', 'devolvida'].includes(sub.rows[0].status)) return reply.code(409).send({ error: 'Submissão não encontrada ou já revisada.' })
+      if (sub.rows[0].arquivamento_status) return reply.code(409).send({ error: 'Aguarde a resposta da apresentadora à solicitação de arquivamento.' })
       if (parsed.data.versao_esperada !== undefined && parsed.data.versao_esperada !== sub.rows[0].versao) return reply.code(409).send({ error: 'O envio foi alterado. Atualize a lista e confira os dados novamente.' })
       if (sub.rows[0].status === 'devolvida' && (parsed.data.versao_esperada === undefined || !parsed.data.motivo_revisao)) return reply.code(422).send({ error: 'Para validar um envio devolvido, confira a versão atual e informe o motivo da revisão.' })
       let liveId = parsed.data.live_id

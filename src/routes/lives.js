@@ -1785,6 +1785,7 @@ export async function livesRoutes(app) {
           LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id
           LEFT JOIN apresentadoras a ON a.id=s.apresentadora_id AND a.tenant_id=s.tenant_id
           WHERE s.tenant_id=${bind[0]}::uuid AND s.status IN ('pendente','devolvida')
+            AND s.arquivamento_status IS NULL
             AND (${bind[1]}::uuid IS NULL OR s.marca_id=${bind[1]}::uuid)
             AND (${bind[2]}::uuid IS NULL OR s.apresentadora_id=${bind[2]}::uuid)
             AND (${bind[3]}::uuid IS NULL OR s.cabine_id=${bind[3]}::uuid)

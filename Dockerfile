@@ -2,6 +2,9 @@ FROM node:22-bookworm-slim
 
 WORKDIR /app
 ENV NODE_ENV=production
+# Rollout global autorizado. Override no Railway: "off" desliga novas unioes;
+# UUIDs separados por virgula restringem unidades, sem remover historico/reversao.
+ENV LIVE_MERGE_TENANT_ALLOWLIST="*"
 
 # Ferramentas do backup offsite (scripts/pg_dump_offsite.sh, cron 03:00).
 # Sem elas o cron falhava silenciosamente todo dia: a imagem slim não traz

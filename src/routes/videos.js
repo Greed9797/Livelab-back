@@ -90,7 +90,8 @@ async function videoFinanceiroFechado(db, tenantId, videoId) {
     `SELECT 1 FROM vendas_atribuidas
       WHERE tenant_id = $1::uuid AND origem = 'video' AND origem_id = $2::uuid
         AND status_aprovacao IN ('aprovada', 'fechada', 'faturada')
-      LIMIT 1`,
+      LIMIT 1
+      FOR UPDATE`,
     [tenantId, videoId],
   )
   return Boolean(result.rows[0])
@@ -188,23 +189,33 @@ export async function videosRoutes(app) {
 
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const refsOk = await ensureVideoRefs(db, reply, {
-        tenantId: tenant_id,
-        marcaId: updates.marca_id,
-        apresentadoraId: updates.apresentadora_id,
-        agendaEventoId: updates.agenda_evento_id,
-      })
-      if (!refsOk) return reply
-
-      // A atribuição aprovada/fechada é um snapshot financeiro. O bloqueio
-      // precisa acontecer antes de abrir a transação de UPDATE e antes de
-      // sincronizar vendas_atribuidas, para que PATCH nunca altere o histórico.
-      if (await videoFinanceiroFechado(db, tenant_id, request.params.id)) {
-        return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser alterado' })
-      }
-
       await db.query('BEGIN')
       try {
+        const videoLock = await db.query(
+          `SELECT id FROM video_registros
+            WHERE id = $1::uuid AND tenant_id = $2::uuid
+            FOR UPDATE`,
+          [request.params.id, tenant_id],
+        )
+        if (!videoLock.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Registro de vídeo não encontrado' })
+        }
+        const refsOk = await ensureVideoRefs(db, reply, {
+          tenantId: tenant_id,
+          marcaId: updates.marca_id,
+          apresentadoraId: updates.apresentadora_id,
+          agendaEventoId: updates.agenda_evento_id,
+        })
+        if (!refsOk) {
+          await db.query('ROLLBACK')
+          return reply
+        }
+        // O lock da linha do vídeo serializa este teste com PATCH/DELETE.
+        if (await videoFinanceiroFechado(db, tenant_id, request.params.id)) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser alterado' })
+        }
         const values = [request.params.id, tenant_id, ...fields.map((field) => updates[field])]
         const set = fields.map((field, index) => `${field} = $${index + 3}`).join(', ')
         const result = await db.query(
@@ -230,11 +241,22 @@ export async function videosRoutes(app) {
   app.delete('/v1/videos/:id', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      if (await videoFinanceiroFechado(db, tenant_id, request.params.id)) {
-        return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser excluído' })
-      }
       await db.query('BEGIN')
       try {
+        const videoLock = await db.query(
+          `SELECT id FROM video_registros
+            WHERE id = $1::uuid AND tenant_id = $2::uuid
+            FOR UPDATE`,
+          [request.params.id, tenant_id],
+        )
+        if (!videoLock.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Registro de vídeo não encontrado' })
+        }
+        if (await videoFinanceiroFechado(db, tenant_id, request.params.id)) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser excluído' })
+        }
         const video = await db.query(
           `DELETE FROM video_registros
            WHERE id = $1 AND tenant_id = $2::uuid

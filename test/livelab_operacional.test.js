@@ -46,7 +46,15 @@ describe('LIVELAB operational routes', () => {
     const res = await app.inject({ method: 'GET', url: '/v1/marcas' })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual([{ id: 'marca-1', nome: 'Marca A', ativo: true }])
+    expect(res.json()).toEqual([{
+      id: 'marca-1', nome: 'Marca A', ativo: true,
+      configuracao_comercial: {
+        status: 'nao_aplicavel', codigos: ['nao_aplicavel'],
+        fixo: { status: 'nao_aplicavel', valor: null },
+        comissao: { status: 'nao_aplicavel', percentual: null },
+        resumo: 'Não aplicável para esta entidade',
+      },
+    }])
     expect(tenantIds).toEqual(['tenant-1'])
     expect(queryMock.mock.calls[0][0]).toContain('WHERE m.tenant_id = $1::uuid')
     // params: [tenant_id, mStart, mEnd] — métricas de GMV/lives/vídeos do mês corrente
@@ -278,6 +286,7 @@ describe('LIVELAB operational routes', () => {
   it('PATCH /v1/videos bloqueia atribuição financeira antes de UPDATE/sync', async () => {
     const queryMock = vi.fn(async (sql) => {
       if (sql.includes('FROM marcas')) return { rows: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }] }
+      if (sql.includes('FROM video_registros') && sql.includes('FOR UPDATE')) return { rows: [{ id: 'video-closed' }] }
       if (sql.includes("status_aprovacao IN ('aprovada', 'fechada', 'faturada')")) return { rows: [{ '?column?': 1 }] }
       return { rows: [] }
     })

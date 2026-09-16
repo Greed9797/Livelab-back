@@ -318,6 +318,20 @@ await db.query(
   'UPDATE vendas_atribuidas SET comissao_apresentadora=comissao_apresentadora-0.01 WHERE origem_id=$1 AND apresentadora_id=$2',
   [destinationId, presenterA],
 )
+await db.query(
+  'UPDATE vendas_atribuidas SET marca_condicao_id=$1 WHERE origem_id=$2 AND apresentadora_id=$3',
+  [conditionAugust, destinationId, presenterA],
+)
+await assert.rejects(
+  undoLiveMerge(db, {
+    tenantId: tenant, userId: manager, unionId, requestId: id(51), motivo: 'Condição temporal alterada',
+  }),
+  (error) => error.code === 'UNION_FINANCE_CHANGED' && error.statusCode === 409,
+)
+await db.query(
+  'UPDATE vendas_atribuidas SET marca_condicao_id=$1 WHERE origem_id=$2 AND apresentadora_id=$3',
+  [conditionSeptember, destinationId, presenterA],
+)
 
 await assert.rejects(
   db.query('UPDATE lives SET manual_gmv=1 WHERE id=$1', [liveA]),

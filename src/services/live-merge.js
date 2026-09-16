@@ -186,6 +186,7 @@ function financialFingerprint({ live, sales }) {
       comissao_apresentadora: sumMoneyDecimal([sale.comissao_apresentadora]),
       comissao_franquia: sumMoneyDecimal([sale.comissao_franquia]),
       comissao_franqueadora: sumMoneyDecimal([sale.comissao_franqueadora]),
+      marca_condicao_id: sale.marca_condicao_id ?? null,
       status_aprovacao: sale.status_aprovacao ?? 'pendente_aprovacao',
       status_motivo: sale.status_motivo ?? null,
       aprovado_por: sale.aprovado_por ?? null,

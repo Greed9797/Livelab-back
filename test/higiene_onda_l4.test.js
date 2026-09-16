@@ -109,7 +109,7 @@ describe('L4-2 — nome de marca único por tenant', () => {
     const response = await app.inject({
       method: 'PATCH',
       url: '/v1/marcas/marca-1',
-      payload: { comissao_franquia_pct: 7 },
+      payload: { site: 'https://example.com' },
     })
 
     expect(response.statusCode).toBe(200)

@@ -28,7 +28,8 @@ export function registerReadiness(app, { storageProbe } = {}) {
     reply.header('Cache-Control', 'no-store')
     const ok = await probe()
     const storage = storageProbe ? await storageProbe() : undefined
-    const storageOk = !storageProbe || storage?.ok === true || storage?.configured === false
+    const storageOk = !storageProbe || storage?.ok === true
+      || (storage?.configured === false && process.env.NODE_ENV !== 'production')
     return reply.code(ok && storageOk ? 200 : 503).send({ ok: ok && storageOk, storage: storage ? { configured: storage.configured, ok: storage.ok } : undefined })
   })
 }

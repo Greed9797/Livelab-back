@@ -332,7 +332,17 @@ export async function marcasRoutes(app) {
             [tenant_id, d.cliente_id],
           )
           clienteMarcaExistia = Boolean(existente.rows[0])
-          createdMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: d.cliente_id, origem: origemDados(request) })
+          createdMarcaId = await ensureClienteMarca(db, {
+            tenantId: tenant_id,
+            clienteId: d.cliente_id,
+            origem: origemDados(request),
+            baseline: {
+              valor_fixo_minimo: d.valor_fixo_minimo,
+              comissao_franquia_pct: d.comissao_franquia_pct,
+              comissao_franqueadora_pct: d.comissao_franqueadora_pct,
+              tipo_cobranca: d.tipo_cobranca,
+            },
+          })
         }
 
         if (clienteMarcaExistia && Object.keys(request.body ?? {}).some((field) => CAMPOS_FINANCEIROS_MARCA.has(field))) {
@@ -379,14 +389,28 @@ export async function marcasRoutes(app) {
               ],
             )
           : await db.query(
-              `INSERT INTO marcas (
-                 tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
-                 marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
-                 observacoes, logo_url, valor_fixo_minimo, cor, tipo_cobranca,
-                 data_inicio, data_fim, origem_dados
+              `WITH nova_marca AS (
+                 INSERT INTO marcas (
+                   tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
+                   marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
+                   observacoes, logo_url, valor_fixo_minimo, cor, tipo_cobranca,
+                   data_inicio, data_fim, origem_dados
+                 )
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                 RETURNING *
+               ), baseline AS (
+                 INSERT INTO marca_condicoes_comerciais (
+                   tenant_id, marca_id, inicio_vigencia, fixo_mensal,
+                   comissao_franquia_pct, comissao_franqueadora_pct, tipo_cobranca,
+                   origem, motivo
+                 )
+                 SELECT tenant_id, id, DATE '1900-01-01', valor_fixo_minimo,
+                        comissao_franquia_pct, comissao_franqueadora_pct, tipo_cobranca,
+                        'legado_nao_verificado', 'Condição criada junto com a marca.'
+                   FROM nova_marca
+                 ON CONFLICT (tenant_id, marca_id, inicio_vigencia) WHERE cancelled_at IS NULL DO NOTHING
                )
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-               RETURNING *`,
+               SELECT * FROM nova_marca`,
               [
                 tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
                 d.tipo === 'cliente' ? null : d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,

@@ -12,13 +12,18 @@
  */
 export async function ensureClienteMarca(
   db,
-  { tenantId, clienteId, activateExisting = false, observacoes = 'Marca de cliente criada automaticamente.', origem = 'manual' } = {},
+  { tenantId, clienteId, activateExisting = false, observacoes = 'Marca de cliente criada automaticamente.', origem = 'manual', baseline = {} } = {},
 ) {
   if (!tenantId || !clienteId) return null
 
   // Pega a marca preferida do cliente (ativa > mais recente) de forma determinística.
   const existing = await db.query(
-    `SELECT id, status
+    `SELECT id, status,
+            EXISTS (
+              SELECT 1 FROM marca_condicoes_comerciais c
+               WHERE c.tenant_id = marcas.tenant_id AND c.marca_id = marcas.id
+                 AND c.inicio_vigencia = DATE '1900-01-01' AND c.cancelled_at IS NULL
+            ) AS has_baseline_condition
        FROM marcas
       WHERE tenant_id = $1::uuid
         AND cliente_id = $2::uuid
@@ -29,6 +34,19 @@ export async function ensureClienteMarca(
   )
   const marca = existing.rows[0]
   if (marca) {
+    if (marca.has_baseline_condition === false) {
+      await db.query(
+        `INSERT INTO marca_condicoes_comerciais (
+           tenant_id, marca_id, inicio_vigencia, fixo_mensal,
+           comissao_franquia_pct, comissao_franqueadora_pct, tipo_cobranca,
+           origem, motivo
+         ) VALUES ($1::uuid,$2::uuid,DATE '1900-01-01',$3,$4,$5,$6,'legado_nao_verificado',$7)
+         ON CONFLICT (tenant_id, marca_id, inicio_vigencia) WHERE cancelled_at IS NULL DO NOTHING`,
+        [tenantId, marca.id, baseline.valor_fixo_minimo ?? 0,
+          baseline.comissao_franquia_pct ?? 0, baseline.comissao_franqueadora_pct ?? 0,
+          baseline.tipo_cobranca ?? 'fixo_mais_comissao', observacoes],
+      )
+    }
     if (activateExisting && marca.status !== 'ativa') {
       // Reativação é uma ação explícita do cliente. Nunca ressuscita uma marca
       // espelho se o cliente já está cancelado ou arquivado.
@@ -76,11 +94,23 @@ export async function ensureClienteMarca(
   // do @ (ver migration 103 e tiktokUsernameSql, precedência cliente>marca). Copiar
   // aqui criaria @ desatualizado se o cliente trocar o usuário depois.
   const inserted = await db.query(
-    `INSERT INTO marcas (
-       tenant_id, cliente_id, nome, tipo, status, tiktok_username, site, logo_url, observacoes, origem_dados
+    `WITH nova_marca AS (
+       INSERT INTO marcas (
+         tenant_id, cliente_id, nome, tipo, status, tiktok_username, site, logo_url, observacoes, origem_dados
+       ) VALUES ($1,$2,$3,'cliente',$4,NULL,$5,$6,$7,$8)
+       RETURNING id
+     ), baseline AS (
+       INSERT INTO marca_condicoes_comerciais (
+         tenant_id, marca_id, inicio_vigencia, fixo_mensal,
+         comissao_franquia_pct, comissao_franqueadora_pct, tipo_cobranca,
+         origem, motivo
+       )
+       SELECT $1::uuid, id, DATE '1900-01-01', $9, $10, $11, $12,
+              'legado_nao_verificado', $7
+         FROM nova_marca
+       ON CONFLICT (tenant_id, marca_id, inicio_vigencia) WHERE cancelled_at IS NULL DO NOTHING
      )
-     VALUES ($1,$2,$3,'cliente',$4,NULL,$5,$6,$7,$8)
-     RETURNING id`,
+     SELECT id FROM nova_marca`,
     [
       tenantId,
       row.id,
@@ -90,6 +120,10 @@ export async function ensureClienteMarca(
       row.logo_url ?? null,
       observacoes,
       origem,
+      baseline.valor_fixo_minimo ?? 0,
+      baseline.comissao_franquia_pct ?? 0,
+      baseline.comissao_franqueadora_pct ?? 0,
+      baseline.tipo_cobranca ?? 'fixo_mais_comissao',
     ],
   )
   return inserted.rows[0]?.id ?? null

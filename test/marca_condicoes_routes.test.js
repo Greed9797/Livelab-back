@@ -54,4 +54,31 @@ describe('rotas de condições comerciais', () => {
     expect(response.json()).toMatchObject({ code: 'EXPECTED_REVISION_REQUIRED' })
     await app.close()
   })
+
+  it('cria a condição baseline na mesma transação para marca sem cliente', async () => {
+    const inserted = {
+      id: marcaId, tenant_id: tenantId, cliente_id: null, nome: 'Marca parceira',
+      tipo: 'parceira', status: 'ativa', tipo_cobranca: 'fixo_mais_comissao',
+      valor_fixo_minimo: 900, comissao_franquia_pct: 7, comissao_franqueadora_pct: 1,
+    }
+    const query = vi.fn(async (sql) => {
+      const text = String(sql)
+      if (text.includes('WITH nova_marca') && text.includes('INSERT INTO marcas')) return { rows: [inserted] }
+      return { rows: [] }
+    })
+    const app = buildApp(query)
+    await app.register(marcasRoutes)
+    const response = await app.inject({
+      method: 'POST', url: '/v1/marcas',
+      payload: {
+        nome: 'Marca parceira', tipo: 'parceira', valor_fixo_minimo: 900,
+        comissao_franquia_pct: 7, comissao_franqueadora_pct: 1,
+      },
+    })
+    expect(response.statusCode).toBe(201)
+    const insert = query.mock.calls.find(([sql]) => String(sql).includes('WITH nova_marca'))
+    expect(String(insert?.[0])).toContain('INSERT INTO marca_condicoes_comerciais')
+    expect(query.mock.calls.map(([sql]) => String(sql).trim())).toEqual(expect.arrayContaining(['BEGIN', 'COMMIT']))
+    await app.close()
+  })
 })

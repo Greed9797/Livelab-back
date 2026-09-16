@@ -1,4 +1,5 @@
 import { lockTenantLiveFinance } from '../lib/live-finance-lock.js'
+import { activeLiveSql } from '../lib/live-merge-sql.js'
 import {
   conditionPayloadHash,
   normalizarMarcaCondicao,
@@ -86,14 +87,15 @@ async function readImpact(db, { tenantId, marcaId, start, end }) {
        FROM lives l
       WHERE l.tenant_id = $1::uuid AND l.marca_id = $2::uuid
         AND l.iniciado_em >= ($3::date AT TIME ZONE 'America/Sao_Paulo')
-        AND l.iniciado_em < ($4::date AT TIME ZONE 'America/Sao_Paulo')`,
+        AND l.iniciado_em < ($4::date AT TIME ZONE 'America/Sao_Paulo')
+        AND ${activeLiveSql('l')}`,
       [tenantId, marcaId, start, end],
     ),
     db.query(
       `SELECT
          COUNT(*) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') = 'aprovada')::int AS fechados,
-         COUNT(*) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'aprovada')::int AS abertos,
-         COALESCE(SUM(va.gmv) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'aprovada'), 0) AS gmv_aberto
+         COUNT(*) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada'))::int AS abertos,
+         COALESCE(SUM(va.gmv) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada')), 0) AS gmv_aberto
        FROM vendas_atribuidas va
       WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
         AND va.data >= $3::date AND va.data < $4::date`,
@@ -117,7 +119,7 @@ async function openMovementBreakdown(db, { tenantId, marcaId, start, end }) {
        FROM vendas_atribuidas va
       WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
         AND va.data >= $3::date AND va.data < $4::date
-        AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'aprovada'
+        AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada')
       GROUP BY va.data::date
       ORDER BY va.data::date`,
     [tenantId, marcaId, start, end],
@@ -125,11 +127,51 @@ async function openMovementBreakdown(db, { tenantId, marcaId, start, end }) {
   return result.rows.map((row) => ({ competencia: String(row.competencia).slice(0, 10), gmv: Number(row.gmv ?? 0) }))
 }
 
+function dateValue(value) {
+  if (!value) return null
+  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  return String(value).slice(0, 10)
+}
+
+function monthStartFromDate(value) {
+  const date = dateValue(value)
+  return date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date.slice(0, 7)}-01` : null
+}
+
+// Sem uma sucessora, o intervalo lógico é aberto. Para manter a prévia e o
+// recálculo finitos, materializamos somente até o mês seguinte ao último
+// movimento já existente. Movimentos criados depois dessa confirmação usarão
+// o resolver temporal (T9+) e não precisam ser reescritos retroativamente.
+async function movementHorizonEnd(db, { tenantId, marcaId, start }) {
+  const result = await db.query(
+    `SELECT MAX(competencia) AS ultima_competencia
+       FROM (
+         SELECT (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date AS competencia
+           FROM lives l
+          WHERE l.tenant_id = $1::uuid AND l.marca_id = $2::uuid
+            AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date >= $3::date
+            AND ${activeLiveSql('l')}
+         UNION ALL
+         SELECT va.data::date AS competencia
+           FROM vendas_atribuidas va
+          WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
+            AND va.data >= $3::date
+            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada')
+       ) movimentos`,
+    [tenantId, marcaId, start],
+  )
+  const lastMonth = monthStartFromDate(result.rows[0]?.ultima_competencia)
+  return lastMonth ? monthAfter(lastMonth) : monthAfter(start)
+}
+
 async function previewInTransaction(db, { tenantId, marcaId, proposal, conditions }) {
   const nextExisting = conditions
     .filter((condition) => condition.inicio_vigencia > proposal.inicio_vigencia)
     .sort((a, b) => String(a.inicio_vigencia).localeCompare(String(b.inicio_vigencia)))[0]
-  const end = nextExisting?.inicio_vigencia ?? monthAfter(proposal.inicio_vigencia)
+  const horizonEnd = await movementHorizonEnd(db, { tenantId, marcaId, start: proposal.inicio_vigencia })
+  const end = nextExisting && nextExisting.inicio_vigencia < horizonEnd
+    ? nextExisting.inicio_vigencia
+    : horizonEnd
   const impact = await readImpact(db, { tenantId, marcaId, start: proposal.inicio_vigencia, end })
   const movements = await openMovementBreakdown(db, { tenantId, marcaId, start: proposal.inicio_vigencia, end })
   return {
@@ -188,7 +230,7 @@ async function recalculateOpenVendas(db, { tenantId, marcaId, start, end }) {
         FROM vendas_atribuidas va
        WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
          AND va.data >= $3::date AND va.data < $4::date
-         AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'aprovada'
+         AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada')
     )
     UPDATE vendas_atribuidas va
         SET comissao_franquia = ROUND(r.gmv * r.franquia_pct / 100.0, 2),
@@ -304,10 +346,7 @@ export async function confirmarCondicaoMarca(db, {
     const created = inserted.rows[0]
     if (!created) throw new Error('Condição não foi criada')
 
-    const end = conditions
-      .filter((row) => row.inicio_vigencia > normalized.inicio_vigencia)
-      .sort((a, b) => String(a.inicio_vigencia).localeCompare(String(b.inicio_vigencia)))[0]?.inicio_vigencia
-      ?? monthAfter(normalized.inicio_vigencia)
+    const end = preview.fim_vigencia_exclusivo
     await recalculateOpenVendas(db, { tenantId, marcaId, start: normalized.inicio_vigencia, end })
     await recalculateOpenLives(db, { tenantId, marcaId, start: normalized.inicio_vigencia, end })
     await db.query(

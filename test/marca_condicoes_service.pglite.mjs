@@ -43,15 +43,24 @@ await db.exec(`
   INSERT INTO marcas(id,tenant_id,nome,tipo,valor_fixo_minimo,comissao_franquia_pct,comissao_franqueadora_pct,tipo_cobranca,atualizado_em)
     VALUES ('${marca}','${tenant}','Marca A','cliente',1000,5,2,'fixo_mais_comissao',NOW());
   INSERT INTO lives(id,tenant_id,marca_id,iniciado_em,fat_gerado,comissao_calculada)
-    VALUES ('${id(3)}','${tenant}','${marca}','2026-09-15T12:00:00Z',10000,500);
+    VALUES ('${id(3)}','${tenant}','${marca}','2026-09-15T12:00:00Z',10000,500),
+           ('${id(5)}','${tenant}','${marca}','2026-10-15T12:00:00Z',2000,100),
+           -- Historical origin of a union: it must not inflate preview or recalc.
+           ('${id(7)}','${tenant}','${marca}','2026-09-20T12:00:00Z',999,50);
+  UPDATE lives SET uniao_destino_id='${id(3)}' WHERE id='${id(7)}';
   INSERT INTO vendas_atribuidas(id,tenant_id,marca_id,data,gmv,status_aprovacao,comissao_franquia,comissao_franqueadora)
-    VALUES ('${id(4)}','${tenant}','${marca}','2026-09-15',10000,'pendente_aprovacao',500,200);
+    VALUES ('${id(4)}','${tenant}','${marca}','2026-09-15',10000,'pendente_aprovacao',500,200),
+           ('${id(6)}','${tenant}','${marca}','2026-10-15',2000,'pendente_aprovacao',100,40),
+           -- Rejected financial movement: it must not be open or recalculated.
+           ('${id(8)}','${tenant}','${marca}','2026-10-15',999,'reprovada',1,1);
 `)
 await db.exec(await readFile(new URL('../migrations/151_marca_condicoes_comerciais.sql', import.meta.url), 'utf8'))
 await db.query(`SELECT set_config('app.tenant_id',$1,false)`, [tenant])
 
 const preview = await preverCondicaoMarca(db, { tenantId: tenant, marcaId: marca, proposta: proposal })
 assert.equal(preview.bloqueada, false)
+assert.equal(preview.fim_vigencia_exclusivo, '2026-11-01')
+assert.equal(preview.impacto.movimentos_abertos, 4)
 assert.equal((await db.query('SELECT count(*)::int AS total FROM marca_condicoes_comerciais')).rows[0].total, 1)
 
 const confirmed = await confirmarCondicaoMarca(db, {
@@ -61,6 +70,10 @@ const confirmed = await confirmarCondicaoMarca(db, {
 assert.equal(confirmed.idempotent, false)
 assert.equal((await db.query(`SELECT comissao_franquia,comissao_franqueadora FROM vendas_atribuidas WHERE id=$1`, [id(4)])).rows[0].comissao_franquia, '800.00')
 assert.equal((await db.query(`SELECT comissao_calculada FROM lives WHERE id=$1`, [id(3)])).rows[0].comissao_calculada, '800.00')
+assert.equal((await db.query(`SELECT comissao_calculada FROM lives WHERE id=$1`, [id(5)])).rows[0].comissao_calculada, '160.00')
+assert.equal((await db.query(`SELECT comissao_franquia FROM vendas_atribuidas WHERE id=$1`, [id(6)])).rows[0].comissao_franquia, '160.00')
+assert.equal((await db.query(`SELECT comissao_franquia FROM vendas_atribuidas WHERE id=$1`, [id(8)])).rows[0].comissao_franquia, '1.00')
+assert.equal((await db.query(`SELECT comissao_calculada FROM lives WHERE id=$1`, [id(7)])).rows[0].comissao_calculada, '50.00')
 assert.equal((await db.query(`SELECT valor_fixo_minimo,comissao_franquia_pct FROM marcas WHERE id=$1`, [marca])).rows[0].valor_fixo_minimo, '1200.00')
 
 // A second confirmation with the same key is a read-only idempotent retry.
@@ -71,7 +84,7 @@ const retry = await confirmarCondicaoMarca(db, {
 assert.equal(retry.idempotent, true)
 
 // Closed live is detected before insertion and rolls back.
-await db.query(`UPDATE lives SET iniciado_em='2026-10-15T12:00:00Z', faturado_em=NOW() WHERE id=$1`, [id(3)])
+await db.query(`UPDATE lives SET faturado_em=NOW() WHERE id=$1`, [id(5)])
 await assert.rejects(
   confirmarCondicaoMarca(db, {
     tenantId: tenant, marcaId: marca,

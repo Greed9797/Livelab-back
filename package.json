@@ -8,7 +8,7 @@
     "dev": "nodemon --watch src src/server.js",
     "start": "node apply_migrations.js && node src/server.js",
     "test": "vitest run test/*.test.js",
-    "test:integration": "node test/assiduidade_union.pglite.mjs",
+    "test:integration": "node test/integration.pglite.mjs",
     "test:watch": "vitest"
   },
   "engines": {

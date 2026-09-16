@@ -30,7 +30,7 @@ await db.exec(migration)
 await db.exec(migration)
 
 const baseline = await db.query(`
-  SELECT tenant_id, marca_id, inicio_vigencia, fixo_mensal,
+  SELECT tenant_id, marca_id, inicio_vigencia::text, fixo_mensal,
          comissao_franquia_pct, fixo_confirmado, origem
     FROM marca_condicoes_comerciais
    ORDER BY tenant_id, marca_id

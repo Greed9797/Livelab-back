@@ -120,6 +120,51 @@ const CAMPOS_FINANCEIROS_MARCA = new Set([
   'comissao_franquia_pct', 'comissao_franqueadora_pct', 'valor_fixo_minimo', 'tipo_cobranca',
 ])
 
+/** Shape canônico consumido pela lista de marcas e pelos formulários de cliente. */
+export function buildConfiguracaoComercial({ tipo, condicao } = {}) {
+  if (tipo !== 'cliente') {
+    return {
+      status: 'nao_aplicavel',
+      codigos: ['nao_aplicavel'],
+      fixo: { status: 'nao_aplicavel', valor: null },
+      comissao: { status: 'nao_aplicavel', percentual: null },
+      resumo: 'Não aplicável para esta entidade',
+    }
+  }
+  if (!condicao) {
+    return {
+      status: 'incompleto',
+      codigos: ['fixo_nao_informado', 'comissao_nao_informada'],
+      fixo: { status: 'fixo_nao_informado', valor: null },
+      comissao: { status: 'comissao_nao_informada', percentual: null },
+      resumo: 'Cadastre o fixo e a comissão',
+    }
+  }
+  const legado = condicao.origem === 'legado_nao_verificado'
+    && !condicao.fixo_confirmado && !condicao.comissao_confirmada
+  if (legado) {
+    return {
+      status: 'a_revisar',
+      codigos: ['a_revisar'],
+      fixo: { status: 'a_revisar', valor: Number(condicao.fixo_mensal ?? 0) },
+      comissao: { status: 'a_revisar', percentual: Number(condicao.comissao_franquia_pct ?? 0) },
+      resumo: 'Revise a condição comercial legada',
+    }
+  }
+  const fixoOk = condicao.fixo_confirmado || Number(condicao.fixo_mensal ?? 0) === 0
+  const comissaoOk = condicao.comissao_confirmada || Number(condicao.comissao_franquia_pct ?? 0) === 0
+  const codigos = []
+  if (!fixoOk) codigos.push('fixo_nao_informado')
+  if (!comissaoOk) codigos.push('comissao_nao_informada')
+  return {
+    status: codigos.length === 0 ? 'configurado' : 'incompleto',
+    codigos,
+    fixo: { status: fixoOk ? 'configurado' : 'fixo_nao_informado', valor: Number(condicao.fixo_mensal ?? 0) },
+    comissao: { status: comissaoOk ? 'configurado' : 'comissao_nao_informada', percentual: Number(condicao.comissao_franquia_pct ?? 0) },
+    resumo: codigos.length === 0 ? 'Condição comercial configurada' : 'Complete a condição comercial',
+  }
+}
+
 function responderErroCondicao(reply, error) {
   return reply.code(error?.statusCode ?? 409).send({
     code: error?.code ?? 'MARCA_CONDITION_ERROR',
@@ -185,9 +230,26 @@ export async function marcasRoutes(app) {
         `SELECT ${marcaCols},
                 COALESCE(mtr.gmv_mes, 0) AS gmv_mes,
                 COALESCE(mtr.lives_mes, 0) AS lives_mes,
-                COALESCE(mtr.videos_mes, 0) AS videos_mes
+                COALESCE(mtr.videos_mes, 0) AS videos_mes,
+                mcc.id AS comercial_condicao_id,
+                mcc.fixo_mensal AS comercial_fixo_mensal,
+                mcc.comissao_franquia_pct AS comercial_comissao_franquia_pct,
+                mcc.tipo_cobranca AS comercial_tipo_cobranca,
+                mcc.fixo_confirmado AS comercial_fixo_confirmado,
+                mcc.comissao_confirmada AS comercial_comissao_confirmada,
+                mcc.origem AS comercial_origem
          FROM marcas m
          LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT id, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
+                  fixo_confirmado, comissao_confirmada, origem
+             FROM marca_condicoes_comerciais
+            WHERE tenant_id = m.tenant_id AND marca_id = m.id
+              AND inicio_vigencia <= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+              AND cancelled_at IS NULL
+            ORDER BY inicio_vigencia DESC, revision DESC
+            LIMIT 1
+         ) mcc ON true
          LEFT JOIN LATERAL (
            SELECT json_agg(json_build_object(
              'id', am.apresentadora_id,
@@ -223,7 +285,20 @@ export async function marcasRoutes(app) {
          ORDER BY ${marcaStatusOperacionalSql()} = 'ativa' DESC, m.nome ASC`,
         values,
       )
-      return result.rows
+      return result.rows.map((row) => ({
+        ...row,
+        configuracao_comercial: buildConfiguracaoComercial({
+          tipo: row.tipo,
+          condicao: row.comercial_condicao_id ? {
+            fixo_mensal: row.comercial_fixo_mensal,
+            comissao_franquia_pct: row.comercial_comissao_franquia_pct,
+            tipo_cobranca: row.comercial_tipo_cobranca,
+            fixo_confirmado: row.comercial_fixo_confirmado,
+            comissao_confirmada: row.comercial_comissao_confirmada,
+            origem: row.comercial_origem,
+          } : null,
+        }),
+      }))
       }),
     })
     setCacheControl(reply, state, startedAt)
@@ -500,9 +575,26 @@ export async function marcasRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
-        `SELECT ${marcaCols}
+        `SELECT ${marcaCols},
+                mcc.id AS comercial_condicao_id,
+                mcc.fixo_mensal AS comercial_fixo_mensal,
+                mcc.comissao_franquia_pct AS comercial_comissao_franquia_pct,
+                mcc.tipo_cobranca AS comercial_tipo_cobranca,
+                mcc.fixo_confirmado AS comercial_fixo_confirmado,
+                mcc.comissao_confirmada AS comercial_comissao_confirmada,
+                mcc.origem AS comercial_origem
          FROM marcas m
          LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
+         LEFT JOIN LATERAL (
+           SELECT id, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
+                  fixo_confirmado, comissao_confirmada, origem
+             FROM marca_condicoes_comerciais
+            WHERE tenant_id = m.tenant_id AND marca_id = m.id
+              AND inicio_vigencia <= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+              AND cancelled_at IS NULL
+            ORDER BY inicio_vigencia DESC, revision DESC
+            LIMIT 1
+         ) mcc ON true
          LEFT JOIN LATERAL (
            SELECT json_agg(json_build_object(
              'id', am.apresentadora_id,
@@ -521,7 +613,21 @@ export async function marcasRoutes(app) {
         [request.params.id, tenant_id],
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Marca não encontrada' })
-      return result.rows[0]
+      const row = result.rows[0]
+      return {
+        ...row,
+        configuracao_comercial: buildConfiguracaoComercial({
+          tipo: row.tipo,
+          condicao: row.comercial_condicao_id ? {
+            fixo_mensal: row.comercial_fixo_mensal,
+            comissao_franquia_pct: row.comercial_comissao_franquia_pct,
+            tipo_cobranca: row.comercial_tipo_cobranca,
+            fixo_confirmado: row.comercial_fixo_confirmado,
+            comissao_confirmada: row.comercial_comissao_confirmada,
+            origem: row.comercial_origem,
+          } : null,
+        }),
+      }
     })
   })
 

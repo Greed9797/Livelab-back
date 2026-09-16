@@ -97,7 +97,11 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(sql).toContain('FROM lives l')
     expect(sql).toContain('video_periodo')
     expect(sql).toContain('custos_periodo')
-    expect(sql).not.toContain('FROM vendas_atribuidas va')
+    // Vídeos usam o snapshot atribuído/condição temporal; a consulta deve limitar essa
+    // fonte à origem de vídeo e excluir registros reprovados.
+    expect(sql).toContain('FROM vendas_atribuidas va')
+    expect(sql).toContain("va.origem = 'video'")
+    expect(sql).toContain("<> 'reprovada'")
     expect(releaseMock).toHaveBeenCalledTimes(1)
 
     await app.close()

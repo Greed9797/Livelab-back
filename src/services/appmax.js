@@ -27,12 +27,13 @@ function _apiKey() {
   return k
 }
 
-async function _request(path, { method = 'POST', body } = {}) {
+async function _request(path, { method = 'POST', body, idempotencyKey } = {}) {
   const res = await fetch(`${APPMAX_BASE}${path}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
+      ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
     },
     body: body ? JSON.stringify({ 'access-token': _apiKey(), ...body }) : undefined,
   })
@@ -76,14 +77,14 @@ export async function createOrder(order) {
     'products': order.products,
     'total': order.total,
   }
-  const res = await _request('/order', { body })
+  const res = await _request('/order', { body, idempotencyKey: order.idempotencyKey ? `${order.idempotencyKey}:order` : undefined })
   return res?.data
 }
 
 /**
  * Gera cobrança PIX. Retorna QR code + copia-e-cola.
  */
-export async function chargePix({ orderId, customerId, expirationDate }) {
+export async function chargePix({ orderId, customerId, expirationDate, idempotencyKey }) {
   const body = {
     'cart': { 'order_id': orderId },
     'customer': { 'customer_id': customerId },
@@ -94,14 +95,14 @@ export async function chargePix({ orderId, customerId, expirationDate }) {
       },
     },
   }
-  const res = await _request('/payment/pix', { body })
+  const res = await _request('/payment/pix', { body, idempotencyKey })
   return res?.data
 }
 
 /**
  * Gera boleto bancário.
  */
-export async function chargeBoleto({ orderId, customerId, dueDate }) {
+export async function chargeBoleto({ orderId, customerId, dueDate, idempotencyKey }) {
   const body = {
     'cart': { 'order_id': orderId },
     'customer': { 'customer_id': customerId },
@@ -112,7 +113,7 @@ export async function chargeBoleto({ orderId, customerId, dueDate }) {
       },
     },
   }
-  const res = await _request('/payment/boleto', { body })
+  const res = await _request('/payment/boleto', { body, idempotencyKey })
   return res?.data
 }
 
@@ -180,6 +181,7 @@ export async function criarCobranca({
   descricao,
   externalReference,
   billingType = 'BOLETO',
+  idempotencyKey,
 }) {
   const gatewayCustomerId = asaasCustomerId  // compatibilidade interna
 
@@ -190,6 +192,7 @@ export async function criarCobranca({
       { sku: externalReference, name: descricao, qty: 1, price: valor, digital_product: 1 },
     ],
     total: valor,
+    idempotencyKey,
   })
   const orderId = order?.id ?? order?.order_id
   if (!orderId) throw new Error(`Appmax createOrder não retornou id (resp: ${JSON.stringify(order)})`)
@@ -202,12 +205,14 @@ export async function criarCobranca({
       orderId,
       customerId: gatewayCustomerId,
       expirationDate: vencimento,
+      idempotencyKey,
     })
   } else {
     payment = await chargeBoleto({
       orderId,
       customerId: gatewayCustomerId,
       dueDate: vencimento,
+      idempotencyKey,
     })
   }
 

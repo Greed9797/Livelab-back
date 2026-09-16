@@ -18,7 +18,8 @@ export async function ensureClienteMarca(
 
   // Pega a marca preferida do cliente (ativa > mais recente) de forma determinística.
   const existing = await db.query(
-    `SELECT id, status,
+    `SELECT id, status, valor_fixo_minimo, comissao_franquia_pct,
+            comissao_franqueadora_pct, tipo_cobranca,
             EXISTS (
               SELECT 1 FROM marca_condicoes_comerciais c
                WHERE c.tenant_id = marcas.tenant_id AND c.marca_id = marcas.id
@@ -42,9 +43,11 @@ export async function ensureClienteMarca(
            origem, motivo
          ) VALUES ($1::uuid,$2::uuid,DATE '1900-01-01',$3,$4,$5,$6,'legado_nao_verificado',$7)
          ON CONFLICT (tenant_id, marca_id, inicio_vigencia) WHERE cancelled_at IS NULL DO NOTHING`,
-        [tenantId, marca.id, baseline.valor_fixo_minimo ?? 0,
-          baseline.comissao_franquia_pct ?? 0, baseline.comissao_franqueadora_pct ?? 0,
-          baseline.tipo_cobranca ?? 'fixo_mais_comissao', observacoes],
+        [tenantId, marca.id,
+          baseline.valor_fixo_minimo ?? marca.valor_fixo_minimo ?? 0,
+          baseline.comissao_franquia_pct ?? marca.comissao_franquia_pct ?? 0,
+          baseline.comissao_franqueadora_pct ?? marca.comissao_franqueadora_pct ?? 0,
+          baseline.tipo_cobranca ?? marca.tipo_cobranca ?? 'fixo_mais_comissao', observacoes],
       )
     }
     if (activateExisting && marca.status !== 'ativa') {

@@ -16,7 +16,10 @@ try {
     CREATE TABLE marcas (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, cliente_id uuid NOT NULL,
       nome text, tipo text, status text, tiktok_username text, site text, logo_url text,
-      observacoes text, origem_dados text, criado_em timestamptz DEFAULT now(), atualizado_em timestamptz DEFAULT now()
+      observacoes text, origem_dados text, valor_fixo_minimo numeric DEFAULT 0,
+      comissao_franquia_pct numeric DEFAULT 0, comissao_franqueadora_pct numeric DEFAULT 0,
+      tipo_cobranca text DEFAULT 'fixo_mais_comissao',
+      criado_em timestamptz DEFAULT now(), atualizado_em timestamptz DEFAULT now()
     );
     CREATE TABLE marca_condicoes_comerciais (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL,
@@ -52,7 +55,7 @@ try {
     baseline: { valor_fixo_minimo: 1200, comissao_franquia_pct: 8, comissao_franqueadora_pct: 2, tipo_cobranca: 'fixo_ou_comissao' },
   })
   assert.deepEqual((await db.query(`
-    SELECT fixo_mensal, comissao_franquia_pct, tipo_cobranca, fixo_confirmado, comissao_confirmada, origem
+    SELECT c.fixo_mensal, c.comissao_franquia_pct, c.tipo_cobranca, c.fixo_confirmado, c.comissao_confirmada, c.origem
       FROM marca_condicoes_comerciais c
      JOIN marcas m ON m.id = c.marca_id
      WHERE m.cliente_id=$1`, [configured])).rows[0], {

@@ -169,46 +169,55 @@ export async function preverCondicaoMarca(db, { tenantId, marcaId, proposta, con
 
 async function recalculateOpenVendas(db, { tenantId, marcaId, start, end }) {
   await db.query(
-    `UPDATE vendas_atribuidas va
-        SET comissao_franquia = ROUND(va.gmv * COALESCE(cond.comissao_franquia_pct, 0) / 100.0, 2),
-            comissao_franqueadora = ROUND(va.gmv * COALESCE(cond.comissao_franqueadora_pct, 0) / 100.0, 2),
+    `WITH recalculated AS (
+      SELECT va.id, va.gmv,
+             COALESCE((SELECT c.comissao_franquia_pct
+                         FROM marca_condicoes_comerciais c
+                        WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
+                          AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
+                        ORDER BY c.inicio_vigencia DESC LIMIT 1), 0) AS franquia_pct,
+             COALESCE((SELECT c.comissao_franqueadora_pct
+                         FROM marca_condicoes_comerciais c
+                        WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
+                          AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
+                        ORDER BY c.inicio_vigencia DESC LIMIT 1), 0) AS franqueadora_pct
+        FROM vendas_atribuidas va
+       WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
+         AND va.data >= $3::date AND va.data < $4::date
+         AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'aprovada'
+    )
+    UPDATE vendas_atribuidas va
+        SET comissao_franquia = ROUND(r.gmv * r.franquia_pct / 100.0, 2),
+            comissao_franqueadora = ROUND(r.gmv * r.franqueadora_pct / 100.0, 2),
             atualizado_em = NOW()
-       FROM LATERAL (
-         SELECT c.comissao_franquia_pct, c.comissao_franqueadora_pct
-           FROM marca_condicoes_comerciais c
-          WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
-            AND c.inicio_vigencia <= va.data
-            AND c.cancelled_at IS NULL
-          ORDER BY c.inicio_vigencia DESC
-          LIMIT 1
-       ) cond
-      WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
-        AND va.data >= $3::date AND va.data < $4::date
-        AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'aprovada'`,
+       FROM recalculated r
+      WHERE va.id = r.id`,
     [tenantId, marcaId, start, end],
   )
 }
 
 async function recalculateOpenLives(db, { tenantId, marcaId, start, end }) {
   await db.query(
-    `UPDATE lives l
-        SET comissao_calculada = ROUND(
-              COALESCE(l.fat_gerado, 0) * COALESCE(cond.comissao_franquia_pct, 0) / 100.0, 2),
+    `WITH recalculated AS (
+      SELECT l.id, COALESCE(l.fat_gerado, 0) AS gmv,
+             COALESCE((SELECT c.comissao_franquia_pct
+                         FROM marca_condicoes_comerciais c
+                        WHERE c.tenant_id = l.tenant_id AND c.marca_id = l.marca_id
+                          AND c.inicio_vigencia <= (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date
+                          AND c.cancelled_at IS NULL
+                        ORDER BY c.inicio_vigencia DESC LIMIT 1), 0) AS franquia_pct
+        FROM lives l
+       WHERE l.tenant_id = $1::uuid AND l.marca_id = $2::uuid
+         AND l.iniciado_em >= ($3::date AT TIME ZONE 'America/Sao_Paulo')
+         AND l.iniciado_em < ($4::date AT TIME ZONE 'America/Sao_Paulo')
+         AND l.faturado_em IS NULL AND l.boleto_id IS NULL
+         AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+    )
+    UPDATE lives l
+        SET comissao_calculada = ROUND(r.gmv * r.franquia_pct / 100.0, 2),
             atualizado_em = NOW()
-       FROM LATERAL (
-         SELECT c.comissao_franquia_pct
-           FROM marca_condicoes_comerciais c
-          WHERE c.tenant_id = l.tenant_id AND c.marca_id = l.marca_id
-            AND c.inicio_vigencia <= (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date
-            AND c.cancelled_at IS NULL
-          ORDER BY c.inicio_vigencia DESC
-          LIMIT 1
-       ) cond
-      WHERE l.tenant_id = $1::uuid AND l.marca_id = $2::uuid
-        AND l.iniciado_em >= ($3::date AT TIME ZONE 'America/Sao_Paulo')
-        AND l.iniciado_em < ($4::date AT TIME ZONE 'America/Sao_Paulo')
-        AND l.faturado_em IS NULL AND l.boleto_id IS NULL
-        AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL`,
+       FROM recalculated r
+      WHERE l.id = r.id`,
     [tenantId, marcaId, start, end],
   )
 }

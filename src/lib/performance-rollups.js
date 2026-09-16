@@ -1,5 +1,6 @@
 import { presenterFixedCapSql } from '../config/presenter_defaults.js'
 import { apresentadoraHorasSql } from './metric-sql.js'
+import { liveGmvSql } from './metric-sql.js'
 import { activeLiveSql } from './live-merge-sql.js'
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
@@ -102,8 +103,14 @@ export async function getPerformanceRanking(db, {
             ELSE COALESCE(l.manual_orders, l.final_orders_count, 0)
           END::int AS pedidos,
           COALESCE(live_commission.comissao_apresentadora, 0) AS comissao_apresentadora,
-          COALESCE(live_commission.comissao_franquia, 0) AS comissao_franquia,
-          COALESCE(live_commission.comissao_franqueadora, 0) AS comissao_franqueadora,
+          CASE WHEN mc.id IS NOT NULL
+            THEN COALESCE(${liveGmvSql('l')} * mc.comissao_franquia_pct / 100.0, 0)
+            ELSE COALESCE(live_commission.comissao_franquia, 0)
+          END AS comissao_franquia,
+          CASE WHEN mc.id IS NOT NULL
+            THEN COALESCE(${liveGmvSql('l')} * mc.comissao_franqueadora_pct / 100.0, 0)
+            ELSE COALESCE(live_commission.comissao_franqueadora, 0)
+          END AS comissao_franqueadora,
           CASE
             WHEN $7::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
               THEN COALESCE(
@@ -127,6 +134,16 @@ export async function getPerformanceRanking(db, {
           ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
           LIMIT 1
         ) ap_v2 ON true
+        LEFT JOIN LATERAL (
+          SELECT c.id, c.comissao_franquia_pct, c.comissao_franqueadora_pct
+            FROM marca_condicoes_comerciais c
+           WHERE c.tenant_id = l.tenant_id
+             AND c.marca_id = l.marca_id
+             AND c.inicio_vigencia <= (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date
+             AND c.cancelled_at IS NULL
+           ORDER BY c.inicio_vigencia DESC
+           LIMIT 1
+        ) mc ON true
         LEFT JOIN LATERAL (
           SELECT
             SUM(va.pedidos)::int AS pedidos,
@@ -179,6 +196,38 @@ export async function getPerformanceRanking(db, {
         UNION ALL
         SELECT * FROM video_source
       )
+      ,marca_composicao AS (
+        SELECT combined.marca_id, combined.mes,
+               COALESCE(SUM(combined.comissao_franquia), 0) AS comissao,
+               COALESCE(MAX(CASE WHEN m.tipo = 'cliente'
+                 THEN COALESCE(mc.fixo_mensal, m.valor_fixo_minimo) ELSE 0 END), 0) AS fixo,
+               COALESCE(MAX(CASE WHEN m.tipo = 'cliente'
+                 THEN COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao')
+                 ELSE 'fixo_mais_comissao' END), 'fixo_mais_comissao') AS tipo_cobranca
+          FROM combined
+          LEFT JOIN marcas m ON m.id = combined.marca_id AND m.tenant_id = $1::uuid
+          LEFT JOIN LATERAL (
+            SELECT c.fixo_mensal, c.tipo_cobranca
+              FROM marca_condicoes_comerciais c
+             WHERE c.tenant_id = $1::uuid
+               AND c.marca_id = combined.marca_id
+               AND c.inicio_vigencia <= combined.mes::date
+               AND c.cancelled_at IS NULL
+             ORDER BY c.inicio_vigencia DESC
+             LIMIT 1
+          ) mc ON true
+         WHERE combined.gmv > 0 OR combined.pedidos > 0
+         GROUP BY combined.marca_id, combined.mes
+      ),
+      marca_totais AS (
+        SELECT marca_id,
+               COALESCE(SUM(fixo), 0) AS fixo,
+               COALESCE(SUM(comissao), 0) AS comissao_variavel,
+               COALESCE(SUM(CASE WHEN tipo_cobranca = 'fixo_ou_comissao'
+                 THEN GREATEST(fixo, comissao) ELSE fixo + comissao END), 0) AS receita
+          FROM marca_composicao
+         GROUP BY marca_id
+      )
       SELECT
         combined.marca_id,
         m.nome AS marca_nome,
@@ -195,18 +244,14 @@ export async function getPerformanceRanking(db, {
         -- Fixo mensal (marcas.valor_fixo_minimo) SOMA ao comissionamento da marca tipo='cliente',
         -- uma vez por mês COM comissionamento gerado (GMV/pedidos > 0), em franquia E franqueadora.
         -- O FILTER alinha com o HAVING (gmv/pedidos <> 0) e com o financeiro: as duas telas concordam.
-        COALESCE(SUM(combined.comissao_franquia), 0)
-          + COALESCE(MAX(CASE WHEN m.tipo = 'cliente' THEN m.valor_fixo_minimo ELSE 0 END), 0)
-            * COUNT(DISTINCT combined.mes) FILTER (WHERE combined.gmv > 0 OR combined.pedidos > 0) AS comissao_franquia,
-        COALESCE(SUM(combined.comissao_franqueadora), 0)
-          + COALESCE(MAX(CASE WHEN m.tipo = 'cliente' THEN m.valor_fixo_minimo ELSE 0 END), 0)
-            * COUNT(DISTINCT combined.mes) FILTER (WHERE combined.gmv > 0 OR combined.pedidos > 0) AS comissao_franqueadora,
-        COALESCE(MAX(CASE WHEN m.tipo = 'cliente' THEN m.valor_fixo_minimo ELSE 0 END), 0)
-          * COUNT(DISTINCT combined.mes) FILTER (WHERE combined.gmv > 0 OR combined.pedidos > 0) AS comissao_fixo,
+        COALESCE(MAX(mt.receita), 0) AS comissao_franquia,
+        COALESCE(SUM(combined.comissao_franqueadora), 0) + COALESCE(MAX(mt.fixo), 0) AS comissao_franqueadora,
+        COALESCE(MAX(mt.fixo), 0) AS comissao_fixo,
         COUNT(*)::int AS registros
       FROM combined
       LEFT JOIN marcas m ON m.id = combined.marca_id AND m.tenant_id = $1::uuid
       LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
+      LEFT JOIN marca_totais mt ON mt.marca_id = combined.marca_id
       GROUP BY combined.marca_id, m.nome, COALESCE(m.logo_url, c.logo_url), COALESCE(m.site, c.site)
       HAVING COALESCE(SUM(combined.gmv), 0) <> 0 OR COALESCE(SUM(combined.pedidos), 0) <> 0
       ORDER BY gmv_total DESC, pedidos DESC, marca_nome ASC

@@ -22,11 +22,13 @@ export function createReadinessProbe(db, { timeoutMs = 3000, cacheMs = 5000 } = 
   }
 }
 
-export function registerReadiness(app) {
+export function registerReadiness(app, { storageProbe } = {}) {
   const probe = createReadinessProbe(app.db)
   app.get('/readyz', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store')
     const ok = await probe()
-    return reply.code(ok ? 200 : 503).send({ ok })
+    const storage = storageProbe ? await storageProbe() : undefined
+    const storageOk = !storageProbe || storage?.ok === true || storage?.configured === false
+    return reply.code(ok && storageOk ? 200 : 503).send({ ok: ok && storageOk, storage: storage ? { configured: storage.configured, ok: storage.ok } : undefined })
   })
 }

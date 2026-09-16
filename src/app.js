@@ -1,4 +1,5 @@
 import { registerReadiness } from './services/readiness.js'
+import { getKnowledgeStorageStatus } from './services/knowledge-storage.js'
 import Fastify from 'fastify'
 import * as Sentry from '@sentry/node'
 import { timingSafeEqual } from 'crypto'
@@ -385,7 +386,7 @@ export async function buildApp(opts = {}) {
 
   // S-11: opcional — se HEALTH_CHECK_TOKEN setado, exige header pra responder.
   // 404 (não 401) pra não confirmar existência do endpoint a scanners.
-  registerReadiness(app)
+  registerReadiness(app, { storageProbe: async () => getKnowledgeStorageStatus() })
   app.get('/health', healthHandler)
   app.get('/healthcheck', healthHandler)
 

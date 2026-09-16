@@ -46,21 +46,12 @@ import { startEncerrarLivesZumbi } from './jobs/encerrar_lives_zumbi.js'
 import { notifyBoletosVencidos } from './jobs/notify_boletos_vencidos.js'
 import { withAdvisoryLock } from './jobs/advisory_lock.js'
 import { runMigrations } from '../apply_migrations.js'
+import { ensureKnowledgePrivateBucket, getKnowledgeStorageStatus } from './services/knowledge-storage.js'
 
 const TIKTOK_POLL_LOCK_KEY = 7421900119911235n
 
-// Auto-create Supabase Storage bucket if not exists
-const _sbUrl = process.env.SUPABASE_URL
-const _sbKey = process.env.SUPABASE_SERVICE_KEY
-if (_sbUrl && _sbKey) {
-  fetch(`${_sbUrl}/storage/v1/bucket`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${_sbKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: 'tenant-assets', name: 'tenant-assets', public: true }),
-  }).catch(() => {}) // ignore 409 already-exists
-}
-
 const app = await buildApp()
+await ensureKnowledgePrivateBucket()
 await runMigrations(app.db.pool)
 
 // ── Barreira: um erro solto não pode derrubar a API inteira ───────────────────

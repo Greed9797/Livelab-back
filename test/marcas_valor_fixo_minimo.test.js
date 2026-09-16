@@ -40,7 +40,7 @@ describe('marcas — valor_fixo_minimo (Onda 1 #3)', () => {
     expect(sql).toContain('m.valor_fixo_minimo')
   })
 
-  it('PATCH /v1/marcas/:id persists valor_fixo_minimo', async () => {
+  it('PATCH /v1/marcas/:id encaminha alteração financeira para o histórico temporal', async () => {
     const queryMock = vi.fn().mockResolvedValue({
       rows: [{ id: 'marca-1', nome: 'Boca Rosa', tipo: 'afiliada', cliente_id: null, comissao_franquia_pct: 5, comissao_franqueadora_pct: 2, valor_fixo_minimo: '1500.00' }],
     })
@@ -53,12 +53,9 @@ describe('marcas — valor_fixo_minimo (Onda 1 #3)', () => {
       payload: { valor_fixo_minimo: 1500 },
     })
 
-    expect(response.statusCode).toBe(200)
-    expect(response.json().valor_fixo_minimo).toBe('1500.00')
-
-    // O UPDATE (2ª chamada, após o BEGIN) deve incluir a coluna no SET dinâmico.
-    const updateSql = queryMock.mock.calls.map((c) => c[0]).find((q) => typeof q === 'string' && q.includes('UPDATE marcas SET'))
-    expect(updateSql).toContain('valor_fixo_minimo =')
+    expect(response.statusCode).toBe(409)
+    expect(response.json()).toMatchObject({ code: 'USE_MARCA_CONDITION_ENDPOINT' })
+    expect(queryMock.mock.calls).toHaveLength(0)
   })
 
   it('PATCH rejects negative valor_fixo_minimo (schema)', async () => {
@@ -136,7 +133,7 @@ describe('POST /v1/marcas — upsert de marca cliente não re-zera comissões (b
     await app.close()
   })
 
-  it('POST com comissao_franquia_pct explícito aplica o novo valor', async () => {
+  it('POST em marca existente com comissao_franquia_pct exige condição temporal', async () => {
     const queryMock = upsertQueryMock({
       id: 'marca-1', tipo: 'cliente', cliente_id: clienteId, nome: 'Posthaus',
       comissao_franquia_pct: '7.00',
@@ -150,9 +147,8 @@ describe('POST /v1/marcas — upsert de marca cliente não re-zera comissões (b
       payload: { nome: 'Posthaus', tipo: 'cliente', cliente_id: clienteId, comissao_franquia_pct: 7 },
     })
 
-    expect(response.statusCode).toBe(201)
-    const updateCall = queryMock.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('UPDATE marcas SET'))
-    expect(updateCall[1][6]).toBe(7)
+    expect(response.statusCode).toBe(409)
+    expect(response.json()).toMatchObject({ code: 'USE_MARCA_CONDITION_ENDPOINT' })
     await app.close()
   })
 })

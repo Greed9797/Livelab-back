@@ -9,6 +9,7 @@ import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
+import { listarCondicoesMarca, preverCondicaoMarca, confirmarCondicaoMarca } from '../services/marca-condicoes.js'
 
 // TTL longo de propósito: a invalidação por evento (writes) é quem mantém a
 // listagem fresca. Este TTL é só o limite de quanto um dado poderia ficar velho
@@ -113,6 +114,19 @@ async function nomeMarcaJaExiste(db, { tenantId, nome, ignoreId = null }) {
 /** 23505 vindo do índice único de nome (e não de outra constraint da tabela). */
 function isNomeDuplicadoError(err) {
   return err?.code === '23505' && err?.constraint === UNIQ_NOME_INDEX
+}
+
+const CAMPOS_FINANCEIROS_MARCA = new Set([
+  'comissao_franquia_pct', 'comissao_franqueadora_pct', 'valor_fixo_minimo', 'tipo_cobranca',
+])
+
+function responderErroCondicao(reply, error) {
+  return reply.code(error?.statusCode ?? 409).send({
+    code: error?.code ?? 'MARCA_CONDITION_ERROR',
+    error: error?.message ?? 'Não foi possível processar a condição comercial',
+    ...(error?.currentRevision == null ? {} : { current_revision: error.currentRevision }),
+    ...(error?.preview == null ? {} : { preview: error.preview }),
+  })
 }
 
 export async function marcasRoutes(app) {
@@ -234,8 +248,24 @@ export async function marcasRoutes(app) {
         // por cliente. Em vez de inserir uma 2ª (que violaria uniq_marca_cliente_por_tenant),
         // reusamos a existente e aplicamos os campos enviados (upsert idempotente).
         let createdMarcaId = null
+        let clienteMarcaExistia = false
         if (d.tipo === 'cliente' && d.cliente_id) {
+          const existente = await db.query(
+            `SELECT id FROM marcas
+              WHERE tenant_id = $1::uuid AND cliente_id = $2::uuid AND tipo = 'cliente'
+              LIMIT 1`,
+            [tenant_id, d.cliente_id],
+          )
+          clienteMarcaExistia = Boolean(existente.rows[0])
           createdMarcaId = await ensureClienteMarca(db, { tenantId: tenant_id, clienteId: d.cliente_id, origem: origemDados(request) })
+        }
+
+        if (clienteMarcaExistia && Object.keys(request.body ?? {}).some((field) => CAMPOS_FINANCEIROS_MARCA.has(field))) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({
+            code: 'USE_MARCA_CONDITION_ENDPOINT',
+            error: 'Alterações financeiras exigem uma nova condição comercial com vigência e confirmação',
+          })
         }
 
         // A pré-checagem de nome duplicado NÃO vale no caminho tipo='cliente':
@@ -307,6 +337,54 @@ export async function marcasRoutes(app) {
         await db.query('ROLLBACK')
         if (isNomeDuplicadoError(err)) return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
         throw err
+      }
+    })
+  })
+
+  app.get('/v1/marcas/:id/condicoes', { preHandler: readAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        return await listarCondicoesMarca(db, { tenantId: tenant_id, marcaId: request.params.id })
+      } catch (error) {
+        return responderErroCondicao(reply, error)
+      }
+    })
+  })
+
+  app.post('/v1/marcas/:id/condicoes/preview', { preHandler: writeAccess }, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        const preview = await preverCondicaoMarca(db, {
+          tenantId: tenant_id,
+          marcaId: request.params.id,
+          proposta: request.body ?? {},
+        })
+        return reply.send(preview)
+      } catch (error) {
+        return responderErroCondicao(reply, error)
+      }
+    })
+  })
+
+  app.post('/v1/marcas/:id/condicoes', { preHandler: writeAccess }, async (request, reply) => {
+    const { tenant_id, sub } = request.user
+    const idempotencyKey = request.headers['idempotency-key'] ?? request.body?.idempotency_key
+    const expectedRevision = request.body?.expected_revision ?? request.body?.versao_esperada
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        const result = await confirmarCondicaoMarca(db, {
+          tenantId: tenant_id,
+          marcaId: request.params.id,
+          proposta: request.body ?? {},
+          expectedRevision,
+          idempotencyKey,
+          actorUserId: sub ?? null,
+        })
+        return reply.code(result.idempotent ? 200 : 201).send(result)
+      } catch (error) {
+        return responderErroCondicao(reply, error)
       }
     })
   })
@@ -452,6 +530,14 @@ export async function marcasRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const updates = { ...parsed.data }
+    const camposFinanceiros = Object.keys(updates).filter((field) => CAMPOS_FINANCEIROS_MARCA.has(field))
+    if (camposFinanceiros.length > 0) {
+      return reply.code(409).send({
+        code: 'USE_MARCA_CONDITION_ENDPOINT',
+        error: 'Alterações financeiras exigem uma nova condição comercial com vigência e confirmação',
+        campos: camposFinanceiros,
+      })
+    }
     const hasTikTokUpdate = Object.prototype.hasOwnProperty.call(updates, 'tiktok_username')
     const nextTikTokUsername = updates.tiktok_username
     delete updates.tiktok_username

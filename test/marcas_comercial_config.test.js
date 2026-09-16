@@ -15,7 +15,7 @@ describe('indicador de configuração comercial da marca', () => {
       tipo: 'cliente',
       condicao: {
         origem: 'gestao', fixo_mensal: 0, comissao_franquia_pct: 0,
-        fixo_confirmado: false, comissao_confirmada: false,
+        fixo_confirmado: true, comissao_confirmada: true,
       },
     })).toMatchObject({ status: 'configurado', codigos: [] })
   })
@@ -32,6 +32,16 @@ describe('indicador de configuração comercial da marca', () => {
       codigos: ['fixo_nao_informado'],
       fixo: { status: 'fixo_nao_informado' },
       comissao: { status: 'configurado' },
+    })
+  })
+
+  it('não trata zero não confirmado como configuração válida', () => {
+    expect(buildConfiguracaoComercial({
+      tipo: 'cliente',
+      condicao: { origem: 'gestao', fixo_mensal: 0, comissao_franquia_pct: 0 },
+    })).toMatchObject({
+      status: 'incompleto',
+      codigos: ['fixo_nao_informado', 'comissao_nao_informada'],
     })
   })
 })

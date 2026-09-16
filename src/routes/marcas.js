@@ -151,8 +151,8 @@ export function buildConfiguracaoComercial({ tipo, condicao } = {}) {
       resumo: 'Revise a condição comercial legada',
     }
   }
-  const fixoOk = condicao.fixo_confirmado || Number(condicao.fixo_mensal ?? 0) === 0
-  const comissaoOk = condicao.comissao_confirmada || Number(condicao.comissao_franquia_pct ?? 0) === 0
+  const fixoOk = Boolean(condicao.fixo_confirmado)
+  const comissaoOk = Boolean(condicao.comissao_confirmada)
   const codigos = []
   if (!fixoOk) codigos.push('fixo_nao_informado')
   if (!comissaoOk) codigos.push('comissao_nao_informada')

@@ -275,6 +275,28 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('PATCH /v1/videos bloqueia atribuição financeira antes de UPDATE/sync', async () => {
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('FROM marcas')) return { rows: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }] }
+      if (sql.includes("status_aprovacao IN ('aprovada', 'fechada', 'faturada')")) return { rows: [{ '?column?': 1 }] }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(videosRoutes)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/v1/videos/video-closed',
+      payload: { observacoes: 'tentativa' },
+    })
+
+    expect(res.statusCode).toBe(409)
+    expect(res.json()).toMatchObject({ code: 'FINANCIAL_ROW_CLOSED' })
+    expect(queryMock.mock.calls.some(([sql]) => /UPDATE video_registros/i.test(sql))).toBe(false)
+    expect(queryMock.mock.calls.some(([sql]) => /INSERT INTO vendas_atribuidas/i.test(sql))).toBe(false)
+    await app.close()
+  })
+
   it('POST /v1/vendas-atribuidas blocks cliente_parceiro writes', async () => {
     const queryMock = vi.fn().mockResolvedValue({ rows: [] })
     const { app } = buildApp({ papel: 'cliente_parceiro', queryMock })

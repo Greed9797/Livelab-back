@@ -151,10 +151,6 @@ export async function videosRoutes(app) {
       })
       if (!refsOk) return reply
 
-      if (await videoFinanceiroFechado(db, tenant_id, request.params.id)) {
-        return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser alterado' })
-      }
-
       await db.query('BEGIN')
       try {
         const result = await db.query(
@@ -199,6 +195,13 @@ export async function videosRoutes(app) {
         agendaEventoId: updates.agenda_evento_id,
       })
       if (!refsOk) return reply
+
+      // A atribuição aprovada/fechada é um snapshot financeiro. O bloqueio
+      // precisa acontecer antes de abrir a transação de UPDATE e antes de
+      // sincronizar vendas_atribuidas, para que PATCH nunca altere o histórico.
+      if (await videoFinanceiroFechado(db, tenant_id, request.params.id)) {
+        return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser alterado' })
+      }
 
       await db.query('BEGIN')
       try {

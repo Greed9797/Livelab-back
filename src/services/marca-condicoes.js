@@ -93,9 +93,9 @@ async function readImpact(db, { tenantId, marcaId, start, end }) {
     ),
     db.query(
       `SELECT
-         COUNT(*) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') = 'aprovada')::int AS fechados,
-         COUNT(*) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada'))::int AS abertos,
-         COALESCE(SUM(va.gmv) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada')), 0) AS gmv_aberto
+         COUNT(*) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') IN ('aprovada', 'fechada', 'faturada'))::int AS fechados,
+         COUNT(*) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'fechada', 'faturada', 'reprovada'))::int AS abertos,
+         COALESCE(SUM(va.gmv) FILTER (WHERE COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'fechada', 'faturada', 'reprovada')), 0) AS gmv_aberto
        FROM vendas_atribuidas va
       WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
         AND va.data >= $3::date AND va.data < $4::date`,
@@ -119,7 +119,7 @@ async function openMovementBreakdown(db, { tenantId, marcaId, start, end }) {
        FROM vendas_atribuidas va
       WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
         AND va.data >= $3::date AND va.data < $4::date
-        AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada')
+        AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'fechada', 'faturada', 'reprovada')
       GROUP BY va.data::date
       ORDER BY va.data::date`,
     [tenantId, marcaId, start, end],
@@ -156,7 +156,7 @@ async function movementHorizonEnd(db, { tenantId, marcaId, start }) {
            FROM vendas_atribuidas va
           WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
             AND va.data >= $3::date
-            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada')
+            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'fechada', 'faturada', 'reprovada')
        ) movimentos`,
     [tenantId, marcaId, start],
   )
@@ -235,7 +235,7 @@ async function recalculateOpenVendas(db, { tenantId, marcaId, start, end }) {
         FROM vendas_atribuidas va
        WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
          AND va.data >= $3::date AND va.data < $4::date
-         AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'reprovada')
+         AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'fechada', 'faturada', 'reprovada')
     )
     UPDATE vendas_atribuidas va
         SET comissao_franquia = ROUND(r.gmv * r.franquia_pct / 100.0, 2),

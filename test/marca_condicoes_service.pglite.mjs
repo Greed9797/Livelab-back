@@ -51,6 +51,8 @@ await db.exec(`
   INSERT INTO vendas_atribuidas(id,tenant_id,marca_id,data,gmv,status_aprovacao,comissao_franquia,comissao_franqueadora)
     VALUES ('${id(4)}','${tenant}','${marca}','2026-09-15',10000,'pendente_aprovacao',500,200),
            ('${id(6)}','${tenant}','${marca}','2026-10-15',2000,'pendente_aprovacao',100,40),
+           ('${id(9)}','${tenant}','${marca}','2026-07-15',300,'fechada',15,6),
+           ('${id(10)}','${tenant}','${marca}','2026-07-15',400,'faturada',20,8),
            -- Rejected financial movement: it must not be open or recalculated.
            ('${id(8)}','${tenant}','${marca}','2026-10-15',999,'reprovada',1,1);
 `)
@@ -61,12 +63,19 @@ const preview = await preverCondicaoMarca(db, { tenantId: tenant, marcaId: marca
 assert.equal(preview.bloqueada, false)
 assert.equal(preview.fim_vigencia_exclusivo, '2026-11-01')
 assert.equal(preview.impacto.movimentos_abertos, 4)
+assert.equal(preview.impacto.movimentos_fechados, 0)
 assert.equal((await db.query('SELECT count(*)::int AS total FROM marca_condicoes_comerciais')).rows[0].total, 1)
 
 const confirmed = await confirmarCondicaoMarca(db, {
   tenantId: tenant, marcaId: marca, proposta: proposal,
   expectedRevision: 1, idempotencyKey: 'pglite-contract-1', actorUserId: null,
 })
+const protectedPreview = await preverCondicaoMarca(db, {
+  tenantId: tenant, marcaId: marca,
+  proposta: { ...proposal, inicio_vigencia: '2026-07' },
+})
+assert.equal(protectedPreview.bloqueada, true)
+assert.equal(protectedPreview.impacto.movimentos_fechados, 2)
 assert.equal(confirmed.idempotent, false)
 const conditionId = confirmed.condition.id
 assert.equal((await db.query(`SELECT marca_condicao_id FROM vendas_atribuidas WHERE id=$1`, [id(4)])).rows[0].marca_condicao_id, conditionId)
@@ -75,6 +84,8 @@ assert.equal((await db.query(`SELECT comissao_franquia,comissao_franqueadora FRO
 assert.equal((await db.query(`SELECT comissao_calculada FROM lives WHERE id=$1`, [id(3)])).rows[0].comissao_calculada, '800.00')
 assert.equal((await db.query(`SELECT comissao_calculada FROM lives WHERE id=$1`, [id(5)])).rows[0].comissao_calculada, '160.00')
 assert.equal((await db.query(`SELECT comissao_franquia FROM vendas_atribuidas WHERE id=$1`, [id(6)])).rows[0].comissao_franquia, '160.00')
+assert.equal((await db.query(`SELECT comissao_franquia FROM vendas_atribuidas WHERE id=$1`, [id(9)])).rows[0].comissao_franquia, '15.00')
+assert.equal((await db.query(`SELECT comissao_franquia FROM vendas_atribuidas WHERE id=$1`, [id(10)])).rows[0].comissao_franquia, '20.00')
 assert.equal((await db.query(`SELECT comissao_franquia FROM vendas_atribuidas WHERE id=$1`, [id(8)])).rows[0].comissao_franquia, '1.00')
 assert.equal((await db.query(`SELECT comissao_calculada FROM lives WHERE id=$1`, [id(7)])).rows[0].comissao_calculada, '50.00')
 assert.equal((await db.query(`SELECT valor_fixo_minimo,comissao_franquia_pct FROM marcas WHERE id=$1`, [marca])).rows[0].valor_fixo_minimo, '1200.00')

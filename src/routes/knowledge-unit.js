@@ -46,7 +46,9 @@ const createSchema = z.object({
   titulo: z.string().trim().min(2).max(240),
   status: z.enum(['draft', 'published', 'archived']).default('draft'),
 })
-const patchSchema = z.object({ ...contentFields, status: z.enum(['draft', 'published', 'archived']).optional(), expected_revision: z.number().int().positive() })
+// A material can only become published through the transactional publish route.
+// Keeping that transition out of PATCH prevents bypassing the content/PDF gate.
+const patchSchema = z.object({ ...contentFields, status: z.enum(['draft', 'archived']).optional(), expected_revision: z.number().int().positive() })
 
 function unsafeMarkdown(markdown) {
   return markdown && (/<\/?(?:script|iframe|object|embed|form|style|link)\b/i.test(markdown)
@@ -68,7 +70,26 @@ function videoInputError(data) {
   const provider = data.video_provider ?? 'none'
   if (provider !== 'none' && !data.video_url) return 'URL de vídeo obrigatória'
   if (provider === 'none' && data.video_url) return 'Informe o provedor do vídeo'
+  if (provider !== 'none' && data.video_url) {
+    let host
+    try { host = new URL(data.video_url).hostname.toLowerCase() } catch { return 'URL de vídeo inválida' }
+    const youtube = ['youtube.com', 'www.youtube.com', 'youtu.be'].includes(host)
+    const panda = host === 'panda.video' || host.endsWith('.pandavideo.com')
+    if ((provider === 'youtube' && !youtube) || (provider === 'panda' && !panda)) return 'O provedor não corresponde à URL do vídeo'
+    const id = videoId(data.video_url, provider)
+    if (!id || !SAFE_VIDEO_ID.test(id)) return 'URL de vídeo sem identificador válido'
+  }
   return null
+}
+
+function videoPatchError(data) {
+  const hasProvider = Object.prototype.hasOwnProperty.call(data, 'video_provider')
+  const hasUrl = Object.prototype.hasOwnProperty.call(data, 'video_url')
+  if (!hasProvider && !hasUrl) return null
+  // `none` without a URL is the explicit and safe way to clear a video.
+  if (hasProvider && data.video_provider === 'none' && !hasUrl) return null
+  if (!hasProvider || !hasUrl) return 'Informe provedor e URL do vídeo juntos'
+  return videoInputError(data)
 }
 
 function videoId(value, provider) {
@@ -80,6 +101,38 @@ function videoId(value, provider) {
 
 function hasUsableContent(data) {
   return Boolean(data.content_markdown?.trim() || data.external_url || data.video_url || data.video_id)
+}
+
+const SAFE_VIDEO_ID = /^[A-Za-z0-9_-]{1,200}$/
+function canonicalVideoUrl(provider, id) {
+  if (!id || !SAFE_VIDEO_ID.test(String(id))) return null
+  if (provider === 'youtube') return `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`
+  if (provider === 'panda') return `https://panda.video/${encodeURIComponent(id)}`
+  return null
+}
+
+function materialResponse(row) {
+  if (!row) return row
+  return { ...row, video_url: canonicalVideoUrl(row.video_provider, row.video_id) }
+}
+
+function attachmentResponse(row) {
+  if (!row) return row
+  const { storage_key: _storageKey, ...safe } = row
+  return { ...safe, filename: safe.filename ?? safe.original_name }
+}
+
+function audit(app, request, action, entityType, entityId, metadata = {}) {
+  return app.audit?.log?.(request, {
+    action,
+    entity_type: entityType,
+    entity_id: entityId ?? null,
+    metadata: {
+      tenant_id: request.user?.tenant_id ?? null,
+      actor_id: request.user?.sub ?? null,
+      ...metadata,
+    },
+  })?.catch((error) => request.log?.warn?.({ error }, 'knowledge audit failed'))
 }
 
 function fileName(value) {
@@ -140,7 +193,9 @@ export async function knowledgeUnitRoutes(app) {
     return app.withTenant(request.user.tenant_id, async (db) => {
       try {
         const result = await db.query(`INSERT INTO knowledge_unit_categories (tenant_id, name, slug, description, icon, sort_order, created_by, updated_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$7) RETURNING *`, [request.user.tenant_id, data.name, slugify(data.name), data.description ?? null, data.icon ?? null, data.sort_order ?? 0, request.user.sub])
-        return reply.code(201).send(result.rows[0])
+        const row = result.rows[0]
+        await audit(app, request, 'knowledge.category.create', 'knowledge_category', row.id, { revision: 1 })
+        return reply.code(201).send(row)
       } catch (error) { if (error.code === '23505') return reply.code(409).send({ error: 'Já existe categoria com esse slug nesta unidade' }); throw error }
     })
   })
@@ -157,6 +212,7 @@ export async function knowledgeUnitRoutes(app) {
     return app.withTenant(request.user.tenant_id, async (db) => {
       const result = await db.query(`UPDATE knowledge_unit_categories SET ${fields.join(', ')} WHERE id = $${values.length - 1} AND tenant_id = $${values.length} RETURNING *`, values)
       if (!result.rows.length) return reply.code(404).send({ error: 'Categoria não encontrada' })
+      await audit(app, request, 'knowledge.category.update', 'knowledge_category', result.rows[0].id, { revision: null, changed_fields: Object.keys(parsed.data) })
       return result.rows[0]
     })
   })
@@ -166,6 +222,7 @@ export async function knowledgeUnitRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     return app.withTenant(request.user.tenant_id, async (db) => {
       for (let i = 0; i < parsed.data.ids.length; i++) await db.query('UPDATE knowledge_unit_categories SET sort_order = $1, updated_at = NOW(), updated_by = $2 WHERE id = $3 AND tenant_id = $4', [i + 1, request.user.sub, parsed.data.ids[i], request.user.tenant_id])
+      await audit(app, request, 'knowledge.category.reorder', 'knowledge_category', null, { count: parsed.data.ids.length })
       return reply.code(204).send()
     })
   })
@@ -173,6 +230,7 @@ export async function knowledgeUnitRoutes(app) {
   app.delete('/v1/knowledge/unit/categories/:id', { onRequest: managers }, async (request, reply) => app.withTenant(request.user.tenant_id, async (db) => {
     const result = await db.query('UPDATE knowledge_unit_categories SET is_active = false, updated_at = NOW(), updated_by = $1 WHERE id = $2 AND tenant_id = $3 RETURNING id', [request.user.sub, request.params.id, request.user.tenant_id])
     if (!result.rows.length) return reply.code(404).send({ error: 'Categoria não encontrada' })
+    await audit(app, request, 'knowledge.category.archive', 'knowledge_category', result.rows[0].id, { revision: null })
     return reply.code(204).send()
   }))
 
@@ -187,7 +245,7 @@ export async function knowledgeUnitRoutes(app) {
     const limitIndex = values.length + 1; values.push(size); const offsetIndex = values.length + 1; values.push(offset)
     return app.withTenant(request.user.tenant_id, async (db) => {
       const result = await db.query(`SELECT m.id, m.title AS titulo, m.slug, m.excerpt, m.material_type, m.external_url, m.video_provider, m.video_id, m.tags, m.status, m.revision, m.published_at, m.updated_at AS atualizado_em, m.category_id, c.name AS category_name, c.slug AS category_slug, (SELECT COUNT(*)::int FROM knowledge_material_attachments a WHERE a.material_id = m.id AND a.tenant_id = m.tenant_id AND a.state = 'ready') AS attachment_count FROM knowledge_materials m LEFT JOIN knowledge_unit_categories c ON c.id = m.category_id AND c.tenant_id = m.tenant_id WHERE ${predicates.join(' AND ')} ORDER BY m.updated_at DESC, m.id LIMIT $${limitIndex} OFFSET $${offsetIndex}`, values)
-      return { items: result.rows, page: current, page_size: size, has_more: result.rows.length === size }
+      return { items: result.rows.map(materialResponse), page: current, page_size: size, has_more: result.rows.length === size }
     })
   })
 
@@ -202,7 +260,8 @@ export async function knowledgeUnitRoutes(app) {
     if (!result.rows.length) return reply.code(404).send({ error: 'Material não encontrado' })
     const material = result.rows[0]
     const attachments = await db.query(`SELECT id, original_name, mime_type, byte_size, state, created_at FROM knowledge_material_attachments WHERE tenant_id = $1 AND material_id = $2 AND ($3 OR state = 'ready') ORDER BY created_at DESC`, [request.user.tenant_id, material.id, manager])
-    material.attachments = attachments.rows
+    material.video_url = canonicalVideoUrl(material.video_provider, material.video_id)
+    material.attachments = attachments.rows.map(attachmentResponse)
     return material
   }))
 
@@ -228,7 +287,8 @@ export async function knowledgeUnitRoutes(app) {
             SET updated_at = knowledge_materials.updated_at
           RETURNING *, title AS titulo, updated_at AS atualizado_em, (xmax = 0) AS inserted`,
           [request.user.tenant_id, data.category_id ?? null, data.titulo, `${slugify(data.titulo)}-${crypto.randomBytes(4).toString('hex')}`, data.excerpt ?? null, data.content_markdown ?? null, data.material_type ?? 'playbook', data.external_url ?? null, data.video_provider ?? 'none', videoId(data.video_url, data.video_provider ?? 'none'), data.tags ?? [], data.status, idempotency, request.user.sub])
-        const row = result.rows[0]
+        const row = materialResponse(result.rows[0])
+        if (row.inserted !== false) await audit(app, request, 'knowledge.material.create', 'knowledge_material', row.id, { revision: row.revision ?? 1, status: row.status ?? data.status })
         return reply.code(row.inserted === false ? 200 : 201).send(row)
       } catch (error) { if (error.code === '23505') return reply.code(409).send({ error: 'Material ou chave de idempotência já existe' }); throw error }
     })
@@ -238,7 +298,7 @@ export async function knowledgeUnitRoutes(app) {
     const parsed = patchSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const data = parsed.data
-    const videoError = videoInputError(data)
+    const videoError = videoPatchError(data)
     if (videoError) return reply.code(400).send({ error: videoError })
     if (data.content_markdown === null && data.external_url === null && data.video_url === null) return reply.code(400).send({ error: 'O material precisa manter texto, link ou vídeo' })
     if (unsafeMarkdown(data.content_markdown)) return reply.code(400).send({ error: 'O conteúdo contém HTML ou URL não permitido' })
@@ -246,14 +306,20 @@ export async function knowledgeUnitRoutes(app) {
     const values = []; const fields = []
     const columns = { category_id: 'category_id', titulo: 'title', excerpt: 'excerpt', content_markdown: 'content_markdown', material_type: 'material_type', external_url: 'external_url', video_provider: 'video_provider', tags: 'tags', status: 'status' }
     for (const [key, column] of Object.entries(columns)) if (data[key] !== undefined) { fields.push(`${column} = $${values.length + 1}`); values.push(data[key]) }
-    if (data.video_url !== undefined) { fields.push(`video_id = $${values.length + 1}`); values.push(videoId(data.video_url, data.video_provider ?? 'none')) }
+    if (Object.prototype.hasOwnProperty.call(data, 'video_provider') || Object.prototype.hasOwnProperty.call(data, 'video_url')) {
+      fields.push(`video_id = $${values.length + 1}`)
+      values.push(videoId(data.video_url, data.video_provider ?? 'none'))
+    }
     if (data.titulo !== undefined) { fields.push(`slug = $${values.length + 1}`); values.push(`${slugify(data.titulo)}-${request.params.id.slice(0, 8)}`) }
-    if (data.status === 'published') fields.push('published_at = COALESCE(published_at, NOW())')
     if (!fields.length) return reply.code(400).send({ error: 'Nada para atualizar' })
     fields.push('revision = revision + 1', 'updated_at = NOW()', `updated_by = $${values.length + 1}`); values.push(request.user.sub, request.params.id, data.expected_revision, request.user.tenant_id)
     return app.withTenant(request.user.tenant_id, async (db) => {
       const result = await db.query(`UPDATE knowledge_materials SET ${fields.join(', ')} WHERE id = $${values.length - 2} AND tenant_id = $${values.length} AND revision = $${values.length - 1} RETURNING *`, values)
-      if (result.rows.length) return result.rows[0]
+      if (result.rows.length) {
+        const row = materialResponse(result.rows[0])
+        await audit(app, request, 'knowledge.material.update', 'knowledge_material', row.id, { revision: row.revision, changed_fields: Object.keys(data).filter((key) => key !== 'expected_revision') })
+        return row
+      }
       const current = await db.query('SELECT id, revision FROM knowledge_materials WHERE id = $1 AND tenant_id = $2', [request.params.id, request.user.tenant_id])
       if (!current.rows.length) return reply.code(404).send({ error: 'Material não encontrado' })
       return reply.code(409).send({ error: 'Material foi alterado em outra aba', current_revision: current.rows[0].revision })
@@ -269,7 +335,7 @@ export async function knowledgeUnitRoutes(app) {
         try {
           const current = await db.query(`
             SELECT m.id, m.slug, m.status, m.revision, m.content_markdown, m.external_url,
-                   m.video_id, EXISTS (
+                   m.video_provider, m.video_id, EXISTS (
                      SELECT 1 FROM knowledge_material_attachments a
                       WHERE a.material_id = m.id AND a.tenant_id = m.tenant_id AND a.state = 'ready'
                    ) AS has_ready_attachment
@@ -292,9 +358,11 @@ export async function knowledgeUnitRoutes(app) {
                    published_at = CASE WHEN $1 = 'published' THEN COALESCE(published_at, NOW()) ELSE published_at END,
                    updated_at = NOW(), updated_by = $2
              WHERE id = $3 AND tenant_id = $4 AND revision = $5
-           RETURNING id, slug, status, revision, published_at`, [status, request.user.sub, request.params.id, request.user.tenant_id, expected])
+           RETURNING id, slug, status, revision, published_at, video_provider, video_id`, [status, request.user.sub, request.params.id, request.user.tenant_id, expected])
           await db.query('COMMIT')
-          return result.rows[0]
+          const row = materialResponse(result.rows[0])
+          await audit(app, request, `knowledge.material.${action}`, 'knowledge_material', row.id, { revision: row.revision, status: row.status })
+          return row
         } catch (error) {
           await db.query('ROLLBACK').catch(() => {})
           throw error
@@ -317,11 +385,15 @@ export async function knowledgeUnitRoutes(app) {
       await storage(app, request, 'POST', `/object/${PRIVATE_BUCKET}/${storageKey}`, buffer, { 'Content-Type': 'application/pdf', 'x-upsert': 'false' })
       return app.withTenant(request.user.tenant_id, async (db) => {
         const result = await db.query(`UPDATE knowledge_material_attachments SET state = 'ready', ready_at = NOW() WHERE id = $1 AND tenant_id = $2 RETURNING *`, [attachment.id, request.user.tenant_id])
-        return reply.code(201).send(result.rows[0])
+        if (!result.rows.length) return reply.code(409).send({ error: 'O anexo não está mais disponível' })
+        const row = attachmentResponse(result.rows[0])
+        await audit(app, request, 'knowledge.attachment.create', 'knowledge_attachment', row.id, { state: row.state, byte_size: row.byte_size, revision: null })
+        return reply.code(201).send(row)
       })
     } catch (error) {
       await storage(app, request, 'DELETE', `/object/${PRIVATE_BUCKET}/${storageKey}`).catch(() => {})
       await app.withTenant(request.user.tenant_id, (db) => db.query(`UPDATE knowledge_material_attachments SET state = 'orphaned', orphaned_at = NOW() WHERE id = $1 AND tenant_id = $2`, [attachment.id, request.user.tenant_id])).catch(() => {})
+      await audit(app, request, 'knowledge.attachment.orphaned', 'knowledge_attachment', attachment.id, { state: 'orphaned' })
       throw error
     }
   })
@@ -341,11 +413,15 @@ export async function knowledgeUnitRoutes(app) {
       await storage(app, request, 'POST', `/object/${PRIVATE_BUCKET}/${storageKey}`, buffer, { 'Content-Type': 'application/pdf', 'x-upsert': 'false' })
       return app.withTenant(request.user.tenant_id, async (db) => {
         const result = await db.query(`UPDATE knowledge_material_attachments SET state = 'ready', ready_at = NOW() WHERE id = $1 AND tenant_id = $2 AND state = 'pending' RETURNING *`, [request.params.attachmentId, request.user.tenant_id])
-        return reply.code(200).send(result.rows[0])
+        if (!result.rows.length) return reply.code(409).send({ error: 'O anexo não está mais disponível' })
+        const row = attachmentResponse(result.rows[0])
+        await audit(app, request, 'knowledge.attachment.retry', 'knowledge_attachment', row.id, { state: row.state, byte_size: row.byte_size, revision: null })
+        return reply.code(200).send(row)
       })
     } catch (error) {
       await storage(app, request, 'DELETE', `/object/${PRIVATE_BUCKET}/${storageKey}`).catch(() => {})
       await app.withTenant(request.user.tenant_id, (db) => db.query(`UPDATE knowledge_material_attachments SET state = 'orphaned', orphaned_at = NOW() WHERE id = $1 AND tenant_id = $2`, [request.params.attachmentId, request.user.tenant_id])).catch(() => {})
+      await audit(app, request, 'knowledge.attachment.orphaned', 'knowledge_attachment', request.params.attachmentId, { state: 'orphaned' })
       throw error
     }
   })

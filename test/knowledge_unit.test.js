@@ -1,4 +1,5 @@
 import Fastify from 'fastify'
+import multipart from '@fastify/multipart'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { knowledgeUnitRoutes } from '../src/routes/knowledge-unit.js'
@@ -61,6 +62,37 @@ describe('local knowledge base security and editing', () => {
     await app.close()
   })
 
+  it('keeps publication behind the transactional route', async () => {
+    const { app, query } = buildApp()
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({ method: 'PATCH', url: `/v1/knowledge/unit/materials/${MATERIAL}`, payload: { status: 'published', expected_revision: 1 } })
+    expect(response.statusCode).toBe(400)
+    expect(query).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('rebuilds a safe video URL on detail reload and exposes attachment filename metadata', async () => {
+    const { app } = buildApp({ queryResults: [
+      { rows: [{ id: MATERIAL, title: 'Vídeo', video_provider: 'youtube', video_id: 'abc_123', status: 'published' }] },
+      { rows: [{ id: 'att-1', original_name: 'Guia.pdf', mime_type: 'application/pdf', byte_size: 100, state: 'ready' }] },
+    ] })
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({ method: 'GET', url: `/v1/knowledge/unit/materials/${MATERIAL}` })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ video_url: 'https://www.youtube.com/watch?v=abc_123', attachments: [{ filename: 'Guia.pdf', original_name: 'Guia.pdf' }] })
+    await app.close()
+  })
+
+  it('updates other fields without requiring the existing video URL again', async () => {
+    const { app, query } = buildApp({ queryResults: [{ rows: [{ id: MATERIAL, title: 'Título novo', video_provider: 'youtube', video_id: 'still_here', revision: 2 }] }] })
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({ method: 'PATCH', url: `/v1/knowledge/unit/materials/${MATERIAL}`, payload: { titulo: 'Título novo', expected_revision: 1 } })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ video_url: 'https://www.youtube.com/watch?v=still_here' })
+    expect(query.mock.calls[0][0]).not.toContain('video_id =')
+    await app.close()
+  })
+
   it('rejects active HTML and unsafe video URLs', async () => {
     const { app, query } = buildApp()
     await app.register(knowledgeUnitRoutes)
@@ -72,6 +104,15 @@ describe('local knowledge base security and editing', () => {
     await app.close()
   })
 
+  it('rejects a video provider and URL that do not describe the same source', async () => {
+    const { app, query } = buildApp()
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({ method: 'POST', url: '/v1/knowledge/unit/materials', payload: { titulo: 'Vídeo', video_provider: 'youtube', video_url: 'https://panda.video/video-123' } })
+    expect(response.statusCode).toBe(400)
+    expect(query).not.toHaveBeenCalled()
+    await app.close()
+  })
+
   it('allows an empty draft for the upload-first flow and validates content at publish', async () => {
     const { app, query } = buildApp({ queryResults: [{ rows: [{ id: MATERIAL, revision: 1, status: 'draft' }] }] })
     await app.register(knowledgeUnitRoutes)
@@ -79,6 +120,64 @@ describe('local knowledge base security and editing', () => {
     expect(draft.statusCode).toBe(201)
     expect(query).toHaveBeenCalledTimes(1)
     await app.close()
+  })
+
+  it('audits material creation with tenant, actor and revision metadata only', async () => {
+    const { app } = buildApp({ queryResults: [{ rows: [{ id: MATERIAL, revision: 1, status: 'draft', inserted: true }] }] })
+    const auditLog = vi.fn().mockResolvedValue(undefined)
+    app.decorate('audit', { log: auditLog })
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({ method: 'POST', url: '/v1/knowledge/unit/materials', payload: { titulo: 'Playbook', content_markdown: 'texto' } })
+    expect(response.statusCode).toBe(201)
+    expect(auditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: 'knowledge.material.create',
+      metadata: expect.objectContaining({ tenant_id: TENANT, actor_id: 'user-1', revision: 1 }),
+    }))
+    expect(auditLog.mock.calls[0][1].metadata).not.toHaveProperty('content_markdown')
+    await app.close()
+  })
+
+  it('marks a failed private upload as orphaned and never returns a usable attachment', async () => {
+    const { app, query } = buildApp({ queryResults: [
+      { rows: [{ id: MATERIAL }] },
+      { rows: [{ id: 'att-1', storage_key: `${TENANT}/opaque.pdf`, original_name: 'Guia.pdf', state: 'pending' }] },
+      { rows: [] },
+    ] })
+    await app.register(multipart)
+    await app.register(knowledgeUnitRoutes)
+    const previousUrl = process.env.SUPABASE_URL
+    const previousKey = process.env.SUPABASE_SERVICE_KEY
+    process.env.SUPABASE_URL = 'https://storage.example.test'
+    process.env.SUPABASE_SERVICE_KEY = 'secret-test-only'
+    const calls = []
+    const boundary = 'knowledge-test-boundary'
+    const pdf = Buffer.from('%PDF-1.7\n1 0 obj\nendobj\n%%EOF\n')
+    const multipartBody = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="Guia.pdf"\r\nContent-Type: application/pdf\r\n\r\n`),
+      pdf,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ])
+    vi.stubGlobal('fetch', vi.fn(async (url, options) => {
+      calls.push({ url, method: options.method })
+      return options.method === 'POST' ? { ok: false, status: 500 } : { ok: true, status: 200 }
+    }))
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/v1/knowledge/unit/materials/${MATERIAL}/attachments`,
+        headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+        payload: multipartBody,
+      })
+      expect(response.statusCode).toBe(502)
+      expect(calls.map((call) => call.method)).toEqual(['POST', 'DELETE'])
+      expect(query.mock.calls.some(([sql]) => sql.includes("state = 'orphaned'"))).toBe(true)
+    } finally {
+      if (previousUrl === undefined) delete process.env.SUPABASE_URL
+      else process.env.SUPABASE_URL = previousUrl
+      if (previousKey === undefined) delete process.env.SUPABASE_SERVICE_KEY
+      else process.env.SUPABASE_SERVICE_KEY = previousKey
+      await app.close()
+    }
   })
 
   it('uses the database winner for concurrent idempotent creation', async () => {

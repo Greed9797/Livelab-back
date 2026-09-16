@@ -16,6 +16,7 @@ async function createDb() {
     INSERT INTO users VALUES ('${USER_A}');
   `)
   await db.exec(fs.readFileSync(new URL('../migrations/153_knowledge_unit_library.sql', import.meta.url), 'utf8'))
+  await db.exec(fs.readFileSync(new URL('../migrations/154_knowledge_unit_force_rls.sql', import.meta.url), 'utf8'))
   await db.exec(`GRANT USAGE ON SCHEMA public TO base_reader; GRANT SELECT ON knowledge_unit_categories, knowledge_materials, knowledge_material_attachments TO base_reader;`)
   return db
 }
@@ -31,11 +32,14 @@ describe('knowledge unit migration against PostgreSQL-compatible SQL', () => {
 
     await expect(db.query(`INSERT INTO knowledge_materials (tenant_id, category_id, title, slug, content_markdown, created_by, updated_by) VALUES ($1, $2, 'Playbook', 'playbook', 'texto', $3, $3)`, [TENANT_B, categoryId, USER_A])).rejects.toMatchObject({ code: '23503' })
 
-    await db.exec('ALTER TABLE knowledge_unit_categories FORCE ROW LEVEL SECURITY')
+    const material = await db.query(`INSERT INTO knowledge_materials (tenant_id, title, slug, content_markdown, created_by, updated_by) VALUES ($1, 'Playbook A', 'playbook-a', 'texto', $2, $2) RETURNING id`, [TENANT_A, USER_A])
+    await db.query(`INSERT INTO knowledge_material_attachments (tenant_id, material_id, storage_key, original_name, mime_type, byte_size, state, created_by) VALUES ($1, $2, 'opaque/a.pdf', 'a.pdf', 'application/pdf', 100, 'ready', $3)`, [TENANT_A, material.rows[0].id, USER_A])
     await db.exec('SET ROLE base_reader')
     await db.exec(`SET app.tenant_id = '${TENANT_B}'`)
     const isolated = await db.query('SELECT id FROM knowledge_unit_categories')
     expect(isolated.rows).toEqual([])
+    expect((await db.query('SELECT id FROM knowledge_materials')).rows).toEqual([])
+    expect((await db.query('SELECT id FROM knowledge_material_attachments')).rows).toEqual([])
   })
 
   it('enforces the PDF metadata limits in the database', async () => {

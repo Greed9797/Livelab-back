@@ -29,6 +29,7 @@ const categorySchema = z.object({
   icon: z.string().max(40).nullable().optional(),
   sort_order: z.number().int().min(0).max(100000).optional(),
 })
+const categoryPatchSchema = categorySchema.partial().extend({ is_active: z.boolean().optional() })
 
 const contentFields = {
   category_id: uuid.nullable().optional(),
@@ -182,7 +183,8 @@ export async function knowledgeUnitRoutes(app) {
   const managers = [app.authenticate, app.requirePapel(MANAGERS)]
 
   app.get('/v1/knowledge/unit/categories', { onRequest: readers }, async (request) => app.withTenant(request.user.tenant_id, async (db) => {
-    const result = await db.query(`SELECT id, name, slug, description, icon, sort_order, is_active, created_at, updated_at FROM knowledge_unit_categories WHERE tenant_id = $1 AND is_active = true ORDER BY sort_order, name`, [request.user.tenant_id])
+    const includeInactive = request.query?.include_inactive === 'true' && MANAGERS.includes(request.user.papel)
+    const result = await db.query(`SELECT id, name, slug, description, icon, sort_order, is_active, created_at, updated_at FROM knowledge_unit_categories WHERE tenant_id = $1${includeInactive ? '' : ' AND is_active = true'} ORDER BY sort_order, name`, [request.user.tenant_id])
     return result.rows
   }))
 
@@ -201,10 +203,10 @@ export async function knowledgeUnitRoutes(app) {
   })
 
   app.patch('/v1/knowledge/unit/categories/:id', { onRequest: managers }, async (request, reply) => {
-    const parsed = categorySchema.partial().safeParse(request.body)
+    const parsed = categoryPatchSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const values = []; const fields = []
-    for (const key of ['name', 'description', 'icon', 'sort_order']) if (parsed.data[key] !== undefined) { fields.push(`${key} = $${values.length + 1}`); values.push(parsed.data[key]) }
+    for (const key of ['name', 'description', 'icon', 'sort_order', 'is_active']) if (parsed.data[key] !== undefined) { fields.push(`${key} = $${values.length + 1}`); values.push(parsed.data[key]) }
     if (parsed.data.name !== undefined) { fields.push(`slug = $${values.length + 1}`); values.push(slugify(parsed.data.name)) }
     if (!fields.length) return reply.code(400).send({ error: 'Nada para atualizar' })
     fields.push(`updated_by = $${values.length + 1}`, 'updated_at = NOW()'); values.push(request.user.sub)

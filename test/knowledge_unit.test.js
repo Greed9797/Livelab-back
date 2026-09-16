@@ -52,6 +52,35 @@ describe('local knowledge base security and editing', () => {
     await app.close()
   })
 
+  it('lets managers list inactive categories and reactivate one', async () => {
+    const category = '44444444-4444-4444-8444-444444444444'
+    const { app, query, queries } = buildApp({ queryResults: [
+      { rows: [{ id: category, name: 'Arquivada', is_active: false }] },
+      { rows: [{ id: category, name: 'Arquivada', is_active: true }] },
+    ] })
+    await app.register(knowledgeUnitRoutes)
+
+    const listed = await app.inject({ method: 'GET', url: '/v1/knowledge/unit/categories?include_inactive=true' })
+    const reactivated = await app.inject({ method: 'PATCH', url: `/v1/knowledge/unit/categories/${category}`, payload: { is_active: true } })
+
+    expect(listed.statusCode).toBe(200)
+    expect(queries[0].sql).not.toContain('is_active = true')
+    expect(reactivated.statusCode).toBe(200)
+    expect(queries[1].sql).toContain('is_active = $1')
+    expect(queries[1].params).toContain(true)
+    expect(query).toHaveBeenCalledTimes(2)
+    await app.close()
+  })
+
+  it('never exposes inactive categories to non-manager readers', async () => {
+    const { app, queries } = buildApp({ papel: 'apresentadora', queryResults: [{ rows: [] }] })
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({ method: 'GET', url: '/v1/knowledge/unit/categories?include_inactive=true' })
+    expect(response.statusCode).toBe(200)
+    expect(queries[0].sql).toContain('is_active = true')
+    await app.close()
+  })
+
   it('requires expected revision and returns conflict when the row was changed', async () => {
     const { app, query } = buildApp({ queryResults: [{ rows: [] }, { rows: [{ id: MATERIAL, revision: 4 }] }] })
     await app.register(knowledgeUnitRoutes)

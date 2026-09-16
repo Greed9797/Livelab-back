@@ -103,7 +103,7 @@ export async function loadLiveMergeSources(db, { tenantId, liveIds, lock = false
             va.apresentadora_id, a.nome AS apresentadora_nome,
             a.user_id AS apresentadora_user_id, va.data::text AS data, va.gmv, va.pedidos,
             va.comissao_apresentadora, va.comissao_franquia,
-            va.comissao_franqueadora, va.status_aprovacao, va.status_motivo,
+            va.comissao_franqueadora, va.marca_condicao_id, va.status_aprovacao, va.status_motivo,
             va.aprovado_por, va.aprovado_em, va.criado_em, va.atualizado_em
        FROM vendas_atribuidas va
        LEFT JOIN apresentadoras a
@@ -338,11 +338,11 @@ export async function mergeLives(db, {
          INSERT INTO vendas_atribuidas (
            tenant_id, origem, origem_id, marca_id, apresentadora_id, data,
            gmv, pedidos, comissao_apresentadora, comissao_franquia,
-           comissao_franqueadora, status_aprovacao
-         ) VALUES ($1::uuid,'live',$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,'pendente_aprovacao')`,
+           comissao_franqueadora, marca_condicao_id, status_aprovacao
+         ) VALUES ($1::uuid,'live',$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11,'pendente_aprovacao')`,
         [tenantId, destinationId, sale.marca_id, sale.apresentadora_id, sale.data,
           sale.gmv, sale.pedidos, sale.comissao_apresentadora,
-          sale.comissao_franquia, sale.comissao_franqueadora],
+          sale.comissao_franquia, sale.comissao_franqueadora, sale.marca_condicao_id],
       )
     }
     const persistedDestination = await db.query(
@@ -361,7 +361,7 @@ export async function mergeLives(db, {
       `/* live-merge:read-destination-sales */
        SELECT marca_id, apresentadora_id, data::text AS data, gmv, pedidos,
               comissao_apresentadora, comissao_franquia, comissao_franqueadora,
-              status_aprovacao, status_motivo, aprovado_por, aprovado_em
+              marca_condicao_id, status_aprovacao, status_motivo, aprovado_por, aprovado_em
          FROM vendas_atribuidas
         WHERE tenant_id = $1::uuid AND origem = 'live' AND origem_id = $2::uuid
         ORDER BY apresentadora_id NULLS FIRST, id`,
@@ -509,7 +509,7 @@ export async function undoLiveMerge(db, {
        SELECT va.id, va.tenant_id, va.origem, va.origem_id, va.marca_id,
               va.apresentadora_id, va.data::text AS data, va.gmv, va.pedidos,
               va.comissao_apresentadora, va.comissao_franquia,
-              va.comissao_franqueadora, va.status_aprovacao, va.status_motivo,
+              va.comissao_franqueadora, va.marca_condicao_id, va.status_aprovacao, va.status_motivo,
               va.aprovado_por, va.aprovado_em, va.criado_em, va.atualizado_em
          FROM vendas_atribuidas va
         WHERE va.tenant_id = $1::uuid AND va.origem = 'live' AND va.origem_id = $2::uuid
@@ -536,16 +536,16 @@ export async function undoLiveMerge(db, {
            INSERT INTO vendas_atribuidas (
              id, tenant_id, origem, origem_id, marca_id, apresentadora_id, data,
              gmv, pedidos, comissao_apresentadora, comissao_franquia,
-             comissao_franqueadora, status_aprovacao, status_motivo,
+             comissao_franqueadora, marca_condicao_id, status_aprovacao, status_motivo,
              aprovado_por, aprovado_em, criado_em, atualizado_em
            ) VALUES (
              $1::uuid,$2::uuid,$3,$4::uuid,$5::uuid,$6::uuid,$7,
-             $8,$9,$10,$11,$12,$13,$14,$15::uuid,$16,$17,$18
+             $8,$9,$10,$11,$12,$13,$14,$15::uuid,$16,$17,$18,$19
            )`,
           [sale.id, tenantId, sale.origem, sale.origem_id, sale.marca_id,
             sale.apresentadora_id, sale.data, sale.gmv, sale.pedidos,
             sale.comissao_apresentadora, sale.comissao_franquia,
-            sale.comissao_franqueadora, sale.status_aprovacao, sale.status_motivo,
+            sale.comissao_franqueadora, sale.marca_condicao_id, sale.status_aprovacao, sale.status_motivo,
             sale.aprovado_por, sale.aprovado_em, sale.criado_em, sale.atualizado_em],
         )
       }

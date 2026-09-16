@@ -457,10 +457,14 @@ export function buildLiveMergePreview(sources, { requestedLiveIds } = {}) {
 export function aggregateSalesByPresenter(sources) {
   const grouped = new Map()
   for (const sale of sources.flatMap((source) => source.vendas ?? [])) {
-    const key = sale.apresentadora_id
+    // Uma união pode atravessar uma virada de contrato. Manter a condição no
+    // agrupamento evita transformar dois snapshots temporais em uma linha sem
+    // origem determinável.
+    const key = `${sale.apresentadora_id ?? ''}:${sale.marca_condicao_id ?? ''}`
     const current = grouped.get(key) ?? {
-      apresentadora_id: key,
+      apresentadora_id: sale.apresentadora_id,
       marca_id: sale.marca_id,
+      marca_condicao_id: sale.marca_condicao_id ?? null,
       data: sale.data,
       gmv: 0n,
       pedidos: 0,

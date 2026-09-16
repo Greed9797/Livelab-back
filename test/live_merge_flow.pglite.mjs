@@ -44,6 +44,10 @@ await db.exec(`
     id uuid PRIMARY KEY, tenant_id uuid, cliente_id uuid, nome text, tipo text,
     tiktok_username text
   );
+  CREATE TABLE marca_condicoes_comerciais(
+    id uuid PRIMARY KEY, tenant_id uuid NOT NULL, marca_id uuid NOT NULL,
+    inicio_vigencia date NOT NULL, cancelled_at timestamptz
+  );
   CREATE TABLE cabines(
     id uuid PRIMARY KEY, tenant_id uuid, numero int, contrato_id uuid
   );
@@ -92,6 +96,7 @@ await db.exec(`
 `)
 await db.exec(await readFile(new URL('../migrations/148_lives_origem_apresentadora.sql', import.meta.url), 'utf8'))
 await db.exec(await readFile(new URL('../migrations/150_live_unioes.sql', import.meta.url), 'utf8'))
+await db.exec(await readFile(new URL('../migrations/152_marca_condicao_snapshot.sql', import.meta.url), 'utf8'))
 await db.query(`SELECT set_config('app.tenant_id',$1,false)`, [tenant])
 
 await db.query('INSERT INTO tenants VALUES ($1)', [tenant])
@@ -103,6 +108,13 @@ await db.query(
 )
 await db.query('INSERT INTO clientes VALUES ($1,$2,$3)', [client, tenant, 'marca.oficial'])
 await db.query('INSERT INTO marcas VALUES ($1,$2,$3,$4,$5,NULL)', [brand, tenant, client, 'Marca', 'cliente'])
+const conditionAugust = id(24)
+const conditionSeptember = id(25)
+await db.query(
+  `INSERT INTO marca_condicoes_comerciais(id,tenant_id,marca_id,inicio_vigencia)
+   VALUES ($1,$2,$3,'2026-08-01'),($4,$2,$3,'2026-09-01')`,
+  [conditionAugust, tenant, brand, conditionSeptember],
+)
 await db.query('INSERT INTO cabines VALUES ($1,$2,1,NULL)', [cabin, tenant])
 await db.query(
   `INSERT INTO apresentadoras(id,tenant_id,user_id,nome) VALUES
@@ -135,11 +147,11 @@ await db.query(
 await db.query(
   `INSERT INTO vendas_atribuidas(
      id,tenant_id,origem,origem_id,marca_id,apresentadora_id,data,gmv,pedidos,
-     comissao_apresentadora,comissao_franquia,comissao_franqueadora,status_aprovacao
+     comissao_apresentadora,comissao_franquia,comissao_franqueadora,marca_condicao_id,status_aprovacao
    ) VALUES
-   ($1,$3,'live',$4,$5,$6,'2026-09-15',2000,20,100,200,50,'pendente_aprovacao'),
-   ($2,$3,'live',$7,$5,$8,'2026-09-15',3000,30,150,300,75,'pendente_aprovacao')`,
-  [saleA, saleB, tenant, liveA, brand, presenterA, liveB, presenterB],
+   ($1,$3,'live',$4,$5,$6,'2026-09-15',2000,20,100,200,50,$9,'pendente_aprovacao'),
+   ($2,$3,'live',$7,$5,$8,'2026-09-15',3000,30,150,300,75,$9,'pendente_aprovacao')`,
+  [saleA, saleB, tenant, liveA, brand, presenterA, liveB, presenterB, conditionSeptember],
 )
 
 const assertOriginalState = async () => {
@@ -279,15 +291,15 @@ assert.deepEqual(rateio.map((row) => [
   [presenterB, 3000, 10800, 30, 60, 'principal'],
 ])
 const mergedSales = (await db.query(`
-  SELECT apresentadora_id,gmv,pedidos,comissao_apresentadora,comissao_franquia,comissao_franqueadora
+  SELECT apresentadora_id,gmv,pedidos,comissao_apresentadora,comissao_franquia,comissao_franqueadora,marca_condicao_id
     FROM vendas_atribuidas WHERE origem_id=$1 ORDER BY apresentadora_id
 `, [destinationId])).rows
 assert.deepEqual(mergedSales.map((row) => [
   row.apresentadora_id, Number(row.gmv), row.pedidos, Number(row.comissao_apresentadora),
-  Number(row.comissao_franquia), Number(row.comissao_franqueadora),
+  Number(row.comissao_franquia), Number(row.comissao_franqueadora), row.marca_condicao_id,
 ]), [
-  [presenterA, 2000, 20, 100, 200, 50],
-  [presenterB, 3000, 30, 150, 300, 75],
+  [presenterA, 2000, 20, 100, 200, 50, conditionSeptember],
+  [presenterB, 3000, 30, 150, 300, 75, conditionSeptember],
 ])
 
 // Legitimate monthly commission recalculation is allowed, but makes automatic
@@ -352,6 +364,10 @@ const restored = (await db.query(`
 `)).rows[0]
 assert.deepEqual({ ...restored, gmv: Number(restored.gmv) }, { lives: 2, gmv: 5000, pedidos: 50, sales: 2, undone: 1 })
 assert.deepEqual((await db.query('SELECT id FROM vendas_atribuidas ORDER BY id')).rows.map((row) => row.id), [saleA, saleB])
+assert.deepEqual((await db.query('SELECT id,marca_condicao_id FROM vendas_atribuidas ORDER BY id')).rows, [
+  { id: saleA, marca_condicao_id: conditionSeptember },
+  { id: saleB, marca_condicao_id: conditionSeptember },
+])
 assert.equal((await getLiveMergeHistory(db, { tenantId: tenant, liveId: liveA })).ativo, false)
 await assert.rejects(
   db.query('UPDATE lives SET manual_gmv=1 WHERE id=$1', [destinationId]),

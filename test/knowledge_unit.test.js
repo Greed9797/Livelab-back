@@ -1,5 +1,5 @@
 import Fastify from 'fastify'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { knowledgeUnitRoutes } from '../src/routes/knowledge-unit.js'
 
@@ -24,6 +24,8 @@ function buildApp({ papel = 'franqueado', tenant = TENANT, queryResults = [] } =
 }
 
 describe('local knowledge base security and editing', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
   it('rejects client and automation roles before touching the database', async () => {
     for (const papel of ['cliente_parceiro', 'automacao']) {
       const { app, query } = buildApp({ papel })
@@ -68,6 +70,61 @@ describe('local knowledge base security and editing', () => {
     expect(url.statusCode).toBe(400)
     expect(query).not.toHaveBeenCalled()
     await app.close()
+  })
+
+  it('allows an empty draft for the upload-first flow and validates content at publish', async () => {
+    const { app, query } = buildApp({ queryResults: [{ rows: [{ id: MATERIAL, revision: 1, status: 'draft' }] }] })
+    await app.register(knowledgeUnitRoutes)
+    const draft = await app.inject({ method: 'POST', url: '/v1/knowledge/unit/materials', payload: { titulo: 'Rascunho sem arquivo' } })
+    expect(draft.statusCode).toBe(201)
+    expect(query).toHaveBeenCalledTimes(1)
+    await app.close()
+  })
+
+  it('uses the database winner for concurrent idempotent creation', async () => {
+    const { app, query, queries } = buildApp({ queryResults: [{ rows: [{ id: MATERIAL, inserted: false, titulo: 'Vencedor' }] }] })
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({ method: 'POST', url: '/v1/knowledge/unit/materials', headers: { 'idempotency-key': 'same-request' }, payload: { titulo: 'Tentativa repetida', content_markdown: 'texto' } })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ id: MATERIAL, titulo: 'Vencedor' })
+    expect(queries[0].sql).toMatch(/ON CONFLICT \(tenant_id, idempotency_key\) DO UPDATE/)
+    await app.close()
+  })
+
+  it('validates publication inside a transaction and returns the existing revision conflict', async () => {
+    const { app, query } = buildApp({ queryResults: [
+      { rows: [] },
+      { rows: [{ id: MATERIAL, revision: 1, content_markdown: null, external_url: null, video_id: null, has_ready_attachment: false }] },
+      { rows: [] },
+    ] })
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({ method: 'POST', url: `/v1/knowledge/unit/materials/${MATERIAL}/publish`, payload: { expected_revision: 1 } })
+    expect(response.statusCode).toBe(400)
+    expect(query.mock.calls.some(([sql]) => sql === 'BEGIN')).toBe(true)
+    expect(query.mock.calls.some(([sql]) => sql === 'ROLLBACK')).toBe(true)
+    await app.close()
+  })
+
+  it('returns an absolute signed URL and preserves the original download name', async () => {
+    const { app } = buildApp({ queryResults: [{ rows: [{ id: 'att-1', storage_key: `${TENANT}/opaque.pdf`, original_name: 'Guia operação.pdf', mime_type: 'application/pdf', byte_size: 123 }] }] })
+    await app.register(knowledgeUnitRoutes)
+    const previousUrl = process.env.SUPABASE_URL
+    const previousKey = process.env.SUPABASE_SERVICE_KEY
+    process.env.SUPABASE_URL = 'https://storage.example.test'
+    process.env.SUPABASE_SERVICE_KEY = 'secret-test-only'
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ signedURL: '/storage/v1/object/sign/knowledge-private/opaque.pdf?token=x' }) }))
+    try {
+      const response = await app.inject({ method: 'GET', url: `/v1/knowledge/unit/materials/${MATERIAL}/attachments/att-1` })
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toMatchObject({ url: 'https://storage.example.test/storage/v1/object/sign/knowledge-private/opaque.pdf?token=x', filename: 'Guia operação.pdf' })
+      expect(response.json().content_disposition).toContain('filename*=UTF-8')
+    } finally {
+      if (previousUrl === undefined) delete process.env.SUPABASE_URL
+      else process.env.SUPABASE_URL = previousUrl
+      if (previousKey === undefined) delete process.env.SUPABASE_SERVICE_KEY
+      else process.env.SUPABASE_SERVICE_KEY = previousKey
+      await app.close()
+    }
   })
 
   it('does not return a material from another tenant even when its id is known', async () => {

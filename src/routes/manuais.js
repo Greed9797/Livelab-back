@@ -34,14 +34,14 @@ export async function manuaisRoutes(app) {
       ],
     },
     async (request, reply) => {
-      const canManage = ['franqueador_master', 'franqueado', 'gerente', 'gerente_comercial'].includes(request.user.papel)
+      const canSeeUnpublished = request.user.papel === 'franqueador_master'
       const { rows } = await app.db.query(`
         SELECT id, titulo, url, atualizado_em, categoria, paginas, destaque, slug,
                status, excerpt, cover_image_url, video_provider, video_url, tags, published_at
         FROM manuais
         WHERE $1 OR status = 'published'
         ORDER BY destaque DESC, atualizado_em DESC
-      `, [canManage])
+      `, [canSeeUnpublished])
       return reply.send(rows)
     }
   )

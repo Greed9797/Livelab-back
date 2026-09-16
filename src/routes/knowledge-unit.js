@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
 import { z } from 'zod'
+import { KNOWLEDGE_PRIVATE_BUCKET } from '../services/knowledge-storage.js'
 
 // Local Base API. `manuais`/`knowledge_categories` remain global legacy data;
 // this plugin keeps new content tenant-scoped until every legacy reader has
@@ -11,12 +12,16 @@ const READERS = [
 ]
 const MANAGERS = ['franqueador_master', 'franqueado', 'gerente', 'gerente_comercial']
 const PDF_MAX_BYTES = 10 * 1024 * 1024
-const PRIVATE_BUCKET = 'knowledge-private'
+const PRIVATE_BUCKET = KNOWLEDGE_PRIVATE_BUCKET
 
 const uuid = z.string().uuid()
 const slugify = (value) => String(value ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
 const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
-const isPdf = (buffer) => buffer.subarray(0, 5).toString('ascii') === '%PDF-'
+const isPdf = (buffer) => {
+  if (!/^%PDF-[0-9]\.[0-9]/.test(buffer.subarray(0, 8).toString('ascii'))) return false
+  const tail = buffer.subarray(Math.max(0, buffer.length - 1024 * 1024)).toString('latin1')
+  return /%%EOF\s*$/.test(tail)
+}
 
 const categorySchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -60,8 +65,9 @@ function safeUrl(value, kind = 'link') {
 }
 
 function videoInputError(data) {
-  if (data.video_provider && data.video_provider !== 'none' && !data.video_url) return 'URL de vídeo obrigatória'
-  if (data.video_provider === 'none' && data.video_url) return 'Informe o provedor do vídeo'
+  const provider = data.video_provider ?? 'none'
+  if (provider !== 'none' && !data.video_url) return 'URL de vídeo obrigatória'
+  if (provider === 'none' && data.video_url) return 'Informe o provedor do vídeo'
   return null
 }
 
@@ -73,11 +79,25 @@ function videoId(value, provider) {
 }
 
 function hasUsableContent(data) {
-  return Boolean(data.content_markdown?.trim() || data.external_url || data.video_url)
+  return Boolean(data.content_markdown?.trim() || data.external_url || data.video_url || data.video_id)
 }
 
 function fileName(value) {
   return (String(value ?? 'arquivo.pdf').replace(/[\\/\0\r\n]/g, '_').trim().slice(0, 255) || 'arquivo.pdf')
+}
+
+async function readPdfPart(part) {
+  if (!part) { const error = new Error('Nenhum arquivo enviado'); error.statusCode = 400; throw error }
+  if (part.mimetype !== 'application/pdf') { const error = new Error('Somente PDF é aceito'); error.statusCode = 400; throw error }
+  const chunks = []; let bytes = 0
+  for await (const chunk of part.file) {
+    bytes += chunk.length
+    if (bytes > PDF_MAX_BYTES) { const error = new Error('PDF muito grande. Máximo 10 MB.'); error.statusCode = 413; throw error }
+    chunks.push(chunk)
+  }
+  const buffer = Buffer.concat(chunks)
+  if (!isPdf(buffer)) { const error = new Error('O conteúdo não é um PDF válido'); error.statusCode = 400; throw error }
+  return { buffer, originalName: fileName(part.filename) }
 }
 
 async function storage(app, request, method, path, body, extraHeaders = {}) {
@@ -90,6 +110,12 @@ async function storage(app, request, method, path, body, extraHeaders = {}) {
     const error = new Error('Falha no armazenamento privado'); error.statusCode = response.status === 413 ? 413 : 502; throw error
   }
   return response
+}
+
+function absoluteStorageUrl(raw) {
+  const base = process.env.SUPABASE_URL?.replace(/\/$/, '')
+  if (!base || !raw) return raw
+  return raw.startsWith('http://') || raw.startsWith('https://') ? raw : `${base}${raw.startsWith('/') ? '' : '/'}${raw}`
 }
 
 function page(query) {
@@ -160,7 +186,7 @@ export async function knowledgeUnitRoutes(app) {
     if (request.query?.category_slug) { predicates.push(`c.slug = $${values.length + 1}`); values.push(request.query.category_slug) }
     const limitIndex = values.length + 1; values.push(size); const offsetIndex = values.length + 1; values.push(offset)
     return app.withTenant(request.user.tenant_id, async (db) => {
-      const result = await db.query(`SELECT m.id, m.title AS titulo, m.slug, m.excerpt, m.material_type, m.external_url, m.video_provider, m.video_id, m.tags, m.status, m.revision, m.published_at, m.updated_at AS atualizado_em, m.category_id, c.name AS category_name, c.slug AS category_slug FROM knowledge_materials m LEFT JOIN knowledge_unit_categories c ON c.id = m.category_id AND c.tenant_id = m.tenant_id WHERE ${predicates.join(' AND ')} ORDER BY m.updated_at DESC, m.id LIMIT $${limitIndex} OFFSET $${offsetIndex}`, values)
+      const result = await db.query(`SELECT m.id, m.title AS titulo, m.slug, m.excerpt, m.material_type, m.external_url, m.video_provider, m.video_id, m.tags, m.status, m.revision, m.published_at, m.updated_at AS atualizado_em, m.category_id, c.name AS category_name, c.slug AS category_slug, (SELECT COUNT(*)::int FROM knowledge_material_attachments a WHERE a.material_id = m.id AND a.tenant_id = m.tenant_id AND a.state = 'ready') AS attachment_count FROM knowledge_materials m LEFT JOIN knowledge_unit_categories c ON c.id = m.category_id AND c.tenant_id = m.tenant_id WHERE ${predicates.join(' AND ')} ORDER BY m.updated_at DESC, m.id LIMIT $${limitIndex} OFFSET $${offsetIndex}`, values)
       return { items: result.rows, page: current, page_size: size, has_more: result.rows.length === size }
     })
   })
@@ -174,27 +200,36 @@ export async function knowledgeUnitRoutes(app) {
     const key = request.params.slugOrId; const manager = MANAGERS.includes(request.user.papel)
     const result = await db.query(`SELECT m.*, m.title AS titulo, m.updated_at AS atualizado_em, c.name AS category_name, c.slug AS category_slug FROM knowledge_materials m LEFT JOIN knowledge_unit_categories c ON c.id = m.category_id AND c.tenant_id = m.tenant_id WHERE m.tenant_id = $1 AND ${isUuid(key) ? 'm.id = $2' : 'm.slug = $2'} AND ($3 OR m.status = 'published')`, [request.user.tenant_id, key, manager])
     if (!result.rows.length) return reply.code(404).send({ error: 'Material não encontrado' })
-    return result.rows[0]
+    const material = result.rows[0]
+    const attachments = await db.query(`SELECT id, original_name, mime_type, byte_size, state, created_at FROM knowledge_material_attachments WHERE tenant_id = $1 AND material_id = $2 AND ($3 OR state = 'ready') ORDER BY created_at DESC`, [request.user.tenant_id, material.id, manager])
+    material.attachments = attachments.rows
+    return material
   }))
 
   app.post('/v1/knowledge/unit/materials', { onRequest: managers }, async (request, reply) => {
     const parsed = createSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const data = parsed.data
-    if (!hasUsableContent(data)) return reply.code(400).send({ error: 'Informe texto, link ou vídeo antes de salvar' })
+    if (data.status === 'published' && !hasUsableContent(data)) return reply.code(400).send({ error: 'Publique somente após informar texto, link, vídeo ou PDF' })
     const videoError = videoInputError(data)
     if (videoError) return reply.code(400).send({ error: videoError })
     if (unsafeMarkdown(data.content_markdown)) return reply.code(400).send({ error: 'O conteúdo contém HTML ou URL não permitido' })
     if (!safeUrl(data.external_url) || !safeUrl(data.video_url, 'video')) return reply.code(400).send({ error: 'URL externa não permitida' })
     const idempotency = String(request.headers['idempotency-key'] ?? '').trim().slice(0, 200) || null
     return app.withTenant(request.user.tenant_id, async (db) => {
-      if (idempotency) {
-        const existing = await db.query('SELECT * FROM knowledge_materials WHERE tenant_id = $1 AND idempotency_key = $2', [request.user.tenant_id, idempotency])
-        if (existing.rows.length) return existing.rows[0]
-      }
       try {
-        const result = await db.query(`INSERT INTO knowledge_materials (tenant_id, category_id, title, slug, excerpt, content_markdown, material_type, external_url, video_provider, video_id, tags, status, idempotency_key, created_by, updated_by, published_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,CASE WHEN $12 = 'published' THEN NOW() END) RETURNING *, title AS titulo, updated_at AS atualizado_em`, [request.user.tenant_id, data.category_id ?? null, data.titulo, `${slugify(data.titulo)}-${crypto.randomBytes(4).toString('hex')}`, data.excerpt ?? null, data.content_markdown ?? null, data.material_type ?? 'playbook', data.external_url ?? null, data.video_provider ?? 'none', videoId(data.video_url, data.video_provider ?? 'none'), data.tags ?? [], data.status, idempotency, request.user.sub])
-        return reply.code(201).send(result.rows[0])
+        const result = await db.query(`
+          INSERT INTO knowledge_materials
+            (tenant_id, category_id, title, slug, excerpt, content_markdown, material_type,
+             external_url, video_provider, video_id, tags, status, idempotency_key,
+             created_by, updated_by, published_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,CASE WHEN $12 = 'published' THEN NOW() END)
+          ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
+            SET updated_at = knowledge_materials.updated_at
+          RETURNING *, title AS titulo, updated_at AS atualizado_em, (xmax = 0) AS inserted`,
+          [request.user.tenant_id, data.category_id ?? null, data.titulo, `${slugify(data.titulo)}-${crypto.randomBytes(4).toString('hex')}`, data.excerpt ?? null, data.content_markdown ?? null, data.material_type ?? 'playbook', data.external_url ?? null, data.video_provider ?? 'none', videoId(data.video_url, data.video_provider ?? 'none'), data.tags ?? [], data.status, idempotency, request.user.sub])
+        const row = result.rows[0]
+        return reply.code(row.inserted === false ? 200 : 201).send(row)
       } catch (error) { if (error.code === '23505') return reply.code(409).send({ error: 'Material ou chave de idempotência já existe' }); throw error }
     })
   })
@@ -230,11 +265,40 @@ export async function knowledgeUnitRoutes(app) {
       const expected = Number(request.body?.expected_revision)
       if (!Number.isInteger(expected) || expected < 1) return reply.code(400).send({ error: 'expected_revision obrigatório' })
       return app.withTenant(request.user.tenant_id, async (db) => {
-        const result = await db.query(`UPDATE knowledge_materials SET status = $1, revision = revision + 1, published_at = CASE WHEN $1 = 'published' THEN COALESCE(published_at, NOW()) ELSE published_at END, updated_at = NOW(), updated_by = $2 WHERE id = $3 AND tenant_id = $4 AND revision = $5 RETURNING id, slug, status, revision, published_at`, [status, request.user.sub, request.params.id, request.user.tenant_id, expected])
-        if (result.rows.length) return result.rows[0]
-        const current = await db.query('SELECT revision FROM knowledge_materials WHERE id = $1 AND tenant_id = $2', [request.params.id, request.user.tenant_id])
-        if (!current.rows.length) return reply.code(404).send({ error: 'Material não encontrado' })
-        return reply.code(409).send({ error: 'Material foi alterado em outra aba', current_revision: current.rows[0].revision })
+        await db.query('BEGIN')
+        try {
+          const current = await db.query(`
+            SELECT m.id, m.slug, m.status, m.revision, m.content_markdown, m.external_url,
+                   m.video_id, EXISTS (
+                     SELECT 1 FROM knowledge_material_attachments a
+                      WHERE a.material_id = m.id AND a.tenant_id = m.tenant_id AND a.state = 'ready'
+                   ) AS has_ready_attachment
+              FROM knowledge_materials m
+             WHERE m.id = $1 AND m.tenant_id = $2
+             FOR UPDATE`, [request.params.id, request.user.tenant_id])
+          if (!current.rows.length) { await db.query('ROLLBACK'); return reply.code(404).send({ error: 'Material não encontrado' }) }
+          const material = current.rows[0]
+          if (material.revision !== expected) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: 'Material foi alterado em outra aba', current_revision: material.revision })
+          }
+          if (status === 'published' && !hasUsableContent(material) && !material.has_ready_attachment) {
+            await db.query('ROLLBACK')
+            return reply.code(400).send({ error: 'Publique somente após informar texto, link, vídeo ou anexar um PDF pronto' })
+          }
+          const result = await db.query(`
+            UPDATE knowledge_materials
+               SET status = $1, revision = revision + 1,
+                   published_at = CASE WHEN $1 = 'published' THEN COALESCE(published_at, NOW()) ELSE published_at END,
+                   updated_at = NOW(), updated_by = $2
+             WHERE id = $3 AND tenant_id = $4 AND revision = $5
+           RETURNING id, slug, status, revision, published_at`, [status, request.user.sub, request.params.id, request.user.tenant_id, expected])
+          await db.query('COMMIT')
+          return result.rows[0]
+        } catch (error) {
+          await db.query('ROLLBACK').catch(() => {})
+          throw error
+        }
       })
     })
   }
@@ -244,14 +308,11 @@ export async function knowledgeUnitRoutes(app) {
     if (!material.rows.length) return reply.code(404).send({ error: 'Material não encontrado' })
     let part
     try { part = await request.file({ limits: { fileSize: PDF_MAX_BYTES } }) } catch (error) { if (error.code === 'FST_REQ_FILE_TOO_LARGE') return reply.code(413).send({ error: 'PDF muito grande. Máximo 10 MB.' }); throw error }
-    if (!part) return reply.code(400).send({ error: 'Nenhum arquivo enviado' })
-    if (part.mimetype !== 'application/pdf') return reply.code(400).send({ error: 'Somente PDF é aceito' })
-    const chunks = []; let bytes = 0
-    for await (const chunk of part.file) { bytes += chunk.length; if (bytes > PDF_MAX_BYTES) return reply.code(413).send({ error: 'PDF muito grande. Máximo 10 MB.' }); chunks.push(chunk) }
-    const buffer = Buffer.concat(chunks)
-    if (!isPdf(buffer)) return reply.code(400).send({ error: 'O conteúdo não é um PDF válido' })
+    let pdf
+    try { pdf = await readPdfPart(part) } catch (error) { return reply.code(error.statusCode ?? 400).send({ error: error.message }) }
+    const { buffer, originalName } = pdf
     const storageKey = `${request.user.tenant_id}/${crypto.randomUUID()}.pdf`
-    const attachment = await app.withTenant(request.user.tenant_id, (db) => db.query(`INSERT INTO knowledge_material_attachments (tenant_id, material_id, storage_key, original_name, mime_type, byte_size, state, created_by) VALUES ($1,$2,$3,$4,'application/pdf',$5,'pending',$6) RETURNING *`, [request.user.tenant_id, request.params.id, storageKey, fileName(part.filename), buffer.length, request.user.sub]).then((result) => result.rows[0]))
+    const attachment = await app.withTenant(request.user.tenant_id, (db) => db.query(`INSERT INTO knowledge_material_attachments (tenant_id, material_id, storage_key, original_name, mime_type, byte_size, state, created_by) VALUES ($1,$2,$3,$4,'application/pdf',$5,'pending',$6) RETURNING *`, [request.user.tenant_id, request.params.id, storageKey, originalName, buffer.length, request.user.sub]).then((result) => result.rows[0]))
     try {
       await storage(app, request, 'POST', `/object/${PRIVATE_BUCKET}/${storageKey}`, buffer, { 'Content-Type': 'application/pdf', 'x-upsert': 'false' })
       return app.withTenant(request.user.tenant_id, async (db) => {
@@ -259,7 +320,32 @@ export async function knowledgeUnitRoutes(app) {
         return reply.code(201).send(result.rows[0])
       })
     } catch (error) {
+      await storage(app, request, 'DELETE', `/object/${PRIVATE_BUCKET}/${storageKey}`).catch(() => {})
       await app.withTenant(request.user.tenant_id, (db) => db.query(`UPDATE knowledge_material_attachments SET state = 'orphaned', orphaned_at = NOW() WHERE id = $1 AND tenant_id = $2`, [attachment.id, request.user.tenant_id])).catch(() => {})
+      throw error
+    }
+  })
+
+  app.post('/v1/knowledge/unit/materials/:id/attachments/:attachmentId/retry', { onRequest: managers }, async (request, reply) => {
+    const existing = await app.withTenant(request.user.tenant_id, (db) => db.query(`SELECT a.id FROM knowledge_material_attachments a WHERE a.id = $1 AND a.material_id = $2 AND a.tenant_id = $3 AND a.state = 'orphaned'`, [request.params.attachmentId, request.params.id, request.user.tenant_id]))
+    if (!existing.rows.length) return reply.code(404).send({ error: 'Anexo órfão não encontrado' })
+    let part
+    try { part = await request.file({ limits: { fileSize: PDF_MAX_BYTES } }) } catch (error) { if (error.code === 'FST_REQ_FILE_TOO_LARGE') return reply.code(413).send({ error: 'PDF muito grande. Máximo 10 MB.' }); throw error }
+    let pdf
+    try { pdf = await readPdfPart(part) } catch (error) { return reply.code(error.statusCode ?? 400).send({ error: error.message }) }
+    const { buffer, originalName } = pdf
+    const storageKey = `${request.user.tenant_id}/${crypto.randomUUID()}.pdf`
+    const moved = await app.withTenant(request.user.tenant_id, (db) => db.query(`UPDATE knowledge_material_attachments SET storage_key = $1, original_name = $2, byte_size = $3, state = 'pending', orphaned_at = NULL WHERE id = $4 AND tenant_id = $5 AND state = 'orphaned' RETURNING *`, [storageKey, originalName, buffer.length, request.params.attachmentId, request.user.tenant_id]))
+    if (!moved.rows.length) return reply.code(409).send({ error: 'O anexo já está sendo processado' })
+    try {
+      await storage(app, request, 'POST', `/object/${PRIVATE_BUCKET}/${storageKey}`, buffer, { 'Content-Type': 'application/pdf', 'x-upsert': 'false' })
+      return app.withTenant(request.user.tenant_id, async (db) => {
+        const result = await db.query(`UPDATE knowledge_material_attachments SET state = 'ready', ready_at = NOW() WHERE id = $1 AND tenant_id = $2 AND state = 'pending' RETURNING *`, [request.params.attachmentId, request.user.tenant_id])
+        return reply.code(200).send(result.rows[0])
+      })
+    } catch (error) {
+      await storage(app, request, 'DELETE', `/object/${PRIVATE_BUCKET}/${storageKey}`).catch(() => {})
+      await app.withTenant(request.user.tenant_id, (db) => db.query(`UPDATE knowledge_material_attachments SET state = 'orphaned', orphaned_at = NOW() WHERE id = $1 AND tenant_id = $2`, [request.params.attachmentId, request.user.tenant_id])).catch(() => {})
       throw error
     }
   })
@@ -272,6 +358,31 @@ export async function knowledgeUnitRoutes(app) {
     const expires = Math.min(3600, Math.max(60, Number.parseInt(request.query?.expires_in ?? '600', 10) || 600))
     const signed = await storage(app, request, 'POST', `/object/sign/${PRIVATE_BUCKET}/${row.storage_key}`, JSON.stringify({ expiresIn: expires }), { 'Content-Type': 'application/json' })
     const body = await signed.json()
-    return { id: row.id, filename: row.original_name, mime_type: row.mime_type, byte_size: row.byte_size, url: body.signedURL ?? body.signedUrl ?? body.url, expires_in: expires }
+    return {
+      id: row.id,
+      filename: row.original_name,
+      mime_type: row.mime_type,
+      byte_size: row.byte_size,
+      content_disposition: `attachment; filename*=UTF-8''${encodeURIComponent(row.original_name)}`,
+      url: absoluteStorageUrl(body.signedURL ?? body.signedUrl ?? body.url),
+      expires_in: expires,
+    }
+  })
+
+  app.get('/v1/knowledge/unit/materials/:id/attachments/:attachmentId/download', { onRequest: readers }, async (request, reply) => {
+    const canManage = MANAGERS.includes(request.user.papel)
+    const result = await app.withTenant(request.user.tenant_id, (db) => db.query(`SELECT a.id, a.storage_key, a.original_name, a.mime_type, a.byte_size FROM knowledge_material_attachments a JOIN knowledge_materials m ON m.id = a.material_id AND m.tenant_id = a.tenant_id WHERE a.id = $1 AND a.material_id = $2 AND a.tenant_id = $3 AND a.state = 'ready' AND ($4 OR m.status = 'published')`, [request.params.attachmentId, request.params.id, request.user.tenant_id, canManage]))
+    if (!result.rows.length) return reply.code(404).send({ error: 'Anexo não encontrado' })
+    const row = result.rows[0]
+    const signed = await storage(app, request, 'POST', `/object/sign/${PRIVATE_BUCKET}/${row.storage_key}`, JSON.stringify({ expiresIn: 600 }), { 'Content-Type': 'application/json' })
+    const signedBody = await signed.json()
+    const response = await fetch(absoluteStorageUrl(signedBody.signedURL ?? signedBody.signedUrl ?? signedBody.url))
+    if (!response.ok) return reply.code(502).send({ error: 'Não foi possível baixar o anexo' })
+    const body = Buffer.from(await response.arrayBuffer())
+    if (body.length > PDF_MAX_BYTES || !isPdf(body)) return reply.code(502).send({ error: 'O armazenamento retornou um PDF inválido' })
+    reply.header('Content-Type', row.mime_type)
+    reply.header('Content-Length', String(body.length))
+    reply.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(row.original_name)}`)
+    return reply.send(body)
   })
 }

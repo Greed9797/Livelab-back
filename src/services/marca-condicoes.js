@@ -217,6 +217,11 @@ async function recalculateOpenVendas(db, { tenantId, marcaId, start, end }) {
   await db.query(
     `WITH recalculated AS (
       SELECT va.id, va.gmv,
+             (SELECT c.id
+                FROM marca_condicoes_comerciais c
+               WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
+                 AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
+               ORDER BY c.inicio_vigencia DESC LIMIT 1) AS marca_condicao_id,
              COALESCE((SELECT c.comissao_franquia_pct
                          FROM marca_condicoes_comerciais c
                         WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
@@ -235,6 +240,7 @@ async function recalculateOpenVendas(db, { tenantId, marcaId, start, end }) {
     UPDATE vendas_atribuidas va
         SET comissao_franquia = ROUND(r.gmv * r.franquia_pct / 100.0, 2),
             comissao_franqueadora = ROUND(r.gmv * r.franqueadora_pct / 100.0, 2),
+            marca_condicao_id = r.marca_condicao_id,
             atualizado_em = NOW()
        FROM recalculated r
       WHERE va.id = r.id`,

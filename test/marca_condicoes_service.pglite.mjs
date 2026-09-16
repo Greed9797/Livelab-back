@@ -33,7 +33,7 @@ await db.exec(`
   CREATE TABLE vendas_atribuidas(
     id uuid PRIMARY KEY, tenant_id uuid, marca_id uuid, data date, gmv numeric(15,2),
     status_aprovacao text, comissao_franquia numeric(15,2),
-    comissao_franqueadora numeric(15,2), atualizado_em timestamptz
+    comissao_franqueadora numeric(15,2), marca_condicao_id uuid, atualizado_em timestamptz
   );
   CREATE TABLE audit_log(
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid, user_id uuid,
@@ -68,6 +68,9 @@ const confirmed = await confirmarCondicaoMarca(db, {
   expectedRevision: 1, idempotencyKey: 'pglite-contract-1', actorUserId: null,
 })
 assert.equal(confirmed.idempotent, false)
+const conditionId = confirmed.condition.id
+assert.equal((await db.query(`SELECT marca_condicao_id FROM vendas_atribuidas WHERE id=$1`, [id(4)])).rows[0].marca_condicao_id, conditionId)
+assert.equal((await db.query(`SELECT marca_condicao_id FROM vendas_atribuidas WHERE id=$1`, [id(6)])).rows[0].marca_condicao_id, conditionId)
 assert.equal((await db.query(`SELECT comissao_franquia,comissao_franqueadora FROM vendas_atribuidas WHERE id=$1`, [id(4)])).rows[0].comissao_franquia, '800.00')
 assert.equal((await db.query(`SELECT comissao_calculada FROM lives WHERE id=$1`, [id(3)])).rows[0].comissao_calculada, '800.00')
 assert.equal((await db.query(`SELECT comissao_calculada FROM lives WHERE id=$1`, [id(5)])).rows[0].comissao_calculada, '160.00')

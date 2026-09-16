@@ -35,8 +35,12 @@ function monthAfter(monthStart) {
 
 function conditionRowToPublic(row) {
   if (!row) return null
+  const inicioVigencia = row.inicio_vigencia instanceof Date
+    ? row.inicio_vigencia.toISOString().slice(0, 10)
+    : String(row.inicio_vigencia).slice(0, 10)
   return {
     ...row,
+    inicio_vigencia: inicioVigencia,
     fixo_mensal: Number(row.fixo_mensal ?? 0),
     comissao_franquia_pct: Number(row.comissao_franquia_pct ?? 0),
     comissao_franqueadora_pct: Number(row.comissao_franqueadora_pct ?? 0),

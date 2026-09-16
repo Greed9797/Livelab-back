@@ -43,14 +43,25 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
        c.id          AS contrato_id,
        c.comissao_pct,
        m.id          AS marca_id,
-       m.comissao_franquia_pct,
-       m.comissao_franqueadora_pct,
+       COALESCE(mc.comissao_franquia_pct, m.comissao_franquia_pct) AS comissao_franquia_pct,
+       COALESCE(mc.comissao_franqueadora_pct, m.comissao_franqueadora_pct) AS comissao_franqueadora_pct,
+       mc.id         AS marca_condicao_id,
        m.valor_fixo_minimo
      FROM lives l
      LEFT JOIN cabines cab ON cab.id = l.cabine_id
      LEFT JOIN contratos c  ON c.id = cab.contrato_id AND c.status = 'ativo'
      LEFT JOIN marcas m     ON m.tenant_id = $1::uuid
                             AND ${MARCA_RESOLVE_PREDICATE}
+     LEFT JOIN LATERAL (
+       SELECT c.id, c.comissao_franquia_pct, c.comissao_franqueadora_pct
+         FROM marca_condicoes_comerciais c
+        WHERE c.tenant_id = $1::uuid
+          AND c.marca_id = m.id
+          AND c.inicio_vigencia <= (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date
+          AND c.cancelled_at IS NULL
+        ORDER BY c.inicio_vigencia DESC
+        LIMIT 1
+     ) mc ON true
      WHERE l.id = $2 AND l.tenant_id = $1::uuid
        AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
      ORDER BY m.criado_em ASC
@@ -192,8 +203,8 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
       `INSERT INTO vendas_atribuidas
          (tenant_id, origem, origem_id, marca_id, apresentadora_id, data,
           gmv, pedidos, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
-          status_aprovacao)
-       VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,$9,$10,'pendente_aprovacao')
+          status_aprovacao, marca_condicao_id)
+       VALUES ($1,'live',$2,$3,$4,$5,$6,$7,$8,$9,$10,'pendente_aprovacao',$11)
        ON CONFLICT (tenant_id, origem, origem_id, COALESCE(apresentadora_id, '00000000-0000-0000-0000-000000000000'::uuid))
        DO UPDATE SET
            marca_id               = EXCLUDED.marca_id,
@@ -203,6 +214,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
            comissao_apresentadora = EXCLUDED.comissao_apresentadora,
            comissao_franquia      = EXCLUDED.comissao_franquia,
            comissao_franqueadora  = EXCLUDED.comissao_franqueadora,
+           marca_condicao_id     = EXCLUDED.marca_condicao_id,
            status_aprovacao       = 'pendente_aprovacao',
            status_motivo          = NULL,
            atualizado_em          = NOW()
@@ -211,6 +223,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
       [
         tenantId, liveId, live.marca_id, apresentadoraId, data,
         gmvRateado, pedidosLinha, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
+        live.marca_condicao_id ?? null,
       ],
     )
 

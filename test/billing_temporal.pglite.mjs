@@ -20,8 +20,8 @@ const billingSelection = `
     JOIN video_registros vr ON vr.tenant_id = va.tenant_id AND vr.id = va.origem_id
     JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
     LEFT JOIN LATERAL (
-      SELECT (c.origem <> 'legado_nao_verificado' AND c.comissao_confirmada IS TRUE) AS condicao_comissao_autoritativa,
-             CASE WHEN c.origem <> 'legado_nao_verificado' AND c.comissao_confirmada IS TRUE
+      SELECT (c.origem <> 'legado_nao_verificado' AND c.comissao_confirmada IS TRUE AND c.fixo_confirmado IS TRUE) AS condicao_comissao_autoritativa,
+             CASE WHEN c.origem <> 'legado_nao_verificado' AND c.comissao_confirmada IS TRUE AND c.fixo_confirmado IS TRUE
                   THEN c.comissao_franquia_pct END AS comissao_franquia_pct_efetiva,
              CASE WHEN c.origem <> 'legado_nao_verificado'
                         AND c.comissao_confirmada IS TRUE AND c.fixo_confirmado IS TRUE
@@ -33,9 +33,7 @@ const billingSelection = `
     ) mc ON true
    WHERE va.tenant_id = $1 AND va.origem = 'video'
      AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') IN ('aprovada', 'fechada')
-     AND (($4::int = 16 AND COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
-          OR ($4::int = 1 AND (COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') = 'fixo_ou_comissao'
-                               OR va.data >= ($2::date + 15))))
+     AND ($4::int = 1 OR COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
      AND va.data >= ($2::date - CASE WHEN $4::int = 1
                                           AND COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') = 'fixo_ou_comissao'
                                      THEN 15 ELSE 0 END)
@@ -53,8 +51,8 @@ const liveSelection = `
     FROM lives l
     JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
     LEFT JOIN LATERAL (
-      SELECT (c.origem <> 'legado_nao_verificado' AND c.comissao_confirmada IS TRUE) AS condicao_comissao_autoritativa,
-             CASE WHEN c.origem <> 'legado_nao_verificado' AND c.comissao_confirmada IS TRUE
+      SELECT (c.origem <> 'legado_nao_verificado' AND c.comissao_confirmada IS TRUE AND c.fixo_confirmado IS TRUE) AS condicao_comissao_autoritativa,
+             CASE WHEN c.origem <> 'legado_nao_verificado' AND c.comissao_confirmada IS TRUE AND c.fixo_confirmado IS TRUE
                   THEN c.comissao_franquia_pct END AS comissao_franquia_pct_efetiva,
              CASE WHEN c.origem <> 'legado_nao_verificado'
                         AND c.comissao_confirmada IS TRUE AND c.fixo_confirmado IS TRUE
@@ -66,9 +64,7 @@ const liveSelection = `
        ORDER BY c.inicio_vigencia DESC LIMIT 1
     ) mc ON true
    WHERE l.tenant_id = $1 AND l.status = 'encerrada' AND l.faturado_em IS NULL
-     AND (($4::int = 16 AND COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
-          OR ($4::int = 1 AND (COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') = 'fixo_ou_comissao'
-                               OR (l.encerrado_em AT TIME ZONE 'America/Sao_Paulo')::date >= ($2::date + 15))))
+     AND ($4::int = 1 OR COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
      AND (l.encerrado_em AT TIME ZONE 'America/Sao_Paulo')::date >=
          ($2::date - CASE WHEN $4::int = 1
                                AND COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') = 'fixo_ou_comissao'
@@ -110,14 +106,20 @@ try {
       ('00000000-0000-4000-8000-000000000041', '${tenant}', '${legacy}', '2026-08-01', 900, 99, 'fixo_ou_comissao', 'legado_nao_verificado', true, true, NULL);
     INSERT INTO video_registros VALUES
       ('00000000-0000-4000-8000-000000000101', '${tenant}', '${additive}', '2026-08-10', 4000),
+      ('00000000-0000-4000-8000-000000000107', '${tenant}', '${additive}', '2026-08-15', 1500),
+      ('00000000-0000-4000-8000-000000000108', '${tenant}', '${additive}', '2026-08-16', 1600),
       ('00000000-0000-4000-8000-000000000104', '${tenant}', '${additive}', '2026-08-20', 2000),
+      ('00000000-0000-4000-8000-000000000109', '${tenant}', '${additive}', '2026-08-30', 3000),
       ('00000000-0000-4000-8000-000000000102', '${tenant}', '${additive}', '2026-09-10', 2000),
       ('00000000-0000-4000-8000-000000000103', '${tenant}', '${ou}', '2026-08-10', 6000),
       ('00000000-0000-4000-8000-000000000105', '${tenant}', '${partial}', '2026-08-10', 10000),
       ('00000000-0000-4000-8000-000000000106', '${tenant}', '${legacy}', '2026-08-10', 10000);
     INSERT INTO vendas_atribuidas VALUES
       ('00000000-0000-4000-8000-000000000201', '${tenant}', 'video', '00000000-0000-4000-8000-000000000101', '${additive}', '2026-08-10', 4000, 0, 'aprovada'),
+      ('00000000-0000-4000-8000-000000000207', '${tenant}', 'video', '00000000-0000-4000-8000-000000000107', '${additive}', '2026-08-15', 1500, 0, 'aprovada'),
+      ('00000000-0000-4000-8000-000000000208', '${tenant}', 'video', '00000000-0000-4000-8000-000000000108', '${additive}', '2026-08-16', 1600, 0, 'aprovada'),
       ('00000000-0000-4000-8000-000000000204', '${tenant}', 'video', '00000000-0000-4000-8000-000000000104', '${additive}', '2026-08-20', 2000, 0, 'aprovada'),
+      ('00000000-0000-4000-8000-000000000209', '${tenant}', 'video', '00000000-0000-4000-8000-000000000109', '${additive}', '2026-08-30', 3000, 0, 'aprovada'),
       ('00000000-0000-4000-8000-000000000202', '${tenant}', 'video', '00000000-0000-4000-8000-000000000102', '${additive}', '2026-09-10', 2000, 0, 'aprovada'),
       ('00000000-0000-4000-8000-000000000203', '${tenant}', 'video', '00000000-0000-4000-8000-000000000103', '${ou}', '2026-08-10', 6000, 0, 'aprovada'),
       ('00000000-0000-4000-8000-000000000205', '${tenant}', 'video', '00000000-0000-4000-8000-000000000105', '${partial}', '2026-08-10', 10000, 77, 'aprovada'),
@@ -138,14 +140,20 @@ try {
   // On day 16 the OU brand is deferred; its complete monthly variable amount
   // is evaluated with the fixed amount on day 1.
   const firstHalf = await select(16, '2026-08-01', '2026-08-15')
-  assert.equal(firstHalf.length, 4)
-  assert.deepEqual(firstHalf.map((row) => Number(row.comissao)).sort((a, b) => a - b), [77, 88, 400, 600])
+  assert.equal(firstHalf.length, 5)
+  assert.deepEqual(firstHalf.map((row) => Number(row.comissao)).sort((a, b) => a - b), [77, 88, 150, 400, 600])
   assert.equal(firstHalf.find((row) => row.marca_id === partial).tipo_cobranca, 'fixo_mais_comissao')
   assert.equal(firstHalf.find((row) => row.marca_id === legacy).comissao, '88')
   await db.query(`UPDATE lives SET faturado_em = NOW() WHERE id = '00000000-0000-4000-8000-000000000301'`)
 
-  const month = await select(1, '2026-08-01', '2026-08-31')
-  assert.equal(month.length, 3)
+  // No dia 1 o inicioPeriodo real é 16/08. A marca + começa no dia 16,
+  // enquanto OU volta quinze dias para avaliar o mês inteiro.
+  const month = await select(1, '2026-08-16', '2026-08-31')
+  assert.equal(month.length, 5)
+  assert.equal(month.some((row) => row.marca_id === additive && Number(row.comissao) === 150), false)
+  assert.equal(month.some((row) => row.marca_id === additive && Number(row.comissao) === 160), true)
+  assert.equal(month.some((row) => row.marca_id === additive && Number(row.comissao) === 300), true)
+  assert.equal(month.some((row) => row.marca_id === ou && Number(row.comissao) === 600), true)
   const byBrand = month.reduce((map, row) => {
     const key = row.marca_id
     map[key] ??= { totalFixo: 0, totalComissao: 0, tipoCobranca: row.tipo_cobranca }
@@ -154,7 +162,7 @@ try {
   }, {})
   byBrand[additive].totalFixo = 1000
   byBrand[ou].totalFixo = 1000
-  assert.equal(calculateBillingAmount([byBrand[additive]]), 1200)
+  assert.equal(calculateBillingAmount([byBrand[additive]]), 1660)
   assert.equal(calculateBillingAmount([byBrand[ou]]), 1200)
 
   const september = await select(16, '2026-09-01', '2026-09-15')

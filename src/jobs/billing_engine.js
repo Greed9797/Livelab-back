@@ -108,9 +108,10 @@ async function processTenantBilling(tenantId, day, spDate) {
        WHERE l.tenant_id = $1
          AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
          AND l.status = 'encerrada' AND l.faturado_em IS NULL
-         AND (($4::int = 16 AND COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
-              OR ($4::int = 1 AND (COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') = 'fixo_ou_comissao'
-                                   OR (l.encerrado_em AT TIME ZONE 'America/Sao_Paulo')::date >= ($2::date + 15))))
+         -- Dia 16 fecha a primeira quinzena apenas para cobrança aditiva (+).
+         -- Dia 1 fecha todos os tipos: OU precisa voltar ao dia 1 do mês,
+         -- enquanto + começa no dia 16 já passado em inicioPeriodo.
+         AND ($4::int = 1 OR COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
          AND (l.encerrado_em AT TIME ZONE 'America/Sao_Paulo')::date >=
              ($2::date - CASE WHEN $4::int = 1
                                    AND COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') = 'fixo_ou_comissao'
@@ -142,9 +143,10 @@ async function processTenantBilling(tenantId, day, spDate) {
         ) mc ON true
        WHERE va.tenant_id = $1 AND va.origem = 'video'
          AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') IN ('aprovada', 'fechada')
-         AND (($4::int = 16 AND COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
-              OR ($4::int = 1 AND (COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') = 'fixo_ou_comissao'
-                                   OR va.data >= ($2::date + 15))))
+         -- A mesma janela vale para vídeos, sem marcador de faturamento:
+         -- a competência do dia 1 começa em inicioPeriodo para + e volta
+         -- quinze dias para OU.
+         AND ($4::int = 1 OR COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
          AND va.data >= ($2::date - CASE WHEN $4::int = 1
                                               AND COALESCE(mc.tipo_cobranca_autoritativo, 'fixo_mais_comissao') = 'fixo_ou_comissao'
                                          THEN 15 ELSE 0 END)
@@ -265,6 +267,12 @@ async function processTenantBilling(tenantId, day, spDate) {
       const boletoId = boleto.id
       let gatewayConfirmed = Boolean(boleto.gateway_id)
 
+      // O boleto já foi inserido (ou encontrado) e precisa sobreviver se uma
+      // atualização local falhar depois que o gateway confirmar. Este segundo
+      // savepoint é deliberadamente posterior ao INSERT: o savepoint anterior
+      // continua reservado para desfazer o boleto quando o gateway falha.
+      await db.query('SAVEPOINT boleto_preservado')
+
       // Comunicação com o gateway PRIMEIRO. A live só é marcada como faturada
       // e os dados do boleto só são gravados APÓS o gateway confirmar a
       // cobrança — assim uma falha do gateway não trava a receita.
@@ -329,11 +337,33 @@ async function processTenantBilling(tenantId, day, spDate) {
         }
         await db.query('RELEASE SAVEPOINT cliente_fatura')
       } catch (err) {
-        // O gateway já confirmou. Comita o boleto e seus dados disponíveis;
-        // a próxima execução encontra a mesma chave e reconcilia sem chamar
-        // o gateway novamente.
-        await db.query('COMMIT').catch(() => {})
-        console.error(`Falha ao finalizar boleto local ${boletoId}:`, err.message)
+        // O gateway já confirmou. A falha SQL deixou a transação em 25P02;
+        // primeiro voltamos ao savepoint posterior ao INSERT, depois
+        // regravamos a confirmação externa e repetimos as marcações locais.
+        // Assim o COMMIT é válido e a próxima execução encontra a mesma chave
+        // sem chamar o gateway novamente. Se a própria regravação falhar,
+        // não há garantia local possível sem uma transação independente: o
+        // erro fica explícito para retry/alerta operacional.
+        try {
+          await db.query('ROLLBACK TO SAVEPOINT boleto_preservado')
+          if (payment) {
+            await db.query(
+              `UPDATE boletos SET gateway_id = $1, gateway_url = $2, gateway_pix_copia_cola = $3, gateway_provider = 'appmax' WHERE id = $4`,
+              [payment.id, payment.invoiceUrl, payment.pixCopiaECola ?? null, boletoId]
+            )
+          }
+          if (data.lives.length > 0) {
+            await db.query(
+              `UPDATE lives SET faturado_em = NOW(), boleto_id = $1 WHERE id = ANY($2::uuid[])`,
+              [boletoId, data.lives]
+            )
+          }
+          await db.query('RELEASE SAVEPOINT boleto_preservado')
+          await db.query('COMMIT')
+        } catch (recoveryErr) {
+          await db.query('ROLLBACK').catch(() => {})
+          console.error(`Falha ao preservar confirmação local do boleto ${boletoId}:`, recoveryErr.message)
+        }
         return
       }
     }

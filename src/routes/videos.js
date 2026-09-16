@@ -85,6 +85,17 @@ async function syncVendaVideo(db, tenantId, video) {
   })
 }
 
+async function videoFinanceiroFechado(db, tenantId, videoId) {
+  const result = await db.query(
+    `SELECT 1 FROM vendas_atribuidas
+      WHERE tenant_id = $1::uuid AND origem = 'video' AND origem_id = $2::uuid
+        AND status_aprovacao IN ('aprovada', 'fechada', 'faturada')
+      LIMIT 1`,
+    [tenantId, videoId],
+  )
+  return Boolean(result.rows[0])
+}
+
 export async function videosRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_VIDEOS)]
   const writeAccess = [app.authenticate, app.requirePapel(WRITE_VIDEOS)]
@@ -139,6 +150,10 @@ export async function videosRoutes(app) {
         agendaEventoId: d.agenda_evento_id,
       })
       if (!refsOk) return reply
+
+      if (await videoFinanceiroFechado(db, tenant_id, request.params.id)) {
+        return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser alterado' })
+      }
 
       await db.query('BEGIN')
       try {
@@ -212,6 +227,9 @@ export async function videosRoutes(app) {
   app.delete('/v1/videos/:id', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      if (await videoFinanceiroFechado(db, tenant_id, request.params.id)) {
+        return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser excluído' })
+      }
       await db.query('BEGIN')
       try {
         const video = await db.query(

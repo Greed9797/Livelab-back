@@ -6,9 +6,10 @@ const db = new PGlite()
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 await db.exec(`
 CREATE TABLE marcas(id uuid,tenant_id uuid,comissao_franquia_pct numeric,comissao_franqueadora_pct numeric);
+CREATE TABLE marca_condicoes_comerciais(id uuid,tenant_id uuid,marca_id uuid,inicio_vigencia date,comissao_franquia_pct numeric,comissao_franqueadora_pct numeric,tipo_cobranca text,cancelled_at timestamptz);
 CREATE TABLE apresentadora_comissao_faixas(tenant_id uuid,apresentadora_id uuid,ativo boolean,gmv_inicio numeric,gmv_fim numeric,comissao_pct numeric);
 CREATE TABLE tenant_comissao_faixas_default(tenant_id uuid,gmv_inicio numeric,gmv_fim numeric,comissao_pct numeric);
-CREATE TABLE vendas_atribuidas(id uuid PRIMARY KEY,tenant_id uuid,apresentadora_id uuid,marca_id uuid,origem text,origem_id uuid,data date,gmv numeric,pedidos int,status_aprovacao text,comissao_apresentadora numeric DEFAULT 99,comissao_franquia numeric DEFAULT 99,comissao_franqueadora numeric DEFAULT 99,atualizado_em timestamptz,criado_em timestamptz DEFAULT now());
+CREATE TABLE vendas_atribuidas(id uuid PRIMARY KEY,tenant_id uuid,apresentadora_id uuid,marca_id uuid,origem text,origem_id uuid,data date,gmv numeric,pedidos int,status_aprovacao text,comissao_apresentadora numeric DEFAULT 99,comissao_franquia numeric DEFAULT 99,comissao_franqueadora numeric DEFAULT 99,marca_condicao_id uuid,atualizado_em timestamptz,criado_em timestamptz DEFAULT now());
 CREATE TABLE lives(id uuid,tenant_id uuid,comissao_apresentadora_valor numeric,comissao_apresentadora_pct numeric,uniao_destino_id uuid,uniao_desfeita_em timestamptz);
 `)
 await db.query('INSERT INTO marcas VALUES ($1,$2,10,2)', [id(3),id(1)])

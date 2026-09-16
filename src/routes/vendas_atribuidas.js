@@ -31,9 +31,24 @@ export async function calcularComissoesAtribuidas(db, {
   comissaoFranqueadora,
 }) {
   const marcaQ = await db.query(
-    `SELECT comissao_franquia_pct, comissao_franqueadora_pct
-     FROM marcas WHERE id = $1 AND tenant_id = $2::uuid`,
-    [marcaId, tenantId],
+    `SELECT m.comissao_franquia_pct AS marca_comissao_franquia_pct,
+            m.comissao_franqueadora_pct AS marca_comissao_franqueadora_pct,
+            mc.id AS marca_condicao_id,
+            COALESCE(mc.comissao_franquia_pct, m.comissao_franquia_pct) AS comissao_franquia_pct,
+            COALESCE(mc.comissao_franqueadora_pct, m.comissao_franqueadora_pct) AS comissao_franqueadora_pct
+       FROM marcas m
+       LEFT JOIN LATERAL (
+         SELECT c.id, c.comissao_franquia_pct, c.comissao_franqueadora_pct
+           FROM marca_condicoes_comerciais c
+          WHERE c.tenant_id = $2::uuid
+            AND c.marca_id = m.id
+            AND c.inicio_vigencia <= $3::date
+            AND c.cancelled_at IS NULL
+          ORDER BY c.inicio_vigencia DESC
+          LIMIT 1
+       ) mc ON true
+      WHERE m.id = $1 AND m.tenant_id = $2::uuid`,
+    [marcaId, tenantId, data],
   )
   const marca = marcaQ.rows[0]
   if (!marca) return null
@@ -56,6 +71,7 @@ export async function calcularComissoesAtribuidas(db, {
     comissao_apresentadora: comissaoApresentadora ?? valor * (apresentadoraPct / 100),
     comissao_franquia: comissaoFranquia ?? valor * (Number(marca.comissao_franquia_pct ?? 0) / 100),
     comissao_franqueadora: comissaoFranqueadora ?? valor * (Number(marca.comissao_franqueadora_pct ?? 0) / 100),
+    marca_condicao_id: marca.marca_condicao_id ?? null,
   }
 }
 
@@ -88,12 +104,14 @@ export async function upsertVendaAtribuida(db, payload) {
            comissao_apresentadora = $6,
            comissao_franquia = $7,
            comissao_franqueadora = $8,
+           marca_condicao_id = $9,
            atualizado_em = NOW()
-       WHERE id = $9 AND tenant_id = $10::uuid
+       WHERE id = $10 AND tenant_id = $11::uuid
        RETURNING *`,
       [
         payload.marcaId, apresentadoraId, payload.data, payload.gmv ?? 0, payload.pedidos ?? 0,
         comissoes.comissao_apresentadora, comissoes.comissao_franquia, comissoes.comissao_franqueadora,
+        comissoes.marca_condicao_id,
         current.rows[0].id, payload.tenantId,
       ],
     )
@@ -104,18 +122,35 @@ export async function upsertVendaAtribuida(db, payload) {
   const inserted = await db.query(
     `INSERT INTO vendas_atribuidas (
        tenant_id, origem, origem_id, marca_id, apresentadora_id, data,
-       gmv, pedidos, comissao_apresentadora, comissao_franquia, comissao_franqueadora
+       gmv, pedidos, comissao_apresentadora, comissao_franquia, comissao_franqueadora,
+       marca_condicao_id
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      RETURNING *`,
     [
       payload.tenantId, payload.origem, payload.origemId, payload.marcaId,
       apresentadoraId, payload.data, payload.gmv ?? 0, payload.pedidos ?? 0,
       comissoes.comissao_apresentadora, comissoes.comissao_franquia, comissoes.comissao_franqueadora,
+      comissoes.marca_condicao_id,
     ],
   )
   await sincronizarSnapshotDaVenda(db, payload.tenantId, inserted.rows[0])
   return inserted.rows[0]
+}
+
+const STATUS_FINANCEIRO_FECHADO = new Set(['aprovada', 'fechada', 'faturada'])
+
+async function movimentoFinanceiroFechado(db, venda, tenantId) {
+  if (STATUS_FINANCEIRO_FECHADO.has(venda.status_aprovacao)) return true
+  if (venda.origem !== 'live') return false
+  const result = await db.query(
+    `SELECT 1 FROM lives
+      WHERE id = $1::uuid AND tenant_id = $2::uuid
+        AND (faturado_em IS NOT NULL OR boleto_id IS NOT NULL)
+      LIMIT 1`,
+    [venda.origem_id, tenantId],
+  )
+  return Boolean(result.rows[0])
 }
 
 /** Venda de live alterada → snapshot da live segue o motor. Vídeo não tem snapshot por live. */
@@ -141,7 +176,11 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
   // A janela inclui TODAS as vendas do mês, inclusive aprovadas, como o resolver
   // individual. Excluir a origem inteira preserva a semântica mesmo com duplicatas.
   const vendas = await db.query(
-    `SELECT va.*, m.comissao_franquia_pct, m.comissao_franqueadora_pct,
+    `SELECT va.*, m.comissao_franquia_pct AS marca_comissao_franquia_pct,
+            m.comissao_franqueadora_pct AS marca_comissao_franqueadora_pct,
+            mc.id AS marca_condicao_id,
+            COALESCE(mc.comissao_franquia_pct, m.comissao_franquia_pct) AS comissao_franquia_pct,
+            COALESCE(mc.comissao_franqueadora_pct, m.comissao_franqueadora_pct) AS comissao_franqueadora_pct,
             m.id AS resolved_marca_id
        FROM (
          SELECT id, origem, origem_id, marca_id, apresentadora_id, data, gmv,
@@ -152,7 +191,17 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
             AND data >= ${mesInicioSql}
             AND data < (${mesInicioSql} + interval '1 month')
        ) va
-       LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = $1::uuid`,
+       LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = $1::uuid
+       LEFT JOIN LATERAL (
+         SELECT c.id, c.comissao_franquia_pct, c.comissao_franqueadora_pct
+           FROM marca_condicoes_comerciais c
+          WHERE c.tenant_id = $1::uuid
+            AND c.marca_id = va.marca_id
+            AND c.inicio_vigencia <= va.data
+            AND c.cancelled_at IS NULL
+          ORDER BY c.inicio_vigencia DESC
+          LIMIT 1
+       ) mc ON true`,
     params,
   )
   const pendentes = vendas.rows.filter(v => ['live', 'video'].includes(v.origem)
@@ -176,17 +225,20 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
       monthlyContext: { gmvExcludingOrigin: venda.gmv_excluding_origin, presenterBands, defaultBands },
     })
     const gmv = Number(venda.gmv ?? 0)
-    updates.push({ id: venda.id, ap: gmv * (pct / 100),
+    const update = { id: venda.id, ap: gmv * (pct / 100),
       franquia: gmv * (Number(venda.comissao_franquia_pct ?? 0) / 100),
-      franqueadora: gmv * (Number(venda.comissao_franqueadora_pct ?? 0) / 100) })
+      franqueadora: gmv * (Number(venda.comissao_franqueadora_pct ?? 0) / 100) }
+    if (venda.marca_condicao_id) update.marca_condicao_id = venda.marca_condicao_id
+    updates.push(update)
   }
   // Um único UPDATE substitui centenas de round trips. Revalida aprovação no
   // momento da escrita para não sobrescrever uma venda aprovada em paralelo.
   const changed = await db.query(
     `UPDATE vendas_atribuidas va SET comissao_apresentadora = u.ap,
        comissao_franquia = u.franquia, comissao_franqueadora = u.franqueadora,
+       marca_condicao_id = u.marca_condicao_id,
        atualizado_em = NOW()
-     FROM jsonb_to_recordset($3::jsonb) AS u(id uuid, ap numeric, franquia numeric, franqueadora numeric)
+     FROM jsonb_to_recordset($3::jsonb) AS u(id uuid, ap numeric, franquia numeric, franqueadora numeric, marca_condicao_id uuid)
      WHERE va.id = u.id AND va.tenant_id = $1::uuid AND va.apresentadora_id = $2::uuid
        AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') = 'pendente_aprovacao'
      RETURNING va.origem, va.origem_id`,
@@ -272,6 +324,9 @@ export async function vendasAtribuidasRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const current = await db.query('SELECT * FROM vendas_atribuidas WHERE id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
       if (!current.rows[0]) return reply.code(404).send({ error: 'Venda atribuída não encontrada' })
+      if (await movimentoFinanceiroFechado(db, current.rows[0], tenant_id)) {
+        return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'A atribuição financeira já está fechada e não pode ser alterada' })
+      }
 
       const next = { ...current.rows[0], ...updates }
     const comissoes = await calcularComissoesAtribuidas(db, {

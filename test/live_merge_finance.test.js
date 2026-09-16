@@ -22,7 +22,7 @@ describe('pedidos preservados após união de lives', () => {
   it('o faturamento bloqueia as lives antes de enviar qualquer cobrança ao gateway', () => {
     const source = readFileSync(new URL('../src/jobs/billing_engine.js', import.meta.url), 'utf8')
     const selection = source.slice(source.indexOf('const livesQ ='), source.indexOf('const livesPorCliente ='))
-    expect(selection).toMatch(/ORDER BY id\s+FOR UPDATE/)
+    expect(selection).toMatch(/ORDER BY l\.id\s+FOR UPDATE OF l/)
     expect(selection).toContain('uniao_destino_id IS NULL')
   })
   it('recalcular mantém os pedidos atribuídos a cada apresentadora', async () => {

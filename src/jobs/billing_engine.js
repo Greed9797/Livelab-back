@@ -19,6 +19,17 @@ let dbPool = null
 // Usado pra prevenir múltiplas instâncias Railway rodando billing simultaneamente.
 const BILLING_ADVISORY_LOCK_KEY = 7421900119911234n
 
+/** Totaliza parcelas por marca; cada competência aplica seu próprio tipo OU. */
+export function calculateBillingAmount(marcas = []) {
+  return marcas.reduce((sum, brand) => {
+    const fixed = Number(brand.totalFixo || 0)
+    const variable = Number(brand.totalComissao || 0)
+    return sum + (brand.tipoCobranca === 'fixo_ou_comissao'
+      ? Math.max(fixed, variable)
+      : fixed + variable)
+  }, 0)
+}
+
 async function processTenantBilling(tenantId, day, spDate) {
   const db = await dbPool.connect()
   try {
@@ -56,7 +67,10 @@ async function processTenantBilling(tenantId, day, spDate) {
       const prevMonth = month === 0 ? 11 : month - 1
       const prevYear = month === 0 ? year - 1 : year
       
-      inicioPeriodo = new Date(prevYear, prevMonth, 16)
+      // A segunda parcela olha o mês inteiro: lives/vídeos já faturados na
+      // quinzena anterior estão marcados como faturados e ficam fora; isso
+      // permite fechar corretamente marcas no modo fixo_ou_comissao.
+      inicioPeriodo = new Date(prevYear, prevMonth, 1)
       const lastDay = new Date(year, month, 0) // último dia do mês passado
       fimPeriodo = new Date(prevYear, prevMonth, lastDay.getDate(), 23, 59, 59, 999)
       
@@ -69,48 +83,115 @@ async function processTenantBilling(tenantId, day, spDate) {
       return // Não é dia de faturamento
     }
 
-    // Busca lives não faturadas no período (Timezone São Paulo)
+    // Lives e vídeos usam a condição vigente na competência do fato gerador.
     const livesQ = await db.query(`
-      SELECT cliente_id, id, comissao_calculada
-      FROM lives 
-      WHERE tenant_id = $1 
-        AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
-        AND status = 'encerrada' 
-        AND faturado_em IS NULL
-        AND (encerrado_em AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') BETWEEN $2 AND $3
-      ORDER BY id
-      FOR UPDATE
-    `, [tenantId, inicioPeriodo, fimPeriodo])
+      SELECT l.cliente_id, l.id, l.marca_id,
+             CASE WHEN mc.condition_id IS NOT NULL
+                  THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)
+                       * COALESCE(mc.comissao_franquia_pct, 0) / 100.0
+                  ELSE COALESCE(l.comissao_calculada, 0) END AS comissao,
+             COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca
+        FROM lives l
+        JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
+        LEFT JOIN LATERAL (
+          SELECT c.id AS condition_id, c.comissao_franquia_pct, c.tipo_cobranca
+            FROM marca_condicoes_comerciais c
+           WHERE c.tenant_id = l.tenant_id AND c.marca_id = l.marca_id
+             AND c.inicio_vigencia <= (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date
+             AND c.cancelled_at IS NULL
+           ORDER BY c.inicio_vigencia DESC LIMIT 1
+        ) mc ON true
+       WHERE l.tenant_id = $1
+         AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+         AND l.status = 'encerrada' AND l.faturado_em IS NULL
+         AND ($4::int = 1 OR COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
+         AND (l.encerrado_em AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') BETWEEN $2 AND $3
+       ORDER BY l.id
+       FOR UPDATE OF l
+    `, [tenantId, inicioPeriodo, fimPeriodo, day])
+    const videosQ = await db.query(`
+      SELECT m.cliente_id, va.origem_id AS id, va.marca_id,
+             CASE WHEN mc.condition_id IS NOT NULL
+                  THEN va.gmv * COALESCE(mc.comissao_franquia_pct, 0) / 100.0
+                  ELSE va.comissao_franquia END AS comissao,
+             COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca
+        FROM vendas_atribuidas va
+        JOIN video_registros vr ON vr.tenant_id = va.tenant_id AND vr.id = va.origem_id
+        JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+        LEFT JOIN LATERAL (
+          SELECT c.id AS condition_id, c.comissao_franquia_pct, c.tipo_cobranca
+            FROM marca_condicoes_comerciais c
+           WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
+             AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
+           ORDER BY c.inicio_vigencia DESC LIMIT 1
+        ) mc ON true
+       WHERE va.tenant_id = $1 AND va.origem = 'video'
+         AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') IN ('aprovada', 'fechada')
+         AND ($4::int = 1 OR COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') <> 'fixo_ou_comissao')
+         AND va.data BETWEEN ($2 AT TIME ZONE 'America/Sao_Paulo')::date
+                         AND ($3 AT TIME ZONE 'America/Sao_Paulo')::date
+       ORDER BY va.origem_id, va.id
+       FOR UPDATE OF va
+    `, [tenantId, inicioPeriodo, fimPeriodo, day])
 
     const livesPorCliente = {}
-    for (const l of livesQ.rows) {
-      if (!livesPorCliente[l.cliente_id]) {
-        livesPorCliente[l.cliente_id] = { lives: [], totalComissao: 0, contrato_id: null, totalFixo: 0 }
+    const ensureClientBrand = (clienteId, marcaId, tipoCobranca) => {
+      if (!livesPorCliente[clienteId]) {
+        livesPorCliente[clienteId] = { lives: [], videos: [], contrato_id: null, marcas: {} }
       }
-      livesPorCliente[l.cliente_id].lives.push(l.id)
-      livesPorCliente[l.cliente_id].totalComissao += Number(l.comissao_calculada || 0)
+      const key = marcaId ?? `legacy:${clienteId}`
+      if (!livesPorCliente[clienteId].marcas[key]) {
+        livesPorCliente[clienteId].marcas[key] = {
+          totalComissao: 0, totalFixo: 0,
+          tipoCobranca: tipoCobranca ?? 'fixo_mais_comissao',
+        }
+      }
+      return livesPorCliente[clienteId].marcas[key]
+    }
+    for (const row of livesQ.rows) {
+      const brand = ensureClientBrand(row.cliente_id, row.marca_id, row.tipo_cobranca)
+      brand.totalComissao += Number(row.comissao ?? row.comissao_calculada ?? 0)
+      if (row.id) livesPorCliente[row.cliente_id].lives.push(row.id)
+    }
+    for (const row of videosQ.rows) {
+      const brand = ensureClientBrand(row.cliente_id, row.marca_id, row.tipo_cobranca)
+      brand.totalComissao += Number(row.comissao ?? row.comissao_calculada ?? 0)
+      if (row.id) livesPorCliente[row.cliente_id].videos.push(row.id)
     }
 
-    // Se for dia 01, busca os contratos ativos para incluir o valor fixo
+    // O fixo da fatura do dia 1 pertence à competência anterior.
     if (day === 1) {
       const contratosQ = await db.query(`
-        SELECT cliente_id, id, valor_fixo 
-        FROM contratos 
-        WHERE tenant_id = $1 AND status = 'ativo'
-      `, [tenantId])
-
-      for (const c of contratosQ.rows) {
-        if (!livesPorCliente[c.cliente_id]) {
-          livesPorCliente[c.cliente_id] = { lives: [], totalComissao: 0, contrato_id: c.id, totalFixo: 0 }
-        }
-        livesPorCliente[c.cliente_id].contrato_id = c.id
-        livesPorCliente[c.cliente_id].totalFixo += Number(c.valor_fixo || 0)
+        SELECT m.cliente_id, m.id AS marca_id,
+               COALESCE(mc.fixo_mensal, m.valor_fixo_minimo, 0) AS valor_fixo,
+               COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca,
+               NULL::uuid AS contrato_id
+          FROM marcas m
+          LEFT JOIN LATERAL (
+            SELECT c.fixo_mensal, c.tipo_cobranca
+              FROM marca_condicoes_comerciais c
+             WHERE c.tenant_id = m.tenant_id AND c.marca_id = m.id
+               AND c.inicio_vigencia <= ($2 AT TIME ZONE 'America/Sao_Paulo')::date
+               AND c.cancelled_at IS NULL
+             ORDER BY c.inicio_vigencia DESC LIMIT 1
+          ) mc ON true
+         WHERE m.tenant_id = $1 AND m.status = 'ativa' AND m.cliente_id IS NOT NULL
+        UNION ALL
+        SELECT c.cliente_id, NULL::uuid, c.valor_fixo, 'fixo_mais_comissao', c.id AS contrato_id
+          FROM contratos c
+         WHERE c.tenant_id = $1 AND c.status = 'ativo'
+           AND NOT EXISTS (SELECT 1 FROM marcas m WHERE m.tenant_id = c.tenant_id AND m.cliente_id = c.cliente_id)
+      `, [tenantId, inicioPeriodo])
+      for (const row of contratosQ.rows) {
+        const brand = ensureClientBrand(row.cliente_id, row.marca_id, row.tipo_cobranca)
+        brand.totalFixo += Number(row.valor_fixo || 0)
+        if (row.contrato_id) livesPorCliente[row.cliente_id].contrato_id = row.contrato_id
       }
     }
 
     // Gerar faturas por cliente
     for (const [clienteId, data] of Object.entries(livesPorCliente)) {
-      const valorTotal = data.totalComissao + data.totalFixo
+      const valorTotal = calculateBillingAmount(Object.values(data.marcas))
 
       if (valorTotal <= 0) continue // Ignora faturas zeradas (Zero-Boleto Bug)
 
@@ -191,6 +272,14 @@ async function processTenantBilling(tenantId, day, spDate) {
         await db.query(
           `UPDATE lives SET faturado_em = NOW(), boleto_id = $1 WHERE id = ANY($2::uuid[])`,
           [boletoId, data.lives]
+        )
+      }
+      if (data.videos.length > 0) {
+        await db.query(
+          `UPDATE vendas_atribuidas
+              SET status_aprovacao = 'faturada', atualizado_em = NOW()
+            WHERE tenant_id = $1 AND origem = 'video' AND origem_id = ANY($2::uuid[])`,
+          [tenantId, data.videos],
         )
       }
       await db.query('RELEASE SAVEPOINT cliente_fatura')

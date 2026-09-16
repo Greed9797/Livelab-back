@@ -5,6 +5,7 @@ import Fastify from 'fastify'
 
 import { analyticsRoutes } from '../src/routes/analytics.js'
 import { activeLiveSql } from '../src/lib/live-merge-sql.js'
+import { apresentadoraHorasPresencaSql } from '../src/lib/metric-sql.js'
 
 const { PGlite } = await import(process.env.PGLITE_MODULE || '@electric-sql/pglite')
 const db = new PGlite()
@@ -19,6 +20,9 @@ const originAna = id(10)
 const originBia = id(11)
 const destination = id(12)
 const union = id(13)
+const agenda = id(30)
+const coAgenda = id(31)
+const coLive = id(14)
 
 await db.exec(`
   SET TIME ZONE 'UTC';
@@ -54,6 +58,25 @@ await db.exec(`
 `)
 
 await db.query(`
+  INSERT INTO agenda_eventos(id, tenant_id, apresentadora_id)
+  VALUES ($1, $3, $2), ($4, $3, $2)
+`, [agenda, ana, tenant, coAgenda])
+
+// O primeiro evento tem revezamento sequencial: Ana fica 12h–15h UTC e Bia
+// 15h–18h UTC. O segundo evento verifica coapresentação: ambas ficam juntas
+// durante cinco horas. Os turnos são a fonte de tempo quando segundos_rateio
+// não foram persistidos.
+await db.query(`
+  INSERT INTO agenda_evento_apresentadoras(
+    agenda_evento_id, tenant_id, apresentadora_id, data_inicio, data_fim
+  ) VALUES
+    ($1, $3, $4, '2025-09-15T12:00:00Z', '2025-09-15T15:00:00Z'),
+    ($1, $3, $5, '2025-09-15T15:00:00Z', '2025-09-15T18:00:00Z'),
+    ($2, $3, $4, '2025-09-16T12:00:00Z', '2025-09-16T17:00:00Z'),
+    ($2, $3, $5, '2025-09-16T12:00:00Z', '2025-09-16T17:00:00Z')
+`, [agenda, coAgenda, tenant, ana, bia])
+
+await db.query(`
   INSERT INTO apresentadoras(id, tenant_id, user_id, nome, data_inicio, criado_em)
   VALUES ($1, $3, $4, 'Ana', '2020-01-01', '2020-01-01T00:00:00Z'),
          ($2, $3, $5, 'Bia', '2020-01-01', '2020-01-01T00:00:00Z')
@@ -63,21 +86,29 @@ await db.query(`
 // propósito: presença vem do tempo rateado, sem depender de venda.
 await db.query(`
   INSERT INTO lives(
-    id, tenant_id, apresentador_id, status, iniciado_em, encerrado_em,
+    id, tenant_id, apresentador_id, agenda_evento_id, status, iniciado_em, encerrado_em,
     uniao_destino_id, uniao_id, uniao_desfeita_em
   ) VALUES
-    ($1, $4, $5, 'encerrada', '2025-09-15T12:00:00Z', '2025-09-15T15:00:00Z', $3, NULL, NULL),
-    ($2, $4, $6, 'encerrada', '2025-09-15T15:00:00Z', '2025-09-15T18:00:00Z', $3, NULL, NULL),
-    ($3, $4, NULL, 'encerrada', '2025-09-15T12:00:00Z', '2025-09-15T18:00:00Z', NULL, $7, NULL)
-`, [originAna, originBia, destination, tenant, anaUser, biaUser, union])
+    ($1, $4, $5, $8, 'encerrada', '2025-09-15T12:00:00Z', '2025-09-15T15:00:00Z', $3, NULL, NULL),
+    ($2, $4, $6, $8, 'encerrada', '2025-09-15T15:00:00Z', '2025-09-15T18:00:00Z', $3, NULL, NULL),
+    ($3, $4, NULL, $8, 'encerrada', '2025-09-15T12:00:00Z', '2025-09-15T18:00:00Z', NULL, $7, NULL)
+`, [originAna, originBia, destination, tenant, anaUser, biaUser, union, agenda])
+
+await db.query(`
+  INSERT INTO lives(
+    id, tenant_id, agenda_evento_id, status, iniciado_em, encerrado_em
+  ) VALUES ($1, $2, $3, 'encerrada', '2025-09-16T12:00:00Z', '2025-09-16T17:00:00Z')
+`, [coLive, tenant, coAgenda])
 
 await db.query(`
   INSERT INTO live_apresentadoras_v2(live_id, tenant_id, apresentadora_id, segundos_rateio, percentual_rateio, gmv_rateado)
-  VALUES ($1, $4, $5, 10800, 100, 0),
-         ($2, $4, $6, 10800, 100, 0),
-         ($3, $4, $5, 10800, 50, 0),
-         ($3, $4, $6, 10800, 50, 0)
-`, [originAna, originBia, destination, tenant, ana, bia])
+  VALUES ($1, $4, $5, NULL, 100, 0),
+         ($2, $4, $6, NULL, 100, 0),
+         ($3, $4, $5, NULL, 50, 0),
+         ($3, $4, $6, NULL, 50, 0),
+         ($7, $4, $5, NULL, 50, 0),
+         ($7, $4, $6, NULL, 50, 0)
+`, [originAna, originBia, destination, tenant, ana, bia, coLive])
 
 const app = Fastify({ logger: false })
 app.decorate('authenticate', async (request) => {
@@ -89,33 +120,43 @@ app.decorate('requirePapel', (roles) => async (request, reply) => {
 app.decorate('withTenant', async (_tenantId, callback) => callback(db))
 await app.register(analyticsRoutes)
 
-const routeHours = async () => {
+const routeHours = async (day = '2025-09-15') => {
   const response = await app.inject({
     method: 'GET',
-    url: '/v1/analytics/assiduidade?inicio=2025-09-15&fim=2025-09-15',
+    url: `/v1/analytics/assiduidade?inicio=${day}&fim=${day}`,
   })
   assert.equal(response.statusCode, 200, response.body)
   return Object.fromEntries(response.json().apresentadoras.map((presenter) => [presenter.nome, presenter.resumo.horas_total]))
 }
 
-const directHours = async (guard) => {
+const directHours = async (day, guard) => {
   const { rows } = await db.query(`
-    SELECT lav.apresentadora_id, SUM(lav.segundos_rateio) / 3600.0 AS horas
+    SELECT lav.apresentadora_id,
+           SUM(${apresentadoraHorasPresencaSql({ live: 'l', rateio: 'lav', turno: 'turno' })}) AS horas
       FROM lives l
       JOIN live_apresentadoras_v2 lav ON lav.live_id = l.id AND lav.tenant_id = l.tenant_id
+      LEFT JOIN LATERAL (
+        SELECT SUM(EXTRACT(EPOCH FROM (aea.data_fim - aea.data_inicio))) / 3600.0 AS horas_turno
+          FROM agenda_evento_apresentadoras aea
+         WHERE aea.agenda_evento_id = l.agenda_evento_id
+           AND aea.tenant_id = l.tenant_id
+           AND aea.apresentadora_id = lav.apresentadora_id
+      ) turno ON true
      WHERE l.tenant_id = $1::uuid
        AND l.status = 'encerrada'
+       AND l.iniciado_em >= ($2::timestamp) AT TIME ZONE 'America/Sao_Paulo'
+       AND l.iniciado_em < (($2::timestamp) + INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo'
        ${guard}
      GROUP BY lav.apresentadora_id
      ORDER BY lav.apresentadora_id
-  `, [tenant])
+  `, [tenant, day])
   return rows.map((row) => Number(row.horas))
 }
 
 // Antes da reversão, a leitura legada soma origem + destino (6h por pessoa),
 // enquanto o filtro canônico e a rota devem enxergar só o destino ativo (3h).
-assert.deepEqual(await directHours(''), [6, 6])
-assert.deepEqual(await directHours(`AND ${activeLiveSql('l')}`), [3, 3])
+assert.deepEqual(await directHours('2025-09-15', ''), [6, 6])
+assert.deepEqual(await directHours('2025-09-15', `AND ${activeLiveSql('l')}`), [3, 3])
 assert.deepEqual(await routeHours(), { Ana: 3, Bia: 3 })
 
 // A reversão reativa as origens e marca o destino como desfeito. O mesmo filtro
@@ -131,9 +172,14 @@ await db.query(
   [tenant, destination],
 )
 
-assert.deepEqual(await directHours(''), [6, 6])
-assert.deepEqual(await directHours(`AND ${activeLiveSql('l')}`), [3, 3])
+assert.deepEqual(await directHours('2025-09-15', ''), [6, 6])
+assert.deepEqual(await directHours('2025-09-15', `AND ${activeLiveSql('l')}`), [3, 3])
 assert.deepEqual(await routeHours(), { Ana: 3, Bia: 3 })
+
+// Turnos sobrepostos dão a cada apresentadora o evento inteiro. O rateio continua
+// 50/50 e o GMV continua zero; a presença usa o calendário físico do turno.
+assert.deepEqual(await directHours('2025-09-16', `AND ${activeLiveSql('l')}`), [5, 5])
+assert.deepEqual(await routeHours('2025-09-16'), { Ana: 5, Bia: 5 })
 
 console.log(JSON.stringify({
   verified: true,

@@ -147,6 +147,7 @@ export const MIGRATIONS_LIST = [
   '150_live_unioes.sql',
   '151_marca_condicoes_comerciais.sql',
   '152_marca_condicao_snapshot.sql',
+  '153_knowledge_unit_library.sql',
 ]
 
 async function ensureMigrationsTable(client) {

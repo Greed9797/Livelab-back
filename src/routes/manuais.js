@@ -1,9 +1,7 @@
 import { z } from 'zod'
 
-// PUBLIC: Tabela `manuais` é global — sem coluna tenant_id (migration 011:
-// "manuais são públicos para todos os usuários autenticados"; 035/063 só
-// adicionam metadados/knowledge, nunca tenant_id). app.db (bypass RLS) é
-// correto aqui; não há dado por-tenant a filtrar. Banner vale para o arquivo.
+// Conteúdo legado é global, mas continua restrito à equipe interna e às
+// apresentadoras. Clientes/parceiros e automações não são leitores da Base.
 
 const manualSchema = z.object({
   titulo: z.string().min(2, 'Título obrigatório'),
@@ -28,15 +26,22 @@ export async function manuaisRoutes(app) {
     {
       onRequest: [
         app.authenticate,
-        app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'cliente_parceiro']),
+        app.requirePapel([
+          'franqueador_master', 'franqueado', 'gerente', 'gerente_comercial',
+          'financeiro', 'financeiro_readonly', 'auditor', 'suporte', 'operacional',
+          'produtor_live', 'marketing', 'comercial_readonly', 'apresentador', 'apresentadora',
+        ]),
       ],
     },
-    async (_req, reply) => {
+    async (request, reply) => {
+      const canManage = ['franqueador_master', 'franqueado', 'gerente', 'gerente_comercial'].includes(request.user.papel)
       const { rows } = await app.db.query(`
-        SELECT id, titulo, url, atualizado_em, categoria, paginas, destaque
+        SELECT id, titulo, url, atualizado_em, categoria, paginas, destaque, slug,
+               status, excerpt, cover_image_url, video_provider, video_url, tags, published_at
         FROM manuais
+        WHERE $1 OR status = 'published'
         ORDER BY destaque DESC, atualizado_em DESC
-      `)
+      `, [canManage])
       return reply.send(rows)
     }
   )

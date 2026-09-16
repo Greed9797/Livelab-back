@@ -2829,6 +2829,10 @@ export async function analyticsRoutes(app) {
                 AND aea.apresentadora_id = ap_v2.apresentadora_id
             ) turno ON true
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+              -- A união mantém as origens para histórico e reversão, mas presença operacional
+              -- deve ler somente o destino ativo. Depois da reversão, o destino fica marcado como
+              -- desfeito e as origens voltam a ser as únicas lives contabilizáveis.
+              AND ${activeLiveSql('l')}
               -- Live em andamento não conta, e a live que vira a madrugada é do dia em que
               -- começou (mesmo critério de todos os agregados de horas do produto). O dia
               -- corrente, que por isso soma 0h até alguém encerrar, sai como 'em_curso' na

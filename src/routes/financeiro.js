@@ -163,8 +163,21 @@ export async function financeiroRoutes(app) {
           SELECT
             COALESCE(SUM(vr.gmv_atribuido), 0) AS gmv_videos,
             COALESCE(SUM(vr.pedidos_atribuidos), 0)::int AS pedidos_videos,
-            COUNT(*)::int AS total_videos
+            COUNT(*)::int AS total_videos,
+            COALESCE(SUM(CASE WHEN mc.id IS NOT NULL
+                              THEN va.gmv * COALESCE(mc.comissao_franquia_pct, 0) / 100.0
+                              ELSE va.comissao_franquia END), 0) AS comissao_franquia_videos
           FROM video_registros vr
+          LEFT JOIN vendas_atribuidas va
+            ON va.tenant_id = vr.tenant_id AND va.origem = 'video' AND va.origem_id = vr.id
+           AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+          LEFT JOIN LATERAL (
+            SELECT c.id, c.comissao_franquia_pct
+              FROM marca_condicoes_comerciais c
+             WHERE c.tenant_id = vr.tenant_id AND c.marca_id = vr.marca_id
+               AND c.inicio_vigencia <= vr.data AND c.cancelled_at IS NULL
+             ORDER BY c.inicio_vigencia DESC LIMIT 1
+          ) mc ON true
           WHERE vr.tenant_id = $3::uuid
             AND vr.data >= $1::date
             AND vr.data <= $2::date
@@ -178,7 +191,7 @@ export async function financeiroRoutes(app) {
         ),
         -- Comissão de franquia VARIÁVEL por marca (gmv × pct), mesma fonte do live_periodo mas
         -- agrupada por marca resolvida — pra combinar com o fixo POR marca conforme tipo_cobranca.
-        comissao_marca AS (
+        comissao_marca_raw AS (
           SELECT mc.marca_id,
                  date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes,
                  COALESCE(SUM(${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0), 0) AS comissao
@@ -191,6 +204,29 @@ export async function financeiroRoutes(app) {
             AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
             AND mc.id IS NOT NULL
           GROUP BY mc.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+          UNION ALL
+          SELECT va.marca_id,
+                 date_trunc('month', va.data::timestamp) AS mes,
+                 COALESCE(SUM(CASE WHEN vc.id IS NOT NULL
+                                   THEN va.gmv * COALESCE(vc.comissao_franquia_pct, 0) / 100.0
+                                   ELSE va.comissao_franquia END), 0) AS comissao
+            FROM vendas_atribuidas va
+            LEFT JOIN LATERAL (
+              SELECT c.id, c.comissao_franquia_pct
+                FROM marca_condicoes_comerciais c
+               WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
+                 AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
+               ORDER BY c.inicio_vigencia DESC LIMIT 1
+            ) vc ON true
+           WHERE va.tenant_id = $3::uuid AND va.origem = 'video'
+             AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+             AND va.data >= $1::date AND va.data <= $2::date
+           GROUP BY va.marca_id, date_trunc('month', va.data::timestamp)
+        ),
+        comissao_marca AS (
+          SELECT marca_id, mes, SUM(comissao) AS comissao
+            FROM comissao_marca_raw
+           GROUP BY marca_id, mes
         ),
         -- Fixo mensal das marcas tipo='cliente': valor_fixo_minimo × meses ativos (migration 116).
         -- Fonte compartilhada marcaFixoMensalSql() — mesma do /operacional e performance-rollups.js.
@@ -235,6 +271,7 @@ export async function financeiroRoutes(app) {
         SELECT lp.gmv_lives, lp.pedidos_lives, lp.total_lives,
                lp.comissao_franquia_lives, lp.comissao_configurada, lp.comissao_faltante_count,
                vp.gmv_videos, vp.pedidos_videos, vp.total_videos,
+               vp.comissao_franquia_videos,
                cu.total_custos, tm.fixo_mensal_total, tm.receita_combinada,
                COALESCE((SELECT json_agg(json_build_object(
                  'competencia', pc.mes::date,
@@ -261,6 +298,8 @@ export async function financeiroRoutes(app) {
         pedidos: toNum(r.pedidos_lives) + toNum(r.pedidos_videos),
         total_lives: toNum(r.total_lives),
         total_videos: toNum(r.total_videos),
+        comissao_franquia_lives: toNum(r.comissao_franquia_lives),
+        comissao_franquia_videos: toNum(r.comissao_franquia_videos),
         receita_liquida,
         fixo_mensal: toNum(r.fixo_mensal_total),
         comissao_configurada: toNum(r.comissao_configurada),
@@ -492,18 +531,32 @@ export async function financeiroRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       // ENTRADA: comissão de franquia por marca (vendas não-reprovadas do período)
       const comissaoFranquia = await db.query(`
-        SELECT va.marca_id, m.nome AS marca_nome, m.tipo_cobranca,
+        -- SUM(va.comissao_franquia) permanece no inventário como fallback legado;
+        -- condições temporais substituem esse valor quando existe snapshot.
+        SELECT va.marca_id, m.nome AS marca_nome,
+               COALESCE(vc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca,
                date_trunc('month', va.data::timestamp)::date AS mes,
-               COALESCE(SUM(va.comissao_franquia), 0) AS valor,
+               COALESCE(SUM(CASE WHEN vc.id IS NOT NULL
+                                 THEN va.gmv * COALESCE(vc.comissao_franquia_pct, 0) / 100.0
+                                 ELSE va.comissao_franquia END), 0) AS valor,
                COALESCE(SUM(va.gmv), 0) AS gmv,
                COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives
         FROM vendas_atribuidas va
         JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+        LEFT JOIN LATERAL (
+          SELECT c.id, c.comissao_franquia_pct, c.tipo_cobranca
+            FROM marca_condicoes_comerciais c
+           WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
+             AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
+           ORDER BY c.inicio_vigencia DESC LIMIT 1
+        ) vc ON true
         WHERE va.tenant_id = $3::uuid
           AND va.data >= $1::date AND va.data <= $2::date
           AND ${VENDA_NAO_REPROVADA}
-        GROUP BY va.marca_id, m.nome, m.tipo_cobranca, date_trunc('month', va.data::timestamp)::date
-        HAVING COALESCE(SUM(va.comissao_franquia), 0) <> 0
+        GROUP BY va.marca_id, m.nome, vc.tipo_cobranca, m.tipo_cobranca, date_trunc('month', va.data::timestamp)::date
+        HAVING COALESCE(SUM(CASE WHEN vc.id IS NOT NULL
+                                 THEN va.gmv * COALESCE(vc.comissao_franquia_pct, 0) / 100.0
+                                 ELSE va.comissao_franquia END), 0) <> 0
         ORDER BY valor DESC
       `, [startDate, endDate, tenant_id])
 

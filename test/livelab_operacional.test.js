@@ -696,7 +696,7 @@ describe('LIVELAB operational routes', () => {
       comissao_faltante_count: 0,
     })
     expect(queryMock.mock.calls[0][0]).toContain('FROM lives l')
-    expect(queryMock.mock.calls[0][0]).not.toContain('FROM vendas_atribuidas va')
+    expect(queryMock.mock.calls[0][0]).toContain('FROM vendas_atribuidas va')
     await app.close()
   })
 

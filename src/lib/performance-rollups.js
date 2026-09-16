@@ -104,11 +104,23 @@ export async function getPerformanceRanking(db, {
           END::int AS pedidos,
           COALESCE(live_commission.comissao_apresentadora, 0) AS comissao_apresentadora,
           CASE WHEN mc.id IS NOT NULL
-            THEN COALESCE(${liveGmvSql('l')} * mc.comissao_franquia_pct / 100.0, 0)
+            THEN COALESCE((CASE
+              WHEN $7::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
+                THEN COALESCE(ap_v2.gmv_rateado,
+                  ${liveGmvSql('l')} * ap_v2.percentual_rateio / 100.0,
+                  CASE WHEN ap_v2.papel = 'principal' THEN ${liveGmvSql('l')} ELSE 0 END)
+              ELSE ${liveGmvSql('l')}
+            END) * mc.comissao_franquia_pct / 100.0, 0)
             ELSE COALESCE(live_commission.comissao_franquia, 0)
           END AS comissao_franquia,
           CASE WHEN mc.id IS NOT NULL
-            THEN COALESCE(${liveGmvSql('l')} * mc.comissao_franqueadora_pct / 100.0, 0)
+            THEN COALESCE((CASE
+              WHEN $7::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
+                THEN COALESCE(ap_v2.gmv_rateado,
+                  ${liveGmvSql('l')} * ap_v2.percentual_rateio / 100.0,
+                  CASE WHEN ap_v2.papel = 'principal' THEN ${liveGmvSql('l')} ELSE 0 END)
+              ELSE ${liveGmvSql('l')}
+            END) * mc.comissao_franqueadora_pct / 100.0, 0)
             ELSE COALESCE(live_commission.comissao_franqueadora, 0)
           END AS comissao_franqueadora,
           CASE

@@ -34,13 +34,12 @@ const toNum = (v) => Number(v ?? 0)
 // Params posicionais fixos: $1=startDate, $2=endDate, $3=tenant_id.
 function marcaFixoMensalSql() {
   return `
-    SELECT m.id AS marca_id, m.nome AS marca_nome, m.valor_fixo_minimo, m.tipo_cobranca,
-           am.meses_ativos, am.fator_meses
-    FROM marcas m
-    JOIN (
-      SELECT am2.marca_id,
-             COUNT(*)::int AS meses_ativos,
-             COALESCE(SUM(${prorateFatorSql('am2.mes', 'mk.data_inicio', 'mk.data_fim')}), 0) AS fator_meses
+    SELECT m.id AS marca_id, m.nome AS marca_nome,
+           COALESCE(mc.fixo_mensal, m.valor_fixo_minimo) AS valor_fixo_minimo,
+           COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca,
+           am2.mes,
+           1::int AS meses_ativos,
+           ${prorateFatorSql('am2.mes', 'm.data_inicio', 'm.data_fim')} AS fator_meses
       FROM (
         SELECT DISTINCT marca_id, mes FROM (
           SELECT l.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes
@@ -58,10 +57,18 @@ function marcaFixoMensalSql() {
             AND (vr.gmv_atribuido > 0 OR vr.pedidos_atribuidos > 0)
         ) u
       ) am2
-      JOIN marcas mk ON mk.id = am2.marca_id AND mk.tenant_id = $3::uuid
-      GROUP BY am2.marca_id
-    ) am ON am.marca_id = m.id
-    WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente'`
+      JOIN marcas m ON m.id = am2.marca_id AND m.tenant_id = $3::uuid
+      LEFT JOIN LATERAL (
+        SELECT c.fixo_mensal, c.tipo_cobranca
+          FROM marca_condicoes_comerciais c
+         WHERE c.tenant_id = $3::uuid
+           AND c.marca_id = m.id
+           AND c.inicio_vigencia <= am2.mes::date
+           AND c.cancelled_at IS NULL
+         ORDER BY c.inicio_vigencia DESC
+         LIMIT 1
+      ) mc ON true
+     WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente'`
 }
 
 // Vendas reprovadas NUNCA entram em soma financeira (mesmo predicado de lib/operacional.js).
@@ -172,7 +179,8 @@ export async function financeiroRoutes(app) {
         -- Comissão de franquia VARIÁVEL por marca (gmv × pct), mesma fonte do live_periodo mas
         -- agrupada por marca resolvida — pra combinar com o fixo POR marca conforme tipo_cobranca.
         comissao_marca AS (
-          SELECT mc.id AS marca_id,
+          SELECT mc.marca_id,
+                 date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes,
                  COALESCE(SUM(${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0), 0) AS comissao
           FROM lives l
           ${marcaResolveLateralSql('$3')}
@@ -182,23 +190,25 @@ export async function financeiroRoutes(app) {
             AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
             AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
             AND mc.id IS NOT NULL
-          GROUP BY mc.id
+          GROUP BY mc.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
         ),
         -- Fixo mensal das marcas tipo='cliente': valor_fixo_minimo × meses ativos (migration 116).
         -- Fonte compartilhada marcaFixoMensalSql() — mesma do /operacional e performance-rollups.js.
         fixo_marca AS (
-          SELECT mf.marca_id, mf.tipo_cobranca, (mf.valor_fixo_minimo * mf.fator_meses) AS fixo
+          SELECT mf.marca_id, mf.mes, mf.tipo_cobranca,
+                 (mf.valor_fixo_minimo * mf.fator_meses) AS fixo
           FROM (${marcaFixoMensalSql()}) mf
         ),
         -- Entrada POR marca: junta comissão variável e fixo mensal; tipo_cobranca decide se soma
         -- (fixo_mais_comissao) ou pega o maior (fixo_ou_comissao). Default preserva o aditivo.
         entrada_marca AS (
           SELECT COALESCE(cm.marca_id, fm.marca_id) AS marca_id,
+                 COALESCE(cm.mes, fm.mes) AS mes,
                  COALESCE(cm.comissao, 0) AS comissao,
                  COALESCE(fm.fixo, 0) AS fixo,
                  COALESCE(fm.tipo_cobranca, mk.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca
           FROM comissao_marca cm
-          FULL OUTER JOIN fixo_marca fm ON fm.marca_id = cm.marca_id
+          FULL OUTER JOIN fixo_marca fm ON fm.marca_id = cm.marca_id AND fm.mes = cm.mes
           LEFT JOIN marcas mk ON mk.id = cm.marca_id AND mk.tenant_id = $3::uuid
         ),
         totais_marca AS (
@@ -209,11 +219,29 @@ export async function financeiroRoutes(app) {
                    ELSE fixo + comissao END
             ), 0) AS receita_combinada
           FROM entrada_marca
+        ),
+        parcelas_competencia AS (
+          SELECT mes,
+                 COALESCE(SUM(fixo), 0) AS fixo,
+                 COALESCE(SUM(comissao), 0) AS comissao,
+                 COALESCE(SUM(
+                   CASE WHEN tipo_cobranca = 'fixo_ou_comissao' THEN GREATEST(fixo, comissao)
+                        ELSE fixo + comissao END
+                 ), 0) AS receita
+            FROM entrada_marca
+           GROUP BY mes
+           ORDER BY mes
         )
         SELECT lp.gmv_lives, lp.pedidos_lives, lp.total_lives,
                lp.comissao_franquia_lives, lp.comissao_configurada, lp.comissao_faltante_count,
                vp.gmv_videos, vp.pedidos_videos, vp.total_videos,
-               cu.total_custos, tm.fixo_mensal_total, tm.receita_combinada
+               cu.total_custos, tm.fixo_mensal_total, tm.receita_combinada,
+               COALESCE((SELECT json_agg(json_build_object(
+                 'competencia', pc.mes::date,
+                 'fixo', pc.fixo,
+                 'comissao', pc.comissao,
+                 'receita', pc.receita
+               ) ORDER BY pc.mes) FROM parcelas_competencia pc), '[]'::json) AS parcelas_competencia
         FROM live_periodo lp, video_periodo vp, custos_periodo cu, totais_marca tm
       `, [startDate, endDate, tenant_id])
 
@@ -241,6 +269,7 @@ export async function financeiroRoutes(app) {
         periodo: startDate,
         inicio: startDate,
         fim: endDate,
+        parcelas_competencia: Array.isArray(r.parcelas_competencia) ? r.parcelas_competencia : [],
       }
       }),
     })
@@ -464,6 +493,7 @@ export async function financeiroRoutes(app) {
       // ENTRADA: comissão de franquia por marca (vendas não-reprovadas do período)
       const comissaoFranquia = await db.query(`
         SELECT va.marca_id, m.nome AS marca_nome, m.tipo_cobranca,
+               date_trunc('month', va.data::timestamp)::date AS mes,
                COALESCE(SUM(va.comissao_franquia), 0) AS valor,
                COALESCE(SUM(va.gmv), 0) AS gmv,
                COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives
@@ -472,7 +502,7 @@ export async function financeiroRoutes(app) {
         WHERE va.tenant_id = $3::uuid
           AND va.data >= $1::date AND va.data <= $2::date
           AND ${VENDA_NAO_REPROVADA}
-        GROUP BY va.marca_id, m.nome, m.tipo_cobranca
+        GROUP BY va.marca_id, m.nome, m.tipo_cobranca, date_trunc('month', va.data::timestamp)::date
         HAVING COALESCE(SUM(va.comissao_franquia), 0) <> 0
         ORDER BY valor DESC
       `, [startDate, endDate, tenant_id])
@@ -550,46 +580,49 @@ export async function financeiroRoutes(app) {
       // 'fixo_ou_comissao' entra só a maior (uma linha vencedora) → total = GREATEST(fixo, comissao).
       const marcaEntradas = new Map()
       for (const r of comissaoFranquia.rows) {
-        marcaEntradas.set(r.marca_id, {
+        const key = `${r.marca_id}:${String(r.mes ?? '').slice(0, 10)}`
+        marcaEntradas.set(key, {
           marca_id: r.marca_id,
           marca_nome: r.marca_nome,
           tipo: r.tipo_cobranca || 'fixo_mais_comissao',
           comissao: toNum(r.valor), gmv: toNum(r.gmv), lives: toNum(r.lives),
-          fixo: 0, meses_ativos: 0,
+          mes: r.mes, fixo: 0, meses_ativos: 0,
         })
       }
       for (const r of fixoMarcas.rows) {
         // valor monetário rateado por dias de contrato (fator_meses); meses_ativos fica só p/ display.
         const fixo = toNum(r.valor_fixo_minimo) * toNum(r.fator_meses)
-        const cur = marcaEntradas.get(r.marca_id)
+        const key = `${r.marca_id}:${String(r.mes ?? '').slice(0, 10)}`
+        const cur = marcaEntradas.get(key)
         if (cur) {
-          cur.fixo = fixo
-          cur.meses_ativos = toNum(r.meses_ativos)
+          cur.fixo += fixo
+          cur.meses_ativos += toNum(r.meses_ativos)
           cur.tipo = r.tipo_cobranca || cur.tipo
         } else {
-          marcaEntradas.set(r.marca_id, {
+          marcaEntradas.set(key, {
             marca_id: r.marca_id,
             marca_nome: r.marca_nome,
             tipo: r.tipo_cobranca || 'fixo_mais_comissao',
             comissao: 0, gmv: 0, lives: 0,
-            fixo, meses_ativos: toNum(r.meses_ativos),
+            mes: r.mes, fixo, meses_ativos: toNum(r.meses_ativos),
           })
         }
       }
 
       const entradas = []
       for (const m of marcaEntradas.values()) {
+        const competenciaMemoria = m.mes ? { competencia: m.mes } : {}
         const linhaComissao = () => ({
           categoria: 'comissao_franquia',
           descricao: `Comissão de franquia — ${m.marca_nome}`,
           valor: m.comissao,
-          memoria: { marca_id: m.marca_id, marca_nome: m.marca_nome, gmv: m.gmv, lives: m.lives, pct_medio: pctMedio(m.comissao, m.gmv) },
+          memoria: { marca_id: m.marca_id, marca_nome: m.marca_nome, ...competenciaMemoria, gmv: m.gmv, lives: m.lives, pct_medio: pctMedio(m.comissao, m.gmv) },
         })
         const linhaFixo = (criterio) => ({
           categoria: 'fixo_marca',
           descricao: `Fixo mensal — ${m.marca_nome}`,
           valor: m.fixo,
-          memoria: { marca_id: m.marca_id, marca_nome: m.marca_nome, criterio, meses_ativos: m.meses_ativos },
+          memoria: { marca_id: m.marca_id, marca_nome: m.marca_nome, ...competenciaMemoria, criterio, meses_ativos: m.meses_ativos },
         })
         if (m.tipo === 'fixo_ou_comissao') {
           // entra só a maior — uma linha; memória registra o que foi comparado

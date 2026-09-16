@@ -404,7 +404,13 @@ export async function financeiroRoutes(app) {
           UNION ALL
           SELECT m.cliente_id, vr.marca_id,
                  vr.gmv_atribuido AS gmv,
-                 0 AS comissao_franquia,
+                 vr.gmv_atribuido * COALESCE((
+                   SELECT c.comissao_franquia_pct
+                     FROM marca_condicoes_comerciais c
+                    WHERE c.tenant_id = vr.tenant_id AND c.marca_id = vr.marca_id
+                      AND c.inicio_vigencia <= vr.data AND c.cancelled_at IS NULL
+                    ORDER BY c.inicio_vigencia DESC LIMIT 1
+                 ), m.comissao_franquia_pct, 0) / 100.0 AS comissao_franquia,
                  0 AS is_live, 1 AS is_video
           FROM video_registros vr
           JOIN marcas m ON m.id = vr.marca_id AND m.tenant_id = vr.tenant_id
@@ -680,9 +686,22 @@ export async function financeiroRoutes(app) {
         if (m.tipo === 'fixo_ou_comissao') {
           // entra só a maior — uma linha; memória registra o que foi comparado
           if (m.fixo >= m.comissao) {
-            if (m.fixo > 0) entradas.push({ ...linhaFixo('fixo_ou_comissao_venceu_fixo'), memoria: { marca_id: m.marca_id, marca_nome: m.marca_nome, criterio: 'fixo_ou_comissao_venceu_fixo', meses_ativos: m.meses_ativos, comissao_comparada: round2(m.comissao) } })
+            if (m.fixo > 0) entradas.push({
+              ...linhaFixo('fixo_ou_comissao_venceu_fixo'),
+              memoria: {
+                ...linhaFixo('fixo_ou_comissao_venceu_fixo').memoria,
+                comissao_comparada: round2(m.comissao),
+              },
+            })
           } else {
-            entradas.push({ ...linhaComissao(), memoria: { marca_id: m.marca_id, marca_nome: m.marca_nome, gmv: m.gmv, lives: m.lives, pct_medio: pctMedio(m.comissao, m.gmv), criterio: 'fixo_ou_comissao_venceu_comissao', fixo_comparado: round2(m.fixo) } })
+            entradas.push({
+              ...linhaComissao(),
+              memoria: {
+                ...linhaComissao().memoria,
+                criterio: 'fixo_ou_comissao_venceu_comissao',
+                fixo_comparado: round2(m.fixo),
+              },
+            })
           }
         } else {
           if (m.comissao > 0) entradas.push(linhaComissao())

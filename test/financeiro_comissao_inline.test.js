@@ -98,6 +98,8 @@ describe('financeiro — comissão de franquia calculada INLINE (não da coluna 
     const sql = String(call[0])
     expect(sql).not.toContain('comissao_calculada')
     expect(sql).toContain('comissao_franquia_pct')
+    expect(sql).toContain('c.inicio_vigencia <= vr.data')
+    expect(sql).toContain('vr.gmv_atribuido * COALESCE')
     // Task 6: predicado simplificado — marca_id NOT NULL, braço cliente_id IS NULL morto
     expect(sql).toContain('m.id = l.marca_id')
     await app.close()

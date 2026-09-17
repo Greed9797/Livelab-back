@@ -69,6 +69,15 @@ describe('database readiness', () => {
     expect(response?.json()).toEqual({ ok: true, storage: { configured: true, ok: false } })
     await app.close()
   })
+  it('normalizes non-boolean storage output without leaking provider details', async () => {
+    const app = Fastify()
+    app.decorate('db', { query: vi.fn().mockResolvedValue({ rows: [{ '?column?': 1 }] }) })
+    registerReadiness(app, { storageProbe: async () => ({ configured: 1, ok: 'yes', error: 'provider secret', secret: 'x' }) })
+    const response = await app.inject('/readyz')
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ ok: true, storage: { configured: true, ok: true } })
+    await app.close()
+  })
 })
 
 describe('offsite backup coordination', () => {

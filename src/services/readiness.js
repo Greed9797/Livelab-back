@@ -45,7 +45,7 @@ export function registerReadiness(app, { storageProbe, storageTimeoutMs = 1000 }
     }
     return reply.code(ok ? 200 : 503).send({
       ok,
-      storage: storage ? { configured: storage.configured, ok: storage.ok } : undefined,
+      storage: storage ? { configured: Boolean(storage.configured), ok: Boolean(storage.ok) } : undefined,
     })
   })
 }

@@ -29,6 +29,26 @@ describe('knowledge private storage provisioning', () => {
     }
   })
 
+  it('verifies an existing private bucket when Supabase reports duplicate as 400', async () => {
+    const previousUrl = process.env.SUPABASE_URL
+    const previousKey = process.env.SUPABASE_SERVICE_KEY
+    process.env.SUPABASE_URL = 'https://storage.example.test'
+    process.env.SUPABASE_SERVICE_KEY = 'secret-test-only'
+    try {
+      const status = await ensureKnowledgePrivateBucket({
+        fetchImpl: async (url) => url.endsWith('/bucket')
+          ? { ok: false, status: 400, json: async () => ({}) }
+          : { ok: true, status: 200, json: async () => ({ public: false }) },
+      })
+      expect(status).toEqual({ configured: true, ok: true })
+    } finally {
+      if (previousUrl === undefined) delete process.env.SUPABASE_URL
+      else process.env.SUPABASE_URL = previousUrl
+      if (previousKey === undefined) delete process.env.SUPABASE_SERVICE_KEY
+      else process.env.SUPABASE_SERVICE_KEY = previousKey
+    }
+  })
+
   it('fails closed when an existing bucket is public', async () => {
     const previousUrl = process.env.SUPABASE_URL
     const previousKey = process.env.SUPABASE_SERVICE_KEY

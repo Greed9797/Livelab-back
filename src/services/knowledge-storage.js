@@ -27,7 +27,7 @@ export async function ensureKnowledgePrivateBucket({ fetchImpl = fetch } = {}) {
       method: 'POST', headers,
       body: JSON.stringify({ id: BUCKET, name: BUCKET, public: false }),
     })
-    if (!create.ok && create.status !== 409) throw new Error(`storage bucket create ${create.status}`)
+    if (!create.ok && create.status !== 400 && create.status !== 409) throw new Error(`storage bucket create ${create.status}`)
     const check = await fetchImpl(`${base}/storage/v1/bucket/${BUCKET}`, { headers })
     if (!check.ok) throw new Error(`storage bucket check ${check.status}`)
     const metadata = await check.json()

@@ -17,7 +17,7 @@ await db.exec(`
  CREATE TABLE apresentadoras(id uuid PRIMARY KEY,tenant_id uuid,user_id uuid,nome text,ativo boolean DEFAULT true,arquivada boolean DEFAULT false,fixo numeric DEFAULT 2700,foto_url text,comissao_pct numeric,data_inicio date,data_fim date);
  CREATE TABLE clientes(id uuid PRIMARY KEY,tenant_id uuid,status text);
  CREATE TABLE contratos(id uuid PRIMARY KEY,tenant_id uuid,status text,comissao_pct numeric);
- CREATE TABLE marcas(id uuid PRIMARY KEY,tenant_id uuid,cliente_id uuid,nome text,status text,tipo text,criado_em timestamptz DEFAULT now(),comissao_franquia_pct numeric DEFAULT 5,comissao_franqueadora_pct numeric DEFAULT 1,valor_fixo_minimo numeric DEFAULT 0);
+CREATE TABLE marcas(id uuid PRIMARY KEY,tenant_id uuid,cliente_id uuid,nome text,status text,tipo text,criado_em timestamptz DEFAULT now(),comissao_franquia_pct numeric DEFAULT 5,comissao_franqueadora_pct numeric DEFAULT 1,valor_fixo_minimo numeric DEFAULT 0,tipo_cobranca text DEFAULT 'fixo_mais_comissao');
  CREATE TABLE cabines(id uuid PRIMARY KEY,tenant_id uuid,nome text,numero int,ativo boolean DEFAULT true,contrato_id uuid);
  CREATE TABLE lives(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),tenant_id uuid,cabine_id uuid,cliente_id uuid,apresentador_id uuid,gestor_id uuid,status text,iniciado_em timestamptz,encerrado_em timestamptz,previsto_fim timestamptz,fat_gerado numeric,final_orders_count int,live_impressions bigint,manual_views int,resumo text,tipo text,status_publicacao text,origem_dados text,marca_id uuid,comissao_calculada numeric,comissao_apresentadora_pct numeric,comissao_apresentadora_valor numeric,agenda_evento_id uuid,ads_gmv numeric,manual_gmv numeric,manual_orders int);
  CREATE TABLE live_apresentadores(tenant_id uuid,live_id uuid,apresentador_id uuid);
@@ -55,6 +55,9 @@ await db.query(`INSERT INTO clientes VALUES ($1,$2,'ativo'),($3,$2,'arquivado')`
 await db.query(`INSERT INTO marcas(id,tenant_id,cliente_id,nome,status,tipo) VALUES ($1,$2,$3,'Aurora','ativa','cliente'),($4,$2,$3,'Disponível','ativa','cliente'),($5,$2,$3,'Arquivada','arquivada','cliente'),($6,$2,$7,'Herdada arquivada','ativa','cliente')`,[brand,tenant,client,unassignedBrand,archivedBrand,inheritedArchivedBrand,archivedClient])
 await db.query(`INSERT INTO cabines(id,tenant_id,nome,numero) VALUES($1,$2,'Norte',1)`,[cabin,tenant])
 await db.query(`INSERT INTO apresentadora_marcas VALUES($1,$2,$4,true),($1,$3,$4,true)`,[tenant,presenter,peerPresenter,brand])
+await db.exec(await readFile(new URL('../migrations/151_marca_condicoes_comerciais.sql',import.meta.url),'utf8'))
+await db.exec(await readFile(new URL('../migrations/152_marca_condicao_snapshot.sql',import.meta.url),'utf8'))
+await db.exec(await readFile(new URL('../migrations/155_portal_runtime_marca_condicoes.sql',import.meta.url),'utf8'))
 let failAudit=false, failCommit=false
 const app=Fastify()
 // Synthetic trusted identity stands in for JWT verification; database linkage,

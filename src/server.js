@@ -46,12 +46,11 @@ import { startEncerrarLivesZumbi } from './jobs/encerrar_lives_zumbi.js'
 import { notifyBoletosVencidos } from './jobs/notify_boletos_vencidos.js'
 import { withAdvisoryLock } from './jobs/advisory_lock.js'
 import { runMigrations } from '../apply_migrations.js'
-import { ensureKnowledgePrivateBucket, getKnowledgeStorageStatus } from './services/knowledge-storage.js'
+import { ensureKnowledgePrivateBucket } from './services/knowledge-storage.js'
 
 const TIKTOK_POLL_LOCK_KEY = 7421900119911235n
 
 const app = await buildApp()
-await ensureKnowledgePrivateBucket()
 await runMigrations(app.db.pool)
 
 // ── Barreira: um erro solto não pode derrubar a API inteira ───────────────────
@@ -99,6 +98,14 @@ startClienteMetricasSnapshotCron(app)
 
 await app.listen({ port: Number(process.env.PORT ?? 3001), host: '0.0.0.0' })
 console.log(`LiveShop API rodando na porta ${process.env.PORT ?? 3001}`)
+
+// Storage is optional for most API routes. Provision it after listen so a
+// transient Supabase outage cannot block Railway promotion or take the API down.
+void ensureKnowledgePrivateBucket({ retryDelays: [1000, 5000, 30000, 120000] })
+  .then((status) => {
+    if (status.ok) app.log.info('[knowledge-storage] bucket privado verificado')
+    else app.log.warn({ configured: status.configured, error: status.error }, '[knowledge-storage] indisponível; API segue em modo degradado')
+  })
 
 // TikTok data collection every 60s:
 // 1. Polling fallback (keeps live_snapshots updated even without connector)

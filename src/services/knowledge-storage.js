@@ -11,32 +11,50 @@ export function getKnowledgeStorageStatus() {
 }
 
 /**
- * Creates the private bucket once at boot and verifies existing buckets instead
- * of assuming a 409 means it has the desired visibility. No key or provider
- * response is returned to callers.
+ * Creates and verifies the private bucket without exposing provider responses.
+ * Retries are opt-in so request paths stay single-attempt; boot supplies a small,
+ * bounded backoff after the HTTP server is already accepting traffic.
  */
-export async function ensureKnowledgePrivateBucket({ fetchImpl = fetch } = {}) {
+export async function ensureKnowledgePrivateBucket({
+  fetchImpl = fetch,
+  timeoutMs = 5000,
+  retryDelays = [],
+} = {}) {
   const { base, key } = config()
   if (!base || !key) {
     state = { configured: false, ok: false }
-    return state
+    return getKnowledgeStorageStatus()
   }
   const headers = { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }
-  try {
-    const create = await fetchImpl(`${base}/storage/v1/bucket`, {
-      method: 'POST', headers,
-      body: JSON.stringify({ id: BUCKET, name: BUCKET, public: false }),
-    })
-    if (!create.ok && create.status !== 400 && create.status !== 409) throw new Error(`storage bucket create ${create.status}`)
-    const check = await fetchImpl(`${base}/storage/v1/bucket/${BUCKET}`, { headers })
-    if (!check.ok) throw new Error(`storage bucket check ${check.status}`)
-    const metadata = await check.json()
-    if (metadata.public === true) throw new Error('knowledge-private bucket must be private')
-    state = { configured: true, ok: true }
-  } catch (error) {
-    state = { configured: true, ok: false, error: error.message }
+  const request = (url, options = {}) => fetchImpl(url, {
+    ...options,
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const create = await request(`${base}/storage/v1/bucket`, {
+        method: 'POST',
+        body: JSON.stringify({ id: BUCKET, name: BUCKET, public: false }),
+      })
+      if (!create.ok && create.status !== 400 && create.status !== 409) throw new Error(`storage bucket create ${create.status}`)
+      const check = await request(`${base}/storage/v1/bucket/${BUCKET}`)
+      if (!check.ok) throw new Error(`storage bucket check ${check.status}`)
+      const metadata = await check.json()
+      if (metadata.public === true) throw new Error('knowledge-private bucket must be private')
+      state = { configured: true, ok: true }
+      return getKnowledgeStorageStatus()
+    } catch (error) {
+      state = {
+        configured: true,
+        ok: false,
+        error: error?.name === 'TimeoutError' ? 'storage request timed out' : error.message,
+      }
+      if (attempt >= retryDelays.length) return getKnowledgeStorageStatus()
+      await new Promise(resolve => setTimeout(resolve, retryDelays[attempt]))
+    }
   }
-  return getKnowledgeStorageStatus()
 }
 
 export { BUCKET as KNOWLEDGE_PRIVATE_BUCKET }

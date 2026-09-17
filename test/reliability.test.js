@@ -39,6 +39,36 @@ describe('database readiness', () => {
     expect(await probe()).toBe(false)
     expect(query).toHaveBeenCalledTimes(1)
   })
+  it('stays ready when optional storage is degraded', async () => {
+    const app = Fastify()
+    app.decorate('db', { query: vi.fn().mockResolvedValue({ rows: [{ '?column?': 1 }] }) })
+    registerReadiness(app, { storageProbe: async () => ({ configured: true, ok: false }) })
+    const response = await app.inject('/readyz')
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ ok: true, storage: { configured: true, ok: false } })
+    await app.close()
+  })
+  it('keeps readiness fail-soft when the storage probe rejects', async () => {
+    const app = Fastify()
+    app.decorate('db', { query: vi.fn().mockResolvedValue({ rows: [{ '?column?': 1 }] }) })
+    registerReadiness(app, { storageProbe: async () => { throw new Error('provider secret') } })
+    const response = await app.inject('/readyz')
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ ok: true, storage: { configured: true, ok: false } })
+    await app.close()
+  })
+  it('bounds a stalled storage probe without affecting database readiness', async () => {
+    const app = Fastify()
+    app.decorate('db', { query: vi.fn().mockResolvedValue({ rows: [{ '?column?': 1 }] }) })
+    registerReadiness(app, { storageProbe: async () => new Promise(() => {}), storageTimeoutMs: 5 })
+    const response = await Promise.race([
+      app.inject('/readyz'),
+      new Promise(resolve => setTimeout(() => resolve(null), 50)),
+    ])
+    expect(response?.statusCode).toBe(200)
+    expect(response?.json()).toEqual({ ok: true, storage: { configured: true, ok: false } })
+    await app.close()
+  })
 })
 
 describe('offsite backup coordination', () => {

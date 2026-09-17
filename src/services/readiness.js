@@ -22,14 +22,30 @@ export function createReadinessProbe(db, { timeoutMs = 3000, cacheMs = 5000 } = 
   }
 }
 
-export function registerReadiness(app, { storageProbe } = {}) {
+export function registerReadiness(app, { storageProbe, storageTimeoutMs = 1000 } = {}) {
   const probe = createReadinessProbe(app.db)
   app.get('/readyz', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store')
     const ok = await probe()
-    const storage = storageProbe ? await storageProbe() : undefined
-    const storageOk = !storageProbe || storage?.ok === true
-      || (storage?.configured === false && process.env.NODE_ENV !== 'production')
-    return reply.code(ok && storageOk ? 200 : 503).send({ ok: ok && storageOk, storage: storage ? { configured: storage.configured, ok: storage.ok } : undefined })
+    let storage
+    if (storageProbe) {
+      let timer
+      try {
+        storage = await Promise.race([
+          Promise.resolve().then(storageProbe),
+          new Promise(resolve => {
+            timer = setTimeout(() => resolve({ configured: true, ok: false }), storageTimeoutMs)
+          }),
+        ])
+      } catch {
+        storage = { configured: true, ok: false }
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+    return reply.code(ok ? 200 : 503).send({
+      ok,
+      storage: storage ? { configured: storage.configured, ok: storage.ok } : undefined,
+    })
   })
 }

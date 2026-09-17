@@ -58,6 +58,17 @@ await db.query(`INSERT INTO apresentadora_marcas VALUES($1,$2,$4,true),($1,$3,$4
 await db.exec(await readFile(new URL('../migrations/151_marca_condicoes_comerciais.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/152_marca_condicao_snapshot.sql',import.meta.url),'utf8'))
 await db.exec(await readFile(new URL('../migrations/155_portal_runtime_marca_condicoes.sql',import.meta.url),'utf8'))
+await db.exec(await readFile(new URL('../migrations/156_portal_runtime_marca_condicoes_least_privilege.sql',import.meta.url),'utf8'))
+const temporalPrivileges=await db.query(`SELECT column_name,
+  has_column_privilege('livelab_portal_runtime','marca_condicoes_comerciais',column_name,'SELECT') AS allowed
+  FROM unnest(ARRAY[
+    'id','tenant_id','marca_id','inicio_vigencia','comissao_franquia_pct','comissao_franqueadora_pct','cancelled_at',
+    'fixo_mensal','tipo_cobranca','fixo_confirmado','comissao_confirmada','origem'
+  ]) AS columns(column_name)`)
+const allowedTemporalColumns=new Set(temporalPrivileges.rows.filter(row=>row.allowed).map(row=>row.column_name))
+assert.deepEqual(allowedTemporalColumns,new Set([
+  'id','tenant_id','marca_id','inicio_vigencia','comissao_franquia_pct','comissao_franqueadora_pct','cancelled_at',
+]))
 let failAudit=false, failCommit=false
 const app=Fastify()
 // Synthetic trusted identity stands in for JWT verification; database linkage,

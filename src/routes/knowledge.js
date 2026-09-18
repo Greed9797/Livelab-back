@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { READ_KNOWLEDGE, WRITE_KNOWLEDGE } from '../config/role_groups.js'
 
 /**
  * Knowledge Base — categorias + artigos com Markdown + vídeo embedado.
@@ -66,21 +67,8 @@ const articleSchema = z.object({
 const ALLOWED_COVER_MIME = ['image/jpeg', 'image/png', 'image/webp']
 
 export async function knowledgeRoutes(app) {
-  const masterOnly = [app.authenticate, app.requirePapel(['franqueador_master'])]
-  const allReaders = [
-    app.authenticate,
-    app.requirePapel([
-      'franqueador_master',
-      'franqueado',
-      'gerente',
-      'gerente_comercial',
-      'financeiro',
-      'operacional',
-      'apresentador',
-      'apresentadora',
-      'cliente_parceiro',
-    ]),
-  ]
+  const masterOnly = [app.authenticate, app.requirePapel(WRITE_KNOWLEDGE)]
+  const allReaders = [app.authenticate, app.requirePapel(READ_KNOWLEDGE)]
 
   // ─── UPLOAD DE CAPA ─────────────────────────────────────────────────────
 
@@ -134,13 +122,20 @@ export async function knowledgeRoutes(app) {
 
   // ─── CATEGORIAS ─────────────────────────────────────────────────────────
 
-  app.get('/v1/knowledge/categories', { onRequest: allReaders }, async () => {
+  app.get('/v1/knowledge/categories', { onRequest: allReaders }, async (req) => {
+    const isMaster = req.user.papel === 'franqueador_master'
+    const statusJoin = isMaster
+      ? ''
+      : `AND m.status = 'published'`
     const { rows } = await app.db.query(`
-      SELECT id, name, slug, description, icon, sort_order, is_active,
-             created_at, updated_at
-      FROM knowledge_categories
-      WHERE is_active = true
-      ORDER BY sort_order ASC, name ASC
+      SELECT c.id, c.name, c.slug, c.description, c.icon, c.sort_order, c.is_active,
+             c.created_at, c.updated_at,
+             COALESCE(COUNT(m.id), 0)::int AS article_count
+      FROM knowledge_categories c
+      LEFT JOIN manuais m ON m.category_id = c.id ${statusJoin}
+      WHERE c.is_active = true
+      GROUP BY c.id
+      ORDER BY c.sort_order ASC, c.name ASC
     `)
     return rows
   })

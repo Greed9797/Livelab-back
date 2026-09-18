@@ -115,6 +115,18 @@ export const WRITE_USUARIOS = ['franqueador_master', 'franqueado']
 // ─── AUDIT LOG ───────────────────────────────────────────────────────
 export const READ_AUDIT_LOG = ['franqueador_master', 'franqueado', 'auditor']
 
+// ─── KNOWLEDGE BASE (categorias + artigos / manuais) ─────────────────
+// Leitura ampla: quem tem Base no menu do front. Escrita só master
+// (categorias são globais, sem tenant_id).
+export const READ_KNOWLEDGE = [
+  ...ADMIN,
+  'gerente_comercial', 'financeiro', 'operacional',
+  'apresentador', 'apresentadora', 'cliente_parceiro',
+  'financeiro_readonly', 'auditor', 'suporte', 'produtor_live',
+  'marketing', 'comercial_readonly',
+]
+export const WRITE_KNOWLEDGE = ['franqueador_master']
+
 // ─── CLIENTE_NOTAS (novo, Fase B inclui) ─────────────────────────────
 export const READ_CLIENTE_NOTAS = READ_CLIENTES
 export const WRITE_CLIENTE_NOTAS = [

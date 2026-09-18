@@ -20,6 +20,23 @@ const custoSchema = z.object({
 })
 
 const toNum = (v) => Number(v ?? 0)
+const roundMoney = (v) => Math.round(toNum(v) * 100) / 100
+
+/**
+ * Competência canônica YYYY-MM-DD para juntar comissão (::date → string via pg-date-string)
+ * com fixo mensal (timestamp → Date JS). Sem isso a chave `marca_id:mes` diverge
+ * (`2026-09-01` vs `Tue Sep 01`) e marcas `fixo_ou_comissao` emitem duas linhas
+ * vencedoras no mesmo mês — o DRE do front rejeita o payload.
+ */
+export function competenciaMesKey(mes) {
+  if (mes == null || mes === '') return ''
+  if (mes instanceof Date && !Number.isNaN(mes.getTime())) {
+    return mes.toISOString().slice(0, 10)
+  }
+  const raw = String(mes).trim()
+  const match = raw.match(/^(\d{4}-\d{2}-\d{2})/)
+  return match ? match[1] : raw.slice(0, 10)
+}
 
 // Fração de um mês (`mesExpr` = timestamp no 1º dia do mês) coberta pelo contrato
 // [inicioCol, fimCol]. Datas NULL → 1.0 (mês cheio, comportamento pré-133). Clamp [0,1].
@@ -37,7 +54,7 @@ function marcaFixoMensalSql() {
     SELECT m.id AS marca_id, m.nome AS marca_nome,
            COALESCE(mc.fixo_mensal, m.valor_fixo_minimo) AS valor_fixo_minimo,
            COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca,
-           am2.mes,
+           am2.mes::date AS mes,
            1::int AS meses_ativos,
            ${prorateFatorSql('am2.mes', 'm.data_inicio', 'm.data_fim')} AS fator_meses
       FROM (
@@ -531,7 +548,7 @@ export async function financeiroRoutes(app) {
   app.get('/v1/financeiro/operacional', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
     const { tenant_id } = request.user
     const { startDate, endDate } = resolveMonthRange(request.query)
-    const round2 = (v) => Math.round(v * 100) / 100
+    const round2 = roundMoney
     const pctMedio = (valor, gmv) => (gmv > 0 ? round2((valor / gmv) * 100) : 0)
 
     return app.withTenant(tenant_id, async (db) => {
@@ -566,9 +583,12 @@ export async function financeiroRoutes(app) {
         ORDER BY valor DESC
       `, [startDate, endDate, tenant_id])
 
-      // ENTRADA: fixo mensal por marca tipo=cliente com atividade (mesma fonte do /resumo)
+      // ENTRADA: fixo mensal por marca tipo=cliente com atividade (mesma fonte do /resumo).
+      // `mes` precisa sair no SELECT: sem ele a junção com comissão usa chave `marca_id:`
+      // vazia e marcas fixo_ou_comissao geram duas linhas vencedoras no mesmo mês.
       const fixoMarcas = await db.query(`
-        SELECT mf.marca_id, mf.marca_nome, mf.valor_fixo_minimo, mf.tipo_cobranca, mf.meses_ativos, mf.fator_meses
+        SELECT mf.marca_id, mf.marca_nome, mf.valor_fixo_minimo, mf.tipo_cobranca,
+               mf.meses_ativos, mf.fator_meses, mf.mes
         FROM (${marcaFixoMensalSql()}) mf
         WHERE mf.valor_fixo_minimo > 0
         ORDER BY mf.valor_fixo_minimo DESC
@@ -639,22 +659,24 @@ export async function financeiroRoutes(app) {
       // 'fixo_ou_comissao' entra só a maior (uma linha vencedora) → total = GREATEST(fixo, comissao).
       const marcaEntradas = new Map()
       for (const r of comissaoFranquia.rows) {
-        const key = `${r.marca_id}:${String(r.mes ?? '').slice(0, 10)}`
+        const mes = competenciaMesKey(r.mes)
+        const key = `${r.marca_id}:${mes}`
         marcaEntradas.set(key, {
           marca_id: r.marca_id,
           marca_nome: r.marca_nome,
           tipo: r.tipo_cobranca || 'fixo_mais_comissao',
-          comissao: toNum(r.valor), gmv: toNum(r.gmv), lives: toNum(r.lives),
-          mes: r.mes, fixo: 0, meses_ativos: 0,
+          comissao: round2(r.valor), gmv: round2(r.gmv), lives: toNum(r.lives),
+          mes, fixo: 0, meses_ativos: 0,
         })
       }
       for (const r of fixoMarcas.rows) {
         // valor monetário rateado por dias de contrato (fator_meses); meses_ativos fica só p/ display.
-        const fixo = toNum(r.valor_fixo_minimo) * toNum(r.fator_meses)
-        const key = `${r.marca_id}:${String(r.mes ?? '').slice(0, 10)}`
+        const fixo = round2(toNum(r.valor_fixo_minimo) * toNum(r.fator_meses))
+        const mes = competenciaMesKey(r.mes)
+        const key = `${r.marca_id}:${mes}`
         const cur = marcaEntradas.get(key)
         if (cur) {
-          cur.fixo += fixo
+          cur.fixo = round2(cur.fixo + fixo)
           cur.meses_ativos += toNum(r.meses_ativos)
           cur.tipo = r.tipo_cobranca || cur.tipo
         } else {
@@ -663,7 +685,7 @@ export async function financeiroRoutes(app) {
             marca_nome: r.marca_nome,
             tipo: r.tipo_cobranca || 'fixo_mais_comissao',
             comissao: 0, gmv: 0, lives: 0,
-            mes: r.mes, fixo, meses_ativos: toNum(r.meses_ativos),
+            mes, fixo, meses_ativos: toNum(r.meses_ativos),
           })
         }
       }
@@ -674,13 +696,13 @@ export async function financeiroRoutes(app) {
         const linhaComissao = () => ({
           categoria: 'comissao_franquia',
           descricao: `Comissão de franquia — ${m.marca_nome}`,
-          valor: m.comissao,
+          valor: round2(m.comissao),
           memoria: { marca_id: m.marca_id, marca_nome: m.marca_nome, ...competenciaMemoria, gmv: m.gmv, lives: m.lives, pct_medio: pctMedio(m.comissao, m.gmv) },
         })
         const linhaFixo = (criterio) => ({
           categoria: 'fixo_marca',
           descricao: `Fixo mensal — ${m.marca_nome}`,
-          valor: m.fixo,
+          valor: round2(m.fixo),
           memoria: { marca_id: m.marca_id, marca_nome: m.marca_nome, ...competenciaMemoria, criterio, meses_ativos: m.meses_ativos },
         })
         if (m.tipo === 'fixo_ou_comissao') {
@@ -710,28 +732,30 @@ export async function financeiroRoutes(app) {
       }
       entradas.sort((a, b) => b.valor - a.valor)
 
+      // Valores já em centavos estáveis (round2): o DRE do front reconcilia Σ(linhas)
+      // com totais reportados e rejeita divergência de 1 centavo.
       const saidas = [
         ...fixoApresentadoras.rows.map((r) => ({
           categoria: 'fixo_apresentadora',
           descricao: `Fixo mensal — ${r.nome}`,
-          valor: toNum(r.valor),
+          valor: round2(r.valor),
           memoria: { apresentadora_id: r.apresentadora_id, nome: r.nome, criterio: 'fixo_mensal' },
         })),
         ...comissaoApresentadoras.rows.map((r) => ({
           categoria: 'comissao_apresentadora',
           descricao: `Comissão — ${r.nome}`,
-          valor: toNum(r.valor),
+          valor: round2(r.valor),
           memoria: {
             apresentadora_id: r.apresentadora_id,
             nome: r.nome,
-            gmv_atribuido: toNum(r.gmv),
+            gmv_atribuido: round2(r.gmv),
             pct_medio: pctMedio(toNum(r.valor), toNum(r.gmv)),
           },
         })),
         ...adicionaisApresentadoras.rows.map((r) => ({
           categoria: 'adicional_apresentadora',
           descricao: `${r.tipo === 'fim_de_semana' ? 'Diária fim de semana' : 'Bonificação'} — ${r.nome}: ${r.descricao}`,
-          valor: toNum(r.valor),
+          valor: round2(r.valor),
           memoria: {
             adicional_id: r.id,
             apresentadora_id: r.apresentadora_id,
@@ -743,25 +767,25 @@ export async function financeiroRoutes(app) {
         ...custosManuais.rows.map((r) => ({
           categoria: 'custo_manual',
           descricao: r.descricao,
-          valor: toNum(r.valor),
+          valor: round2(r.valor),
           memoria: { custo_id: r.id, tipo: r.tipo },
         })),
       ]
 
       const isFixa = (l) => l.categoria === 'fixo_apresentadora'
         || (l.categoria === 'custo_manual' && CUSTO_TIPOS_FIXOS.has(l.memoria.tipo))
-      const totalEntradas = entradas.reduce((s, l) => s + l.valor, 0)
-      const despesasFixas = saidas.reduce((s, l) => s + (isFixa(l) ? l.valor : 0), 0)
-      const despesasVariaveis = saidas.reduce((s, l) => s + (isFixa(l) ? 0 : l.valor), 0)
+      const totalEntradas = round2(entradas.reduce((s, l) => s + l.valor, 0))
+      const despesasFixas = round2(saidas.reduce((s, l) => s + (isFixa(l) ? l.valor : 0), 0))
+      const despesasVariaveis = round2(saidas.reduce((s, l) => s + (isFixa(l) ? 0 : l.valor), 0))
 
       return {
         periodo: { inicio: startDate, fim: endDate },
         entradas,
         saidas,
         totais: {
-          entradas: round2(totalEntradas),
-          despesas_fixas: round2(despesasFixas),
-          despesas_variaveis: round2(despesasVariaveis),
+          entradas: totalEntradas,
+          despesas_fixas: despesasFixas,
+          despesas_variaveis: despesasVariaveis,
           resultado: round2(totalEntradas - despesasFixas - despesasVariaveis),
         },
         // Pendência de schema: supervisor e demais integrantes da equipe não têm

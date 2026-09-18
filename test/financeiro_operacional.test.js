@@ -6,7 +6,7 @@
 import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 
-import { financeiroRoutes } from '../src/routes/financeiro.js'
+import { competenciaMesKey, financeiroRoutes } from '../src/routes/financeiro.js'
 
 const tenantId = '11111111-1111-4111-8111-111111111111'
 
@@ -157,18 +157,20 @@ describe('GET /v1/financeiro/operacional', () => {
 
   it('tipo_cobranca=fixo_ou_comissao: entra só o MAIOR (uma linha por marca), total = GREATEST', async () => {
     // m1: comissão 250, fixo 300 → fixo vence. m2: comissão 900, fixo 500 → comissão vence.
+    // mes presente nos dois lados (produção): string DATE da comissão + Date do fixo
+    // antes do cast ::date — a chave canônica deve juntar e emitir UMA linha por marca.
     const query = vi.fn().mockImplementation(async (sql) => {
       const s = String(sql)
       if (s.includes('SUM(va.comissao_franquia)')) {
         return { rows: [
-          { marca_id: 'm1', marca_nome: 'OU-fixo', tipo_cobranca: 'fixo_ou_comissao', valor: '250.00', gmv: '10000.00', lives: 4 },
-          { marca_id: 'm2', marca_nome: 'OU-com', tipo_cobranca: 'fixo_ou_comissao', valor: '900.00', gmv: '9000.00', lives: 3 },
+          { marca_id: 'm1', marca_nome: 'OU-fixo', tipo_cobranca: 'fixo_ou_comissao', mes: '2026-08-01', valor: '250.00', gmv: '10000.00', lives: 4 },
+          { marca_id: 'm2', marca_nome: 'OU-com', tipo_cobranca: 'fixo_ou_comissao', mes: '2026-08-01', valor: '900.00', gmv: '9000.00', lives: 3 },
         ] }
       }
       if (s.includes('valor_fixo_minimo > 0')) {
         return { rows: [
-          { marca_id: 'm1', marca_nome: 'OU-fixo', valor_fixo_minimo: '300.00', meses_ativos: 1, fator_meses: 1, tipo_cobranca: 'fixo_ou_comissao' },
-          { marca_id: 'm2', marca_nome: 'OU-com', valor_fixo_minimo: '500.00', meses_ativos: 1, fator_meses: 1, tipo_cobranca: 'fixo_ou_comissao' },
+          { marca_id: 'm1', marca_nome: 'OU-fixo', mes: new Date('2026-08-01T00:00:00.000Z'), valor_fixo_minimo: '300.00', meses_ativos: 1, fator_meses: 1, tipo_cobranca: 'fixo_ou_comissao' },
+          { marca_id: 'm2', marca_nome: 'OU-com', mes: new Date('2026-08-01T00:00:00.000Z'), valor_fixo_minimo: '500.00', meses_ativos: 1, fator_meses: 1, tipo_cobranca: 'fixo_ou_comissao' },
         ] }
       }
       return { rows: [] }
@@ -190,12 +192,71 @@ describe('GET /v1/financeiro/operacional', () => {
     expect(m1.valor).toBe(300)
     expect(m1.memoria.criterio).toBe('fixo_ou_comissao_venceu_fixo')
     expect(m1.memoria.comissao_comparada).toBe(250)
+    expect(m1.memoria.competencia).toBe('2026-08-01')
 
     const m2 = body.entradas.find((l) => l.memoria.marca_id === 'm2')
     expect(m2.categoria).toBe('comissao_franquia')
     expect(m2.valor).toBe(900)
     expect(m2.memoria.criterio).toBe('fixo_ou_comissao_venceu_comissao')
     expect(m2.memoria.fixo_comparado).toBe(500)
+    expect(m2.memoria.competencia).toBe('2026-08-01')
     await app.close()
+  })
+
+  it('seleciona mf.mes no SQL do fixo (junção com comissão por competência)', async () => {
+    const query = operacionalQueryMock()
+    const { app } = buildApp({ queryMock: query })
+    await app.register(financeiroRoutes)
+    await app.inject({ method: 'GET', url: '/v1/financeiro/operacional?inicio=2026-06&fim=2026-06' })
+    const fixoSql = String(query.mock.calls.find(([sql]) => String(sql).includes('valor_fixo_minimo > 0'))[0])
+    expect(fixoSql).toMatch(/mf\.mes\b/)
+    await app.close()
+  })
+
+  it('totais reconciliam em centavos com linhas fracionárias (DRE do front)', async () => {
+    // 12 apresentadoras com fixo parcial — antes o Σ(linhas) em centavos divergia de round2(soma).
+    const fixos = Array.from({ length: 12 }, (_, i) => ({
+      apresentadora_id: `ap${i}`,
+      nome: `Ap ${i}`,
+      valor: 2500 * ((15 + (i % 5)) / 30),
+    }))
+    const query = vi.fn().mockImplementation(async (sql) => {
+      const s = String(sql)
+      if (s.includes('SUM(va.comissao_franquia)')) {
+        return { rows: [{ marca_id: 'm1', marca_nome: 'Marca A', mes: '2026-09-01', valor: '33.3333333', gmv: '1000', lives: 1 }] }
+      }
+      if (s.includes('valor_fixo_minimo > 0')) return { rows: [] }
+      if (s.includes('SUM(va.comissao_apresentadora)')) return { rows: [] }
+      if (s.includes('FROM apresentadoras a')) return { rows: fixos }
+      if (s.includes('FROM custos')) return { rows: [] }
+      if (s.includes('FROM apresentadora_remuneracao_adicionais')) return { rows: [] }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock: query })
+    await app.register(financeiroRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/operacional?inicio=2026-09&fim=2026-09' })
+    const body = res.json()
+    const cents = (v) => Math.round(Number(v) * 100)
+    const entradasCents = body.entradas.reduce((s, l) => s + cents(l.valor), 0)
+    const fixasCents = body.saidas
+      .filter((l) => l.categoria === 'fixo_apresentadora')
+      .reduce((s, l) => s + cents(l.valor), 0)
+    const variaveisCents = body.saidas
+      .filter((l) => l.categoria !== 'fixo_apresentadora')
+      .reduce((s, l) => s + cents(l.valor), 0)
+    expect(entradasCents).toBe(cents(body.totais.entradas))
+    expect(fixasCents).toBe(cents(body.totais.despesas_fixas))
+    expect(variaveisCents).toBe(cents(body.totais.despesas_variaveis))
+    expect(cents(body.totais.resultado)).toBe(entradasCents - fixasCents - variaveisCents)
+    await app.close()
+  })
+})
+
+describe('competenciaMesKey', () => {
+  it('normaliza DATE string, Date JS e ISO para YYYY-MM-DD', () => {
+    expect(competenciaMesKey('2026-09-01')).toBe('2026-09-01')
+    expect(competenciaMesKey(new Date('2026-09-01T00:00:00.000Z'))).toBe('2026-09-01')
+    expect(competenciaMesKey('2026-09-01T03:00:00.000Z')).toBe('2026-09-01')
+    expect(competenciaMesKey(null)).toBe('')
   })
 })

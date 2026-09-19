@@ -65,6 +65,16 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('POST', '/v1/lives/manual/x')).toBe(false)
     expect(chaveAlcancaRota('PATCH', '/v1/marcas/abc')).toBe(false)
 
+    // Condições comerciais por competência: POST explícito; GET já cai no prefixo /v1/marcas
+    expect(chaveAlcancaRota('GET', '/v1/marcas/66666666-6666-4666-8666-666666666666/condicoes')).toBe(true)
+    expect(chaveAlcancaRota('POST', '/v1/marcas/66666666-6666-4666-8666-666666666666/condicoes/preview')).toBe(true)
+    expect(chaveAlcancaRota('POST', '/v1/marcas/66666666-6666-4666-8666-666666666666/condicoes')).toBe(true)
+    // não abre outras sub-rotas de escrita (vínculo apresentadoras, etc.)
+    expect(chaveAlcancaRota('POST', '/v1/marcas/66666666-6666-4666-8666-666666666666/apresentadoras')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/marcas/66666666-6666-4666-8666-666666666666/condicoes/extra')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/marcas/nao-uuid/condicoes')).toBe(false)
+    expect(chaveAlcancaRota('DELETE', '/v1/marcas/66666666-6666-4666-8666-666666666666/condicoes')).toBe(false)
+
     // O que não pode: o dinheiro, as pessoas e as chaves do gateway.
     expect(chaveAlcancaRota('GET', '/v1/financeiro/dashboard')).toBe(false)
     expect(chaveAlcancaRota('POST', '/v1/usuarios')).toBe(false)
@@ -73,6 +83,8 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('POST', '/v1/api-keys')).toBe(false)
     // cadastro direto de apresentadora é 410 para todo mundo: não fica na lista
     expect(chaveAlcancaRota('POST', '/v1/apresentadoras')).toBe(false)
+    // clientes CRUD continua fora (use marcas + cliente_id/cliente_nome na listagem)
+    expect(chaveAlcancaRota('GET', '/v1/clientes')).toBe(false)
   })
 })
 

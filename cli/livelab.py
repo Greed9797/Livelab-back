@@ -46,9 +46,13 @@ ROTAS = [
     ('POST', '/v1/lives/manual', 'Cadastrar live já encerrada (data, hora, GMV, pedidos)'),
     ('POST', '/v1/lives', 'Iniciar live ao vivo numa cabine'),
     ('PATCH', '/v1/lives/:id', 'Editar live'),
-    ('GET', '/v1/marcas', 'Listar marcas'),
+    ('GET', '/v1/marcas', 'Listar marcas (inclui cliente_nome e configuracao_comercial / pendências)'),
+    ('GET', '/v1/marcas/:id', 'Ver uma marca'),
+    ('GET', '/v1/marcas/:id/condicoes', 'Histórico de condições comerciais por competência'),
     ('POST', '/v1/marcas', 'Cadastrar marca'),
-    ('PATCH', '/v1/marcas/:id', 'Editar marca'),
+    ('PATCH', '/v1/marcas/:id', 'Editar marca (identidade; campos financeiros vão em condicoes)'),
+    ('POST', '/v1/marcas/:id/condicoes/preview', 'Prévia do impacto de uma nova competência'),
+    ('POST', '/v1/marcas/:id/condicoes', 'Confirmar condição comercial (Idempotency-Key + expected_revision)'),
     ('GET', '/v1/apresentadoras', 'Listar apresentadoras'),
     ('PATCH', '/v1/apresentadoras/:id', 'Editar apresentadora'),
     ('GET', '/v1/comissoes', 'Ler comissão calculada'),
@@ -80,7 +84,7 @@ def normalizar_rota(rota):
     return rota
 
 
-def chamar(metodo, rota, query=None, body=None, verbose=False):
+def chamar(metodo, rota, query=None, body=None, verbose=False, headers_extra=None):
     """Faz a chamada e imprime a resposta. Devolve 0 no 2xx; sai com 1/3 senão."""
     url = base_url() + normalizar_rota(rota)
     if query:
@@ -91,6 +95,8 @@ def chamar(metodo, rota, query=None, body=None, verbose=False):
         'Accept': 'application/json',
         'User-Agent': 'livelab-cli/1.0',
     }
+    if headers_extra:
+        cabecalhos.update(headers_extra)
     if body is not None:
         dados = json.dumps(body, ensure_ascii=False).encode('utf-8')
         cabecalhos['Content-Type'] = 'application/json'
@@ -198,13 +204,31 @@ NOMEADOS = {
         'editar': ('PATCH', '/v1/lives/{id}', 'Editar live. Body: qualquer campo do criar, mais ads_gmv, status_publicacao (rascunho|revisado|publicado)'),
     },
     'marcas': {
-        'list': ('GET', '/v1/marcas', 'Listar marcas. Filtros em -q: status, tipo, cliente_id, q'),
+        'list': ('GET', '/v1/marcas',
+                 'Listar marcas. Filtros em -q: status, tipo, cliente_id, q. '
+                 'Resposta inclui cliente_id/cliente_nome, campos comerciais vigentes e '
+                 'configuracao_comercial (status a_revisar|configurado|incompleto|nao_aplicavel)'),
         'get': ('GET', '/v1/marcas/{id}', 'Ver uma marca'),
+        'condicoes': ('GET', '/v1/marcas/{id}/condicoes',
+                      'Histórico mensal. Cada item: competencia (AAAA-MM), inicio_vigencia, '
+                      'fixo_mensal, comissao_franquia_pct, comissao_franqueadora_pct, '
+                      'tipo_cobranca (fixo_mais_comissao|fixo_ou_comissao), fixo_confirmado, '
+                      'comissao_confirmada, origem, motivo, a_revisar, revision'),
+        'condicao-preview': ('POST', '/v1/marcas/{id}/condicoes/preview',
+                             'Prévia sem gravar. Body: competencia ou inicio_vigencia (AAAA-MM ou AAAA-MM-01), '
+                             'fixo_mensal, comissao_franquia_pct, comissao_franqueadora_pct, '
+                             'tipo_cobranca, fixo_confirmado, comissao_confirmada, motivo'),
+        'condicao-confirmar': ('POST', '/v1/marcas/{id}/condicoes',
+                               'Confirma competência. Mesmo body do preview + expected_revision; '
+                               'header Idempotency-Key (ou body.idempotency_key) obrigatório. '
+                               'Não invente zeros: confirme só valores reais do contrato'),
         'criar': ('POST', '/v1/marcas',
                   'Cadastrar marca. Body: nome*, tipo* (cliente|afiliada|propria|parceira; cliente exige cliente_id), '
                   'status (ativa|inativa|pausada), tiktok_username, site, marketplace_url, comissao_franquia_pct, '
                   'comissao_franqueadora_pct, observacoes. Procure pelo nome em list antes: "Haag" e "HAAG" viram duas marcas'),
-        'editar': ('PATCH', '/v1/marcas/{id}', 'Editar marca. Body: os mesmos campos do criar'),
+        'editar': ('PATCH', '/v1/marcas/{id}',
+                   'Editar identidade da marca (nome, status, urls…). '
+                   'Campos financeiros (fixo/%/tipo_cobranca) devem ir em condicao-confirmar'),
     },
     'apresentadoras': {
         'list': ('GET', '/v1/apresentadoras', 'Listar apresentadoras'),
@@ -230,7 +254,17 @@ def cmd_nomeado(args):
         rota = rota.replace('{id}', args.id)
     elif args.id:
         falhar('%s %s não recebe id' % (args.entidade, args.acao), SAIDA_USO)
-    return chamar(metodo, rota, ler_query(args.query), ler_body(args), getattr(args, 'verbose', False))
+    body = ler_body(args)
+    headers_extra = None
+    # Confirmação de condição exige Idempotency-Key (mesma regra do painel).
+    if args.entidade == 'marcas' and args.acao == 'condicao-confirmar':
+        chave_idemp = None
+        if isinstance(body, dict):
+            chave_idemp = body.get('idempotency_key')
+        if not chave_idemp:
+            falhar('condicao-confirmar exige Idempotency-Key: passe -d \'{"idempotency_key":"…", …}\'', SAIDA_USO)
+        headers_extra = {'Idempotency-Key': str(chave_idemp)}
+    return chamar(metodo, rota, ler_query(args.query), body, getattr(args, 'verbose', False), headers_extra)
 
 
 def cmd_rotas(args):

@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import * as Sentry from '@sentry/node'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const UUID_BODY = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
 // Rotas que uma chave de API alcança. Tudo que não está aqui responde 403 para
 // a chave, mesmo que o papel dela permitisse.
@@ -15,9 +16,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Não há DELETE nenhum, e de fora ficam usuários, financeiro, boletos,
 // contratos e configurações (esta última guarda as chaves do gateway de
 // pagamento).
-// Regra de casamento: GET casa por prefixo; POST/PATCH sem barra final casa EXATO;
-// PATCH com barra final casa só `<prefixo><uuid>` — nunca sub-rota (encerrar,
-// publicar, faixas-comissao, apresentadoras do vínculo).
+// Regra de casamento:
+// - GET casa por prefixo
+// - POST/PATCH sem barra final e sem `:id` casa EXATO
+// - PATCH com barra final casa só `<prefixo><uuid>` — nunca sub-rota (encerrar,
+//   publicar, faixas-comissao, apresentadoras do vínculo)
+// - Entradas com `:id` casam exatamente aquele caminho (uuid no lugar do :id),
+//   usadas para POST de condições comerciais por competência.
 export const ROTAS_API_KEY = [
   ['POST', '/v1/analytics/imports/preview'],
   ['POST', '/v1/analytics/imports/ingest'],
@@ -29,16 +34,29 @@ export const ROTAS_API_KEY = [
   ['GET', '/v1/marcas'],
   ['POST', '/v1/marcas'],
   ['PATCH', '/v1/marcas/'],
+  ['POST', '/v1/marcas/:id/condicoes/preview'],
+  ['POST', '/v1/marcas/:id/condicoes'],
   ['GET', '/v1/apresentadoras'],
   ['PATCH', '/v1/apresentadoras/'],
   ['GET', '/v1/comissoes'],
 ]
 
+function escapeRegex(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Compila padrão da allowlist (com no máximo um `:id`) para o caminho limpo. */
 export function chaveAlcancaRota(metodo, caminho) {
   const limpo = String(caminho ?? '').split('?')[0]
   return ROTAS_API_KEY.some(([m, rota]) => {
     if (m !== metodo) return false
     if (m === 'GET') return limpo.startsWith(rota)
+    if (rota.includes(':id')) {
+      const [prefixo, ...resto] = rota.split(':id')
+      if (resto.length !== 1) return false
+      const re = new RegExp(`^${escapeRegex(prefixo)}${UUID_BODY}${escapeRegex(resto[0])}$`, 'i')
+      return re.test(limpo)
+    }
     if (!rota.endsWith('/')) return limpo === rota
     return limpo.startsWith(rota) && UUID_RE.test(limpo.slice(rota.length))
   })

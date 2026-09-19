@@ -1,0 +1,17 @@
+# src/routes/cliente_insights.js
+
+- toNumber · function · L14-L17 — function toNumber(value)
+- round2 · function · L19-L21 — function round2(value)
+- toInt · function · L23-L26 — function toInt(value)
+- parsePeriodo · function · L28-L36 — function parsePeriodo(query = {})
+- getClienteVinculado · function · L38-L47 — async function getClienteVinculado(db, tenantId, userId)
+- getContratoAtivo · function · L49-L64 — async function getContratoAtivo(db, tenantId, clienteId)
+- getConfigOperacional · function · L70-L96 — async function getConfigOperacional(db, tenantId, clienteId, periodo)
+- contratoDTO · function · L98-L109 — function contratoDTO(contrato, valorFixo, comissaoPct)
+- clienteInsightsRoutes · function · L111-L597 — async function clienteInsightsRoutes(app)
+- _fetchMetricasPeriodo · function · L611-L678 — async function _fetchMetricasPeriodo(db, tenantId, clienteId, periodo)
+- _fetchSessoesPeriodo · function · L689-L739 — async function _fetchSessoesPeriodo(db, tenantId, clienteId, periodo, opts = {})
+- _toDataSP · function · L749-L754 — function _toDataSP(date)
+- _calcularHoras · function · L760-L768 — function _calcularHoras(iniciadoEm, encerradoEm, status)
+- _buildSessao · function · L774-L850 — function _buildSessao(r, { metaGmvHora, margemPct, comissaoLivelabPct })
+- _buildEmptyOperacional · function · L855-L871 — function _buildEmptyOperacional(periodo)

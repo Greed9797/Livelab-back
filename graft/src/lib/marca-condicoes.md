@@ -1,0 +1,15 @@
+# src/lib/marca-condicoes.js
+
+- invalid · function · L12-L17 — function invalid(message)
+- reaisParaCentavos · function · L20-L27 — function reaisParaCentavos(value, field = 'valor')
+- centavosParaReais · function · L29-L32 — function centavosParaReais(value)
+- percentToBasis · function · L34-L38 — function percentToBasis(value, field)
+- monthStart · function · L40-L43 — function monthStart(value)
+- dateOnly · function · L45-L51 — function dateOnly(value)
+- normalizarMarcaCondicao · function · L54-L76 — function normalizarMarcaCondicao(input = {})
+- resolveMarcaCondicao · function · L79-L85 — function resolveMarcaCondicao(conditions = [], factDate)
+- pctCents · function · L90-L93 — function pctCents(gmvCents, basisPoints)
+- calcularCobrancaCondicao · function · L96-L116 — function calcularCobrancaCondicao({ condition, condicao, gmv = 0, gmvCents } = {})
+- somarCobrancasCondicao · function · L121-L124 — function somarCobrancasCondicao(items = [])
+- marcaCondicaoAtSql · function · L130-L146 — function marcaCondicaoAtSql({ alias = 'mc', tenantSql = '$1', marcaSql = 'm.id', dateSql = 'l.iniciado_em AT TIME ZONE \'America/Sao_Paulo\'', } = {})
+- conditionPayloadHash · function · L151-L154 — function conditionPayloadHash(payload)

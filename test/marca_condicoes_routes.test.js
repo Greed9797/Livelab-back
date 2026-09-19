@@ -31,7 +31,11 @@ describe('rotas de condições comerciais', () => {
 
     const history = await app.inject({ method: 'GET', url: `/v1/marcas/${marcaId}/condicoes` })
     expect(history.statusCode).toBe(200)
-    expect(history.json()[0]).toMatchObject({ inicio_vigencia: '2026-08-01', fixo_mensal: 1000 })
+    expect(history.json()[0]).toMatchObject({
+      inicio_vigencia: '2026-08-01',
+      competencia: '2026-08',
+      fixo_mensal: 1000,
+    })
 
     const patch = await app.inject({
       method: 'PATCH', url: `/v1/marcas/${marcaId}`,

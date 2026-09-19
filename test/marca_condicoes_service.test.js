@@ -16,7 +16,7 @@ function fakeDb({ closed = false, failInsert = false, existingIdempotency = null
       if (sql.includes('FROM marcas') && sql.includes('FOR UPDATE')) return { rows: [{ id: marcaId }] }
       if (sql.includes('FROM marcas') && !sql.includes('marca_condicoes')) return { rows: [{ id: marcaId }] }
       if (sql.includes('idempotency_key') && sql.includes('FOR UPDATE')) return { rows: existingIdempotency ? [existingIdempotency] : [] }
-      if (sql.includes('FROM marca_condicoes_comerciais') && sql.includes('ORDER BY')) return { rows: [{ id: 'baseline', inicio_vigencia: '1900-01-01', fixo_mensal: '0.00', comissao_franquia_pct: '0.00', comissao_franqueadora_pct: '0.00', tipo_cobranca: 'fixo_mais_comissao', fixo_confirmado: false, comissao_confirmada: false, revision: 1 }] }
+      if (sql.includes('FROM marca_condicoes_comerciais') && sql.includes('ORDER BY')) return { rows: [{ id: 'baseline', inicio_vigencia: '1900-01-01', fixo_mensal: '0.00', comissao_franquia_pct: '0.00', comissao_franqueadora_pct: '0.00', tipo_cobranca: 'fixo_mais_comissao', fixo_confirmado: false, comissao_confirmada: false, origem: 'legado_nao_verificado', revision: 1 }] }
       if (sql.includes('COUNT(*) FILTER') && sql.includes('FROM lives')) return { rows: [{ fechados: closed ? 1 : 0, abertos: closed ? 0 : 1, gmv_aberto: '10000' }] }
       if (sql.includes('COUNT(*) FILTER') && sql.includes('FROM vendas_atribuidas')) return { rows: [{ fechados: 0, abertos: 0, gmv_aberto: '0' }] }
       if (sql.includes('GROUP BY va.data')) return { rows: [] }
@@ -40,6 +40,20 @@ describe('serviço transacional de condições comerciais', () => {
     const result = await preverCondicaoMarca(db, { tenantId, marcaId, proposta: proposal })
     expect(result.impacto.movimentos_abertos).toBe(1)
     expect(result.bloqueada).toBe(false)
+    expect(result.competencia).toBe('2026-09')
+    expect(result.proposta).toMatchObject({
+      competencia: '2026-09',
+      inicio_vigencia: '2026-09-01',
+      fixo_mensal: 1200,
+      comissao_franquia_pct: 8,
+      tipo_cobranca: 'fixo_mais_comissao',
+    })
+    expect(result.proposta).not.toHaveProperty('fixo_mensal_cents')
+    expect(result.condicao_anterior).toMatchObject({
+      competencia: '1900-01',
+      a_revisar: true,
+      origem: 'legado_nao_verificado',
+    })
     expect(db.calls.map((call) => call.sql)).toContain('ROLLBACK')
     expect(db.calls.some((call) => call.sql.startsWith('INSERT') || call.sql.startsWith('UPDATE'))).toBe(false)
   })

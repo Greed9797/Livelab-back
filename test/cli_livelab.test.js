@@ -137,6 +137,8 @@ describe.skipIf(!temPython)('cli/livelab.py', () => {
     const r = await cli(['rotas'])
     expect(r.status).toBe(0)
     expect(r.stdout).toMatch(/^POST\s+\/v1\/lives\/manual\s/m)
+    expect(r.stdout).toMatch(/^POST\s+\/v1\/marcas\/:id\/condicoes\s/m)
+    expect(r.stdout).toMatch(/^GET\s+\/v1\/marcas\/:id\/condicoes\s/m)
     const linhas = r.stdout.trim().split('\n')
     expect(linhas.length).toBeGreaterThanOrEqual(10)
     for (const linha of linhas) {
@@ -146,7 +148,12 @@ describe.skipIf(!temPython)('cli/livelab.py', () => {
     // e a volta: toda entrada da allowlist tem pelo menos uma linha na CLI
     const listadas = linhas.map((l) => l.trim().split(/\s+/).slice(0, 2))
     for (const [metodo, rota] of ROTAS_API_KEY) {
-      const alguma = listadas.some(([m, r]) => m === metodo && r.replace(':id', UUID).startsWith(rota))
+      const alguma = listadas.some(([m, r]) => {
+        if (m !== metodo) return false
+        if (rota.includes(':id')) return r === rota
+        const concreta = r.replace(':id', UUID)
+        return concreta === rota || concreta.startsWith(rota)
+      })
       expect(alguma, `${metodo} ${rota} sem linha em 'livelab rotas'`).toBe(true)
     }
   })

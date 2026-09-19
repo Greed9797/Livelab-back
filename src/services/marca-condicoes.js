@@ -39,13 +39,52 @@ function conditionRowToPublic(row) {
   const inicioVigencia = row.inicio_vigencia instanceof Date
     ? row.inicio_vigencia.toISOString().slice(0, 10)
     : String(row.inicio_vigencia).slice(0, 10)
+  const fixoConfirmado = Boolean(row.fixo_confirmado)
+  const comissaoConfirmada = Boolean(row.comissao_confirmada)
+  const origem = row.origem ?? null
+  // Mesma regra da UI / buildConfiguracaoComercial: baseline 1900 sem confirmação
+  // aparece como “Legado a revisar”, não como zero financeiro autoritativo.
+  const aRevisar = origem === 'legado_nao_verificado' && !fixoConfirmado && !comissaoConfirmada
   return {
     ...row,
     inicio_vigencia: inicioVigencia,
+    // Alias do campo “Competência” no painel (input type=month → AAAA-MM).
+    competencia: inicioVigencia.slice(0, 7),
     fixo_mensal: Number(row.fixo_mensal ?? 0),
     comissao_franquia_pct: Number(row.comissao_franquia_pct ?? 0),
     comissao_franqueadora_pct: Number(row.comissao_franqueadora_pct ?? 0),
+    tipo_cobranca: row.tipo_cobranca ?? 'fixo_mais_comissao',
+    fixo_confirmado: fixoConfirmado,
+    comissao_confirmada: comissaoConfirmada,
+    origem,
+    a_revisar: aRevisar,
     revision: Number(row.revision ?? 1),
+  }
+}
+
+/** Shape público da proposta (reais / %), alinhado ao formulário do painel. */
+function proposalToPublic(normalized) {
+  if (!normalized) return null
+  if (normalized.fixo_mensal_cents == null) {
+    return {
+      ...normalized,
+      competencia: String(normalized.inicio_vigencia ?? '').slice(0, 7),
+      fixo_mensal: Number(normalized.fixo_mensal ?? 0),
+      comissao_franquia_pct: Number(normalized.comissao_franquia_pct ?? 0),
+      comissao_franqueadora_pct: Number(normalized.comissao_franqueadora_pct ?? 0),
+    }
+  }
+  return {
+    inicio_vigencia: normalized.inicio_vigencia,
+    competencia: String(normalized.inicio_vigencia).slice(0, 7),
+    fixo_mensal: Number((normalized.fixo_mensal_cents / 100).toFixed(2)),
+    comissao_franquia_pct: Number((normalized.comissao_franquia_basis / 100).toFixed(2)),
+    comissao_franqueadora_pct: Number((normalized.comissao_franqueadora_basis / 100).toFixed(2)),
+    tipo_cobranca: normalized.tipo_cobranca,
+    fixo_confirmado: Boolean(normalized.fixo_confirmado),
+    comissao_confirmada: Boolean(normalized.comissao_confirmada),
+    origem: normalized.origem ?? 'gestao',
+    motivo: normalized.motivo ?? null,
   }
 }
 
@@ -174,11 +213,13 @@ async function previewInTransaction(db, { tenantId, marcaId, proposal, condition
     : horizonEnd
   const impact = await readImpact(db, { tenantId, marcaId, start: proposal.inicio_vigencia, end })
   const movements = await openMovementBreakdown(db, { tenantId, marcaId, start: proposal.inicio_vigencia, end })
+  const anterior = resolveMarcaCondicao(conditions, proposal.inicio_vigencia)
   return {
     inicio_vigencia: proposal.inicio_vigencia,
+    competencia: String(proposal.inicio_vigencia).slice(0, 7),
     fim_vigencia_exclusivo: end,
-    proposta: proposal,
-    condicao_anterior: resolveMarcaCondicao(conditions, proposal.inicio_vigencia),
+    proposta: proposalToPublic(proposal),
+    condicao_anterior: anterior ? conditionRowToPublic(anterior) : null,
     impacto: impact,
     movimentos_abertos: movements,
     requer_confirmacao: true,

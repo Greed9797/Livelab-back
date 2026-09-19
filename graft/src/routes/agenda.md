@@ -1,0 +1,16 @@
+# src/routes/agenda.js
+
+- recorrenciaAteIsValid · function · L42-L46 — function recorrenciaAteIsValid(data)
+- ensureAgendaRefs · function · L88-L166 — async function ensureAgendaRefs(db, reply, { tenantId, marcaId, clienteId, cabineId, apresentadoraId, apresentadoraIds })
+- resolveAgendaMarcaId · function · L168-L177 — async function resolveAgendaMarcaId(db, tenantId, { marcaId, clienteId })
+- getConflictingEvents · function · L179-L234 — async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId })
+- getConflictingTurnos · function · L241-L261 — async function getConflictingTurnos(db, { tenantId, apresentadoraId, dataInicio, dataFim, excludeId })
+- buildConflictPayload · function · L263-L285 — function buildConflictPayload(conflitos)
+- dedupConflitos · function · L287-L295 — function dedupConflitos(conflitos)
+- findConflicts · function · L307-L316 — async function findConflicts(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId })
+- collectAgendaConflicts · function · L318-L332 — async function collectAgendaConflicts(db, { tenantId, cabineId, apresentadoraId, intervals, excludeId })
+- calcularRecorrencias · function · L339-L415 — function calcularRecorrencias(dataInicio, dataFim, recorrencia)
+- proximaData · function · L357-L374 — function proximaData(d)
+- agendaRoutes · function · L417-L1040 — async function agendaRoutes(app)
+- add · function · L428-L431 — add = (sql, value)
+- liveAdd · function · L776-L776 — liveAdd = (col, val)

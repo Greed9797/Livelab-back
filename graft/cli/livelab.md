@@ -1,0 +1,15 @@
+# cli/livelab.py
+
+- falhar · function · L62-L64 — def falhar(mensagem, codigo)
+- chave · function · L67-L71 — def chave()
+- base_url · function · L74-L75 — def base_url()
+- normalizar_rota · function · L78-L84 — def normalizar_rota(rota)
+- chamar · function · L87-L133 — def chamar(metodo, rota, query=None, body=None, verbose=False, headers_extra=None)
+- ler_body · function · L136-L153 — def ler_body(args)
+- ler_query · function · L156-L163 — def ler_query(pares)
+- cmd_api · function · L166-L167 — def cmd_api(args)
+- cmd_ingest · function · L170-L190 — def cmd_ingest(args)
+- cmd_nomeado · function · L249-L267 — def cmd_nomeado(args)
+- cmd_rotas · function · L270-L274 — def cmd_rotas(args)
+- montar_parser · function · L277-L324 — def montar_parser()
+- main · function · L327-L330 — def main(argv=None)

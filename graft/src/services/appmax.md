@@ -1,0 +1,15 @@
+# src/services/appmax.js
+
+- _appId · function · L18-L22 — function _appId()
+- _apiKey · function · L24-L28 — function _apiKey()
+- _request · function · L30-L45 — async function _request(path, { method = 'POST', body, idempotencyKey } = {})
+- upsertCustomer · function · L53-L68 — async function upsertCustomer(c)
+- createOrder · function · L74-L82 — async function createOrder(order)
+- chargePix · function · L87-L100 — async function chargePix({ orderId, customerId, expirationDate, idempotencyKey })
+- chargeBoleto · function · L105-L118 — async function chargeBoleto({ orderId, customerId, dueDate, idempotencyKey })
+- chargeCard · function · L123-L142 — async function chargeCard({ orderId, customerId, card, installments = 1 })
+- buscarOuCriarCustomer · function · L150-L159 — async function buscarOuCriarCustomer({ nome, cpfCnpj, email, celular })
+- gerarIdempotencyKey · function · L164-L169 — function gerarIdempotencyKey(tenantId, liveId, tipo)
+- criarCobranca · function · L177-L224 — async function criarCobranca({ asaasCustomerId, // mantido pelo nome legado, é gateway_customer_id — será renomeado em Appmax v2 valor, vencimento, descricao, externalReference, billingType = 'BOLETO', idempotencyKey, })
+- validarWebhookToken · function · L231-L242 — function validarWebhookToken(receivedToken)
+- validateWebhook · function · L248-L254 — function validateWebhook(payload)

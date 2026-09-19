@@ -307,8 +307,7 @@ async function recalculateOpenLives(db, { tenantId, marcaId, start, end }) {
          AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
     )
     UPDATE lives l
-        SET comissao_calculada = ROUND(r.gmv * r.franquia_pct / 100.0, 2),
-            atualizado_em = NOW()
+        SET comissao_calculada = ROUND(r.gmv * r.franquia_pct / 100.0, 2)
        FROM recalculated r
       WHERE l.id = r.id`,
     [tenantId, marcaId, start, end],

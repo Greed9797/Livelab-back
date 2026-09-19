@@ -1,0 +1,15 @@
+# src/services/mailer.js
+
+- _maskEmail · function · L21-L27 — function _maskEmail(email)
+- _emailBreadcrumb · function · L29-L41 — function _emailBreadcrumb(level, template, to, extra = {})
+- isEmailConfigured · function · L43-L45 — function isEmailConfigured()
+- _client · function · L47-L51 — function _client()
+- _from · function · L53-L55 — function _from()
+- _logNotification · function · L61-L79 — async function _logNotification(pool, { tenantId, tipo, refId, destinatario, assunto, enviadoEm, erro })
+- hasSent · function · L85-L103 — async function hasSent(pool, { tenantId, tipo, refId })
+- sendEmail · function · L117-L168 — async function sendEmail({ to, subject, html, tenantId, tipo, refId, pool })
+- _wrap · function · L201-L214 — function _wrap(title, bodyHtml)
+- _money · function · L216-L219 — function _money(v)
+- _fmtDate · function · L221-L230 — function _fmtDate(d)
+- renderTemplate · function · L392-L396 — function renderTemplate(name, vars = {})
+- notify · function · L413-L450 — async function notify(args)

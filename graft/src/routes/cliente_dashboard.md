@@ -1,0 +1,15 @@
+# src/routes/cliente_dashboard.js
+
+- toNumber · function · L6-L9 — function toNumber(value)
+- toInt · function · L11-L13 — function toInt(value)
+- round2 · function · L15-L17 — function round2(value)
+- parsePeriodo · function · L19-L28 — function parsePeriodo(query = {})
+- calcularCustoHora · function · L30-L40 — function calcularCustoHora(contrato)
+- emptyLivesPayload · function · L42-L65 — function emptyLivesPayload(periodo)
+- emptyDashboard · function · L67-L100 — function emptyDashboard(periodo)
+- buildBenchmark · function · L102-L122 — function buildBenchmark({ niche, meuGmv, mediaGmv, amostra, percentil, minimumSample })
+- getClienteVinculado · function · L126-L132 — async function getClienteVinculado(db, tenantId, userId)
+- getContratoAtivo · function · L134-L155 — async function getContratoAtivo(db, tenantId, clienteId)
+- fetchClienteLives · function · L157-L284 — async function fetchClienteLives(db, tenantId, clienteId, periodo, custoHora)
+- bloquearClienteCabines · function · L286-L288 — bloquearClienteCabines = async (_request, reply)
+- clienteDashboardRoutes · function · L290-L1114 — async function clienteDashboardRoutes(app)

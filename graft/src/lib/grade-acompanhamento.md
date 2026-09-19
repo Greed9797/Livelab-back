@@ -1,0 +1,17 @@
+# src/lib/grade-acompanhamento.js
+
+- iso · function · L63-L67 — function iso(value)
+- utcForZonedMidnight · function · L69-L87 — function utcForZonedMidnight(data)
+- nextDate · function · L89-L93 — function nextDate(data)
+- saoPauloDayBounds · function · L95-L100 — function saoPauloDayBounds(data)
+- intervalUnionMinutes · function · L102-L124 — function intervalUnionMinutes(intervals, dayStart, dayEnd)
+- liveInterval · function · L126-L130 — function liveInterval(live)
+- overlaps · function · L132-L138 — function overlaps(evento, live)
+- isDirectLink · function · L140-L142 — function isDirectLink(evento, live)
+- isCandidate · function · L144-L149 — function isCandidate(evento, live)
+- actualMinutes · function · L151-L153 — function actualMinutes(lives, dayStart, dayEnd)
+- planejamentoPayload · function · L155-L197 — function planejamentoPayload(evento, directLives, candidateLives, dayStart, dayEnd, now)
+- execucaoPayload · function · L199-L211 — function execucaoPayload(live, candidateEvents, dayStart, dayEnd)
+- buildCabine · function · L213-L240 — function buildCabine(cabine, agenda, lives, dayStart, dayEnd, allAgenda = agenda, allLives = lives, gradeCells = [], now = new Date().toISOString())
+- buildAcompanhamento · function · L242-L268 — function buildAcompanhamento({ data, dayStart, dayEnd, cabines, agenda, lives, gradeCells = [], now = new Date().toISOString() })
+- carregarAcompanhamento · function · L270-L286 — async function carregarAcompanhamento(db, tenantId, data)

@@ -792,7 +792,7 @@ export async function agendaRoutes(app) {
           if (liveSync.length > 0) {
             liveVals.push(evento.live_id, tenant_id)
             await db.query(
-              `UPDATE lives SET ${liveSync.join(', ')}, atualizado_em = NOW()
+              `UPDATE lives SET ${liveSync.join(', ')}
                WHERE id = $${lIdx}::uuid AND tenant_id = $${lIdx + 1}::uuid AND status = 'em_andamento'`,
               liveVals
             )

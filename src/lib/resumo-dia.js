@@ -7,6 +7,44 @@ function toNum(v) {
   return Number.isFinite(n) ? n : 0
 }
 
+function storedCount(value) {
+  if (value == null || value === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function addStoredCount(current, value) {
+  const n = storedCount(value)
+  if (n == null) return current
+  return (current ?? 0) + n
+}
+
+function formatCount(value) {
+  return new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 0 }).format(Math.round(value))
+}
+
+function countFragment(value, singular, plural) {
+  if (value == null) return null
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  const rounded = Math.round(n)
+  return `${formatCount(rounded)} ${Math.abs(rounded) === 1 ? singular : plural}`
+}
+
+function brandDetailLine(marca) {
+  const parts = [
+    formatMoneyBRL(marca.gmv),
+    marca.horas_formatadas,
+    `${formatMoneyBRL(marca.gmv_por_hora)}/h`,
+    `${marca.pedidos} ${marca.pedidos === 1 ? 'pedido' : 'pedidos'}`,
+  ]
+  const views = countFragment(marca.visualizacoes, 'visualização', 'visualizações')
+  const impressions = countFragment(marca.impressoes, 'impressão', 'impressões')
+  if (views) parts.push(views)
+  if (impressions) parts.push(impressions)
+  return parts.join(' · ')
+}
+
 export function formatMoneyBRL(value) {
   const n = toNum(value)
   return new Intl.NumberFormat('pt-BR', {
@@ -102,6 +140,8 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
         pedidos: 0,
         minutos: 0,
         lives_count: 0,
+        visualizacoes: null,
+        impressoes: null,
       })
     }
     const marcaObj = marcasMap.get(marcaKey)
@@ -109,6 +149,8 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
     marcaObj.pedidos += livePedidos
     marcaObj.minutos += liveMins
     marcaObj.lives_count += 1
+    marcaObj.visualizacoes = addStoredCount(marcaObj.visualizacoes, live.manual_views)
+    marcaObj.impressoes = addStoredCount(marcaObj.impressoes, live.live_impressions)
 
     // Agrupamento por Apresentadora
     const hasRateioV2 = Array.isArray(live.apresentadoras) && live.apresentadoras.length > 0
@@ -227,8 +269,7 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
     lines.push('🏷️ *POR MARCA*')
     for (const m of marcas) {
       lines.push(`*${m.nome}*`)
-      const pedidosStr = `${m.pedidos} ${m.pedidos === 1 ? 'pedido' : 'pedidos'}`
-      lines.push(`${formatMoneyBRL(m.gmv)} · ${m.horas_formatadas} · ${formatMoneyBRL(m.gmv_por_hora)}/h · ${pedidosStr}`)
+      lines.push(brandDetailLine(m))
       lines.push('')
     }
     if (lines[lines.length - 1] === '') lines.pop()

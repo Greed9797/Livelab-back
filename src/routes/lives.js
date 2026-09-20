@@ -1925,6 +1925,8 @@ export async function livesRoutes(app) {
         `SELECT l.id, l.iniciado_em, l.encerrado_em, l.previsto_fim,
                 COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
                 COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos,
+                l.manual_views,
+                l.live_impressions,
                 COALESCE(l.marca_id, va_marca.marca_id) AS marca_id,
                 COALESCE(va_marca.marca_nome, cl.nome, 'Sem marca') AS marca_nome,
                 COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END, 'Sem apresentadora') AS apresentadora_nome,

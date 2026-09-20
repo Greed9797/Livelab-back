@@ -142,5 +142,75 @@ describe('resumo-dia helpers', () => {
     expect(result.texto_whatsapp).toContain('*Camila Santos*')
     // Verify no bullet list indentation character
     expect(result.texto_whatsapp).not.toContain('• ')
+    expect(result.texto_whatsapp).not.toContain('visualiza')
+    expect(result.texto_whatsapp).not.toContain('impress')
+    expect(result.marcas[0].visualizacoes).toBeNull()
+    expect(result.marcas[0].impressoes).toBeNull()
+  })
+
+  it('adds stored views and impressions to each brand line and skips missing values', () => {
+    const result = buildResumoDia({
+      data: '2026-09-11',
+      now: new Date('2026-09-11T19:00:00-03:00'),
+      lives: [
+        {
+          iniciado_em: '2026-09-11T13:00:00-03:00',
+          encerrado_em: '2026-09-11T14:00:00-03:00',
+          gmv: 1000,
+          pedidos: 1,
+          marca_nome: 'Marca B',
+          manual_views: 12400,
+          live_impressions: '80000',
+          product_impressions: 9,
+          final_peak_viewers: 3,
+        },
+        {
+          iniciado_em: '2026-09-11T15:00:00-03:00',
+          encerrado_em: '2026-09-11T16:00:00-03:00',
+          gmv: 500,
+          pedidos: 2,
+          marca_nome: 'Marca B',
+          manual_views: null,
+          live_impressions: 1,
+        },
+        {
+          iniciado_em: '2026-09-11T17:00:00-03:00',
+          encerrado_em: '2026-09-11T18:00:00-03:00',
+          gmv: 100,
+          pedidos: 1,
+          marca_nome: 'Marca A',
+          manual_views: 0,
+          live_impressions: null,
+          product_impressions: 999,
+          final_peak_viewers: 40,
+        },
+      ],
+    })
+
+    expect(result.marcas[0].nome).toBe('Marca B')
+    expect(result.marcas[0].visualizacoes).toBe(12400)
+    expect(result.marcas[0].impressoes).toBe(80001)
+    expect(result.texto_whatsapp).toContain('R$ 1.500,00 · 2h 00min · R$ 750,00/h · 3 pedidos · 12.400 visualizações · 80.001 impressões')
+    expect(result.texto_whatsapp).toContain('R$ 100,00 · 1h 00min · R$ 100,00/h · 1 pedido · 0 visualizações')
+    const marcaALine = result.texto_whatsapp.split('*Marca A*')[1]
+    expect(marcaALine.split('🎤')[0]).not.toContain('impress')
+    expect(result.texto_whatsapp).not.toContain('0 impress')
+  })
+
+  it('uses singular labels when a brand has one stored view and one impression', () => {
+    const result = buildResumoDia({
+      data: '2026-09-11',
+      now: new Date('2026-09-11T19:00:00-03:00'),
+      lives: [{
+        iniciado_em: '2026-09-11T13:00:00-03:00',
+        encerrado_em: '2026-09-11T14:00:00-03:00',
+        gmv: 10,
+        pedidos: 1,
+        marca_nome: 'Única',
+        manual_views: 1,
+        live_impressions: 1,
+      }],
+    })
+    expect(result.texto_whatsapp).toContain('1 visualização · 1 impressão')
   })
 })

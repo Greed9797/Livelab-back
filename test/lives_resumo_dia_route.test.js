@@ -125,5 +125,9 @@ describe('GET /v1/lives/resumo-dia', () => {
 
     // Verify tenant isolation in query params
     expect(calls[0].params[0]).toBe(tenantId)
+    expect(calls[0].sql).toContain('l.manual_views')
+    expect(calls[0].sql).toContain('l.live_impressions')
+    expect(calls[0].sql).not.toContain('COALESCE(l.manual_views')
+    expect(calls[0].sql).not.toContain('COALESCE(l.live_impressions')
   })
 })

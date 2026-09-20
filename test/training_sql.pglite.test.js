@@ -50,6 +50,27 @@ describe('training P0 migration', () => {
     expect(isolated.rows).toEqual([])
   })
 
+  it('orders complete/next by module then lesson, not lesson.sort_order alone', async () => {
+    db = await createDb()
+    const ordered = await db.query(`
+      SELECT l.id::text AS id
+        FROM training_lessons AS current_lesson
+        JOIN training_modules AS current_module ON current_module.id = current_lesson.module_id
+        JOIN training_trails AS trail ON trail.id = current_module.trail_id
+        JOIN training_modules AS module ON module.trail_id = trail.id
+        JOIN training_lessons AS l ON l.module_id = module.id
+       WHERE current_lesson.id = $1
+       ORDER BY module.sort_order, l.sort_order
+    `, [LESSON])
+    expect(ordered.rows.map((row) => row.id)).toEqual([
+      'a1111111-1111-4111-8111-111111111131',
+      'a1111111-1111-4111-8111-111111111132',
+      'a1111111-1111-4111-8111-111111111133',
+      'a1111111-1111-4111-8111-111111111134',
+      'a1111111-1111-4111-8111-111111111135',
+    ])
+  })
+
   it('refuses a certificate-like extra table and keeps progress explicit', async () => {
     db = await createDb()
     const tables = await db.query(`

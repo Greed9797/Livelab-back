@@ -7,6 +7,38 @@ function toNum(v) {
   return Number.isFinite(n) ? n : 0
 }
 
+function recordedCount(value) {
+  if (value == null) return null
+  if (typeof value === 'string' && value.trim() === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function liveVisualizacoes(live) {
+  const manual = recordedCount(live?.manual_views)
+  if (manual != null) return manual
+  return recordedCount(live?.final_peak_viewers)
+}
+
+function liveImpressoes(live) {
+  return recordedCount(live?.live_impressions)
+}
+
+function addRecorded(total, value) {
+  if (value == null) return total
+  return (total ?? 0) + value
+}
+
+function formatCount(value) {
+  return new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 0 }).format(value)
+}
+
+function countFragment(value, singular, plural) {
+  if (value == null) return null
+  const n = Math.round(Number(value))
+  return `${formatCount(n)} ${n === 1 ? singular : plural}`
+}
+
 export function formatMoneyBRL(value) {
   const n = toNum(value)
   return new Intl.NumberFormat('pt-BR', {
@@ -102,6 +134,8 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
         pedidos: 0,
         minutos: 0,
         lives_count: 0,
+        visualizacoes: null,
+        impressoes: null,
       })
     }
     const marcaObj = marcasMap.get(marcaKey)
@@ -109,6 +143,8 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
     marcaObj.pedidos += livePedidos
     marcaObj.minutos += liveMins
     marcaObj.lives_count += 1
+    marcaObj.visualizacoes = addRecorded(marcaObj.visualizacoes, liveVisualizacoes(live))
+    marcaObj.impressoes = addRecorded(marcaObj.impressoes, liveImpressoes(live))
 
     // Agrupamento por Apresentadora
     const hasRateioV2 = Array.isArray(live.apresentadoras) && live.apresentadoras.length > 0
@@ -181,6 +217,8 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
         horas: Math.round(horas * 100) / 100,
         horas_formatadas: formatMinsToHours(m.minutos),
         gmv_por_hora: gmvPorHora,
+        visualizacoes: m.visualizacoes == null ? null : Math.round(m.visualizacoes),
+        impressoes: m.impressoes == null ? null : Math.round(m.impressoes),
       }
     })
     .sort((a, b) => b.gmv - a.gmv || b.minutos - a.minutos || a.nome.localeCompare(b.nome))
@@ -227,8 +265,17 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
     lines.push('🏷️ *POR MARCA*')
     for (const m of marcas) {
       lines.push(`*${m.nome}*`)
-      const pedidosStr = `${m.pedidos} ${m.pedidos === 1 ? 'pedido' : 'pedidos'}`
-      lines.push(`${formatMoneyBRL(m.gmv)} · ${m.horas_formatadas} · ${formatMoneyBRL(m.gmv_por_hora)}/h · ${pedidosStr}`)
+      const parts = [
+        formatMoneyBRL(m.gmv),
+        m.horas_formatadas,
+        `${formatMoneyBRL(m.gmv_por_hora)}/h`,
+        `${m.pedidos} ${m.pedidos === 1 ? 'pedido' : 'pedidos'}`,
+      ]
+      const views = countFragment(m.visualizacoes, 'visualização', 'visualizações')
+      const impressions = countFragment(m.impressoes, 'impressão', 'impressões')
+      if (views) parts.push(views)
+      if (impressions) parts.push(impressions)
+      lines.push(parts.join(' · '))
       lines.push('')
     }
     if (lines[lines.length - 1] === '') lines.pop()

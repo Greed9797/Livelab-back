@@ -122,8 +122,12 @@ describe('GET /v1/lives/resumo-dia', () => {
     expect(body.texto_whatsapp).toContain('⚡ *GMV/h:*')
     expect(body.texto_whatsapp).toContain('🏷️ *POR MARCA*')
     expect(body.texto_whatsapp).toContain('🎤 *POR APRESENTADORA*')
+    expect(body.texto_whatsapp).not.toContain('visualiza')
+    expect(body.texto_whatsapp).not.toContain('impress')
 
-    // Verify tenant isolation in query params
+    expect(calls[0].sql).toContain('l.manual_views')
+    expect(calls[0].sql).toContain('l.final_peak_viewers')
+    expect(calls[0].sql).toContain('l.live_impressions')
     expect(calls[0].params[0]).toBe(tenantId)
   })
 })

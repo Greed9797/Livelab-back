@@ -137,6 +137,13 @@ export const WRITE_USUARIOS = ['franqueador_master', 'franqueado']
 export const READ_AUDIT_LOG = ['franqueador_master', 'franqueado', 'auditor']
 
 // ─── CLIENTE_NOTAS (novo, Fase B inclui) ─────────────────────────────
+export const READ_TRAINING = [
+  ...ADMIN, 'gerente_comercial',
+  'financeiro', 'financeiro_readonly', 'auditor', 'suporte', 'operacional',
+  'produtor_live', 'marketing', 'comercial_readonly', 'apresentador', 'apresentadora',
+]
+export const WRITE_TRAINING = READ_TRAINING
+
 export const READ_CLIENTE_NOTAS = READ_CLIENTES
 export const WRITE_CLIENTE_NOTAS = [
   ...ADMIN_COMERCIAL, 'suporte', 'marketing',

@@ -35,6 +35,7 @@ import { regionalManagersRoutes } from './routes/regional_managers.js'
 import { manuaisRoutes } from './routes/manuais.js'
 import { knowledgeRoutes } from './routes/knowledge.js'
 import { knowledgeUnitRoutes } from './routes/knowledge-unit.js'
+import { trainingRoutes } from './routes/training.js'
 import { clienteNotasRoutes } from './routes/cliente_notas.js'
 import { clienteBriefingRoutes } from './routes/cliente_briefing.js'
 import { tiktokRoutes } from './routes/tiktok.js'
@@ -357,6 +358,7 @@ export async function buildApp(opts = {}) {
   await app.register(manuaisRoutes)
   await app.register(knowledgeRoutes)
   await app.register(knowledgeUnitRoutes)
+  await app.register(trainingRoutes)
   await app.register(clienteNotasRoutes)
   await app.register(clienteBriefingRoutes)
   await app.register(tiktokRoutes)

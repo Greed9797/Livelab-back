@@ -41,6 +41,15 @@ const contentFields = {
   video_provider: z.enum(['youtube', 'panda', 'none']).optional(),
   video_url: z.string().url().nullable().optional(),
   tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  cover_image_url: z.string().url().nullable().optional(),
+  duration_minutes: z.number().int().min(1).max(600).nullable().optional(),
+  difficulty: z.enum(['iniciante', 'intermediario', 'avancado']).nullable().optional(),
+  objectives: z.array(z.string().trim().min(1).max(200)).max(8).optional(),
+  prerequisites: z.array(z.string().trim().min(1).max(200)).max(8).optional(),
+  audience_roles: z.array(z.enum(['apresentadora', 'operacao', 'comercial', 'gestor'])).max(8).optional(),
+  topics: z.array(z.enum(['live', 'shop', 'ads', 'conteudo', 'politicas'])).max(8).optional(),
+  platforms: z.array(z.enum(['tiktok'])).max(4).optional(),
+  featured: z.boolean().optional(),
 }
 const createSchema = z.object({
   ...contentFields,
@@ -246,7 +255,7 @@ export async function knowledgeUnitRoutes(app) {
     if (request.query?.category_slug) { predicates.push(`c.slug = $${values.length + 1}`); values.push(request.query.category_slug) }
     const limitIndex = values.length + 1; values.push(size); const offsetIndex = values.length + 1; values.push(offset)
     return app.withTenant(request.user.tenant_id, async (db) => {
-      const result = await db.query(`SELECT m.id, m.title AS titulo, m.slug, m.excerpt, m.material_type, m.external_url, m.video_provider, m.video_id, m.tags, m.status, m.revision, m.published_at, m.updated_at AS atualizado_em, m.category_id, c.name AS category_name, c.slug AS category_slug, (SELECT COUNT(*)::int FROM knowledge_material_attachments a WHERE a.material_id = m.id AND a.tenant_id = m.tenant_id AND a.state = 'ready') AS attachment_count FROM knowledge_materials m LEFT JOIN knowledge_unit_categories c ON c.id = m.category_id AND c.tenant_id = m.tenant_id WHERE ${predicates.join(' AND ')} ORDER BY m.updated_at DESC, m.id LIMIT $${limitIndex} OFFSET $${offsetIndex}`, values)
+      const result = await db.query(`SELECT m.id, m.title AS titulo, m.slug, m.excerpt, m.material_type, m.external_url, m.video_provider, m.video_id, m.tags, m.status, m.revision, m.published_at, m.updated_at AS atualizado_em, m.category_id, m.cover_image_url, m.duration_minutes, m.difficulty, m.objectives, m.prerequisites, m.audience_roles, m.topics, m.platforms, m.featured, c.name AS category_name, c.slug AS category_slug, (SELECT COUNT(*)::int FROM knowledge_material_attachments a WHERE a.material_id = m.id AND a.tenant_id = m.tenant_id AND a.state = 'ready') AS attachment_count FROM knowledge_materials m LEFT JOIN knowledge_unit_categories c ON c.id = m.category_id AND c.tenant_id = m.tenant_id WHERE ${predicates.join(' AND ')} ORDER BY m.updated_at DESC, m.id LIMIT $${limitIndex} OFFSET $${offsetIndex}`, values)
       return { items: result.rows.map(materialResponse), page: current, page_size: size, has_more: result.rows.length === size }
     })
   })
@@ -275,7 +284,7 @@ export async function knowledgeUnitRoutes(app) {
     const videoError = videoInputError(data)
     if (videoError) return reply.code(400).send({ error: videoError })
     if (unsafeMarkdown(data.content_markdown)) return reply.code(400).send({ error: 'O conteúdo contém HTML ou URL não permitido' })
-    if (!safeUrl(data.external_url) || !safeUrl(data.video_url, 'video')) return reply.code(400).send({ error: 'URL externa não permitida' })
+    if (!safeUrl(data.external_url) || !safeUrl(data.video_url, 'video') || !safeUrl(data.cover_image_url)) return reply.code(400).send({ error: 'URL externa não permitida' })
     const idempotency = String(request.headers['idempotency-key'] ?? '').trim().slice(0, 200) || null
     return app.withTenant(request.user.tenant_id, async (db) => {
       try {
@@ -283,12 +292,13 @@ export async function knowledgeUnitRoutes(app) {
           INSERT INTO knowledge_materials
             (tenant_id, category_id, title, slug, excerpt, content_markdown, material_type,
              external_url, video_provider, video_id, tags, status, idempotency_key,
-             created_by, updated_by, published_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,CASE WHEN $12 = 'published' THEN NOW() END)
+             created_by, updated_by, published_at, cover_image_url, duration_minutes, difficulty,
+             objectives, prerequisites, audience_roles, topics, platforms, featured)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,CASE WHEN $12 = 'published' THEN NOW() END,$15,$16,$17,$18,$19,$20,$21,$22,$23)
           ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
             SET updated_at = knowledge_materials.updated_at
           RETURNING *, title AS titulo, updated_at AS atualizado_em, (xmax = 0) AS inserted`,
-          [request.user.tenant_id, data.category_id ?? null, data.titulo, `${slugify(data.titulo)}-${crypto.randomBytes(4).toString('hex')}`, data.excerpt ?? null, data.content_markdown ?? null, data.material_type ?? 'playbook', data.external_url ?? null, data.video_provider ?? 'none', videoId(data.video_url, data.video_provider ?? 'none'), data.tags ?? [], data.status, idempotency, request.user.sub])
+          [request.user.tenant_id, data.category_id ?? null, data.titulo, `${slugify(data.titulo)}-${crypto.randomBytes(4).toString('hex')}`, data.excerpt ?? null, data.content_markdown ?? null, data.material_type ?? 'playbook', data.external_url ?? null, data.video_provider ?? 'none', videoId(data.video_url, data.video_provider ?? 'none'), data.tags ?? [], data.status, idempotency, request.user.sub, data.cover_image_url ?? null, data.duration_minutes ?? null, data.difficulty ?? null, data.objectives ?? [], data.prerequisites ?? [], data.audience_roles ?? [], data.topics ?? [], data.platforms ?? [], data.featured ?? false])
         const row = materialResponse(result.rows[0])
         if (row.inserted !== false) await audit(app, request, 'knowledge.material.create', 'knowledge_material', row.id, { revision: row.revision ?? 1, status: row.status ?? data.status })
         return reply.code(row.inserted === false ? 200 : 201).send(row)
@@ -304,9 +314,9 @@ export async function knowledgeUnitRoutes(app) {
     if (videoError) return reply.code(400).send({ error: videoError })
     if (data.content_markdown === null && data.external_url === null && data.video_url === null) return reply.code(400).send({ error: 'O material precisa manter texto, link ou vídeo' })
     if (unsafeMarkdown(data.content_markdown)) return reply.code(400).send({ error: 'O conteúdo contém HTML ou URL não permitido' })
-    if (!safeUrl(data.external_url) || !safeUrl(data.video_url, 'video')) return reply.code(400).send({ error: 'URL externa não permitida' })
+    if (!safeUrl(data.external_url) || !safeUrl(data.video_url, 'video') || !safeUrl(data.cover_image_url)) return reply.code(400).send({ error: 'URL externa não permitida' })
     const values = []; const fields = []
-    const columns = { category_id: 'category_id', titulo: 'title', excerpt: 'excerpt', content_markdown: 'content_markdown', material_type: 'material_type', external_url: 'external_url', video_provider: 'video_provider', tags: 'tags', status: 'status' }
+    const columns = { category_id: 'category_id', titulo: 'title', excerpt: 'excerpt', content_markdown: 'content_markdown', material_type: 'material_type', external_url: 'external_url', video_provider: 'video_provider', tags: 'tags', status: 'status', cover_image_url: 'cover_image_url', duration_minutes: 'duration_minutes', difficulty: 'difficulty', objectives: 'objectives', prerequisites: 'prerequisites', audience_roles: 'audience_roles', topics: 'topics', platforms: 'platforms', featured: 'featured' }
     for (const [key, column] of Object.entries(columns)) if (data[key] !== undefined) { fields.push(`${column} = $${values.length + 1}`); values.push(data[key]) }
     if (Object.prototype.hasOwnProperty.call(data, 'video_provider') || Object.prototype.hasOwnProperty.call(data, 'video_url')) {
       fields.push(`video_id = $${values.length + 1}`)

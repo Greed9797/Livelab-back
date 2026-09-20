@@ -4,7 +4,10 @@ import {
   audienceForRole,
   continueTarget,
   freshness,
+  hydrateLesson,
+  nextLessonInTrail,
   nextRequiredLesson,
+  orderTrailLessons,
   pickRecommended,
   resumePath,
   trailProgress,
@@ -72,6 +75,63 @@ describe('training P0 assembly', () => {
     const progressByLesson = new Map([['l1', { completed_at: 'x' }]])
     const recommended = pickRecommended({ lessons, audience: 'apresentadora', progressByLesson })
     expect(recommended.map((lesson) => lesson.id)).toEqual(['l2'])
+  })
+
+  it('walks lessons by module then sort so complete does not skip aula 2', () => {
+    expect(orderTrailLessons(lessons, modules, trail.id).map((lesson) => lesson.id)).toEqual(['l1', 'l2', 'l3'])
+    expect(nextLessonInTrail(lessons, modules, lessons[0]).id).toBe('l2')
+  })
+
+  it('lets ?role= change recommended away from the JWT audience', () => {
+    const gestorHome = assembleHome({
+      papel: 'franqueado',
+      trails: [trail],
+      modules,
+      lessons,
+      progressRows: [],
+      bookmarkIds: [],
+      sources: { network: new Map(), unit: new Map() },
+      curatedUpdates: [],
+      derivedUpdates: [],
+    })
+    const filtered = assembleHome({
+      papel: 'franqueado',
+      trails: [trail],
+      modules,
+      lessons,
+      progressRows: [],
+      bookmarkIds: [],
+      sources: { network: new Map(), unit: new Map() },
+      curatedUpdates: [],
+      derivedUpdates: [],
+      filters: { role: 'apresentadora' },
+    })
+    expect(gestorHome.audience).toBe('gestor')
+    expect(gestorHome.recommended.map((lesson) => lesson.id)).toEqual(['l3'])
+    expect(filtered.recommended.map((lesson) => lesson.id)).toEqual(['l1', 'l2'])
+  })
+
+  it('copies video and markdown onto the lesson payload without inventing numbers', () => {
+    const sources = {
+      network: new Map([['slug-a', {
+        id: 'art-1',
+        slug: 'slug-a',
+        titulo: 'Artigo',
+        content_markdown: '# Corpo',
+        video_provider: 'youtube',
+        video_url: 'https://www.youtube.com/watch?v=abc_123',
+        origin_kind: 'network_article',
+      }]]),
+      unit: new Map(),
+    }
+    const card = hydrateLesson(
+      { id: 'l1', title: 'Checklist', source_kind: 'network_article', source_slug: 'slug-a', module_id: 'm1', sort_order: 1 },
+      { sources, includeContent: true },
+    )
+    expect(card.content_markdown).toBe('# Corpo')
+    expect(card.video_url).toBe('https://www.youtube.com/watch?v=abc_123')
+    expect(card.material.video_url).toBe('https://www.youtube.com/watch?v=abc_123')
+    expect(JSON.stringify(card)).not.toMatch(/"gmv"|valor_fixo|70/)
   })
 
   it('uses start-here when there is no history and continue when there is', () => {

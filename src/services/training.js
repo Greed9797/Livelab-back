@@ -73,6 +73,24 @@ export function nextRequiredLesson(lessons, progressByLesson, fromLessonId = nul
   return required.find((lesson) => !progressByLesson.get(lesson.id)?.completed_at) ?? null
 }
 
+export function orderTrailLessons(lessons, modules, trailId) {
+  const moduleById = new Map(modules.map((row) => [row.id, row]))
+  return lessons
+    .filter((lesson) => moduleById.get(lesson.module_id)?.trail_id === trailId)
+    .sort((a, b) => {
+      const modA = moduleById.get(a.module_id)?.sort_order ?? 0
+      const modB = moduleById.get(b.module_id)?.sort_order ?? 0
+      return modA - modB || a.sort_order - b.sort_order
+    })
+}
+
+export function nextLessonInTrail(lessons, modules, lesson) {
+  const module = modules.find((row) => row.id === lesson.module_id)
+  const ordered = orderTrailLessons(lessons, modules, module?.trail_id)
+  const index = ordered.findIndex((row) => row.id === lesson.id)
+  return index >= 0 ? ordered[index + 1] ?? null : null
+}
+
 export function continueTarget({ lessons, modules, trails, progressRows }) {
   const progressByLesson = new Map(progressRows.map((row) => [row.lesson_id, row]))
   const last = [...progressRows].sort((a, b) => new Date(b.last_opened_at) - new Date(a.last_opened_at))[0]
@@ -81,13 +99,7 @@ export function continueTarget({ lessons, modules, trails, progressRows }) {
   if (!current) return null
   const module = modules.find((row) => row.id === current.module_id)
   const trail = trails.find((row) => row.id === module?.trail_id)
-  const trailLessons = lessons
-    .filter((lesson) => modules.find((row) => row.id === lesson.module_id)?.trail_id === trail?.id)
-    .sort((a, b) => {
-      const modA = modules.find((row) => row.id === a.module_id)?.sort_order ?? 0
-      const modB = modules.find((row) => row.id === b.module_id)?.sort_order ?? 0
-      return modA - modB || a.sort_order - b.sort_order
-    })
+  const trailLessons = orderTrailLessons(lessons, modules, trail?.id)
   const resumeLesson = last.completed_at
     ? nextRequiredLesson(trailLessons, progressByLesson, last.lesson_id)
     : current
@@ -125,10 +137,46 @@ export function pickRecommended({ lessons, audience, progressByLesson, limit = 6
     .slice(0, limit)
 }
 
-export function hydrateLesson(lesson, { sources, progress, bookmarked, now } = {}) {
+const SAFE_VIDEO_ID = /^[A-Za-z0-9_-]{1,200}$/
+
+export function canonicalVideoUrl(provider, id) {
+  if (!id || !SAFE_VIDEO_ID.test(String(id))) return null
+  if (provider === 'youtube') return `https://www.youtube.com/watch?v=${encodeURIComponent(id)}`
+  if (provider === 'panda') return `https://panda.video/${encodeURIComponent(id)}`
+  return null
+}
+
+export function sourceVideoUrl(source) {
+  if (!source) return null
+  if (source.video_url) return source.video_url
+  return canonicalVideoUrl(source.video_provider, source.video_id)
+}
+
+export function lessonMaterial(source) {
+  if (!source) return null
+  const title = source.title ?? source.titulo ?? null
+  return {
+    id: source.id,
+    slug: source.slug,
+    titulo: title,
+    title,
+    excerpt: source.excerpt ?? null,
+    content_markdown: source.content_markdown ?? null,
+    external_url: source.external_url ?? source.url ?? null,
+    video_provider: source.video_provider ?? 'none',
+    video_id: source.video_id ?? null,
+    video_url: sourceVideoUrl(source),
+    cover_image_url: source.cover_image_url ?? null,
+    duration_minutes: source.duration_minutes ?? source.estimated_read_minutes ?? null,
+    status: 'published',
+  }
+}
+
+export function hydrateLesson(lesson, { sources, progress, bookmarked, now, includeContent = false } = {}) {
   const source = resolveSource(lesson, sources)
   const publishedAt = source?.published_at ?? null
   const updatedAt = source?.updated_at ?? source?.atualizado_em ?? null
+  const material = includeContent ? lessonMaterial(source) : null
   return {
     id: lesson.id,
     title: source?.title ?? source?.titulo ?? lesson.title,
@@ -157,6 +205,16 @@ export function hydrateLesson(lesson, { sources, progress, bookmarked, now } = {
       }
       : null,
     content_available: Boolean(source),
+    ...(includeContent
+      ? {
+        content_markdown: material?.content_markdown ?? null,
+        video_provider: material?.video_provider ?? 'none',
+        video_id: material?.video_id ?? null,
+        video_url: material?.video_url ?? null,
+        external_url: material?.external_url ?? null,
+        material,
+      }
+      : {}),
     progress: {
       state: progressState(progress),
       started_at: progress?.started_at ?? null,
@@ -244,6 +302,7 @@ export function assembleHome({
   filters = {},
 }) {
   const audience = audienceForRole(papel)
+  const recommendedAudience = filters.role || audience
   const progressByLesson = new Map(progressRows.map((row) => [row.lesson_id, row]))
   const bookmarks = new Set(bookmarkIds)
   const orderedLessons = [...lessons].sort((a, b) => {
@@ -254,7 +313,7 @@ export function assembleHome({
   const visibleLessons = orderedLessons.filter((lesson) => matchesFilters({
     ...lesson,
     audience_roles: lesson.audience_roles,
-  }, { ...filters, role: filters.role ?? audience }))
+  }, { ...filters, role: recommendedAudience }))
   const starter = trails.find((trail) => trail.slug === STARTER_SLUG) ?? trails[0] ?? null
   const assembledStarter = starter
     ? assembleTrail({ trail: starter, modules, lessons: orderedLessons, progressByLesson, bookmarks, sources, now })
@@ -285,7 +344,7 @@ export function assembleHome({
       : { has_started: false, lesson_id: assembledStarter?.modules[0]?.lessons[0]?.id ?? null, trail_slug: assembledStarter?.slug ?? null, path: assembledStarter?.resume_path ?? null },
     continue_learning: continueCard,
     start_here: continueCard ? null : assembledStarter,
-    recommended: pickRecommended({ lessons: visibleLessons, audience, progressByLesson }).map((lesson) => hydrateLesson(lesson, {
+    recommended: pickRecommended({ lessons: visibleLessons, audience: recommendedAudience, progressByLesson }).map((lesson) => hydrateLesson(lesson, {
       sources,
       progress: progressByLesson.get(lesson.id),
       bookmarked: bookmarks.has(lesson.id),

@@ -68,6 +68,11 @@ import { metasRoutes } from './routes/metas.js'
 import { uploadsRoutes } from './routes/uploads.js'
 import { AppError } from './lib/errors.js'
 
+// Preflight do browser usa allowlist exata. O editor da Base envia
+// Idempotency-Key no POST /v1/knowledge/unit/materials; sem esse header o
+// Chrome barra o preflight e o Axios vira "Não foi possível conectar ao servidor."
+export const corsAllowedHeaders = ['Authorization', 'Content-Type', 'Accept', 'Idempotency-Key', 'tiktok-signature']
+
 // S-Sentry: inicializa o SDK uma vez, antes de qualquer handler.
 // SENTRY_DSN ausente → noop silencioso (dev/test sem Sentry).
 // beforeBreadcrumb filtra campos sensíveis para cumprir LGPD.
@@ -246,7 +251,7 @@ export async function buildApp(opts = {}) {
       cb(new Error('Not allowed by CORS'))
     },
     credentials: true,
-    allowedHeaders: ['Authorization', 'Content-Type', 'Accept', 'tiktok-signature'],
+    allowedHeaders: corsAllowedHeaders,
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   })
   // S-12: CSP habilitado globalmente; TikTok callback sobrescreve no handler.

@@ -151,6 +151,7 @@ export const MIGRATIONS_LIST = [
   '154_knowledge_unit_force_rls.sql',
   '155_portal_runtime_marca_condicoes.sql',
   '156_portal_runtime_marca_condicoes_least_privilege.sql',
+  '157_training_p0.sql',
 ]
 
 async function ensureMigrationsTable(client) {

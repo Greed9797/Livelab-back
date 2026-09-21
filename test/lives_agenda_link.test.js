@@ -252,3 +252,124 @@ describe('PATCH /v1/cabines/:id/liberar — bloqueio com live ativa', () => {
     expect(response.json()).toMatchObject({ status: 'disponivel', aviso: expect.stringContaining('órfão') })
   })
 })
+
+describe('agenda civil day em America/Sao_Paulo', () => {
+  it('POST /v1/lives resolve o dia de São Paulo e não CURRENT_DATE', async () => {
+    const cabineId = '11111111-1111-4111-8111-111111111111'
+    const liveId = '33333333-3333-4333-8333-333333333333'
+    const marcaId = '88888888-8888-4888-8888-888888888888'
+    let agendaSql = ''
+
+    const queryMock = vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('FROM cabines') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ id: cabineId, numero: 1, status: 'disponivel', contrato_id: null, live_atual_id: null, ativo: true }] }
+      }
+      if (sql.includes('FROM agenda_eventos') && sql.includes('planejado')) {
+        agendaSql = sql
+        return { rows: [] }
+      }
+      if (sql.includes('sistema = TRUE')) return { rows: [{ id: marcaId }] }
+      if (sql.includes('INSERT INTO lives')) {
+        return { rows: [{ id: liveId, cabine_id: cabineId, iniciado_em: '2026-09-22T02:30:00.000Z', tipo: 'afiliado' }] }
+      }
+      if (sql.includes('INSERT INTO agenda_eventos')) return { rows: [{ id: 'auto-1' }] }
+      if (sql.includes('UPDATE cabines') || sql.includes('INSERT INTO cabine_eventos')) return { rows: [] }
+      return { rows: [] }
+    })
+
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/lives',
+      payload: { cabine_id: cabineId, tipo: 'afiliado' },
+    })
+
+    expect(response.statusCode).toBe(201)
+    expect(agendaSql).toContain("(ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date")
+    expect(agendaSql).toContain("(NOW() AT TIME ZONE 'America/Sao_Paulo')::date")
+    expect(agendaSql).not.toContain('CURRENT_DATE')
+  })
+
+  it('23:30 America/Sao_Paulo continua no dia civil de São Paulo', async () => {
+    const { PGlite } = await import('@electric-sql/pglite')
+    const db = new PGlite()
+    await db.exec(`SET TIME ZONE 'UTC'`)
+    const res = await db.query(`
+      SELECT
+        (TIMESTAMPTZ '2026-09-22 02:30:00+00' AT TIME ZONE 'America/Sao_Paulo')::date::text AS sp_day,
+        (TIMESTAMPTZ '2026-09-22 02:30:00+00')::date::text AS utc_day,
+        (
+          (TIMESTAMPTZ '2026-09-22 02:30:00+00' AT TIME ZONE 'America/Sao_Paulo')::date
+          = (TIMESTAMPTZ '2026-09-21 23:30:00-03' AT TIME ZONE 'America/Sao_Paulo')::date
+        ) AS same_civil_day
+    `)
+    expect(res.rows[0].sp_day).toBe('2026-09-21')
+    expect(res.rows[0].utc_day).toBe('2026-09-22')
+    expect(res.rows[0].same_civil_day).toBe(true)
+    await db.close()
+  })
+
+  it('GET /v1/lives/:id prefere live_id e só anexa um match de cabine, marca e dia', async () => {
+    const liveId = '33333333-3333-4333-8333-333333333333'
+    const queryMock = vi.fn(async (sql) => {
+      if (String(sql).includes('FROM lives l')) {
+        return { rows: [{ id: liveId, tenant_id: 'tenant-1' }] }
+      }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const response = await app.inject({ method: 'GET', url: `/v1/lives/${liveId}` })
+    expect(response.statusCode).toBe(200)
+    const sql = queryMock.mock.calls.find(([text]) => String(text).includes('FROM lives l'))[0]
+    expect(sql).toContain('ae2.live_id = l.id')
+    expect(sql).toContain('ae2.marca_id IS NOT DISTINCT FROM l.marca_id')
+    expect(sql).toContain("(ae2.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date")
+    expect(sql).toContain(') = 1')
+    expect(sql).not.toContain('ae2.data_inicio::date')
+  })
+
+  it('encerrar usa o dia civil de São Paulo no fallback da agenda', async () => {
+    const liveId = '33333333-3333-4333-8333-333333333333'
+    const cabineId = '11111111-1111-4111-8111-111111111111'
+    const marcaId = '88888888-8888-4888-8888-888888888888'
+    const queryMock = vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('FROM lives') && sql.includes("status = 'em_andamento'")) {
+        return {
+          rows: [{
+            id: liveId,
+            cabine_id: cabineId,
+            cliente_id: null,
+            apresentador_id: null,
+            status: 'em_andamento',
+            iniciado_em: '2026-09-22T02:30:00.000Z',
+            marca_id: marcaId,
+            agenda_evento_id: null,
+          }],
+        }
+      }
+      if (sql.includes('FROM cabines')) return { rows: [{ id: cabineId, contrato_id: null, status: 'ao_vivo' }] }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(livesRoutes)
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}/encerrar`,
+      payload: { fat_gerado: 0 },
+    })
+    expect(response.statusCode).toBe(200)
+    const fallback = queryMock.mock.calls.find(([sql]) => (
+      String(sql).includes("status = 'concluido'") && String(sql).includes('cabine_id')
+    ))
+    expect(fallback).toBeTruthy()
+    expect(fallback[0]).toContain("(data_inicio AT TIME ZONE 'America/Sao_Paulo')::date")
+    expect(fallback[0]).toContain("($3::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date")
+    expect(fallback[0]).not.toContain('data_inicio::date = $3::date')
+  })
+})

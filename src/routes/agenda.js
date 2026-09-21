@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { READ_AGENDA, WRITE_AGENDA } from '../config/role_groups.js'
-import { calcularRateioPlanejado } from '../lib/agenda-turnos.js'
+import { calcularRateioPlanejado, seedRateioPlanejado } from '../lib/agenda-turnos.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 import { saoPauloDateInput, saoPauloTimeInput } from '../lib/timezone.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
@@ -9,12 +9,22 @@ import { ensureClienteMarca } from '../services/client-brand.js'
 
 const activeAgendaStatuses = ['planejado', 'confirmado', 'ao_vivo']
 
-// Status que efetivamente bloqueiam outra reserva no mesmo recurso.
-// `planejado` é só reserva — não bloqueia tentativa de iniciar a própria live
-// (POST /v1/lives já reusa o evento via agenda_evento_id em src/routes/lives.js:380-415).
-// Bloquear `planejado` aqui causa false-positive: usuário com agenda 08-14 não
-// consegue clicar "Iniciar live" porque modal alega conflito com a própria agenda.
+// GET /v1/agenda/conflitos alimenta o modal "Iniciar live". `planejado` fica de
+// fora: a reserva da própria cabine não pode impedir o operador de abrir essa live.
 const conflictBlockingStatuses = ['confirmado', 'ao_vivo']
+
+// POST e PATCH de agenda bloqueiam overlap na mesma cabine também em `planejado`.
+// `cancelado` e `concluido` continuam fora. Apresentadora segue a lista de cima
+// (o modal de início e os turnos já cobrem esse recurso).
+const cabineWriteBlockingStatuses = ['planejado', 'confirmado', 'ao_vivo']
+
+const AGENDA_LIST_CAP = 500
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+function excludeIdsOf({ excludeId, excludeIds }) {
+  if (excludeIds?.length) return excludeIds
+  return excludeId ? [excludeId] : []
+}
 
 const recorrenciaSchema = z.object({
   frequencia: z.enum(['diaria', 'semanal', 'quinzenal', 'mensal']),
@@ -176,10 +186,10 @@ async function resolveAgendaMarcaId(db, tenantId, { marcaId, clienteId }) {
   })
 }
 
-async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId }) {
+async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId, excludeIds, statuses = conflictBlockingStatuses }) {
   if (!cabineId && !apresentadoraId) return []
 
-  const values = [tenantId, dataInicio, dataFim, conflictBlockingStatuses]
+  const values = [tenantId, dataInicio, dataFim, statuses]
   const entityFilters = []
   let cabineParam = null
   let apresentadoraParam = null
@@ -196,10 +206,11 @@ async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, d
     entityFilters.push(`ae.apresentadora_id = $${apresentadoraParam}::uuid`)
   }
 
+  const ignored = excludeIdsOf({ excludeId, excludeIds })
   let extra = ''
-  if (excludeId) {
-    values.push(excludeId)
-    extra = `AND ae.id <> $${values.length}::uuid`
+  if (ignored.length) {
+    values.push(ignored)
+    extra = `AND NOT (ae.id = ANY($${values.length}::uuid[]))`
   }
 
   const result = await db.query(
@@ -238,7 +249,8 @@ async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, d
 // evento cujo espelho é a Ana ficaria invisível para qualquer outra reserva.
 // `excludeId` continua singular e funciona: os turnos irmãos compartilham
 // agenda_evento_id, então excluir o próprio evento exclui todos os seus turnos.
-async function getConflictingTurnos(db, { tenantId, apresentadoraId, dataInicio, dataFim, excludeId }) {
+async function getConflictingTurnos(db, { tenantId, apresentadoraId, dataInicio, dataFim, excludeId, excludeIds, statuses = conflictBlockingStatuses }) {
+  const ignored = excludeIdsOf({ excludeId, excludeIds })
   const q = await db.query(
     `SELECT ae.id, ae.tipo, ae.marca_id, ae.cabine_id,
             t.apresentadora_id, ae.data_inicio, ae.data_fim, ae.status,
@@ -254,8 +266,8 @@ async function getConflictingTurnos(db, { tenantId, apresentadoraId, dataInicio,
         AND t.data_inicio < $4::timestamptz
         AND t.data_fim    > $3::timestamptz
         AND ae.status = ANY($5::text[])
-        AND ($6::uuid IS NULL OR ae.id <> $6::uuid)`,
-    [tenantId, apresentadoraId, dataInicio, dataFim, conflictBlockingStatuses, excludeId || null],
+        AND ($6::uuid[] IS NULL OR NOT (ae.id = ANY($6::uuid[])))`,
+    [tenantId, apresentadoraId, dataInicio, dataFim, statuses, ignored.length ? ignored : null],
   )
   return q.rows
 }
@@ -304,18 +316,53 @@ function dedupConflitos(conflitos) {
  * evento cujo espelho e a Ana ficava invisivel, e dava para reserva-la em duas cabines no
  * mesmo horario sem nenhum aviso.
  */
-async function findConflicts(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId }) {
-  const porEspelho = await getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId })
-  if (!apresentadoraId) return porEspelho
+async function findConflicts(db, {
+  tenantId,
+  cabineId,
+  apresentadoraId,
+  dataInicio,
+  dataFim,
+  excludeId,
+  excludeIds,
+  cabineStatuses = conflictBlockingStatuses,
+  apresentadoraStatuses = conflictBlockingStatuses,
+}) {
+  const shared = { tenantId, dataInicio, dataFim, excludeId, excludeIds }
+  const porCabine = cabineId
+    ? await getConflictingEvents(db, { ...shared, cabineId, statuses: cabineStatuses })
+    : []
+  if (!apresentadoraId) return porCabine
 
-  const porTurno = await getConflictingTurnos(db, { tenantId, apresentadoraId, dataInicio, dataFim, excludeId })
-  // Evento que ja veio pelo espelho nao pode voltar pelo turno: e a mesma reserva, e
-  // conta-la duas vezes dobraria o `total` do payload de conflito que o front le.
-  const idsPorEspelho = new Set(porEspelho.map((item) => item.id))
-  return [...porEspelho, ...porTurno.filter((item) => !idsPorEspelho.has(item.id))]
+  const porEspelho = await getConflictingEvents(db, {
+    ...shared,
+    apresentadoraId,
+    statuses: apresentadoraStatuses,
+  })
+  const porTurno = await getConflictingTurnos(db, {
+    ...shared,
+    apresentadoraId,
+    statuses: apresentadoraStatuses,
+  })
+  // Evento que ja veio pela cabine ou pelo espelho nao pode voltar pelo turno: e a
+  // mesma reserva, e conta-la duas vezes dobraria o `total` do payload de conflito.
+  const vistos = new Set([...porCabine, ...porEspelho].map((item) => item.id))
+  return [
+    ...porCabine,
+    ...porEspelho.filter((item) => !porCabine.some((row) => row.id === item.id)),
+    ...porTurno.filter((item) => !vistos.has(item.id)),
+  ]
 }
 
-async function collectAgendaConflicts(db, { tenantId, cabineId, apresentadoraId, intervals, excludeId }) {
+async function collectAgendaConflicts(db, {
+  tenantId,
+  cabineId,
+  apresentadoraId,
+  intervals,
+  excludeId,
+  excludeIds,
+  cabineStatuses,
+  apresentadoraStatuses,
+}) {
   const conflitos = []
   for (const interval of intervals) {
     conflitos.push(...await findConflicts(db, {
@@ -325,10 +372,36 @@ async function collectAgendaConflicts(db, { tenantId, cabineId, apresentadoraId,
       dataInicio: interval.data_inicio,
       dataFim: interval.data_fim,
       excludeId,
+      excludeIds,
+      cabineStatuses,
+      apresentadoraStatuses,
     }))
   }
 
   return dedupConflitos(conflitos)
+}
+
+async function reseedLiveAberta(db, { tenantId, liveId, agendaEventoId, apresentadoraFallbackId }) {
+  if (!liveId) return
+  const liveQ = await db.query(
+    `SELECT id
+       FROM lives
+      WHERE id = $1::uuid
+        AND tenant_id = $2::uuid
+        AND status = 'em_andamento'`,
+    [liveId, tenantId],
+  )
+  if (!liveQ.rows[0]) return
+  await db.query(
+    'DELETE FROM live_apresentadoras_v2 WHERE live_id = $1::uuid AND tenant_id = $2::uuid',
+    [liveId, tenantId],
+  )
+  await seedRateioPlanejado(db, {
+    tenantId,
+    liveId,
+    agendaEventoId,
+    apresentadoraFallbackId,
+  })
 }
 
 /**
@@ -418,9 +491,16 @@ export async function agendaRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_AGENDA)]
   const writeAccess = [app.authenticate, app.requirePapel(WRITE_AGENDA)]
 
-  app.get('/v1/agenda', { preHandler: readAccess }, async (request) => {
+  app.get('/v1/agenda', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     const { status, tipo, cabine_id, marca_id, cliente_id, data_inicio, data_fim, data } = request.query ?? {}
+
+    if (cabine_id && !UUID_RE.test(String(cabine_id))) {
+      return reply.code(400).send({ error: 'cabine_id inválido' })
+    }
+    if (marca_id && !UUID_RE.test(String(marca_id))) {
+      return reply.code(400).send({ error: 'marca_id inválido' })
+    }
 
     return app.withTenant(tenant_id, async (db) => {
       const values = [tenant_id]
@@ -481,10 +561,14 @@ export async function agendaRoutes(app) {
          ) t ON true
          WHERE ${filters.join(' AND ')}
          ORDER BY ae.data_inicio ASC
-         LIMIT 500`,
+         LIMIT ${AGENDA_LIST_CAP + 1}`,
         values,
       )
-      return result.rows
+      const truncated = result.rows.length > AGENDA_LIST_CAP
+      return {
+        eventos: truncated ? result.rows.slice(0, AGENDA_LIST_CAP) : result.rows,
+        truncated,
+      }
     })
   })
 
@@ -518,82 +602,103 @@ export async function agendaRoutes(app) {
     const { recorrencia, cliente_id: clienteId, ...d } = parsed.data
 
     return app.withTenant(tenant_id, async (db) => {
-      const refsOk = await ensureAgendaRefs(db, reply, {
-        tenantId: tenant_id,
-        marcaId: d.marca_id,
-        clienteId,
-        cabineId: d.cabine_id,
-        apresentadoraId: d.apresentadora_id,
-      })
-      if (!refsOk) return reply
-
-      const marcaId = await resolveAgendaMarcaId(db, tenant_id, { marcaId: d.marca_id, clienteId })
-      if (d.tipo !== 'bloqueio_manutencao' && !marcaId) {
-        return reply.code(400).send({ error: 'Selecione uma marca ou cliente para live e gravação' })
-      }
-
-      let ocorrencias = []
-      if (recorrencia) ocorrencias = calcularRecorrencias(d.data_inicio, d.data_fim, recorrencia)
-
-      if (activeAgendaStatuses.includes(d.status)) {
-        const eventosConflitantes = await collectAgendaConflicts(db, {
+      await db.query('BEGIN')
+      try {
+        const refsOk = await ensureAgendaRefs(db, reply, {
           tenantId: tenant_id,
+          marcaId: d.marca_id,
+          clienteId,
           cabineId: d.cabine_id,
           apresentadoraId: d.apresentadora_id,
-          intervals: [
-            { data_inicio: d.data_inicio, data_fim: d.data_fim },
-            ...ocorrencias,
-          ],
         })
-        if (eventosConflitantes.length > 0) {
-          return reply.code(409).send(buildConflictPayload(eventosConflitantes))
+        if (!refsOk) {
+          await db.query('ROLLBACK')
+          return reply
         }
-      }
 
-      // Cria o evento principal
-      const result = await db.query(
-        `INSERT INTO agenda_eventos (
-           tenant_id, tipo, marca_id, cabine_id, apresentadora_id, data_inicio, data_fim,
-           status, recorrencia_rule, recorrencia_origem_id, responsavel_marketing, observacoes, criado_por
-         )
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-         RETURNING *`,
-        [
-          tenant_id, d.tipo, marcaId ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null, d.data_inicio,
-          d.data_fim, d.status, d.recorrencia_rule ?? null,
-          d.recorrencia_origem_id ?? null, d.responsavel_marketing ?? null, d.observacoes ?? null, sub ?? null,
-        ],
-      )
-      const evento = result.rows[0]
+        const marcaId = await resolveAgendaMarcaId(db, tenant_id, { marcaId: d.marca_id, clienteId })
+        if (d.tipo !== 'bloqueio_manutencao' && !marcaId) {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: 'Selecione uma marca ou cliente para live e gravação' })
+        }
 
-      // Processa recorrência se fornecida
-      let recorrentes = 0
-      if (recorrencia) {
-        const ruleJson = JSON.stringify({
-          frequencia: recorrencia.frequencia,
-          dias_semana: recorrencia.dias_semana,
-          ate: recorrencia.ate,
-        })
-
-        for (const ocorrencia of ocorrencias) {
+        // Lock da cabine só desta escrita, dentro do tenant. Não trava leitura de outro tenant.
+        if (d.cabine_id) {
           await db.query(
-            `INSERT INTO agenda_eventos (
-               tenant_id, tipo, marca_id, cabine_id, apresentadora_id, data_inicio, data_fim,
-               status, recorrencia_rule, recorrencia_origem_id, responsavel_marketing, observacoes, criado_por
-             )
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-            [
-              tenant_id, d.tipo, marcaId ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null,
-              ocorrencia.data_inicio, ocorrencia.data_fim,
-              d.status, ruleJson, evento.id,
-              d.responsavel_marketing ?? null, d.observacoes ?? null, sub ?? null,
-            ],
+            `SELECT id FROM cabines WHERE id = $1 AND tenant_id = $2::uuid FOR UPDATE`,
+            [d.cabine_id, tenant_id],
           )
-          recorrentes++
         }
-      }
 
-      return reply.code(201).send({ evento, recorrentes })
+        let ocorrencias = []
+        if (recorrencia) ocorrencias = calcularRecorrencias(d.data_inicio, d.data_fim, recorrencia)
+
+        if (activeAgendaStatuses.includes(d.status)) {
+          const eventosConflitantes = await collectAgendaConflicts(db, {
+            tenantId: tenant_id,
+            cabineId: d.cabine_id,
+            apresentadoraId: d.apresentadora_id,
+            intervals: [
+              { data_inicio: d.data_inicio, data_fim: d.data_fim },
+              ...ocorrencias,
+            ],
+            cabineStatuses: cabineWriteBlockingStatuses,
+          })
+          if (eventosConflitantes.length > 0) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send(buildConflictPayload(eventosConflitantes))
+          }
+        }
+
+        // Cria o evento principal
+        const result = await db.query(
+          `INSERT INTO agenda_eventos (
+             tenant_id, tipo, marca_id, cabine_id, apresentadora_id, data_inicio, data_fim,
+             status, recorrencia_rule, recorrencia_origem_id, responsavel_marketing, observacoes, criado_por
+           )
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           RETURNING *`,
+          [
+            tenant_id, d.tipo, marcaId ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null, d.data_inicio,
+            d.data_fim, d.status, d.recorrencia_rule ?? null,
+            d.recorrencia_origem_id ?? null, d.responsavel_marketing ?? null, d.observacoes ?? null, sub ?? null,
+          ],
+        )
+        const evento = result.rows[0]
+
+        // Processa recorrência se fornecida
+        let recorrentes = 0
+        if (recorrencia) {
+          const ruleJson = JSON.stringify({
+            frequencia: recorrencia.frequencia,
+            dias_semana: recorrencia.dias_semana,
+            ate: recorrencia.ate,
+          })
+
+          for (const ocorrencia of ocorrencias) {
+            await db.query(
+              `INSERT INTO agenda_eventos (
+                 tenant_id, tipo, marca_id, cabine_id, apresentadora_id, data_inicio, data_fim,
+                 status, recorrencia_rule, recorrencia_origem_id, responsavel_marketing, observacoes, criado_por
+               )
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+              [
+                tenant_id, d.tipo, marcaId ?? null, d.cabine_id ?? null, d.apresentadora_id ?? null,
+                ocorrencia.data_inicio, ocorrencia.data_fim,
+                d.status, ruleJson, evento.id,
+                d.responsavel_marketing ?? null, d.observacoes ?? null, sub ?? null,
+              ],
+            )
+            recorrentes++
+          }
+        }
+
+        await db.query('COMMIT')
+        return reply.code(201).send({ evento, recorrentes })
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {})
+        throw err
+      }
     })
   })
 
@@ -674,17 +779,48 @@ export async function agendaRoutes(app) {
           return reply.code(400).send({ error: 'Selecione uma marca ou cliente para live e gravação' })
         }
 
+        const origemId = current.recorrencia_origem_id ?? current.id
+        let ocorrenciasDaSerie = []
+        if (modo_recorrencia !== 'apenas_este') {
+          const serieValues = [tenant_id, origemId, request.params.id]
+          let serieFiltro = ''
+          if (modo_recorrencia === 'este_e_proximos') {
+            serieValues.push(current.data_inicio)
+            serieFiltro = `AND data_inicio >= $${serieValues.length}::timestamptz`
+          }
+          const serieQ = await db.query(
+            `SELECT id, tipo, marca_id, cabine_id, apresentadora_id, data_inicio, data_fim, status
+               FROM agenda_eventos
+              WHERE tenant_id = $1::uuid
+                AND recorrencia_origem_id = $2::uuid
+                AND id <> $3::uuid
+                ${serieFiltro}
+              FOR UPDATE`,
+            serieValues,
+          )
+          ocorrenciasDaSerie = serieQ.rows
+        }
+        const idsDaSerie = [request.params.id, ...ocorrenciasDaSerie.map((row) => row.id)]
+
         if (activeAgendaStatuses.includes(next.status)) {
-          const eventosConflitantes = await collectAgendaConflicts(db, {
-            tenantId: tenant_id,
-            cabineId: next.cabine_id,
-            apresentadoraId: next.apresentadora_id,
-            intervals: [{ data_inicio: next.data_inicio, data_fim: next.data_fim }],
-            excludeId: request.params.id,
-          })
-          if (eventosConflitantes.length > 0) {
-            await db.query('ROLLBACK')
-            return reply.code(409).send(buildConflictPayload(eventosConflitantes))
+          const alvos = [
+            { data_inicio: next.data_inicio, data_fim: next.data_fim, cabine_id: next.cabine_id, apresentadora_id: next.apresentadora_id, status: next.status },
+            ...ocorrenciasDaSerie.map((row) => ({ ...row, ...patchUpdates })),
+          ]
+          for (const alvo of alvos) {
+            if (!activeAgendaStatuses.includes(alvo.status)) continue
+            const eventosConflitantes = await collectAgendaConflicts(db, {
+              tenantId: tenant_id,
+              cabineId: alvo.cabine_id,
+              apresentadoraId: alvo.apresentadora_id,
+              intervals: [{ data_inicio: alvo.data_inicio, data_fim: alvo.data_fim }],
+              excludeIds: idsDaSerie,
+              cabineStatuses: cabineWriteBlockingStatuses,
+            })
+            if (eventosConflitantes.length > 0) {
+              await db.query('ROLLBACK')
+              return reply.code(409).send(buildConflictPayload(eventosConflitantes))
+            }
           }
         }
 
@@ -799,6 +935,15 @@ export async function agendaRoutes(app) {
           }
         }
         // ── fim sync ─────────────────────────────────────────────────────────────
+
+        if ('apresentadora_id' in patchUpdates && evento.live_id && evento.status === 'ao_vivo') {
+          await reseedLiveAberta(db, {
+            tenantId: tenant_id,
+            liveId: evento.live_id,
+            agendaEventoId: evento.id,
+            apresentadoraFallbackId: evento.apresentadora_id,
+          })
+        }
 
         // Atualiza recorrentes conforme modo_recorrencia
         let recurrentesAtualizados = 0
@@ -972,6 +1117,18 @@ export async function agendaRoutes(app) {
           [evento.id, tenant_id],
         )
 
+        if (evento.status === 'ao_vivo' && evento.live_id) {
+          const principal = turnos.length > 0
+            ? calcularRateioPlanejado(turnos).find((linha) => linha.papel === 'principal')
+            : null
+          await reseedLiveAberta(db, {
+            tenantId: tenant_id,
+            liveId: evento.live_id,
+            agendaEventoId: evento.id,
+            apresentadoraFallbackId: principal?.apresentadora_id ?? evento.apresentadora_id,
+          })
+        }
+
         await db.query('COMMIT')
         return { evento_id: evento.id, apresentadoras: gravados.rows }
       } catch (err) {
@@ -993,6 +1150,10 @@ export async function agendaRoutes(app) {
       )
       const current = currentQ.rows[0]
       if (!current) return reply.code(404).send({ error: 'Evento não encontrado' })
+
+      if (current.status === 'ao_vivo' && current.live_id) {
+        return reply.code(409).send({ error: 'Encerre a live antes de cancelar a agenda.' })
+      }
 
       // Cancela o evento principal
       await db.query(

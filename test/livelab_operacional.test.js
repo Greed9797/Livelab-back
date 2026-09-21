@@ -65,11 +65,14 @@ describe('LIVELAB operational routes', () => {
 
   it('POST /v1/agenda inserts tenant-scoped agenda events', async () => {
     const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
-    const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
-      .mockResolvedValueOnce({
-        rows: [{ id: 'agenda-1', marca_id: marcaId, status: 'planejado' }],
-      })
+    const queryMock = vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('FROM marcas')) return { rows: [{ id: marcaId }] }
+      if (sql.includes('INSERT INTO agenda_eventos')) {
+        return { rows: [{ id: 'agenda-1', marca_id: marcaId, status: 'planejado' }] }
+      }
+      return { rows: [] }
+    })
     const { app } = buildApp({ queryMock })
     await app.register(agendaRoutes)
 
@@ -94,13 +97,15 @@ describe('LIVELAB operational routes', () => {
   it('POST /v1/agenda allows adjacent events in the same cabine', async () => {
     const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const cabineId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
-    const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
-      .mockResolvedValueOnce({ rows: [{ id: cabineId }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({
-        rows: [{ id: 'agenda-adjacente', marca_id: marcaId, cabine_id: cabineId, status: 'planejado' }],
-      })
+    const queryMock = vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('FROM marcas')) return { rows: [{ id: marcaId }] }
+      if (sql.includes('FROM cabines')) return { rows: [{ id: cabineId }] }
+      if (sql.includes('INSERT INTO agenda_eventos')) {
+        return { rows: [{ id: 'agenda-adjacente', marca_id: marcaId, cabine_id: cabineId, status: 'planejado' }] }
+      }
+      return { rows: [] }
+    })
     const { app } = buildApp({ queryMock })
     await app.register(agendaRoutes)
 
@@ -150,21 +155,26 @@ describe('LIVELAB operational routes', () => {
   it('POST /v1/agenda blocks overlapping cabine events with 409', async () => {
     const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const cabineId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
-    const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
-      .mockResolvedValueOnce({ rows: [{ id: cabineId }] })
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'agenda-existente',
-          tipo: 'live',
-          entidade: 'cabine',
-          cabine_id: cabineId,
-          apresentadora_id: null,
-          data_inicio: '2026-05-20T18:30:00Z',
-          data_fim: '2026-05-20T19:30:00Z',
-          status: 'planejado',
-        }],
-      })
+    const queryMock = vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('FROM marcas')) return { rows: [{ id: marcaId }] }
+      if (sql.includes('FROM cabines')) return { rows: [{ id: cabineId }] }
+      if (sql.includes('FROM agenda_eventos ae')) {
+        return {
+          rows: [{
+            id: 'agenda-existente',
+            tipo: 'live',
+            entidade: 'cabine',
+            cabine_id: cabineId,
+            apresentadora_id: null,
+            data_inicio: '2026-05-20T18:30:00Z',
+            data_fim: '2026-05-20T19:30:00Z',
+            status: 'planejado',
+          }],
+        }
+      }
+      return { rows: [] }
+    })
     const { app } = buildApp({ queryMock })
     await app.register(agendaRoutes)
 
@@ -192,25 +202,31 @@ describe('LIVELAB operational routes', () => {
   it('POST /v1/agenda blocks overlapping apresentadora events with 409', async () => {
     const marcaId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     const apresentadoraId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
-    const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ id: marcaId }] })
-      .mockResolvedValueOnce({ rows: [{ id: apresentadoraId }] })
-      .mockResolvedValueOnce({
-        rows: [{
-          id: 'agenda-apresentadora',
-          tipo: 'live',
-          entidade: 'apresentadora',
-          cabine_id: null,
-          apresentadora_id: apresentadoraId,
-          data_inicio: '2026-05-20T18:30:00Z',
-          data_fim: '2026-05-20T19:30:00Z',
-          status: 'planejado',
-        }],
-      })
-      // 4ª query: conflito pelos TURNOS de outros eventos. O espelho escalar só guarda a
+    const queryMock = vi.fn(async (sql) => {
+      if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+      if (sql.includes('FROM marcas')) return { rows: [{ id: marcaId }] }
+      if (sql.includes('FROM apresentadoras') && sql.includes('WHERE id = $1')) {
+        return { rows: [{ id: apresentadoraId }] }
+      }
+      if (sql.includes('FROM agenda_eventos ae')) {
+        return {
+          rows: [{
+            id: 'agenda-apresentadora',
+            tipo: 'live',
+            entidade: 'apresentadora',
+            cabine_id: null,
+            apresentadora_id: apresentadoraId,
+            data_inicio: '2026-05-20T18:30:00Z',
+            data_fim: '2026-05-20T19:30:00Z',
+            status: 'planejado',
+          }],
+        }
+      }
+      // Conflito pelos TURNOS de outros eventos. O espelho escalar só guarda a
       // principal, então sem este ramo a apresentadora que faz o turno 16-18h de um evento
       // alheio ficaria livre para ser reservada de novo na mesma hora.
-      .mockResolvedValueOnce({ rows: [] })
+      return { rows: [] }
+    })
     const { app } = buildApp({ queryMock })
     await app.register(agendaRoutes)
 

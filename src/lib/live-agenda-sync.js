@@ -30,30 +30,35 @@ export async function syncAgendaEventForLive(db, {
 
   const agendaStatus = liveStatusToAgendaStatus(status)
   const agendaFim = safeAgendaEnd(dataInicio, dataFim)
-  let eventId = agendaEventoId ?? null
+  let eventId = null
 
-  if (!eventId) {
+  if (agendaEventoId) {
+    const explicit = await db.query(
+      `SELECT id, cabine_id, marca_id
+         FROM agenda_eventos
+        WHERE id = $1::uuid
+          AND tenant_id = $2::uuid`,
+      [agendaEventoId, tenantId],
+    )
+    const row = explicit.rows[0]
+    const cabineOk = row && (row.cabine_id ?? null) === (cabineId ?? null)
+    const marcaOk = row && (row.marca_id ?? null) === (marcaId ?? null)
+    if (!cabineOk || !marcaOk) return null
+    eventId = row.id
+  } else {
     const existing = await db.query(
       `SELECT ae.id
        FROM agenda_eventos ae
        WHERE ae.tenant_id = $1::uuid
          AND ae.tipo = 'live'
          AND ae.status <> 'cancelado'
-         AND (
-           ae.live_id = $2::uuid
-           OR (
-             ae.live_id IS NULL
-             AND ae.marca_id = $3::uuid
-             AND ae.cabine_id IS NOT DISTINCT FROM $4::uuid
-             AND ae.data_inicio < $6::timestamptz
-             AND ae.data_fim > $5::timestamptz
-           )
-         )
-       ORDER BY (ae.live_id = $2::uuid) DESC,
-                ABS(EXTRACT(EPOCH FROM (ae.data_inicio - $5::timestamptz)))
-       LIMIT 1`,
-      [tenantId, liveId, marcaId, cabineId ?? null, dataInicio, agendaFim],
+         AND ae.marca_id = $2::uuid
+         AND ae.cabine_id IS NOT DISTINCT FROM $3::uuid
+         AND ae.data_inicio < $5::timestamptz
+         AND ae.data_fim > $4::timestamptz`,
+      [tenantId, marcaId, cabineId ?? null, dataInicio, agendaFim],
     )
+    if (existing.rows.length > 1) return null
     eventId = existing.rows[0]?.id ?? null
   }
 
@@ -96,6 +101,8 @@ export async function syncAgendaEventForLive(db, {
     )
     eventId = updated.rows[0]?.id ?? eventId
   } else {
+    // Nenhum evento da mesma cabine e marca: cria o espelho desta live.
+    // Mais de um match já retornou null acima, sem UPDATE.
     const inserted = await db.query(
       `INSERT INTO agenda_eventos (
          tenant_id, tipo, marca_id, cabine_id, apresentadora_id, data_inicio, data_fim,

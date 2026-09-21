@@ -323,7 +323,8 @@ export async function livesRoutes(app) {
                WHERE ae.cabine_id = $1
                  AND ae.tenant_id = $2
                  AND ae.tipo = 'live'
-                 AND ae.data_inicio::date = CURRENT_DATE
+                 AND (ae.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date
+                     = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
                  AND ae.status IN ('planejado', 'confirmado')
                ORDER BY ABS(EXTRACT(EPOCH FROM (ae.data_inicio - NOW())))
                LIMIT 1`,
@@ -1466,11 +1467,34 @@ export async function livesRoutes(app) {
          LEFT JOIN LATERAL (
            SELECT ae2.id, ae2.data_inicio, ae2.data_fim, ae2.observacoes, ae2.apresentadora_id
            FROM agenda_eventos ae2
-           WHERE (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.cabine_id = l.cabine_id)
-             AND ae2.tenant_id = l.tenant_id
+           WHERE ae2.tenant_id = l.tenant_id
              AND ae2.tipo = 'live'
-             AND (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.data_inicio::date = l.iniciado_em::date)
-           ORDER BY ABS(EXTRACT(EPOCH FROM (ae2.data_inicio - l.iniciado_em)))
+             AND (
+               ae2.live_id = l.id
+               OR (
+                 NOT EXISTS (
+                   SELECT 1
+                     FROM agenda_eventos linked
+                    WHERE linked.tenant_id = l.tenant_id
+                      AND linked.live_id = l.id
+                 )
+                 AND ae2.cabine_id = l.cabine_id
+                 AND ae2.marca_id IS NOT DISTINCT FROM l.marca_id
+                 AND (ae2.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date
+                     = (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date
+                 AND (
+                   SELECT COUNT(*)
+                     FROM agenda_eventos ae3
+                    WHERE ae3.tenant_id = l.tenant_id
+                      AND ae3.tipo = 'live'
+                      AND ae3.cabine_id = l.cabine_id
+                      AND ae3.marca_id IS NOT DISTINCT FROM l.marca_id
+                      AND (ae3.data_inicio AT TIME ZONE 'America/Sao_Paulo')::date
+                          = (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date
+                 ) = 1
+               )
+             )
+           ORDER BY (ae2.live_id = l.id) DESC, ae2.id
            LIMIT 1
          ) ae ON true
          LEFT JOIN apresentadoras ap_agenda ON ap_agenda.id = ae.apresentadora_id AND ap_agenda.tenant_id = l.tenant_id
@@ -1912,6 +1936,9 @@ export async function livesRoutes(app) {
       return reply.code(400).send({ error: 'Data inválida.' })
     }
     const status = String(request.query?.status ?? 'encerrada')
+    if (!['em_andamento', 'encerrada', 'faturada', 'todas'].includes(status)) {
+      return reply.code(400).send({ error: 'Status inválido. Use em_andamento, encerrada, faturada ou todas.' })
+    }
 
     return app.withTenant(tenant_id, async (db) => {
       const params = [tenant_id, dayBounds.start, dayBounds.end]
@@ -2511,7 +2538,8 @@ export async function livesRoutes(app) {
                  AND cabine_id = $2::uuid
                  AND tipo = 'live'
                  AND status = 'ao_vivo'
-                 AND data_inicio::date = $3::date`,
+                 AND (data_inicio AT TIME ZONE 'America/Sao_Paulo')::date
+                     = ($3::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date`,
               [tenant_id, live.cabine_id, live.iniciado_em, live.id]
             )
           }

@@ -210,4 +210,31 @@ describe('agenda_autostart job', () => {
     expect(result.started).toBe(0)
     expect(result.errors).toBe(0)
   })
+
+  it('cancela planejado com data_fim no passado e não cria live', async () => {
+    const clientQuery = vi.fn(async (sql) => {
+      const s = String(sql)
+      if (s.includes('UPDATE agenda_eventos') && s.includes("SET status = 'cancelado'") && s.includes('data_fim < NOW()')) {
+        expect(s).not.toMatch(/observacoes/i)
+        expect(s).not.toMatch(/cabines/)
+        expect(s).toContain('live_id IS NULL')
+        expect(s).toContain("status = 'planejado'")
+        return { rows: [{ id: eventId }] }
+      }
+      if (s.includes('INSERT INTO lives') || s.includes('UPDATE cabines')) {
+        throw new Error('não deveria criar live nem alterar cabine')
+      }
+      return { rows: [] }
+    })
+    const app = makeApp({ candidates: [], clientQueryMock: clientQuery })
+    const result = await runAgendaAutostartTick(app)
+
+    expect(result.cancelled).toBe(1)
+    expect(result.started).toBe(0)
+    expect(app.log.info).toHaveBeenCalledWith(
+      { agenda_evento_id: eventId },
+      '[agenda autostart] planejado passado sem live — cancelado',
+    )
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO lives'))).toBe(false)
+  })
 })

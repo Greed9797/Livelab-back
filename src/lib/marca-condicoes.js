@@ -50,8 +50,11 @@ function dateOnly(value) {
   return date
 }
 
-/** Normaliza o payload da condição sem inferir valores históricos. */
-export function normalizarMarcaCondicao(input = {}) {
+/**
+ * Normaliza o payload da condição sem inferir valores históricos.
+ * `origem` do cliente é ignorada: o servidor escolhe `gestao` ou `bot`.
+ */
+export function normalizarMarcaCondicao(input = {}, options = {}) {
   const inicio = input.inicio_vigencia ?? input.competencia
   const inicioVigencia = typeof inicio === 'string' && MONTH_RE.test(inicio)
     ? monthStart(inicio)
@@ -70,7 +73,7 @@ export function normalizarMarcaCondicao(input = {}) {
     tipo_cobranca: tipo,
     fixo_confirmado: Boolean(input.fixo_confirmado),
     comissao_confirmada: Boolean(input.comissao_confirmada),
-    origem: input.origem ?? 'gestao',
+    origem: options.origem === 'bot' ? 'bot' : 'gestao',
     motivo,
   }
 }
@@ -148,7 +151,7 @@ export function marcaCondicaoAtSql({
 export const buildMarcaCondicaoAtSql = marcaCondicaoAtSql
 export const marcaCondicaoLateralSql = marcaCondicaoAtSql
 
-export function conditionPayloadHash(payload) {
-  const normalized = normalizarMarcaCondicao(payload)
+export function conditionPayloadHash(payload, options) {
+  const normalized = normalizarMarcaCondicao(payload, options)
   return JSON.stringify(normalized)
 }

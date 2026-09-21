@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { READ_SOLICITACOES, WRITE_SOLICITACOES } from '../config/role_groups.js'
 
 const agendamentoSchema = z.object({
-  cabine_id:        z.string().uuid(),
+  cabine_id:        z.string().uuid().nullable().optional(),
   cliente_id:       z.string().uuid(),
   marca_id:         z.string().uuid().optional().nullable(),
   apresentadora_id: z.string().uuid().optional().nullable(),
@@ -107,7 +107,7 @@ export async function solicitacoesRoutes(app) {
 
       // Lock pessimista para evitar double-approve simultâneo
       const lockQ = await client.query(`
-        SELECT ae.id, ae.cabine_id, ae.data_inicio, ae.data_fim, ae.status,
+        SELECT ae.id, ae.cabine_id, ae.apresentadora_id, ae.data_inicio, ae.data_fim, ae.status,
                mar.cliente_id
         FROM agenda_eventos ae
         JOIN marcas mar ON mar.id = ae.marca_id AND mar.tenant_id = ae.tenant_id
@@ -126,21 +126,29 @@ export async function solicitacoesRoutes(app) {
         return reply.code(409).send({ error: `Solicitação já está ${statusLegado}` })
       }
 
-      // Verificação de overlap: há alguma solicitação confirmada na mesma cabine que se sobrepõe?
-      const overlapQ = await client.query(`
-        SELECT id FROM agenda_eventos
-        WHERE tenant_id = $1
-          AND cabine_id = $2
-          AND tipo = 'live'
-          AND status = 'confirmado'
-          AND data_inicio < $4
-          AND data_fim    > $3
-          AND id != $5
-      `, [tenant_id, row.cabine_id, row.data_inicio, row.data_fim, id])
+      // Com cabine, o overlap continua na estação. Sem cabine, só na apresentadora.
+      const overlapAlvo = row.cabine_id
+        ? { coluna: 'cabine_id', id: row.cabine_id }
+        : row.apresentadora_id
+          ? { coluna: 'apresentadora_id', id: row.apresentadora_id }
+          : null
+      if (overlapAlvo) {
+        const overlapQ = await client.query(`
+          SELECT id FROM agenda_eventos
+          WHERE tenant_id = $1
+            AND ${overlapAlvo.coluna} = $2
+            AND tipo = 'live'
+            AND status = 'confirmado'
+            AND data_inicio < $4
+            AND data_fim    > $3
+            AND id != $5
+        `, [tenant_id, overlapAlvo.id, row.data_inicio, row.data_fim, id])
 
-      if (overlapQ.rows.length > 0) {
-        await client.query('ROLLBACK')
-        return reply.code(409).send({ error: 'Conflito de horário: já existe uma live aprovada neste período para esta cabine' })
+        if (overlapQ.rows.length > 0) {
+          await client.query('ROLLBACK')
+          const recurso = overlapAlvo.coluna === 'cabine_id' ? 'esta cabine' : 'esta apresentadora'
+          return reply.code(409).send({ error: `Conflito de horário: já existe uma live aprovada neste período para ${recurso}` })
+        }
       }
 
       // Validar contrato ativo do cliente antes de aprovar
@@ -169,13 +177,15 @@ export async function solicitacoesRoutes(app) {
         RETURNING id, status, atualizado_em
       `, [id, tenant_id])
 
-      // Reservar cabine SE ainda disponível (idempotente)
-      await client.query(
-        `UPDATE cabines
-         SET status = 'reservada', contrato_id = $1
-         WHERE id = $2 AND tenant_id = $3 AND status = 'disponivel'`,
-        [contratoId, row.cabine_id, tenant_id]
-      )
+      // Sem cabine não há estação para reservar. Não grava comissão aqui.
+      if (row.cabine_id) {
+        await client.query(
+          `UPDATE cabines
+           SET status = 'reservada', contrato_id = $1
+           WHERE id = $2 AND tenant_id = $3 AND status = 'disponivel'`,
+          [contratoId, row.cabine_id, tenant_id]
+        )
+      }
 
       await client.query('COMMIT')
 
@@ -268,43 +278,49 @@ export async function solicitacoesRoutes(app) {
         return reply.code(422).send({ error: 'Cliente não possui marca ativa. Crie uma marca antes de agendar.' })
       }
 
-      // Monta timestamps com data + hora (tratados como America/Sao_Paulo)
-      const dataInicio = `${d.data_solicitada}T${d.hora_inicio}:00`
-      const dataFim    = `${d.data_solicitada}T${d.hora_fim}:00`
+      const cabineId = d.cabine_id ?? null
+      const apresentadoraId = d.apresentadora_id ?? null
+      const inicio = `${d.data_solicitada}T${d.hora_inicio}:00-03:00`
+      const fim = `${d.data_solicitada}T${d.hora_fim}:00-03:00`
+      // Com cabine, o overlap continua na estação. Sem cabine, só na apresentadora.
+      const overlapAlvo = cabineId
+        ? { coluna: 'cabine_id', id: cabineId }
+        : apresentadoraId
+          ? { coluna: 'apresentadora_id', id: apresentadoraId }
+          : null
+      if (overlapAlvo) {
+        const overlapQ = await client.query(`
+          SELECT id FROM agenda_eventos
+          WHERE tenant_id = $1
+            AND ${overlapAlvo.coluna} = $2
+            AND tipo = 'live'
+            AND status = 'confirmado'
+            AND data_inicio < $4::timestamptz
+            AND data_fim    > $3::timestamptz
+        `, [tenant_id, overlapAlvo.id, inicio, fim])
 
-      // Verifica overlap contra agenda_eventos confirmados
-      const overlapQ = await client.query(`
-        SELECT id FROM agenda_eventos
-        WHERE tenant_id = $1
-          AND cabine_id = $2
-          AND tipo = 'live'
-          AND status = 'confirmado'
-          AND data_inicio < $4::timestamptz
-          AND data_fim    > $3::timestamptz
-      `, [tenant_id, d.cabine_id,
-          `${d.data_solicitada}T${d.hora_inicio}:00-03:00`,
-          `${d.data_solicitada}T${d.hora_fim}:00-03:00`])
-
-      if (overlapQ.rows.length > 0) {
-        await client.query('ROLLBACK')
-        return reply.code(409).send({ error: 'Conflito de horário: já existe um agendamento aprovado neste período para esta cabine' })
+        if (overlapQ.rows.length > 0) {
+          await client.query('ROLLBACK')
+          const recurso = overlapAlvo.coluna === 'cabine_id' ? 'esta cabine' : 'esta apresentadora'
+          return reply.code(409).send({ error: `Conflito de horário: já existe um agendamento aprovado neste período para ${recurso}` })
+        }
       }
 
       const result = await client.query(`
         INSERT INTO agenda_eventos
           (tenant_id, cabine_id, marca_id, criado_por,
-           data_inicio, data_fim, tipo, status, observacoes)
+           data_inicio, data_fim, tipo, status, observacoes, apresentadora_id)
         VALUES ($1, $2, $3, $4,
                 ($5::date + $6::time) AT TIME ZONE 'America/Sao_Paulo',
                 ($5::date + $7::time) AT TIME ZONE 'America/Sao_Paulo',
-                'live', 'confirmado', $8)
+                'live', 'confirmado', $8, $9)
         RETURNING id, status,
                   (data_inicio AT TIME ZONE 'America/Sao_Paulo')::date AS data_solicitada,
                   (data_inicio AT TIME ZONE 'America/Sao_Paulo')::time AS hora_inicio,
                   (data_fim    AT TIME ZONE 'America/Sao_Paulo')::time AS hora_fim,
                   criado_em
-      `, [tenant_id, d.cabine_id, marcaId, user_id,
-          d.data_solicitada, d.hora_inicio, d.hora_fim, d.observacao ?? null])
+      `, [tenant_id, cabineId, marcaId, user_id,
+          d.data_solicitada, d.hora_inicio, d.hora_fim, d.observacao ?? null, apresentadoraId])
 
       await client.query('COMMIT')
       return reply.code(201).send(result.rows[0])

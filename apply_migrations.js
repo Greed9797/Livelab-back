@@ -154,6 +154,7 @@ export const MIGRATIONS_LIST = [
   '157_training_p0.sql',
   '158_training_empty_lesson.sql',
   '159_marca_condicao_origem_bot.sql',
+  '160_lives_cabine_opcional.sql',
 ]
 
 async function ensureMigrationsTable(client) {

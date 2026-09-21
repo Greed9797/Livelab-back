@@ -394,10 +394,19 @@ export async function clientePortalRoutes(app) {
   app.post('/v1/cliente/solicitacao', {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro']), clienteFeatureBlocked],
   }, async (request, reply) => {
-    const { cabine_id, data_solicitada, hora_inicio, hora_fim, observacoes } = request.body ?? {}
+    const {
+      cabine_id: requestedCabineId,
+      apresentadora_id: requestedApresentadoraId,
+      data_solicitada,
+      hora_inicio,
+      hora_fim,
+      observacoes,
+    } = request.body ?? {}
+    const cabineId = requestedCabineId || null
+    const apresentadoraId = requestedApresentadoraId || null
 
-    if (!cabine_id || !data_solicitada || !hora_inicio || !hora_fim) {
-      return reply.code(400).send({ error: 'Campos obrigatórios: cabine_id, data_solicitada, hora_inicio, hora_fim' })
+    if (!data_solicitada || !hora_inicio || !hora_fim) {
+      return reply.code(400).send({ error: 'Campos obrigatórios: data_solicitada, hora_inicio, hora_fim' })
     }
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(data_solicitada)) {
@@ -433,34 +442,44 @@ export async function clientePortalRoutes(app) {
         return reply.code(422).send({ error: 'Sua conta não possui marca ativa. Entre em contato com a unidade.' })
       }
 
-      const cabineQ = await db.query(
-        `SELECT id
-         FROM cabines
-         WHERE id = $1
-           AND tenant_id = $2::uuid
-           AND ativo IS NOT FALSE
-         LIMIT 1`,
-        [cabine_id, tenantId]
-      )
-      if (!cabineQ.rows[0]) {
-        return reply.code(404).send({ error: 'Cabine não encontrada ou inativa.' })
+      if (cabineId) {
+        const cabineQ = await db.query(
+          `SELECT id
+           FROM cabines
+           WHERE id = $1
+             AND tenant_id = $2::uuid
+             AND ativo IS NOT FALSE
+           LIMIT 1`,
+          [cabineId, tenantId]
+        )
+        if (!cabineQ.rows[0]) {
+          return reply.code(404).send({ error: 'Cabine não encontrada ou inativa.' })
+        }
       }
 
-      // Check for time overlap conflict em agenda_eventos (exceto cancelado)
-      const conflictRes = await db.query(
-        `SELECT id FROM agenda_eventos
-         WHERE cabine_id = $1
-           AND tenant_id = $5::uuid
-           AND tipo = 'live'
-           AND status != 'cancelado'
-           AND data_inicio < ($2::date + $4::time) AT TIME ZONE 'America/Sao_Paulo'
-           AND data_fim    > ($2::date + $3::time) AT TIME ZONE 'America/Sao_Paulo'
-         LIMIT 1`,
-        [cabine_id, data_solicitada, startTime, endTime, tenantId]
-      )
+      // Com cabine, o overlap continua na estação. Sem cabine, só na apresentadora.
+      const overlapAlvo = cabineId
+        ? { coluna: 'cabine_id', id: cabineId }
+        : apresentadoraId
+          ? { coluna: 'apresentadora_id', id: apresentadoraId }
+          : null
+      if (overlapAlvo) {
+        const conflictRes = await db.query(
+          `SELECT id FROM agenda_eventos
+           WHERE ${overlapAlvo.coluna} = $1
+             AND tenant_id = $5::uuid
+             AND tipo = 'live'
+             AND status != 'cancelado'
+             AND data_inicio < ($2::date + $4::time) AT TIME ZONE 'America/Sao_Paulo'
+             AND data_fim    > ($2::date + $3::time) AT TIME ZONE 'America/Sao_Paulo'
+           LIMIT 1`,
+          [overlapAlvo.id, data_solicitada, startTime, endTime, tenantId]
+        )
 
-      if (conflictRes.rows.length > 0) {
-        return reply.code(409).send({ error: 'Horário indisponível. Escolha outro horário ou cabine.' })
+        if (conflictRes.rows.length > 0) {
+          const recurso = overlapAlvo.coluna === 'cabine_id' ? 'horário ou cabine' : 'horário'
+          return reply.code(409).send({ error: `Horário indisponível. Escolha outro ${recurso}.` })
+        }
       }
 
       // Insert em agenda_eventos com status='planejado' (equivalente a 'pendente')
@@ -468,13 +487,13 @@ export async function clientePortalRoutes(app) {
       const insertRes = await db.query(
         `INSERT INTO agenda_eventos
            (tenant_id, cabine_id, marca_id, criado_por,
-            data_inicio, data_fim, tipo, status, observacoes)
+            data_inicio, data_fim, tipo, status, observacoes, apresentadora_id)
          VALUES ($1, $2, $3, $4,
                  ($5::date + $6::time) AT TIME ZONE 'America/Sao_Paulo',
                  ($5::date + $7::time) AT TIME ZONE 'America/Sao_Paulo',
-                 'live', 'planejado', $8)
+                 'live', 'planejado', $8, $9)
          RETURNING id, status`,
-        [tenantId, cabine_id, marcaId, request.user.sub, data_solicitada, startTime, endTime, obs]
+        [tenantId, cabineId, marcaId, request.user.sub, data_solicitada, startTime, endTime, obs, apresentadoraId]
       )
 
       const row = insertRes.rows[0]

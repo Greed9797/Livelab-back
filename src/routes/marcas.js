@@ -174,6 +174,41 @@ function responderErroCondicao(reply, error) {
   })
 }
 
+function camposFinanceirosNoBody(body) {
+  return Object.keys(body ?? {}).filter((field) => CAMPOS_FINANCEIROS_MARCA.has(field))
+}
+
+function rejeitarCamposFinanceiros(reply, campos) {
+  return reply.code(409).send({
+    code: 'USE_MARCA_CONDITION_ENDPOINT',
+    error: 'Alterações financeiras exigem uma nova condição comercial com vigência e confirmação',
+    campos,
+  })
+}
+
+/** JWT grava gestão. Chave de API grava bot, pelo helper já usado em origem_dados. */
+function origemDaCondicao(request) {
+  return request?.viaApiKey ? origemDados(request) : 'gestao'
+}
+
+function respostaMarcaNova(row, tipo) {
+  const tipoMarca = row?.tipo ?? tipo
+  return {
+    ...row,
+    configuracao_comercial: buildConfiguracaoComercial({
+      tipo: tipoMarca,
+      condicao: {
+        origem: 'legado_nao_verificado',
+        fixo_mensal: row?.valor_fixo_minimo,
+        comissao_franquia_pct: row?.comissao_franquia_pct,
+        tipo_cobranca: row?.tipo_cobranca,
+        fixo_confirmado: false,
+        comissao_confirmada: false,
+      },
+    }),
+  }
+}
+
 export async function marcasRoutes(app) {
   const readAccess = [app.authenticate, app.requirePapel(READ_MARCAS)]
   const writeAccess = [app.authenticate, app.requirePapel(WRITE_MARCAS)]
@@ -308,6 +343,8 @@ export async function marcasRoutes(app) {
   app.post('/v1/marcas', { preHandler: writeAccess }, async (request, reply) => {
     const parsed = marcaSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const camposFinanceiros = camposFinanceirosNoBody(request.body)
+    if (camposFinanceiros.length > 0) return rejeitarCamposFinanceiros(reply, camposFinanceiros)
 
     const { tenant_id } = request.user
     const d = parsed.data
@@ -336,20 +373,6 @@ export async function marcasRoutes(app) {
             tenantId: tenant_id,
             clienteId: d.cliente_id,
             origem: origemDados(request),
-            baseline: {
-              valor_fixo_minimo: d.valor_fixo_minimo,
-              comissao_franquia_pct: d.comissao_franquia_pct,
-              comissao_franqueadora_pct: d.comissao_franqueadora_pct,
-              tipo_cobranca: d.tipo_cobranca,
-            },
-          })
-        }
-
-        if (clienteMarcaExistia && Object.keys(request.body ?? {}).some((field) => CAMPOS_FINANCEIROS_MARCA.has(field))) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({
-            code: 'USE_MARCA_CONDITION_ENDPOINT',
-            error: 'Alterações financeiras exigem uma nova condição comercial com vigência e confirmação',
           })
         }
 
@@ -392,11 +415,10 @@ export async function marcasRoutes(app) {
               `WITH nova_marca AS (
                  INSERT INTO marcas (
                    tenant_id, cliente_id, nome, tipo, status, tiktok_username, site,
-                   marketplace_url, comissao_franquia_pct, comissao_franqueadora_pct,
-                   observacoes, logo_url, valor_fixo_minimo, cor, tipo_cobranca,
+                   marketplace_url, observacoes, logo_url, cor,
                    data_inicio, data_fim, origem_dados
                  )
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
                  RETURNING *
                ), baseline AS (
                  INSERT INTO marca_condicoes_comerciais (
@@ -414,9 +436,7 @@ export async function marcasRoutes(app) {
               [
                 tenant_id, d.cliente_id ?? null, d.nome, d.tipo, d.status,
                 d.tipo === 'cliente' ? null : d.tiktok_username ?? null, d.site ?? null, d.marketplace_url ?? null,
-                d.comissao_franquia_pct ?? 0, d.comissao_franqueadora_pct ?? 0,
-                d.observacoes ?? null, d.logo_url ?? null, d.valor_fixo_minimo ?? 0,
-                d.cor ?? null, d.tipo_cobranca ?? 'fixo_mais_comissao',
+                d.observacoes ?? null, d.logo_url ?? null, d.cor ?? null,
                 d.data_inicio ?? null, d.data_fim ?? null,
                 origemDados(request),
               ],
@@ -430,8 +450,10 @@ export async function marcasRoutes(app) {
           result.rows[0].tiktok_username = d.tiktok_username ?? null
         }
         await db.query('COMMIT')
+        invalidateTenant(tenant_id, LISTAGEM_NAMESPACES)
         app.audit?.log?.(request, { action: 'marca.create', entity_type: 'marca', entity_id: result.rows[0].id, metadata: { nome: d.nome, tipo: d.tipo } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-        return reply.code(201).send(result.rows[0])
+        const criada = clienteMarcaExistia ? result.rows[0] : respostaMarcaNova(result.rows[0], d.tipo)
+        return reply.code(201).send(criada)
       } catch (err) {
         await db.query('ROLLBACK')
         if (isNomeDuplicadoError(err)) return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
@@ -459,6 +481,7 @@ export async function marcasRoutes(app) {
           tenantId: tenant_id,
           marcaId: request.params.id,
           proposta: request.body ?? {},
+          origem: origemDaCondicao(request),
         })
         return reply.send(preview)
       } catch (error) {
@@ -469,7 +492,13 @@ export async function marcasRoutes(app) {
 
   app.post('/v1/marcas/:id/condicoes', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id, sub } = request.user
-    const idempotencyKey = request.headers['idempotency-key'] ?? request.body?.idempotency_key
+    const idempotencyKey = request.headers['idempotency-key']
+    if (typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0) {
+      return reply.code(400).send({
+        code: 'IDEMPOTENCY_KEY_REQUIRED',
+        error: 'Idempotency-Key é obrigatório',
+      })
+    }
     const expectedRevision = request.body?.expected_revision ?? request.body?.versao_esperada
     return app.withTenant(tenant_id, async (db) => {
       try {
@@ -480,7 +509,9 @@ export async function marcasRoutes(app) {
           expectedRevision,
           idempotencyKey,
           actorUserId: sub ?? null,
+          origem: origemDaCondicao(request),
         })
+        invalidateTenant(tenant_id, LISTAGEM_NAMESPACES)
         return reply.code(result.idempotent ? 200 : 201).send(result)
       } catch (error) {
         return responderErroCondicao(reply, error)
@@ -660,14 +691,8 @@ export async function marcasRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const updates = { ...parsed.data }
-    const camposFinanceiros = Object.keys(updates).filter((field) => CAMPOS_FINANCEIROS_MARCA.has(field))
-    if (camposFinanceiros.length > 0) {
-      return reply.code(409).send({
-        code: 'USE_MARCA_CONDITION_ENDPOINT',
-        error: 'Alterações financeiras exigem uma nova condição comercial com vigência e confirmação',
-        campos: camposFinanceiros,
-      })
-    }
+    const camposFinanceiros = camposFinanceirosNoBody(request.body)
+    if (camposFinanceiros.length > 0) return rejeitarCamposFinanceiros(reply, camposFinanceiros)
     const hasTikTokUpdate = Object.prototype.hasOwnProperty.call(updates, 'tiktok_username')
     const nextTikTokUsername = updates.tiktok_username
     delete updates.tiktok_username
@@ -728,6 +753,7 @@ export async function marcasRoutes(app) {
         )
       }
       await db.query('COMMIT')
+      invalidateTenant(request.user.tenant_id, LISTAGEM_NAMESPACES)
       app.audit?.log?.(request, {
         action: 'marca.update',
         entity_type: 'marca',

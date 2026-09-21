@@ -230,13 +230,22 @@ async function previewInTransaction(db, { tenantId, marcaId, proposal, condition
 /** Lista o histórico sem projetar os campos atuais da marca sobre o passado. */
 export async function listarCondicoesMarca(db, { tenantId, marcaId } = {}) {
   ensureIds({ tenantId, marcaId })
+  const marca = await db.query(
+    `SELECT id FROM marcas WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+    [tenantId, marcaId],
+  )
+  if (!marca.rows[0]) throw serviceError('Marca não encontrada', 'MARCA_NOT_FOUND', 404)
   return listRows(db, { tenantId, marcaId })
 }
 
+function origemServidor(origem) {
+  return origem === 'bot' ? 'bot' : 'gestao'
+}
+
 /** Prévia isolada: nenhuma tabela é escrita e o resultado é descartável. */
-export async function preverCondicaoMarca(db, { tenantId, marcaId, proposta, condition } = {}) {
+export async function preverCondicaoMarca(db, { tenantId, marcaId, proposta, condition, origem } = {}) {
   ensureIds({ tenantId, marcaId })
-  const normalized = normalizarMarcaCondicao(proposta ?? condition ?? {})
+  const normalized = normalizarMarcaCondicao(proposta ?? condition ?? {}, { origem: origemServidor(origem) })
   await db.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
   try {
     await db.query(
@@ -331,14 +340,16 @@ export async function confirmarCondicaoMarca(db, {
   expectedRevision,
   idempotencyKey,
   actorUserId = null,
+  origem,
 } = {}) {
   ensureIds({ tenantId, marcaId })
   const expected = normalizeRevision(expectedRevision)
   if (typeof idempotencyKey !== 'string' || idempotencyKey.trim().length === 0 || idempotencyKey.length > 255) {
     throw serviceError('Idempotency-Key é obrigatório', 'IDEMPOTENCY_KEY_REQUIRED', 400)
   }
-  const normalized = normalizarMarcaCondicao(proposta ?? condition ?? {})
-  const payloadHash = conditionPayloadHash(proposta ?? condition ?? {})
+  const origemNormalizada = { origem: origemServidor(origem) }
+  const normalized = normalizarMarcaCondicao(proposta ?? condition ?? {}, origemNormalizada)
+  const payloadHash = conditionPayloadHash(proposta ?? condition ?? {}, origemNormalizada)
   await db.query('BEGIN')
   try {
     await lockTenantLiveFinance(db, tenantId)

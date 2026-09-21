@@ -54,19 +54,19 @@ const contentFields = {
 const createSchema = z.object({
   ...contentFields,
   titulo: z.string().trim().min(2).max(240),
-  status: z.enum(['draft', 'published', 'archived']).default('draft'),
+  status: z.enum(['draft', 'archived']).default('draft'),
 })
 // A material can only become published through the transactional publish route.
 // Keeping that transition out of PATCH prevents bypassing the content/PDF gate.
 const patchSchema = z.object({ ...contentFields, status: z.enum(['draft', 'archived']).optional(), expected_revision: z.number().int().positive() })
 
-function unsafeMarkdown(markdown) {
+export function unsafeMarkdown(markdown) {
   return markdown && (/<\/?(?:script|iframe|object|embed|form|style|link)\b/i.test(markdown)
     || /\bon[a-z]+\s*=\s*['"]?/i.test(markdown)
     || /(?:javascript|data|vbscript):/i.test(markdown))
 }
 
-function safeUrl(value, kind = 'link') {
+export function safeUrl(value, kind = 'link') {
   if (!value) return true
   let parsed
   try { parsed = new URL(value) } catch { return false }
@@ -187,6 +187,17 @@ function page(query) {
   return { current, size, offset: (current - 1) * size }
 }
 
+async function assertActiveUnitCategory(db, tenantId, categoryId) {
+  if (categoryId === undefined || categoryId === null) return null
+  const result = await db.query(
+    'SELECT is_active FROM knowledge_unit_categories WHERE id = $1 AND tenant_id = $2',
+    [categoryId, tenantId],
+  )
+  if (!result.rows.length) return 'Categoria inválida'
+  if (!result.rows[0].is_active) return 'Categoria inativa'
+  return null
+}
+
 export async function knowledgeUnitRoutes(app) {
   const readers = [app.authenticate, app.requirePapel(READERS)]
   const managers = [app.authenticate, app.requirePapel(MANAGERS)]
@@ -277,16 +288,19 @@ export async function knowledgeUnitRoutes(app) {
   }))
 
   app.post('/v1/knowledge/unit/materials', { onRequest: managers }, async (request, reply) => {
+    if (request.body?.status === 'published') return reply.code(400).send({ error: 'Use a ação publicar.' })
     const parsed = createSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const data = parsed.data
-    if (data.status === 'published' && !hasUsableContent(data)) return reply.code(400).send({ error: 'Publique somente após informar texto, link, vídeo ou PDF' })
     const videoError = videoInputError(data)
     if (videoError) return reply.code(400).send({ error: videoError })
     if (unsafeMarkdown(data.content_markdown)) return reply.code(400).send({ error: 'O conteúdo contém HTML ou URL não permitido' })
     if (!safeUrl(data.external_url) || !safeUrl(data.video_url, 'video') || !safeUrl(data.cover_image_url)) return reply.code(400).send({ error: 'URL externa não permitida' })
-    const idempotency = String(request.headers['idempotency-key'] ?? '').trim().slice(0, 200) || null
+    const idempotency = String(request.headers['idempotency-key'] ?? '').trim().slice(0, 200)
+    if (!idempotency) return reply.code(400).send({ error: 'Idempotency-Key é obrigatório' })
     return app.withTenant(request.user.tenant_id, async (db) => {
+      const categoryError = await assertActiveUnitCategory(db, request.user.tenant_id, data.category_id ?? null)
+      if (categoryError) return reply.code(400).send({ error: categoryError })
       try {
         const result = await db.query(`
           INSERT INTO knowledge_materials
@@ -294,7 +308,7 @@ export async function knowledgeUnitRoutes(app) {
              external_url, video_provider, video_id, tags, status, idempotency_key,
              created_by, updated_by, published_at, cover_image_url, duration_minutes, difficulty,
              objectives, prerequisites, audience_roles, topics, platforms, featured)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,CASE WHEN $12 = 'published' THEN NOW() END,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,NULL,$15,$16,$17,$18,$19,$20,$21,$22,$23)
           ON CONFLICT (tenant_id, idempotency_key) DO UPDATE
             SET updated_at = knowledge_materials.updated_at
           RETURNING *, title AS titulo, updated_at AS atualizado_em, (xmax = 0) AS inserted`,
@@ -326,6 +340,10 @@ export async function knowledgeUnitRoutes(app) {
     if (!fields.length) return reply.code(400).send({ error: 'Nada para atualizar' })
     fields.push('revision = revision + 1', 'updated_at = NOW()', `updated_by = $${values.length + 1}`); values.push(request.user.sub, request.params.id, data.expected_revision, request.user.tenant_id)
     return app.withTenant(request.user.tenant_id, async (db) => {
+      if (data.category_id !== undefined) {
+        const categoryError = await assertActiveUnitCategory(db, request.user.tenant_id, data.category_id)
+        if (categoryError) return reply.code(400).send({ error: categoryError })
+      }
       const result = await db.query(`UPDATE knowledge_materials SET ${fields.join(', ')} WHERE id = $${values.length - 2} AND tenant_id = $${values.length} AND revision = $${values.length - 1} RETURNING *`, values)
       if (result.rows.length) {
         const row = materialResponse(result.rows[0])

@@ -79,6 +79,32 @@ describe('GET /v1/financeiro/operacional', () => {
     const somaSaidas = body.saidas.reduce((s, l) => s + l.valor, 0)
     expect(body.totais.resultado).toBe(somaEntradas - somaSaidas)
     expect(body.periodo).toEqual({ inicio: '2026-06-01', fim: '2026-06-30' })
+    expect(body.lives_sem_apuracao).toBe(0)
+    await app.close()
+  })
+
+  it('lives_sem_apuracao conta encerrada com GMV sem venda e não entra nas somas', async () => {
+    const base = operacionalQueryMock()
+    const query = vi.fn(async (sql) => {
+      const s = String(sql)
+      if (s.includes('lives_sem_apuracao')) {
+        expect(s).toContain("l.status = 'encerrada'")
+        expect(s).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) > 0')
+        expect(s).toContain('NOT EXISTS')
+        expect(s).not.toContain('comissao_faltante')
+        expect(s).not.toContain('comissao_apresentadora')
+        return { rows: [{ lives_sem_apuracao: 2 }] }
+      }
+      return base(sql)
+    })
+    const { app } = buildApp({ queryMock: query })
+    await app.register(financeiroRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/operacional?inicio=2026-06&fim=2026-06' })
+    expect(res.statusCode).toBe(200)
+    const body = res.json()
+    expect(body.lives_sem_apuracao).toBe(2)
+    expect(body.totais.entradas).toBe(550)
+    expect(body.totais.resultado).toBe(550 - 3700 - 150)
     await app.close()
   })
 

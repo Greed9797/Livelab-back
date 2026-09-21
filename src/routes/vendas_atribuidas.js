@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { READ_VENDAS_ATRIBUIDAS, WRITE_VENDAS_ATRIBUIDAS } from '../config/role_groups.js'
+import { READ_VENDAS_ATRIBUIDAS, WRITE_FINANCEIRO, WRITE_VENDAS_ATRIBUIDAS } from '../config/role_groups.js'
 import { NIL_UUID, resolvePresenterCommissionPct } from '../services/presenter-commission.js'
 import { sincronizarSnapshotComissaoApresentadora } from '../services/comissao-snapshot.js'
 
@@ -17,6 +17,20 @@ const vendaSchema = z.object({
 })
 
 const vendaPatchSchema = vendaSchema.partial().omit({ origem: true, origem_id: true })
+
+const CAMPOS_VALOR_COMISSAO = ['comissao_apresentadora', 'comissao_franquia', 'comissao_franqueadora']
+
+function corpoEnviaValorComissao(body) {
+  if (!body || typeof body !== 'object') return false
+  return CAMPOS_VALOR_COMISSAO.some((campo) => Object.prototype.hasOwnProperty.call(body, campo))
+}
+
+function negarValorComissaoSemFinanceiro(request, reply) {
+  if (!corpoEnviaValorComissao(request.body)) return false
+  if (WRITE_FINANCEIRO.includes(request.user?.papel)) return false
+  reply.code(403).send({ error: 'Valores de comissão exigem papel financeiro' })
+  return true
+}
 
 export async function calcularComissoesAtribuidas(db, {
   tenantId,
@@ -287,6 +301,7 @@ export async function vendasAtribuidasRoutes(app) {
   })
 
   app.post('/v1/vendas-atribuidas', { preHandler: writeAccess }, async (request, reply) => {
+    if (negarValorComissaoSemFinanceiro(request, reply)) return
     const parsed = vendaSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -313,6 +328,7 @@ export async function vendasAtribuidasRoutes(app) {
   })
 
   app.patch('/v1/vendas-atribuidas/:id', { preHandler: writeAccess }, async (request, reply) => {
+    if (negarValorComissaoSemFinanceiro(request, reply)) return
     const parsed = vendaPatchSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 

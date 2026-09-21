@@ -14,15 +14,15 @@ vi.mock('../src/routes/vendas_atribuidas.js', () => ({
 
 const TENANT = 'tenant-uuid-1'
 
-function buildApp(queryMock) {
+function buildApp(queryMock, papel = 'franqueado') {
   const app = Fastify()
   const releaseMock = vi.fn()
 
   app.decorate('authenticate', async (request) => {
-    request.user = { tenant_id: TENANT, sub: 'user-1', papel: 'franqueado' }
+    request.user = { tenant_id: TENANT, sub: 'user-1', papel }
   })
   app.decorate('requirePapel', (papeis) => async (request, reply) => {
-    if (!request.user) request.user = { tenant_id: TENANT, sub: 'user-1', papel: 'franqueado' }
+    if (!request.user) request.user = { tenant_id: TENANT, sub: 'user-1', papel }
     if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
   })
   app.decorate('db', { query: queryMock })
@@ -239,5 +239,51 @@ describe('DELETE /v1/comissoes/faixas-default/:faixaId', () => {
     const flat = queryMock.mock.calls.map(([sql]) => String(sql).trim().split(/\s/)[0])
     expect(flat).toContain('ROLLBACK')
     expect(flat).not.toContain('COMMIT')
+  })
+})
+
+describe('POST /v1/comissoes/recalcular-mes', () => {
+  it('operacional, produtor_live e automacao recebem 403', async () => {
+    for (const papel of ['operacional', 'produtor_live', 'automacao']) {
+      const queryMock = vi.fn()
+      const app = buildApp(queryMock, papel)
+      await app.register(comissoesRoutes)
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/comissoes/recalcular-mes',
+        payload: { mes: '2026-06' },
+      })
+      expect(response.statusCode).toBe(403)
+      expect(queryMock).not.toHaveBeenCalled()
+      await app.close()
+    }
+  })
+
+  it('financeiro e franqueado recebem 202', async () => {
+    for (const papel of ['financeiro', 'franqueado']) {
+      const queryMock = vi.fn().mockResolvedValue({ rows: [{ apresentadora_id: 'ap-1' }] })
+      const app = buildApp(queryMock, papel)
+      await app.register(comissoesRoutes)
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/comissoes/recalcular-mes',
+        payload: { mes: '2026-06' },
+      })
+      expect(response.statusCode).toBe(202)
+      expect(response.json()).toMatchObject({ mes: '2026-06', apresentadoras: 1 })
+      await app.close()
+    }
+  })
+
+  it('faixas-default continua no papel de apresentadoras', async () => {
+    const app = buildApp(vi.fn(), 'operacional')
+    await app.register(comissoesRoutes)
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/comissoes/faixas-default',
+      payload: {},
+    })
+    expect(response.statusCode).toBe(400)
+    await app.close()
   })
 })

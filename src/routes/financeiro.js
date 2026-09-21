@@ -654,6 +654,26 @@ export async function financeiroRoutes(app) {
         ORDER BY ara.valor DESC, ara.criado_em ASC
       `, [startDate, endDate, tenant_id])
 
+      // Lives encerradas com GMV e sem linha em vendas_atribuidas. Não entram nas
+      // somas: comissão 0 confirmada já tem linha e não conta aqui.
+      const semApuracao = await db.query(`
+        SELECT COUNT(*)::int AS lives_sem_apuracao
+          FROM lives l
+         WHERE l.tenant_id = $3::uuid
+           AND l.status = 'encerrada'
+           AND ${activeLiveSql('l')}
+           AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
+           AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
+           AND ${liveGmvSql('l')} > 0
+           AND NOT EXISTS (
+             SELECT 1 FROM vendas_atribuidas va
+              WHERE va.tenant_id = l.tenant_id
+                AND va.origem = 'live'
+                AND va.origem_id = l.id
+           )
+      `, [startDate, endDate, tenant_id])
+      const livesSemApuracao = Number(semApuracao.rows[0]?.lives_sem_apuracao ?? 0)
+
       // Junta comissão variável + fixo mensal POR marca. tipo_cobranca decide a composição da
       // ENTRADAS (mesma regra de combinarEntradaMarca): 'fixo_mais_comissao' soma as duas linhas;
       // 'fixo_ou_comissao' entra só a maior (uma linha vencedora) → total = GREATEST(fixo, comissao).
@@ -791,6 +811,7 @@ export async function financeiroRoutes(app) {
         // Pendência de schema: supervisor e demais integrantes da equipe não têm
         // remuneração cadastrada — lançar manualmente em custos (tipo 'salario').
         pendencias: ['equipe_sem_remuneracao_no_schema'],
+        lives_sem_apuracao: livesSemApuracao,
       }
     })
   })

@@ -322,6 +322,83 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('produtor_live não grava valor de comissão; sem o campo persiste o motor', async () => {
+    const origemId = '11111111-1111-4111-8111-111111111111'
+    const marcaId = '22222222-2222-4222-8222-222222222222'
+    const base = {
+      origem: 'video',
+      origem_id: origemId,
+      marca_id: marcaId,
+      data: '2026-06-01',
+      gmv: 1000,
+      pedidos: 2,
+    }
+
+    const bloqueadoQuery = vi.fn()
+    const bloqueado = buildApp({ papel: 'produtor_live', queryMock: bloqueadoQuery })
+    await bloqueado.app.register(vendasAtribuidasRoutes)
+    const postBloqueado = await bloqueado.app.inject({
+      method: 'POST',
+      url: '/v1/vendas-atribuidas',
+      payload: { ...base, comissao_franquia: 50 },
+    })
+    expect(postBloqueado.statusCode).toBe(403)
+    expect(postBloqueado.json()).toEqual({ error: 'Valores de comissão exigem papel financeiro' })
+    expect(bloqueadoQuery).not.toHaveBeenCalled()
+    const patchBloqueado = await bloqueado.app.inject({
+      method: 'PATCH',
+      url: '/v1/vendas-atribuidas/33333333-3333-4333-8333-333333333333',
+      payload: { comissao_apresentadora: 10 },
+    })
+    expect(patchBloqueado.statusCode).toBe(403)
+    expect(bloqueadoQuery).not.toHaveBeenCalled()
+    await bloqueado.app.close()
+
+    const queryMock = vi.fn(async (sql) => {
+      if (String(sql).includes('FROM marcas')) {
+        return { rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '5', marca_condicao_id: null }] }
+      }
+      if (String(sql).includes('INSERT INTO vendas_atribuidas')) {
+        return { rows: [{ id: 'va-1' }] }
+      }
+      return { rows: [] }
+    })
+    const livre = buildApp({ papel: 'produtor_live', queryMock })
+    await livre.app.register(vendasAtribuidasRoutes)
+    const postLivre = await livre.app.inject({
+      method: 'POST',
+      url: '/v1/vendas-atribuidas',
+      payload: base,
+    })
+    expect(postLivre.statusCode).toBe(201)
+    const insert = queryMock.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO vendas_atribuidas'))
+    expect(insert[1][8]).toBe(0)
+    expect(insert[1][9]).toBe(100)
+    expect(insert[1][10]).toBe(50)
+    await livre.app.close()
+
+    const financeiroQuery = vi.fn(async (sql) => {
+      if (String(sql).includes('FROM marcas')) {
+        return { rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '5', marca_condicao_id: null }] }
+      }
+      if (String(sql).includes('INSERT INTO vendas_atribuidas')) return { rows: [{ id: 'va-2' }] }
+      return { rows: [] }
+    })
+    const financeiro = buildApp({ papel: 'financeiro', queryMock: financeiroQuery })
+    await financeiro.app.register(vendasAtribuidasRoutes)
+    const postFinanceiro = await financeiro.app.inject({
+      method: 'POST',
+      url: '/v1/vendas-atribuidas',
+      payload: { ...base, comissao_apresentadora: 0, comissao_franquia: 12.5, comissao_franqueadora: 0 },
+    })
+    expect(postFinanceiro.statusCode).toBe(201)
+    const insertFin = financeiroQuery.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO vendas_atribuidas'))
+    expect(insertFin[1][8]).toBe(0)
+    expect(insertFin[1][9]).toBe(12.5)
+    expect(insertFin[1][10]).toBe(0)
+    await financeiro.app.close()
+  })
+
   it('DELETE /v1/lives/:id removes an ended live and related attribution rows', async () => {
     const liveId = '11111111-1111-4111-8111-111111111111'
     const queryMock = vi.fn(async (sql) => {

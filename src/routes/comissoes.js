@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { READ_COMISSOES, READ_APRESENTADORAS, WRITE_APRESENTADORAS } from '../config/role_groups.js'
+import { READ_COMISSOES, READ_APRESENTADORAS, WRITE_APRESENTADORAS, WRITE_FINANCEIRO } from '../config/role_groups.js'
+import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { getOperationalRanking } from '../lib/operational-ranking.js'
@@ -10,6 +11,19 @@ import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
 
 const APROVADORES = ['franqueador_master', 'franqueado']
+
+// Mesmos fatos de GET /v1/comissoes/pendentes. Aprovar não recalcula valor.
+const DIAGNOSTICO_OPERACIONAL_SQL = `CASE
+             WHEN va.apresentadora_id IS NULL THEN 'sem_apresentadora'
+             WHEN va.marca_id IS NULL OR m.id IS NULL THEN 'sem_marca'
+             WHEN COALESCE(va.comissao_apresentadora, 0) = 0 THEN 'comissao_zero'
+             ELSE 'pronta_para_aprovar'
+           END`
+
+function motivoInformado(body) {
+  const raw = body?.motivo
+  return typeof raw === 'string' ? raw.trim() : ''
+}
 
 const COMISSOES_CACHE_TTL_MS = Number(process.env.COMISSOES_CACHE_TTL_MS ?? 45_000)
 
@@ -181,39 +195,50 @@ export async function comissoesRoutes(app) {
   const readAccess  = [app.authenticate, app.requirePapel(READ_COMISSOES)]
   const writeAccess = [app.authenticate, app.requirePapel(APROVADORES)]
 
-  // POST /v1/comissoes/reprocessar — força AGORA o recálculo das comissões das lives
-  // encerradas do tenant que estão sem vendas_atribuidas (não espera o cron de 10min)
-  // e devolve um diagnóstico das que continuam zeradas e por quê. Ferramenta de
-  // self-service pro admin (sem precisar de acesso ao banco).
+  // POST /v1/comissoes/reprocessar — cria vendas_atribuidas das lives encerradas
+  // sem linha e recalcula as que já têm linha com GMV diferente de liveGmvSql.
+  // Comissão 0 com GMV igual não é motivo de recálculo. GMV nulo/zero sem linha
+  // não ganha placeholder.
   app.post('/v1/comissoes/reprocessar', { preHandler: writeAccess }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const orfas = await db.query(
+      const gmvSql = liveGmvSql('l')
+      const pedidosSql = liveOrdersSql('l')
+      const lives = await db.query(
         `SELECT l.id,
-                to_char(l.iniciado_em, 'YYYY-MM-DD') AS dia,
-                COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
-                COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos,
-                l.marca_id, l.cliente_id,
-                COALESCE(cl.nome, mc.nome) AS nome
+                ${gmvSql} AS gmv,
+                ${pedidosSql} AS pedidos,
+                CASE
+                  WHEN NOT EXISTS (
+                    SELECT 1 FROM vendas_atribuidas va
+                     WHERE va.tenant_id = l.tenant_id
+                       AND va.origem = 'live' AND va.origem_id = l.id
+                  ) AND ${gmvSql} > 0 THEN 'orfa'
+                  WHEN EXISTS (
+                    SELECT 1 FROM vendas_atribuidas va
+                     WHERE va.tenant_id = l.tenant_id
+                       AND va.origem = 'live' AND va.origem_id = l.id
+                       AND va.gmv IS DISTINCT FROM ${gmvSql}
+                  ) THEN 'divergente'
+                  ELSE 'ignorada'
+                END AS classe
            FROM lives l
-           LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
-           LEFT JOIN marcas mc   ON mc.id = l.marca_id   AND mc.tenant_id = l.tenant_id
           WHERE l.tenant_id = $1::uuid
             AND l.status = 'encerrada'
             AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
-            AND COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) > 0
-            AND NOT EXISTS (
-              SELECT 1 FROM vendas_atribuidas va
-               WHERE va.origem = 'live' AND va.origem_id = l.id
-            )
           ORDER BY l.encerrado_em DESC NULLS LAST
           LIMIT 500`,
         [tenant_id],
       )
 
-      let recalculadas = 0
-      const aindaZeradas = []
-      for (const live of orfas.rows) {
+      let orfas = 0
+      let divergentesGmv = 0
+      let ignoradas = 0
+      for (const live of lives.rows) {
+        if (live.classe !== 'orfa' && live.classe !== 'divergente') {
+          ignoradas += 1
+          continue
+        }
         let rows = []
         try {
           rows = await calcularComissoesDaLive(db, {
@@ -224,31 +249,23 @@ export async function comissoesRoutes(app) {
           })
         } catch (err) {
           app.log.warn({ err, liveId: live.id }, '[reprocessar] falha em live')
+          ignoradas += 1
+          continue
         }
-        const totalFranquia = (rows ?? []).reduce((s, r) => s + Number(r?.comissao_franquia ?? 0), 0)
-        if (rows && rows.length > 0 && totalFranquia > 0) {
-          recalculadas += 1
-        } else {
-          aindaZeradas.push({
-            live_id: live.id,
-            nome: live.nome ?? 'Sem marca',
-            dia: live.dia,
-            gmv: Number(live.gmv),
-            motivo: (!rows || rows.length === 0)
-              ? 'Marca não resolvida (cliente sem marca ativa, ou live sem cliente/marca)'
-              : 'Comissão 0 — % de comissão da marca está zerado',
-          })
+        if (!rows || rows.length === 0) {
+          ignoradas += 1
+          continue
         }
+        if (live.classe === 'orfa') orfas += 1
+        else divergentesGmv += 1
       }
 
-      // Recompôs comissões → invalida os dashboards cacheados (comissões/financeiro/analytics)
-      // deste tenant para refletir imediatamente, sem esperar o TTL.
       invalidateTenant(tenant_id)
 
       return {
-        lives_sem_comissao_encontradas: orfas.rows.length,
-        recalculadas_com_comissao: recalculadas,
-        ainda_zeradas: aindaZeradas,
+        orfas,
+        divergentes_gmv: divergentesGmv,
+        ignoradas,
       }
     })
   })
@@ -423,12 +440,7 @@ export async function comissoesRoutes(app) {
            va.atualizado_em,
            m.nome AS marca_nome,
            COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome, COALESCE(a.nome, 'Sem apresentadora') AS nome,
-           CASE
-             WHEN va.apresentadora_id IS NULL THEN 'sem_apresentadora'
-             WHEN va.marca_id IS NULL OR m.id IS NULL THEN 'sem_marca'
-             WHEN COALESCE(va.comissao_apresentadora, 0) = 0 THEN 'comissao_zero'
-             ELSE 'pronta_para_aprovar'
-           END AS diagnostico_operacional,
+           ${DIAGNOSTICO_OPERACIONAL_SQL} AS diagnostico_operacional,
            CASE
              WHEN va.apresentadora_id IS NULL THEN 'Sem apresentadora vinculada'
              WHEN va.marca_id IS NULL OR m.id IS NULL THEN 'Sem marca vinculada'
@@ -445,6 +457,7 @@ export async function comissoesRoutes(app) {
              AND va_mes.apresentadora_id = va.apresentadora_id
              AND date_trunc('month', va_mes.data::timestamp) = date_trunc('month', va.data::timestamp)
              AND va_mes.id <> va.id
+             AND va_mes.status_aprovacao <> 'reprovada'
          ) month_gmv ON true
          LEFT JOIN LATERAL (
            SELECT f.id, f.comissao_pct
@@ -470,40 +483,71 @@ export async function comissoesRoutes(app) {
     })
   })
 
-  // PATCH /v1/comissoes/:id/aprovar — aprova comissão (somente franqueador_master / franqueado)
+  // PATCH /v1/comissoes/:id/aprovar — aprova comissão (somente franqueador_master / franqueado).
+  // Não altera valores. Linha incompleta ou zerada fica 409; reprovada só reabre com motivo.
   app.patch('/v1/comissoes/:id/aprovar', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id, sub, papel } = request.user
+    const body = request.body ?? {}
+    const motivo = motivoInformado(body)
     return app.withTenant(tenant_id, async (db) => {
       const current = await db.query(
-        `SELECT id, status_aprovacao FROM vendas_atribuidas
-         WHERE id = $1 AND tenant_id = $2::uuid`,
+        `SELECT va.id, va.status_aprovacao, va.comissao_apresentadora,
+                ${DIAGNOSTICO_OPERACIONAL_SQL} AS diagnostico_operacional
+           FROM vendas_atribuidas va
+           LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+          WHERE va.id = $1 AND va.tenant_id = $2::uuid`,
         [request.params.id, tenant_id],
       )
-      if (!current.rows[0]) return reply.code(404).send({ error: 'Comissão não encontrada' })
-      if (current.rows[0].status_aprovacao === 'aprovada') {
+      const row = current.rows[0]
+      if (!row) return reply.code(404).send({ error: 'Comissão não encontrada' })
+      if (row.status_aprovacao === 'aprovada') {
         return reply.code(409).send({ error: 'Comissão já aprovada' })
+      }
+
+      const reabrir = row.status_aprovacao === 'reprovada'
+      if (reabrir && (body.reabrir !== true || motivo.length < 3)) {
+        return reply.code(409).send({ error: 'Comissão já reprovada' })
+      }
+
+      const diagnostico = row.diagnostico_operacional
+      if (!reabrir && (diagnostico === 'sem_apresentadora' || diagnostico === 'sem_marca')) {
+        return reply.code(409).send({
+          error: diagnostico === 'sem_apresentadora' ? 'Sem apresentadora vinculada' : 'Sem marca vinculada',
+          diagnostico_operacional: diagnostico,
+        })
+      }
+      const confirmarZero = !reabrir && diagnostico === 'comissao_zero'
+      if (confirmarZero && (body.confirmar_zero !== true || motivo.length < 3)) {
+        return reply.code(409).send({
+          error: 'Comissão zerada exige confirmação',
+          diagnostico_operacional: 'comissao_zero',
+        })
       }
 
       const result = await db.query(
         `UPDATE vendas_atribuidas
          SET status_aprovacao = 'aprovada',
-             status_motivo    = NULL,
-             aprovado_por     = $1,
+             status_motivo    = $1,
+             aprovado_por     = $2,
              aprovado_em      = NOW(),
              atualizado_em    = NOW()
-         WHERE id = $2 AND tenant_id = $3::uuid
-         RETURNING id, status_aprovacao, aprovado_em`,
-        [sub, request.params.id, tenant_id],
+         WHERE id = $3 AND tenant_id = $4::uuid
+         RETURNING id, status_aprovacao, status_motivo, aprovado_em, comissao_apresentadora`,
+        [reabrir || confirmarZero ? motivo : null, sub, request.params.id, tenant_id],
       )
 
       app.audit?.log?.(request, {
-        action: 'comissao.aprovar',
+        action: reabrir ? 'comissao.reabrir' : 'comissao.aprovar',
         entity_type: 'venda_atribuida',
         entity_id: request.params.id,
-        metadata: { aprovado_por: sub, papel },
+        metadata: {
+          aprovado_por: sub,
+          papel,
+          ...(reabrir ? { reabrir: true, motivo } : {}),
+          ...(confirmarZero ? { confirmar_zero: true, motivo } : {}),
+        },
       })?.catch(err => app.log.error({ err }, 'audit log failed'))
 
-      // Aprovação muda quais vendas contam nos rankings → invalida o cache do tenant.
       invalidateTenant(tenant_id)
 
       return result.rows[0]
@@ -727,6 +771,7 @@ export async function comissoesRoutes(app) {
              AND va_mes.apresentadora_id = va.apresentadora_id
              AND date_trunc('month', va_mes.data::timestamp) = date_trunc('month', va.data::timestamp)
              AND va_mes.id <> va.id
+             AND va_mes.status_aprovacao <> 'reprovada'
          ) month_gmv ON true
          LEFT JOIN LATERAL (
            SELECT f.gmv_inicio, f.gmv_fim, f.comissao_pct
@@ -794,9 +839,14 @@ export async function comissoesRoutes(app) {
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
          LEFT JOIN marcas m         ON m.id = va.marca_id         AND m.tenant_id = va.tenant_id
          WHERE ${where}
-         ORDER BY va.data DESC, va.criado_em DESC`,
+         ORDER BY va.data DESC, va.criado_em DESC
+         LIMIT 10001`,
         values,
       )
+
+      if (result.rows.length >= 10001) {
+        return reply.code(400).send({ error: 'Export limitado a 10000 linhas. Filtre o período.' })
+      }
 
       const header = ['data', 'apresentadora', 'marca', 'origem', 'gmv', 'comissao_apresentadora', 'comissao_franquia', 'comissao_franqueadora', 'status']
       const lines = [header.join(',')]
@@ -1032,7 +1082,9 @@ export async function comissoesRoutes(app) {
   // com a escada vigente. Vendas aprovadas nunca são tocadas. Responde 202 e
   // roda em background (fire-and-forget) — mesma proteção anti-timeout dos
   // endpoints de faixa.
-  app.post('/v1/comissoes/recalcular-mes', { preHandler: faixasDefaultWrite }, async (request, reply) => {
+  app.post('/v1/comissoes/recalcular-mes', {
+    preHandler: [app.authenticate, app.requirePapel(WRITE_FINANCEIRO)],
+  }, async (request, reply) => {
     const parsed = z.object({
       mes: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'mes deve estar no formato YYYY-MM'),
     }).safeParse(request.body ?? {})

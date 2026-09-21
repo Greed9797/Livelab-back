@@ -69,6 +69,39 @@ const METRICS_COMPLETO = {
 // Testes
 // ---------------------------------------------------------------------------
 
+describe('GET /v1/cliente/financeiro', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('gmv_mes usa liveGmvSql e preserva 0', async () => {
+    let gmvMes = '1800'
+    const { app, setQueryMock } = buildApp()
+    setQueryMock(vi.fn(async (sql) => {
+      const s = String(sql)
+      if (s.includes('FROM clientes')) return { rows: [{ id: 'cli-1', nome: 'Parceiro', nicho: 'Moda' }] }
+      if (s.includes('FROM contratos')) return { rows: [] }
+      if (s.includes('AS gmv_mes')) {
+        expect(s).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
+        expect(s).not.toMatch(/SUM\(\s*l\.fat_gerado\s*\)/)
+        return { rows: [{ gmv_mes: gmvMes, lives_mes: 1, pedidos: 0 }] }
+      }
+      if (s.includes('FROM boletos')) return { rows: [] }
+      return { rows: [] }
+    }))
+    await app.register(clienteInsightsRoutes)
+    await app.ready()
+
+    const comAds = await app.inject({ method: 'GET', url: '/v1/cliente/financeiro?mes=6&ano=2026' })
+    expect(comAds.statusCode).toBe(200)
+    expect(comAds.json().resumo.gmv_mes).toBe(1800)
+
+    gmvMes = '0'
+    const zerado = await app.inject({ method: 'GET', url: '/v1/cliente/financeiro?mes=6&ano=2026' })
+    expect(zerado.statusCode).toBe(200)
+    expect(zerado.json().resumo.gmv_mes).toBe(0)
+    await app.close()
+  })
+})
+
 describe('GET /v1/cliente/operacional', () => {
   afterEach(() => vi.restoreAllMocks())
 

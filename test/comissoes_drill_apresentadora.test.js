@@ -107,6 +107,25 @@ describe('GET /v1/comissoes/memoria', () => {
     expect(sql).toContain("date_trunc('month'")
     expect(sql).toContain('EXTRACT(DOW FROM va.data)')
     expect(sql).toContain("<> 'reprovada'")
+    const lateral = sql.slice(sql.indexOf('LEFT JOIN LATERAL'), sql.indexOf(') month_gmv'))
+    expect(lateral).toContain("va_mes.status_aprovacao <> 'reprovada'")
+    expect(lateral).not.toContain('pendente_aprovacao')
+  })
+
+  it('pendentes exclui reprovada do gmv do mês e continua listando pendente_aprovacao', async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+    const app = buildApp(queryMock)
+    await app.register(comissoesRoutes)
+    const response = await app.inject({ method: 'GET', url: '/v1/comissoes/pendentes' })
+    expect(response.statusCode).toBe(200)
+    const sql = String(queryMock.mock.calls[0][0])
+    const lateral = sql.slice(sql.indexOf('LEFT JOIN LATERAL'), sql.indexOf(') month_gmv'))
+    expect(lateral).toContain("va_mes.status_aprovacao <> 'reprovada'")
+    expect(lateral).not.toContain('pendente_aprovacao')
+    expect(sql).toContain("va.status_aprovacao = 'pendente_aprovacao'")
+    expect(sql).toContain("THEN 'sem_apresentadora'")
+    expect(sql).toContain("THEN 'comissao_zero'")
+    await app.close()
   })
 
   it('keeps faixa null when no tier matched', async () => {

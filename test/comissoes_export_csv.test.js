@@ -62,4 +62,52 @@ describe('GET /v1/comissoes/export-csv', () => {
     expect(res.body).toContain('aprovada')
     await app.close()
   })
+
+  it('recusa export com mais de 10000 linhas e não devolve CSV parcial', async () => {
+    const rows = Array.from({ length: 10001 }, () => ({
+      data: '2026-05-01',
+      apresentadora_nome: 'Ana',
+      marca_nome: 'Marca',
+      origem: 'live',
+      gmv: 1,
+      comissao_apresentadora: 0,
+      comissao_franquia: 0,
+      comissao_franqueadora: 0,
+      status: 'aprovada',
+    }))
+    const queryMock = vi.fn().mockResolvedValue({ rows })
+    const { app } = buildApp({ queryMock })
+    await app.register(comissoesRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/comissoes/export-csv?mes=2026-05' })
+    expect(res.statusCode).toBe(400)
+    expect(res.headers['content-type'] ?? '').not.toContain('text/csv')
+    expect(res.json()).toEqual({ error: 'Export limitado a 10000 linhas. Filtre o período.' })
+    expect(res.body).not.toContain('data,apresentadora')
+    expect(String(queryMock.mock.calls[0][0])).toContain('LIMIT 10001')
+    await app.close()
+  })
+
+  it('ainda baixa um conjunto dentro do limite', async () => {
+    const queryMock = vi.fn().mockResolvedValue({
+      rows: [{
+        data: '2026-05-02',
+        apresentadora_nome: 'Bia',
+        marca_nome: 'Marca',
+        origem: 'live',
+        gmv: 0,
+        comissao_apresentadora: 0,
+        comissao_franquia: 0,
+        comissao_franqueadora: 0,
+        status: 'aprovada',
+      }],
+    })
+    const { app } = buildApp({ queryMock })
+    await app.register(comissoesRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/comissoes/export-csv?mes=2026-05' })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['content-type']).toContain('text/csv')
+    expect(res.body).toContain('0.00')
+    await app.close()
+  })
 })

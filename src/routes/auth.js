@@ -36,7 +36,8 @@ export async function authRoutes(app) {
     const result = await app.db.query(
       `SELECT u.*, t.nome as tenant_nome
        FROM users u JOIN tenants t ON t.id = u.tenant_id
-       WHERE u.email = $1 AND u.ativo = true`,
+       WHERE LOWER(u.email) = LOWER($1) AND u.ativo = true
+       LIMIT 1`,
       [email]
     )
 
@@ -233,12 +234,18 @@ export async function authRoutes(app) {
     if (!senhaOk) return reply.code(401).send({ error: 'Senha atual incorreta' })
 
     const novoHash = await bcrypt.hash(nova_senha, SECURITY.BCRYPT_ROUNDS)
+    // Mesmo statement de /redefinir-senha: hash e token_version sobem juntos,
+    // então o access JWT desta troca morre na próxima request (cache incluso).
     await app.db.query(
-      `UPDATE users SET senha_hash = $1, atualizado_em = NOW() WHERE id = $2`,
+      `UPDATE users
+          SET senha_hash = $1,
+              token_version = token_version + 1,
+              atualizado_em = NOW()
+        WHERE id = $2 AND ativo = true`,
       [novoHash, user.id]
     )
+    app.invalidateTokenVersionCache?.(user.id)
 
-    // Revoga refresh tokens existentes — força re-login em outras sessões
     await app.db.query(
       `UPDATE refresh_tokens SET revogado = true WHERE user_id = $1`,
       [user.id]

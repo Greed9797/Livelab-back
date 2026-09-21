@@ -47,6 +47,7 @@ const chaveViva = {
   tenant_id: tenantId,
   papel: 'automacao',
   nome: 'grok bot',
+  criado_por: null,
   revogada_em: null,
   expira_em: null,
 }
@@ -57,6 +58,15 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('POST', '/v1/analytics/imports/preview')).toBe(true)
     expect(chaveAlcancaRota('POST', '/v1/analytics/imports/abc/apply')).toBe(false)
     expect(chaveAlcancaRota('GET', '/v1/lives?status=encerrada')).toBe(true)
+    expect(chaveAlcancaRota('GET', '/v1/lives/66666666-6666-4666-8666-666666666666')).toBe(true)
+    expect(chaveAlcancaRota('GET', '/v1/analytics/imports')).toBe(true)
+    expect(chaveAlcancaRota('GET', '/v1/analytics/imports/66666666-6666-4666-8666-666666666666')).toBe(true)
+    expect(chaveAlcancaRota('GET', '/v1/marcas')).toBe(true)
+    expect(chaveAlcancaRota('GET', '/v1/marcas/66666666-6666-4666-8666-666666666666')).toBe(true)
+    expect(chaveAlcancaRota('GET', '/v1/apresentadoras')).toBe(true)
+    expect(chaveAlcancaRota('GET', '/v1/comissoes/resumo')).toBe(true)
+    expect(chaveAlcancaRota('GET', '/v1/comissoes/apresentadoras')).toBe(true)
+    expect(chaveAlcancaRota('GET', '/v1/comissoes/marcas')).toBe(true)
     expect(chaveAlcancaRota('PATCH', '/v1/marcas/66666666-6666-4666-8666-666666666666')).toBe(true)
     // sub-rota de escrita e id que não é uuid ficam de fora, mesmo com prefixo na lista
     expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666/encerrar')).toBe(false)
@@ -65,7 +75,7 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('POST', '/v1/lives/manual/x')).toBe(false)
     expect(chaveAlcancaRota('PATCH', '/v1/marcas/abc')).toBe(false)
 
-    // Condições comerciais por competência: POST explícito; GET já cai no prefixo /v1/marcas
+    // Condições comerciais por competência: GET e POST explícitos, sem prefixo solto
     expect(chaveAlcancaRota('GET', '/v1/marcas/66666666-6666-4666-8666-666666666666/condicoes')).toBe(true)
     expect(chaveAlcancaRota('POST', '/v1/marcas/66666666-6666-4666-8666-666666666666/condicoes/preview')).toBe(true)
     expect(chaveAlcancaRota('POST', '/v1/marcas/66666666-6666-4666-8666-666666666666/condicoes')).toBe(true)
@@ -85,6 +95,17 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('POST', '/v1/apresentadoras')).toBe(false)
     // clientes CRUD continua fora (use marcas + cliente_id/cliente_nome na listagem)
     expect(chaveAlcancaRota('GET', '/v1/clientes')).toBe(false)
+    // GET é caminho exato ou um único :id — prefixo não abre sub-rota
+    expect(chaveAlcancaRota('GET', '/v1/comissoes')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/comissoes/export-csv')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/comissoes/memoria')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/comissoes/pendentes')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/comissoes/por-apresentadora/66666666-6666-4666-8666-666666666666')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/analytics/dashboard')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/analytics/funil')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/lives/resumo-dia')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/lives/66666666-6666-4666-8666-666666666666/comissoes')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/apresentadoras/66666666-6666-4666-8666-666666666666')).toBe(false)
   })
 })
 
@@ -125,6 +146,29 @@ describe('autenticação por chave de API', () => {
     expect(params[0]).toBe(hashDaChave(CHAVE))
     expect(params[0]).not.toContain(CHAVE)
     expect(sql).toContain('key_hash = $1')
+    expect(sql).toContain('criado_por')
+  })
+
+  it('coloca o criador da chave em sub e não inventa usuário quando criado_por é null', async () => {
+    const criador = '99999999-9999-4999-8999-999999999999'
+    const comCriador = await buildApp({ ...chaveViva, criado_por: criador })
+    const ok = await comCriador.app.inject({
+      method: 'GET',
+      url: '/v1/lives',
+      headers: { 'x-api-key': CHAVE },
+    })
+    expect(ok.statusCode).toBe(200)
+    expect(ok.json().sub).toBe(criador)
+    expect(ok.json().sub).not.toBe(keyId)
+
+    const semCriador = await buildApp({ ...chaveViva, criado_por: null })
+    const nulo = await semCriador.app.inject({
+      method: 'GET',
+      url: '/v1/lives',
+      headers: { 'x-api-key': CHAVE },
+    })
+    expect(nulo.statusCode).toBe(200)
+    expect(nulo.json().sub).toBeNull()
   })
 
   it('recusa chave inexistente, revogada e expirada com a mesma resposta', async () => {

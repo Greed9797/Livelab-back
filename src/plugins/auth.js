@@ -16,29 +16,33 @@ const UUID_BODY = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 // Não há DELETE nenhum, e de fora ficam usuários, financeiro, boletos,
 // contratos e configurações (esta última guarda as chaves do gateway de
 // pagamento).
-// Regra de casamento:
-// - GET casa por prefixo
-// - POST/PATCH sem barra final e sem `:id` casa EXATO
+// Regra de casamento (GET incluso — sem prefixo solto):
+// - Sem barra final e sem `:id` casa EXATO
 // - PATCH com barra final casa só `<prefixo><uuid>` — nunca sub-rota (encerrar,
 //   publicar, faixas-comissao, apresentadoras do vínculo)
-// - Entradas com `:id` casam exatamente aquele caminho (uuid no lugar do :id),
-//   usadas para POST de condições comerciais por competência.
+// - Entradas com `:id` casam exatamente aquele caminho (uuid no lugar do :id)
 export const ROTAS_API_KEY = [
   ['POST', '/v1/analytics/imports/preview'],
   ['POST', '/v1/analytics/imports/ingest'],
-  ['GET', '/v1/analytics/'],
+  ['GET', '/v1/analytics/imports'],
+  ['GET', '/v1/analytics/imports/:id'],
   ['GET', '/v1/lives'],
+  ['GET', '/v1/lives/:id'],
   ['POST', '/v1/lives'],
   ['POST', '/v1/lives/manual'],
   ['PATCH', '/v1/lives/'],
   ['GET', '/v1/marcas'],
+  ['GET', '/v1/marcas/:id'],
+  ['GET', '/v1/marcas/:id/condicoes'],
   ['POST', '/v1/marcas'],
   ['PATCH', '/v1/marcas/'],
   ['POST', '/v1/marcas/:id/condicoes/preview'],
   ['POST', '/v1/marcas/:id/condicoes'],
   ['GET', '/v1/apresentadoras'],
   ['PATCH', '/v1/apresentadoras/'],
-  ['GET', '/v1/comissoes'],
+  ['GET', '/v1/comissoes/resumo'],
+  ['GET', '/v1/comissoes/apresentadoras'],
+  ['GET', '/v1/comissoes/marcas'],
 ]
 
 function escapeRegex(text) {
@@ -50,7 +54,6 @@ export function chaveAlcancaRota(metodo, caminho) {
   const limpo = String(caminho ?? '').split('?')[0]
   return ROTAS_API_KEY.some(([m, rota]) => {
     if (m !== metodo) return false
-    if (m === 'GET') return limpo.startsWith(rota)
     if (rota.includes(':id')) {
       const [prefixo, ...resto] = rota.split(':id')
       if (resto.length !== 1) return false
@@ -130,10 +133,10 @@ async function authPlugin(app) {
   app.decorate('invalidateTokenVersionCache', (userId) => tokenVersionCache.delete(userId))
 
   async function _verifyTokenVersion(request, reply) {
-    // Chave de API não tem sessão para expirar: quem a derruba é a revogação na
-    // própria tabela, conferida a cada request. O `sub` dela nem é um UUID de
-    // usuário, então o SELECT abaixo só geraria erro de cast.
-    if (request.viaApiKey) return
+  // Chave de API não tem sessão para expirar: quem a derruba é a revogação na
+  // própria tabela, conferida a cada request. `sub` pode ser o criador da chave
+  // (ou null); token_version desse usuário não invalida a chave.
+  if (request.viaApiKey) return
     // Dedup por request: rotas que empilham [authenticate, requirePapel(...)]
     // chamariam este check 2× (1 SELECT token_version + 1 jwtVerify redundante
     // cada). Após a 1ª verificação bem-sucedida na request, marcamos a flag e
@@ -187,7 +190,7 @@ async function authPlugin(app) {
     if (typeof bruta !== 'string' || bruta.length === 0) return false
 
     const { rows } = await app.db.query(
-      `SELECT id, tenant_id, papel, nome, revogada_em, expira_em
+      `SELECT id, tenant_id, papel, nome, criado_por, revogada_em, expira_em
          FROM api_keys
         WHERE key_hash = $1`,
       [hashDaChave(bruta)],

@@ -50,7 +50,7 @@ export async function solicitacoesRoutes(app) {
           cli.nome   AS cliente_nome,
           u.nome     AS solicitante_nome
         FROM agenda_eventos ae
-        JOIN cabines  cab ON cab.id = ae.cabine_id AND cab.tenant_id = ae.tenant_id
+        LEFT JOIN cabines  cab ON cab.id = ae.cabine_id AND cab.tenant_id = ae.tenant_id
         JOIN marcas   mar ON mar.id = ae.marca_id  AND mar.tenant_id = ae.tenant_id
         JOIN clientes cli ON cli.id = mar.cliente_id AND cli.tenant_id = ae.tenant_id
         LEFT JOIN users u ON u.id = ae.criado_por
@@ -74,7 +74,7 @@ export async function solicitacoesRoutes(app) {
         motivo_recusa:    r.motivo_recusa,
         criado_em:        r.criado_em,
         atualizado_em:    r.atualizado_em,
-        cabine_numero:    Number(r.cabine_numero),
+        cabine_numero:    r.cabine_numero == null ? null : Number(r.cabine_numero),
         cliente_nome:     r.cliente_nome,
         solicitante_nome: r.solicitante_nome,
       }))

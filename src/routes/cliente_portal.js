@@ -367,7 +367,7 @@ export async function clientePortalRoutes(app) {
                cab.numero AS cabine_numero
         FROM agenda_eventos ae
         JOIN marcas mar ON mar.id = ae.marca_id AND mar.tenant_id = ae.tenant_id
-        JOIN cabines cab ON cab.id = ae.cabine_id AND cab.tenant_id = ae.tenant_id
+        LEFT JOIN cabines cab ON cab.id = ae.cabine_id AND cab.tenant_id = ae.tenant_id
         WHERE mar.cliente_id = $1
           AND ae.tipo = 'live'
           AND ae.status != 'cancelado'

@@ -113,27 +113,31 @@ async function startOneEvent(app, ev) {
       return { skipped: true }
     }
 
-    // Cabine deve existir, ativa, e não estar em outra live em_andamento.
-    const cabQ = await client.query(
-      `SELECT id, status, ativo, live_atual_id, contrato_id
-         FROM cabines
-        WHERE id = $1::uuid AND tenant_id = $2::uuid
-        FOR UPDATE`,
-      [locked.cabine_id, ev.tenant_id],
-    )
-    const cab = cabQ.rows[0]
-    if (!cab || cab.ativo === false) {
-      await client.query('ROLLBACK')
-      app.log?.warn?.({ agenda_evento_id: ev.id, cabine_id: locked.cabine_id },
-        '[agenda autostart] cabine inativa ou inexistente, pulando')
-      return { skipped: true }
-    }
-    if (cab.live_atual_id) {
-      // Já tem live ativa nessa cabine — não substituir, deixar humano resolver.
-      await client.query('ROLLBACK')
-      app.log?.warn?.({ agenda_evento_id: ev.id, cabine_id: cab.id, live_atual_id: cab.live_atual_id },
-        '[agenda autostart] cabine já tem live ativa, pulando')
-      return { skipped: true }
+    // Cabine é opcional. Quando o evento tem estação, ela precisa estar ativa
+    // e livre. Sem cabine, a live abre só com marca + apresentadora.
+    let cab = null
+    if (locked.cabine_id) {
+      const cabQ = await client.query(
+        `SELECT id, status, ativo, live_atual_id, contrato_id
+           FROM cabines
+          WHERE id = $1::uuid AND tenant_id = $2::uuid
+          FOR UPDATE`,
+        [locked.cabine_id, ev.tenant_id],
+      )
+      cab = cabQ.rows[0]
+      if (!cab || cab.ativo === false) {
+        await client.query('ROLLBACK')
+        app.log?.warn?.({ agenda_evento_id: ev.id, cabine_id: locked.cabine_id },
+          '[agenda autostart] cabine inativa ou inexistente, pulando')
+        return { skipped: true }
+      }
+      if (cab.live_atual_id) {
+        // Já tem live ativa nessa cabine — não substituir, deixar humano resolver.
+        await client.query('ROLLBACK')
+        app.log?.warn?.({ agenda_evento_id: ev.id, cabine_id: cab.id, live_atual_id: cab.live_atual_id },
+          '[agenda autostart] cabine já tem live ativa, pulando')
+        return { skipped: true }
+      }
     }
 
     // Resolve marca → cliente_id e apresentador_user_id (apresentadora.user_id).
@@ -148,7 +152,7 @@ async function startOneEvent(app, ev) {
 
     if (!locked.marca_id) {
       await client.query('ROLLBACK')
-      app.log?.warn?.({ agenda_evento_id: ev.id, cabine_id: cab.id },
+      app.log?.warn?.({ agenda_evento_id: ev.id, cabine_id: locked.cabine_id },
         '[agenda autostart] evento de live sem marca — live NÃO criada (marca obrigatória)')
       return { skipped: true, reason: 'sem_marca' }
     }
@@ -211,12 +215,14 @@ async function startOneEvent(app, ev) {
       log: app.log,
     })
 
-    await client.query(
-      `UPDATE cabines
-          SET status = 'ao_vivo', live_atual_id = $1::uuid
-        WHERE id = $2::uuid AND tenant_id = $3::uuid`,
-      [liveId, locked.cabine_id, ev.tenant_id],
-    )
+    if (locked.cabine_id) {
+      await client.query(
+        `UPDATE cabines
+            SET status = 'ao_vivo', live_atual_id = $1::uuid
+          WHERE id = $2::uuid AND tenant_id = $3::uuid`,
+        [liveId, locked.cabine_id, ev.tenant_id],
+      )
+    }
 
     // Audit log (best effort — não bloqueia se tabela ausente).
     // O SAVEPOINT é o que torna esse "best effort" verdadeiro: sem ele o catch abaixo não

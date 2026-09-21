@@ -130,4 +130,37 @@ describe('GET /v1/lives/resumo-dia', () => {
     expect(calls[0].sql).toContain('l.live_impressions')
     expect(calls[0].params[0]).toBe(tenantId)
   })
+
+  it('aceita status=encerrada e recusa status fora da lista', async () => {
+    const { app, calls } = buildApp({ lives: [{
+      id: 'live-1',
+      iniciado_em: '2026-09-11T13:00:00-03:00',
+      encerrado_em: '2026-09-11T15:00:00-03:00',
+      gmv: 10,
+      pedidos: 1,
+      marca_nome: 'Rovitex',
+      apresentadora_nome: 'Sandy',
+      manual_views: null,
+      live_impressions: null,
+    }] })
+    await livesRoutes(app)
+
+    const ok = await app.inject({
+      method: 'GET',
+      url: '/v1/lives/resumo-dia?data=2026-09-11&status=encerrada',
+    })
+    expect(ok.statusCode).toBe(200)
+    expect(ok.json().texto_whatsapp).toContain('Rovitex')
+    expect(ok.json().texto_whatsapp).not.toContain('visualiza')
+    expect(ok.json().texto_whatsapp).not.toContain('impress')
+    expect(calls.some((call) => call.params.includes('encerrada'))).toBe(true)
+
+    const bad = await app.inject({
+      method: 'GET',
+      url: '/v1/lives/resumo-dia?data=2026-09-11&status=nope',
+    })
+    expect(bad.statusCode).toBe(400)
+    expect(bad.json().error).toMatch(/Status inválido/)
+    await app.close()
+  })
 })

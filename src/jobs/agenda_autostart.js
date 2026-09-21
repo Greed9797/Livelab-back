@@ -15,6 +15,8 @@
 //
 // Janela de tolerância: ignora eventos com data_inicio < NOW() - 1h
 // (não auto-start agenda esquecida há horas — só warning no log).
+// Quando data_fim passa sem live_id, o mesmo tick cancela o planejado.
+// Não cria live, não mexe na cabine e não reescreve observacoes.
 //
 // TikTok connector é pego automaticamente por connectorManager.syncLives()
 // (server.js:88) que roda a cada 60s.
@@ -35,9 +37,26 @@ export async function runAgendaAutostartTick(app) {
     return { skipped: true }
   }
   _running = true
-  const results = { started: 0, skipped: 0, stale: 0, errors: 0 }
+  const results = { started: 0, skipped: 0, stale: 0, cancelled: 0, errors: 0 }
 
   try {
+    const expirados = await scanPorTenant(
+      app,
+      `UPDATE agenda_eventos
+          SET status = 'cancelado', atualizado_em = NOW()
+        WHERE tipo = 'live'
+          AND status = 'planejado'
+          AND live_id IS NULL
+          AND data_fim < NOW()
+        RETURNING id`,
+      [],
+      '[agenda autostart]',
+    )
+    for (const row of expirados) {
+      results.cancelled += 1
+      app.log?.info?.({ agenda_evento_id: row.id }, '[agenda autostart] planejado passado sem live — cancelado')
+    }
+
     // Busca eventos candidatos tenant a tenant, cada varredura com seu contexto
     // RLS (ver src/jobs/tenant_scan.js). Um SELECT cross-tenant via app.db
     // devolveria zero linhas assim que a RLS for aplicada, em silêncio.
@@ -86,7 +105,7 @@ export async function runAgendaAutostartTick(app) {
     _running = false
   }
 
-  if (results.started > 0 || results.errors > 0 || results.stale > 0) {
+  if (results.started > 0 || results.errors > 0 || results.stale > 0 || results.cancelled > 0) {
     app.log?.info?.({ ...results }, '[agenda autostart] tick concluído')
   }
   return results

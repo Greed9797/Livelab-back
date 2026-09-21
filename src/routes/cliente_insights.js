@@ -347,7 +347,7 @@ export async function clienteInsightsRoutes(app) {
            SELECT make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${TZ}') AS inicio,
                   make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${TZ}') + INTERVAL '1 month' AS fim
          )
-         SELECT COALESCE(SUM(l.fat_gerado),0) AS gmv_mes, COUNT(l.id)::int AS lives_mes,
+         SELECT COALESCE(SUM(${liveGmvSql('l')}),0) AS gmv_mes, COUNT(l.id)::int AS lives_mes,
                 COALESCE(SUM(l.final_orders_count),0)::int AS pedidos
          FROM lives l CROSS JOIN periodo p
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid

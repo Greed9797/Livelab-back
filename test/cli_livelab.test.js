@@ -139,6 +139,10 @@ describe.skipIf(!temPython)('cli/livelab.py', () => {
     expect(r.stdout).toMatch(/^POST\s+\/v1\/lives\/manual\s/m)
     expect(r.stdout).toMatch(/^POST\s+\/v1\/marcas\/:id\/condicoes\s/m)
     expect(r.stdout).toMatch(/^GET\s+\/v1\/marcas\/:id\/condicoes\s/m)
+    expect(r.stdout).toMatch(/^GET\s+\/v1\/comissoes\/apresentadoras\s/m)
+    expect(r.stdout).toMatch(/^GET\s+\/v1\/comissoes\/resumo\s/m)
+    expect(r.stdout).toMatch(/^GET\s+\/v1\/comissoes\/marcas\s/m)
+    expect(r.stdout).not.toMatch(/^GET\s+\/v1\/comissoes\s/m)
     const linhas = r.stdout.trim().split('\n')
     expect(linhas.length).toBeGreaterThanOrEqual(10)
     for (const linha of linhas) {
@@ -189,6 +193,13 @@ describe.skipIf(!temPython)('cli/livelab.py', () => {
     const lista = await cli(['lives', 'list', '-q', 'status=encerrada'])
     expect(lista.status).toBe(0)
     expect(ultima()).toMatchObject({ method: 'GET', url: '/v1/lives?status=encerrada' })
+
+    const comissoes = await cli(['comissoes', 'list', '-q', 'mes=2026-09', '-q', `apresentadora_id=${UUID}`])
+    expect(comissoes.status).toBe(0)
+    expect(ultima()).toMatchObject({
+      method: 'GET',
+      url: `/v1/comissoes/apresentadoras?mes=2026-09&apresentadora_id=${UUID}`,
+    })
 
     const lote = await cli(['imports', 'get', UUID])
     expect(lote.status).toBe(0)

@@ -55,7 +55,9 @@ ROTAS = [
     ('POST', '/v1/marcas/:id/condicoes', 'Confirmar condição comercial (Idempotency-Key + expected_revision)'),
     ('GET', '/v1/apresentadoras', 'Listar apresentadoras'),
     ('PATCH', '/v1/apresentadoras/:id', 'Editar apresentadora'),
-    ('GET', '/v1/comissoes', 'Ler comissão calculada'),
+    ('GET', '/v1/comissoes/resumo', 'Resumo de comissão calculada'),
+    ('GET', '/v1/comissoes/apresentadoras', 'Comissão por apresentadora. Filtros: mes (AAAA-MM), apresentadora_id'),
+    ('GET', '/v1/comissoes/marcas', 'Comissão por marca'),
 ]
 
 
@@ -237,7 +239,7 @@ NOMEADOS = {
                    'Não há criar: apresentadora nasce do convite de usuário no painel'),
     },
     'comissoes': {
-        'list': ('GET', '/v1/comissoes', 'Ler comissão calculada. Filtros em -q: mes (AAAA-MM), apresentadora_id'),
+        'list': ('GET', '/v1/comissoes/apresentadoras', 'Comissão por apresentadora. Filtros em -q: mes (AAAA-MM), apresentadora_id'),
     },
     'imports': {
         'list': ('GET', '/v1/analytics/imports', 'Listar lotes de import'),

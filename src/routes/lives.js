@@ -1970,7 +1970,7 @@ export async function livesRoutes(app) {
            WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
          ) ap_v2 ON true
          LEFT JOIN LATERAL (
-           SELECT m.id, m.nome AS marca_nome, m.cliente_id
+           SELECT m.id, m.id AS marca_id, m.nome AS marca_nome, m.cliente_id
            FROM marcas m
            LEFT JOIN vendas_atribuidas va ON va.marca_id = m.id AND va.tenant_id = m.tenant_id AND va.origem = 'live' AND va.origem_id = l.id
            WHERE m.tenant_id = l.tenant_id AND (m.id = l.marca_id OR va.id IS NOT NULL)

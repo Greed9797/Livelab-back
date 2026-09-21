@@ -128,6 +128,8 @@ describe('GET /v1/lives/resumo-dia', () => {
     expect(calls[0].sql).toContain('l.manual_views')
     expect(calls[0].sql).toContain('l.final_peak_viewers')
     expect(calls[0].sql).toContain('l.live_impressions')
+    expect(calls[0].sql).toMatch(/va_marca\.marca_id/)
+    expect(calls[0].sql).toMatch(/m\.id AS marca_id/)
     expect(calls[0].params[0]).toBe(tenantId)
   })
 })

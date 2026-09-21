@@ -1,9 +1,3 @@
-export const TRAINING_READERS = [
-  'franqueador_master', 'franqueado', 'gerente', 'gerente_comercial',
-  'financeiro', 'financeiro_readonly', 'auditor', 'suporte', 'operacional',
-  'produtor_live', 'marketing', 'comercial_readonly', 'apresentador', 'apresentadora',
-]
-
 export const AUDIENCE_BY_ROLE = {
   apresentador: 'apresentadora',
   apresentadora: 'apresentadora',
@@ -172,15 +166,27 @@ export function lessonMaterial(source) {
   }
 }
 
+function dedupeByLessonId(lessons) {
+  const seen = new Set()
+  const unique = []
+  for (const lesson of lessons) {
+    if (seen.has(lesson.id)) continue
+    seen.add(lesson.id)
+    unique.push(lesson)
+  }
+  return unique
+}
+
 export function hydrateLesson(lesson, { sources, progress, bookmarked, now, includeContent = false } = {}) {
   const source = resolveSource(lesson, sources)
   const publishedAt = source?.published_at ?? null
   const updatedAt = source?.updated_at ?? source?.atualizado_em ?? null
   const material = includeContent ? lessonMaterial(source) : null
+  const unitMissing = lesson.source_kind === 'unit_material' && !source
   return {
     id: lesson.id,
-    title: source?.title ?? source?.titulo ?? lesson.title,
-    excerpt: source?.excerpt ?? lesson.excerpt,
+    title: lesson.title,
+    excerpt: lesson.excerpt ?? null,
     outcome: lesson.outcome,
     duration_minutes: source?.duration_minutes ?? source?.estimated_read_minutes ?? lesson.duration_minutes,
     difficulty: source?.difficulty ?? lesson.difficulty,
@@ -205,6 +211,7 @@ export function hydrateLesson(lesson, { sources, progress, bookmarked, now, incl
       }
       : null,
     content_available: Boolean(source),
+    ...(unitMissing ? { content_gap: 'material_unidade_nao_encontrado' } : {}),
     ...(includeContent
       ? {
         content_markdown: material?.content_markdown ?? null,
@@ -227,13 +234,33 @@ export function hydrateLesson(lesson, { sources, progress, bookmarked, now, incl
   }
 }
 
-function resolveSource(lesson, sources = { network: new Map(), unit: new Map() }) {
-  if (lesson.source_kind === 'unit_material' || lesson.source_title) {
-    const unit = sources.unit.get(normalizeTitle(lesson.source_title)) || sources.unit.get(lesson.source_slug)
-    if (unit) return { ...unit, origin_kind: 'unit_material' }
+function publishedUnit(row) {
+  if (!row) return null
+  if (row.status && row.status !== 'published') return null
+  return row
+}
+
+function lookupUnit(lesson, sources) {
+  const bySlug = sources.unitBySlug ?? sources.unit ?? new Map()
+  const byTitle = sources.unitByTitle ?? sources.unit ?? new Map()
+  if (lesson.source_slug) {
+    const slugHit = sources.unitBySlug
+      ? sources.unitBySlug.get(lesson.source_slug)
+      : bySlug.get(lesson.source_slug)
+    if (slugHit) return publishedUnit(slugHit)
   }
-  if (lesson.source_kind === 'network_article' || lesson.source_slug) {
-    const network = sources.network.get(lesson.source_slug)
+  if (!lesson.source_title) return null
+  return publishedUnit(byTitle.get(normalizeTitle(lesson.source_title)))
+}
+
+function resolveSource(lesson, sources = { network: new Map(), unit: new Map() }) {
+  if (lesson.source_kind === 'unit_material') {
+    const unit = lookupUnit(lesson, sources)
+    if (unit) return { ...unit, origin_kind: 'unit_material' }
+    return null
+  }
+  if (lesson.source_kind === 'network_article' && lesson.source_slug) {
+    const network = sources.network?.get(lesson.source_slug)
     if (network) return { ...network, origin_kind: 'network_article' }
   }
   return null
@@ -350,7 +377,7 @@ export function assembleHome({
       bookmarked: bookmarks.has(lesson.id),
       now,
     })),
-    featured: orderedLessons.filter((lesson) => lesson.featured).slice(0, 4).map((lesson) => hydrateLesson(lesson, {
+    featured: dedupeByLessonId(orderedLessons.filter((lesson) => lesson.featured)).slice(0, 4).map((lesson) => hydrateLesson(lesson, {
       sources,
       progress: progressByLesson.get(lesson.id),
       bookmarked: bookmarks.has(lesson.id),
@@ -407,7 +434,7 @@ export function mergeUpdates(curated = [], derived = [], { audience, now } = {})
     })),
   ]
   return cards
-    .filter((card) => !audience || matchesAudience(card, audience) || card.kind === 'atualizacao')
+    .filter((card) => !audience || matchesAudience(card, audience))
     .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0))
     .slice(0, 8)
 }

@@ -1,7 +1,7 @@
 import { z } from 'zod'
+import { READ_TRAINING } from '../config/role_groups.js'
 import { withCache } from '../lib/dashboard-cache.js'
 import {
-  TRAINING_READERS,
   assembleHome,
   assembleTrail,
   audienceForRole,
@@ -32,13 +32,22 @@ function sourceKeys(lessons) {
 
 function buildSources(networkRows = [], unitRows = []) {
   const network = new Map()
-  for (const row of networkRows) network.set(row.slug, row)
+  for (const row of networkRows) if (row.slug) network.set(row.slug, row)
   const unit = new Map()
+  const unitBySlug = new Map()
+  const unitByTitle = new Map()
   for (const row of unitRows) {
-    unit.set(normalizeTitle(row.title), row)
-    if (row.slug) unit.set(row.slug, row)
+    const title = row.title ?? row.titulo
+    if (title) {
+      unit.set(normalizeTitle(title), row)
+      unitByTitle.set(normalizeTitle(title), row)
+    }
+    if (row.slug) {
+      unit.set(row.slug, row)
+      unitBySlug.set(row.slug, row)
+    }
   }
-  return { network, unit }
+  return { network, unit, unitBySlug, unitByTitle }
 }
 
 async function loadCatalog(app) {
@@ -205,7 +214,7 @@ function assembleTrailPayload({ trail, catalog, progressRows, bookmarkIds, sourc
 }
 
 export async function trainingRoutes(app) {
-  const readers = [app.authenticate, app.requirePapel(TRAINING_READERS)]
+  const readers = [app.authenticate, app.requirePapel(READ_TRAINING)]
 
   app.get('/v1/training/home', { onRequest: readers }, async (request) => {
     const filters = {
@@ -272,7 +281,7 @@ export async function trainingRoutes(app) {
     const trailLessons = catalog.lessons.filter((row) => (
       catalog.modules.find((item) => item.id === row.module_id)?.trail_id === trail.id
     ))
-    const shouldStart = request.query?.start !== 'false'
+    const shouldStart = request.query?.start === 'true'
     const ctx = await loadTrailContext(app, request, trailLessons, { startLessonId: shouldStart ? lesson.id : null })
     const assembled = assembleTrailPayload({
       trail,

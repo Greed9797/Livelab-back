@@ -87,4 +87,35 @@ describe('training P0 migration', () => {
       'training_updates',
     ])
   })
+
+  it('stops requiring the empty starter lesson and leaves the others required', async () => {
+    db = await createDb()
+    const sql = fs.readFileSync(new URL('../migrations/158_training_empty_lesson.sql', import.meta.url), 'utf8')
+    await db.exec(sql)
+    await db.exec(sql)
+    const lessons = await db.query(`
+      SELECT title, required, source_kind
+        FROM training_lessons
+       ORDER BY title
+    `)
+    const demo = lessons.rows.find((row) => row.title === 'Demonstração, prova e CTA')
+    expect(demo.required).toBe(false)
+    expect(demo.source_kind).toBe('none')
+    expect(lessons.rows.filter((row) => row.title !== 'Demonstração, prova e CTA').every((row) => row.required)).toBe(true)
+  })
+
+  it('leaves the empty starter lesson required once it has a source', async () => {
+    db = await createDb()
+    await db.query(`
+      UPDATE training_lessons
+         SET source_kind = 'network_article', source_slug = 'roteiro-cta'
+       WHERE title = 'Demonstração, prova e CTA'
+    `)
+    const sql = fs.readFileSync(new URL('../migrations/158_training_empty_lesson.sql', import.meta.url), 'utf8')
+    await db.exec(sql)
+    const demo = await db.query(`
+      SELECT required FROM training_lessons WHERE title = 'Demonstração, prova e CTA'
+    `)
+    expect(demo.rows[0].required).toBe(true)
+  })
 })

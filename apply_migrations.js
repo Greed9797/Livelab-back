@@ -152,6 +152,7 @@ export const MIGRATIONS_LIST = [
   '155_portal_runtime_marca_condicoes.sql',
   '156_portal_runtime_marca_condicoes_least_privilege.sql',
   '157_training_p0.sql',
+  '158_training_empty_lesson.sql',
 ]
 
 async function ensureMigrationsTable(client) {

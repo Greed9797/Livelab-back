@@ -16,6 +16,7 @@ import { applyApresentadorasToLive } from '../lib/live-rateio.js'
 import { seedRateioPlanejado } from '../lib/agenda-turnos.js'
 import { tombstoneApprovedSubmissionsForDeletedLive } from '../services/live-approved-submission-deletion.js'
 import { buildResumoDia } from '../lib/resumo-dia.js'
+import { comissaoValorFromPct, resolveComissaoPctSemCabine } from '../lib/comissao-sem-cabine.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { pendingCollisionSql, pendingRecord, pendingRows } from '../lib/presenter-pending.js'
 
@@ -54,7 +55,7 @@ const integerMetricSchema = z.preprocess(
 )
 
 const iniciarLiveSchema = z.object({
-  cabine_id: z.string().uuid(),
+  cabine_id: z.string().uuid().nullable().optional(),
   cliente_id: z.string().uuid().optional(),
   marca_id: z.string().uuid().optional().nullable(),
   apresentador_id: z.string().uuid().optional().nullable(),
@@ -89,7 +90,7 @@ const encerrarSchema = z.object({
 })
 
 const liveManualSchema = z.object({
-  cabine_id:          z.string().uuid(),
+  cabine_id:          z.string().uuid().nullable().optional(),
   cliente_id:         z.string().uuid().optional(),
   marca_id:           z.string().uuid().optional(),
   apresentador_id:    z.string().uuid().optional(),
@@ -234,7 +235,7 @@ export async function livesRoutes(app) {
 
     const { tenant_id, sub, papel } = request.user
     const {
-      cabine_id,
+      cabine_id: requestedCabineId,
       cliente_id: requestedClienteId,
       marca_id: requestedMarcaId,
       apresentador_id: requestedApresentadoraIdLegacy,
@@ -244,6 +245,7 @@ export async function livesRoutes(app) {
       agenda_evento_id,
       previsto_fim: rawPrevistoFim,
     } = parsed.data
+    const cabine_id = requestedCabineId ?? null
     const requestedApresentadoraId = requestedApresentadoraIdNew ?? requestedApresentadoraIdLegacy ?? null
     const previstoFim = rawPrevistoFim ? new Date(rawPrevistoFim) : null
     const hasTikTokUpdate = rawTiktok !== undefined
@@ -253,23 +255,26 @@ export async function livesRoutes(app) {
       await db.query('BEGIN')
 
       try {
-        const cabineQ = await db.query(
-          `SELECT id, numero, status, contrato_id, live_atual_id, ativo
-           FROM cabines
-           WHERE id = $1 AND tenant_id = $2::uuid
-           FOR UPDATE`,
-          [cabine_id, tenant_id]
-        )
-        const cabine = cabineQ.rows[0]
+        let cabine = null
+        if (cabine_id) {
+          const cabineQ = await db.query(
+            `SELECT id, numero, status, contrato_id, live_atual_id, ativo
+             FROM cabines
+             WHERE id = $1 AND tenant_id = $2::uuid
+             FOR UPDATE`,
+            [cabine_id, tenant_id]
+          )
+          cabine = cabineQ.rows[0]
 
-        if (!cabine) {
-          await db.query('ROLLBACK')
-          return reply.code(404).send({ error: 'Cabine não encontrada' })
-        }
+          if (!cabine) {
+            await db.query('ROLLBACK')
+            return reply.code(404).send({ error: 'Cabine não encontrada' })
+          }
 
-        if (cabine.ativo === false) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({ error: 'Cabine inativa não pode iniciar live', code: 'CABINE_INATIVA' })
+          if (cabine.ativo === false) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({ error: 'Cabine inativa não pode iniciar live', code: 'CABINE_INATIVA' })
+          }
         }
 
         // ── Resolução via agenda_eventos ─────────────────────────────────────
@@ -305,11 +310,11 @@ export async function livesRoutes(app) {
               return reply.code(404).send({ error: 'Evento de agenda não encontrado', code: 'AGENDA_NOT_FOUND' })
             }
             agendaEvento = evQ.rows[0]
-            if (agendaEvento.cabine_id && agendaEvento.cabine_id !== cabine_id) {
+            if (agendaEvento.cabine_id && cabine_id && agendaEvento.cabine_id !== cabine_id) {
               await db.query('ROLLBACK')
               return reply.code(409).send({ error: 'Evento pertence a outra cabine', code: 'AGENDA_CABINE_MISMATCH' })
             }
-          } else {
+          } else if (cabine_id) {
             // Caminho automático: busca evento de hoje nesta cabine
             const evQ = await db.query(
               `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id, ae.apresentadora_id,
@@ -328,6 +333,27 @@ export async function livesRoutes(app) {
                ORDER BY ABS(EXTRACT(EPOCH FROM (ae.data_inicio - NOW())))
                LIMIT 1`,
               [cabine_id, tenant_id]
+            )
+            agendaEvento = evQ.rows[0] ?? null
+          } else if (requestedApresentadoraId) {
+            // Sem cabine, o conflito e o vínculo automático olham só a apresentadora.
+            const evQ = await db.query(
+              `SELECT ae.id, ae.status, ae.marca_id, ae.cabine_id, ae.apresentadora_id,
+                      ae.data_fim, ae.live_id,
+                      m.cliente_id AS marca_cliente_id,
+                      m.tipo AS marca_tipo,
+                      ${tiktokUsernameSql({ marca: 'm', cliente: 'cl_marca' })} AS marca_tiktok_username
+               FROM agenda_eventos ae
+               LEFT JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
+               LEFT JOIN clientes cl_marca ON cl_marca.id = m.cliente_id AND cl_marca.tenant_id = ae.tenant_id
+               WHERE ae.apresentadora_id = $1
+                 AND ae.tenant_id = $2
+                 AND ae.tipo = 'live'
+                 AND ae.data_inicio::date = CURRENT_DATE
+                 AND ae.status IN ('planejado', 'confirmado')
+               ORDER BY ABS(EXTRACT(EPOCH FROM (ae.data_inicio - NOW())))
+               LIMIT 1`,
+              [requestedApresentadoraId, tenant_id]
             )
             agendaEvento = evQ.rows[0] ?? null
           }
@@ -356,7 +382,7 @@ export async function livesRoutes(app) {
         // ── fim resolução agenda ─────────────────────────────────────────────
 
         // Auto-reserve: se cabine não está reservada/ativa com contrato, busca contrato pelo cliente ou live_request
-        let resolvedContratoId = cabine.contrato_id
+        let resolvedContratoId = cabine?.contrato_id ?? null
         // Se agenda resolveu um cliente_id, usa como base; senão usa o do body
         let resolvedClienteId = resolvedAgendaClienteId ?? requestedClienteId ?? null
         if (!resolvedClienteId && resolvedMarcaId) {
@@ -378,7 +404,7 @@ export async function livesRoutes(app) {
           }
           if (!tiktokUsername && marca.tiktok_username) tiktokUsername = marca.tiktok_username
         }
-        if (!['reservada', 'ao_vivo'].includes(cabine.status) || !cabine.contrato_id) {
+        if (cabine && (!['reservada', 'ao_vivo'].includes(cabine.status) || !cabine.contrato_id)) {
           if (!['disponivel', 'ao_vivo', 'reservada'].includes(cabine.status)) {
             await db.query('ROLLBACK')
             return reply.code(409).send({ error: 'Cabine indisponível para iniciar live', code: 'CABINE_NOT_AVAILABLE' })
@@ -421,7 +447,7 @@ export async function livesRoutes(app) {
           }
         }
 
-        if (cabine.live_atual_id) {
+        if (cabine?.live_atual_id) {
           await db.query('ROLLBACK')
           return reply.code(409).send({ error: 'Cabine já possui uma live em andamento' })
         }
@@ -440,7 +466,7 @@ export async function livesRoutes(app) {
 
         if (contrato && contrato.status !== 'ativo') {
           // Tenta encontrar contrato ativo para o mesmo cliente (contrato vinculado pode ser rascunho antigo)
-          const clienteIdFallback = contrato?.cliente_id ?? cabine.cliente_id
+          const clienteIdFallback = contrato?.cliente_id ?? cabine?.cliente_id
           if (clienteIdFallback) {
             const activeCtQ = await db.query(
               `SELECT id, cliente_id, status FROM contratos
@@ -615,28 +641,30 @@ export async function livesRoutes(app) {
         }
         // ── fim evento automático ────────────────────────────────────────────
 
-        await db.query(
-          `UPDATE cabines
-           SET status = 'ao_vivo', live_atual_id = $1
-           WHERE id = $2 AND tenant_id = $3::uuid`,
-          [live.id, cabine_id, tenant_id]
-        )
+        if (cabine_id) {
+          await db.query(
+            `UPDATE cabines
+             SET status = 'ao_vivo', live_atual_id = $1
+             WHERE id = $2 AND tenant_id = $3::uuid`,
+            [live.id, cabine_id, tenant_id]
+          )
 
-        await logCabineEvent(db, {
-          tenantId: tenant_id,
-          cabineId: cabine_id,
-          contratoId: resolvedContratoId,
-          tipoEvento: 'cabine_live_iniciada',
-          actorUserId: sub,
-          actorPapel: papel,
-          ip,
-          payload: {
-            live_id: live.id,
-            cliente_id: resolvedClienteId,
-            previous_status: cabine.status,
-            agenda_evento_id: finalAgendaEventoId,
-          },
-        })
+          await logCabineEvent(db, {
+            tenantId: tenant_id,
+            cabineId: cabine_id,
+            contratoId: resolvedContratoId,
+            tipoEvento: 'cabine_live_iniciada',
+            actorUserId: sub,
+            actorPapel: papel,
+            ip,
+            payload: {
+              live_id: live.id,
+              cliente_id: resolvedClienteId,
+              previous_status: cabine.status,
+              agenda_evento_id: finalAgendaEventoId,
+            },
+          })
+        }
 
         await db.query('COMMIT')
 
@@ -754,15 +782,27 @@ export async function livesRoutes(app) {
           }
         }
 
-        const cab = await db.query(
-          `SELECT c.contrato_id, ct.comissao_pct
-             FROM cabines c
-             LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
-            WHERE c.id = $1`,
-          [d.cabine_id]
-        )
-        const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
-        const comissao = officialGmvFromPayload(d) * (comissaoPct / 100)
+        let comissao = null
+        if (d.cabine_id) {
+          const cab = await db.query(
+            `SELECT c.contrato_id, ct.comissao_pct
+               FROM cabines c
+               LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
+              WHERE c.id = $1`,
+            [d.cabine_id]
+          )
+          const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
+          comissao = officialGmvFromPayload(d) * (comissaoPct / 100)
+        } else {
+          const pct = await resolveComissaoPctSemCabine(db, {
+            tenantId: tenant_id,
+            marcaId: resolvedMarcaId,
+            apresentadoraId: d.apresentador_id ?? null,
+            gmv: officialGmvFromPayload(d),
+            data: d.data,
+          })
+          comissao = comissaoValorFromPct(officialGmvFromPayload(d), pct)
+        }
 
         // Resolve apresentadoras.id → users.id + comissao_pct (para snapshot operacional)
         let apresentadorUserId = null
@@ -814,7 +854,7 @@ export async function livesRoutes(app) {
                    $26,$27,$28,$29,$30,$31)
            RETURNING id`,
           [
-            tenant_id, d.cabine_id, resolvedClienteId ?? null, apresentadorUserId, gestorId,
+            tenant_id, d.cabine_id ?? null, resolvedClienteId ?? null, apresentadorUserId, gestorId,
             iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
             d.manual_views ?? null, d.manual_likes ?? null,
             d.manual_comments ?? null, d.manual_shares ?? null, d.manual_diamonds ?? null,
@@ -974,7 +1014,7 @@ export async function livesRoutes(app) {
           }
         }
 
-        const cabineId = d.cabine_id ?? live.cabine_id
+        const cabineId = d.cabine_id !== undefined ? d.cabine_id : live.cabine_id
         let comissao = undefined
         const gmvMudou = d.fat_gerado !== undefined || d.manual_gmv !== undefined || d.ads_gmv !== undefined
         // Mesma condição que dispara o recálculo lá embaixo — declarada uma vez só para as
@@ -987,15 +1027,35 @@ export async function livesRoutes(app) {
           // apresentadora recebe — sem isto a divisão ficaria gravada e a comissão, velha.
           || d.apresentadoras !== undefined
         if (gmvMudou) {
-          const cab = await db.query(
-            `SELECT ct.comissao_pct FROM cabines c
-               LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
-              WHERE c.id = $1
-                AND c.tenant_id = $2::uuid`,
-            [cabineId, tenant_id]
-          )
-          const pct = Number(cab.rows[0]?.comissao_pct ?? 0)
-          comissao = officialGmvFromPayload(d, live) * (pct / 100)
+          if (cabineId) {
+            const cab = await db.query(
+              `SELECT ct.comissao_pct FROM cabines c
+                 LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
+                WHERE c.id = $1
+                  AND c.tenant_id = $2::uuid`,
+              [cabineId, tenant_id]
+            )
+            const pct = Number(cab.rows[0]?.comissao_pct ?? 0)
+            comissao = officialGmvFromPayload(d, live) * (pct / 100)
+          } else {
+            const marcaId = d.marca_id !== undefined ? d.marca_id : (live.marca_id ?? null)
+            let apresentadoraId = d.apresentador_id !== undefined ? d.apresentador_id : null
+            if (apresentadoraId == null && d.apresentador_id === undefined && live.apresentador_id) {
+              const ap = await db.query(
+                `SELECT id FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid LIMIT 1`,
+                [live.apresentador_id, tenant_id],
+              )
+              apresentadoraId = ap.rows[0]?.id ?? null
+            }
+            const pct = await resolveComissaoPctSemCabine(db, {
+              tenantId: tenant_id,
+              marcaId,
+              apresentadoraId,
+              gmv: officialGmvFromPayload(d, live),
+              data: live.iniciado_em ? saoPauloDateInput(live.iniciado_em) : null,
+            })
+            comissao = comissaoValorFromPct(officialGmvFromPayload(d, live), pct)
+          }
         }
 
         const updates = []
@@ -1057,8 +1117,8 @@ export async function livesRoutes(app) {
         }
         // ── fim fallback marca sistema ───────────────────────────────────────────
 
-        // cabine_id nunca vira NULL por engano — live sempre tem cabine.
-        if (d.cabine_id) addField('cabine_id', d.cabine_id)
+        // Omitir cabine_id conserva o id antigo. Null explícito grava NULL.
+        if (d.cabine_id !== undefined) addField('cabine_id', d.cabine_id)
         if (resolvedClienteId !== undefined) addField('cliente_id', resolvedClienteId)
         if (d.marca_id !== undefined) addField('marca_id', d.marca_id)
         if (resolvedApresentadorId !== undefined) addField('apresentador_id', resolvedApresentadorId)
@@ -1458,7 +1518,7 @@ export async function livesRoutes(app) {
                 ls.gmv AS gmv_atual, ls.likes_count, ls.comments_count,
                 ls.gifts_diamonds, ls.shares_count
          FROM lives l
-         JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+         LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
          LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
          LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
@@ -1674,7 +1734,7 @@ export async function livesRoutes(app) {
       // ids da página. Os fragmentos de join abaixo são compartilhados pelas duas queries,
       // então a resolução de marca/apresentadora é literalmente a mesma string nas duas —
       // uma live não pode casar o filtro por uma marca e exibir outra.
-      const joinCabines = `JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id`
+      const joinCabines = `LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id`
       const joinContratos = `LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id`
       const joinClientes = `LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id`
       const joinUsers = `LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id`
@@ -1934,7 +1994,7 @@ export async function livesRoutes(app) {
                 COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
                 ap_v2.apresentadoras
          FROM lives l
-         JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+         LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
          LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
          LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
@@ -2085,7 +2145,7 @@ export async function livesRoutes(app) {
           COALESCE(va_m.nome, m.nome, cl.nome, 'Sem marca') AS marca_nome,
           COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora') AS apresentadora_nome
         FROM lives l
-        JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
+        LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
         LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
         LEFT JOIN clientes cl ON cl.id = l.cliente_id AND cl.tenant_id = l.tenant_id
         LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
@@ -2271,28 +2331,50 @@ export async function livesRoutes(app) {
           return reply.code(400).send({ error: 'Live não encontrada ou já encerrada' })
         }
 
-        const cabineQ = await db.query(
-          `SELECT id, contrato_id, status
-           FROM cabines
-           WHERE id = $1
-           FOR UPDATE`,
-          [live.cabine_id]
-        )
-        const cabine = cabineQ.rows[0]
+        let cabine = null
+        let contrato = null
+        let comissao
+        if (live.cabine_id) {
+          const cabineQ = await db.query(
+            `SELECT id, contrato_id, status
+             FROM cabines
+             WHERE id = $1
+             FOR UPDATE`,
+            [live.cabine_id]
+          )
+          cabine = cabineQ.rows[0]
 
-        const contratoQ = cabine?.contrato_id
-          ? await db.query(
-              `SELECT id, status, comissao_pct, horas_contratadas, horas_consumidas
-               FROM contratos
-               WHERE id = $1
-               FOR UPDATE`,
-              [cabine.contrato_id]
+          const contratoQ = cabine?.contrato_id
+            ? await db.query(
+                `SELECT id, status, comissao_pct, horas_contratadas, horas_consumidas
+                 FROM contratos
+                 WHERE id = $1
+                 FOR UPDATE`,
+                [cabine.contrato_id]
+              )
+            : { rows: [] }
+          contrato = contratoQ.rows[0]
+
+          const comissaoPct = Number(contrato?.comissao_pct ?? 0)
+          comissao = officialGmvFromPayload(parsed.data) * (comissaoPct / 100)
+        } else {
+          let apresentadoraId = parsed.data.apresentadora_id ?? null
+          if (!apresentadoraId && live.apresentador_id) {
+            const ap = await db.query(
+              `SELECT id FROM apresentadoras WHERE user_id = $1 AND tenant_id = $2::uuid LIMIT 1`,
+              [live.apresentador_id, tenant_id],
             )
-          : { rows: [] }
-        const contrato = contratoQ.rows[0]
-
-        const comissaoPct = Number(contrato?.comissao_pct ?? 0)
-        const comissao = officialGmvFromPayload(parsed.data) * (comissaoPct / 100)
+            apresentadoraId = ap.rows[0]?.id ?? null
+          }
+          const pct = await resolveComissaoPctSemCabine(db, {
+            tenantId: tenant_id,
+            marcaId: live.marca_id ?? null,
+            apresentadoraId,
+            gmv: officialGmvFromPayload(parsed.data),
+            data: live.iniciado_em ? saoPauloDateInput(live.iniciado_em) : null,
+          })
+          comissao = comissaoValorFromPct(officialGmvFromPayload(parsed.data), pct)
+        }
         const encerradoEm = parsed.data.encerrado_em ? new Date(parsed.data.encerrado_em) : null
         let encerramentoApresentadorUserId = null
         let encerramentoApresentadoraComissaoPct = null
@@ -2501,7 +2583,7 @@ export async function livesRoutes(app) {
              RETURNING id`,
             [tenant_id, live.id, live.agenda_evento_id ?? null]
           )
-          if ((agendaEncerradaQ.rows?.length ?? 0) === 0) {
+          if ((agendaEncerradaQ.rows?.length ?? 0) === 0 && live.cabine_id) {
             await db.query(
               `UPDATE agenda_eventos
                SET status = 'concluido',
@@ -2522,30 +2604,32 @@ export async function livesRoutes(app) {
         const proximoStatus = 'disponivel'
         const proximoContratoId = contrato?.status === 'ativo' ? contrato.id : null
 
-        await db.query(
-          `UPDATE cabines
-           SET status = $1,
-               live_atual_id = NULL,
-               contrato_id = $2
-           WHERE id = $3`,
-          [proximoStatus, proximoContratoId, live.cabine_id]
-        )
+        if (live.cabine_id) {
+          await db.query(
+            `UPDATE cabines
+             SET status = $1,
+                 live_atual_id = NULL,
+                 contrato_id = $2
+             WHERE id = $3`,
+            [proximoStatus, proximoContratoId, live.cabine_id]
+          )
 
-        await logCabineEvent(db, {
-          tenantId: tenant_id,
-          cabineId: live.cabine_id,
-          contratoId: cabine?.contrato_id ?? null,
-          tipoEvento: 'cabine_live_encerrada',
-          actorUserId: sub,
-          actorPapel: papel,
-          ip,
-          payload: {
-            live_id: live.id,
-            fat_gerado: parsed.data.fat_gerado,
-            comissao_calculada: comissao,
-            next_status: proximoStatus,
-          },
-        })
+          await logCabineEvent(db, {
+            tenantId: tenant_id,
+            cabineId: live.cabine_id,
+            contratoId: cabine?.contrato_id ?? null,
+            tipoEvento: 'cabine_live_encerrada',
+            actorUserId: sub,
+            actorPapel: papel,
+            ip,
+            payload: {
+              live_id: live.id,
+              fat_gerado: parsed.data.fat_gerado,
+              comissao_calculada: comissao,
+              next_status: proximoStatus,
+            },
+          })
+        }
 
         await db.query('COMMIT')
 

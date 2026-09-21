@@ -210,4 +210,44 @@ describe('agenda_autostart job', () => {
     expect(result.started).toBe(0)
     expect(result.errors).toBe(0)
   })
+
+  it('inicia live sem cabine e não grava estação', async () => {
+    const candidate = {
+      id: eventId,
+      tenant_id: tenantId,
+      cabine_id: null,
+      marca_id: marcaId,
+      apresentadora_id: apresentadoraId,
+      data_inicio: new Date(Date.now() - 5 * 60_000).toISOString(),
+      data_fim: new Date(Date.now() + 60 * 60_000).toISOString(),
+      minutos_atraso: 5,
+    }
+    const clientQuery = vi.fn(async (sql) => {
+      const s = String(sql)
+      if (s.includes('SELECT id, live_id, cabine_id') && s.includes('FOR UPDATE')) {
+        return {
+          rows: [{
+            id: eventId,
+            live_id: null,
+            cabine_id: null,
+            marca_id: marcaId,
+            apresentadora_id: apresentadoraId,
+            data_fim: candidate.data_fim,
+          }],
+        }
+      }
+      if (s.includes('FROM cabines')) throw new Error('não deveria travar cabine')
+      if (s.includes('FROM marcas')) return { rows: [{ cliente_id: clienteId }] }
+      if (s.includes('FROM apresentadoras')) return { rows: [{ user_id: apresentadorUserId }] }
+      if (s.includes('INSERT INTO lives')) return { rows: [{ id: newLiveId }] }
+      return { rows: [] }
+    })
+    const app = makeApp({ candidates: [candidate], clientQueryMock: clientQuery })
+    const result = await runAgendaAutostartTick(app)
+
+    expect(result).toMatchObject({ started: 1, errors: 0 })
+    const insertCall = clientQuery.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO lives'))
+    expect(insertCall[1][1]).toBeNull()
+    expect(clientQuery.mock.calls.some(([sql]) => String(sql).includes('UPDATE cabines'))).toBe(false)
+  })
 })

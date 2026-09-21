@@ -344,7 +344,7 @@ export async function clienteDashboardRoutes(app) {
           COALESCE(ls.comments_count, 0) AS comentarios,
           COALESCE(ls.shares_count, 0) AS shares
         FROM lives l
-        JOIN cabines c ON c.id = l.cabine_id
+        LEFT JOIN cabines c ON c.id = l.cabine_id
         LEFT JOIN LATERAL (
           SELECT viewer_count, gmv, total_orders, likes_count, comments_count, shares_count
           FROM live_snapshots

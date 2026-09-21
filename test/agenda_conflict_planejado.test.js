@@ -87,4 +87,25 @@ describe('GET /v1/agenda/conflitos — planejado não bloqueia', () => {
 
     await app.close()
   })
+
+  it('sem cabine, confere só a apresentadora', async () => {
+    const apresentadoraId = '00000000-0000-0000-0000-000000000009'
+    const { app, query } = buildApp()
+    await app.register(agendaRoutes)
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/agenda/conflitos?apresentadora_id=${apresentadoraId}&data_inicio=2026-05-27T09:00:00Z&data_fim=2026-05-27T13:00:00Z`,
+    })
+    expect(res.statusCode).toBe(200)
+
+    const espelho = query.mock.calls.find(([sql]) => String(sql).includes('FROM agenda_eventos ae'))
+    expect(espelho).toBeTruthy()
+    expect(String(espelho[0])).toContain('ae.apresentadora_id = $')
+    expect(String(espelho[0])).not.toMatch(/ae\.cabine_id = \$/)
+    expect(espelho[1]).toContain(apresentadoraId)
+    expect(espelho[1]).not.toContain('00000000-0000-0000-0000-000000000005')
+
+    await app.close()
+  })
 })

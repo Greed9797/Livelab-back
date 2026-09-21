@@ -70,11 +70,12 @@ export async function syncLives() {
     SELECT l.id, l.tenant_id,
            ${usernameSql} AS tiktok_username
     FROM lives l
-    JOIN cabines c ON c.live_atual_id = l.id AND c.tenant_id = l.tenant_id
+    LEFT JOIN cabines c ON c.live_atual_id = l.id AND c.tenant_id = l.tenant_id
     LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.tenant_id = l.tenant_id
     LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
     LEFT JOIN clientes cl ON cl.id = COALESCE(m.cliente_id, l.cliente_id, ct.cliente_id) AND cl.tenant_id = l.tenant_id
     WHERE l.status = 'em_andamento'
+      AND (c.id IS NOT NULL OR l.cabine_id IS NULL)
       AND ${usernameSql} IS NOT NULL
   `)
 

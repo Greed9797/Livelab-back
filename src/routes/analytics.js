@@ -1402,6 +1402,13 @@ export async function analyticsRoutes(app) {
           WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND c.status = 'ao_vivo'
             AND c.live_atual_id IS NOT NULL
+          UNION
+          SELECT l.id
+          FROM lives l
+          WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
+            AND l.status = 'em_andamento'
+            AND l.cabine_id IS NULL
+            AND ${activeLiveSql('l')}
         ), snapshots_recentes AS (
           SELECT DISTINCT ON (ls.live_id)
                  ls.live_id,

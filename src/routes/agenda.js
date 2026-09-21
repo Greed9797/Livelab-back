@@ -177,6 +177,7 @@ async function resolveAgendaMarcaId(db, tenantId, { marcaId, clienteId }) {
 }
 
 async function getConflictingEvents(db, { tenantId, cabineId, apresentadoraId, dataInicio, dataFim, excludeId }) {
+  // Sem cabine, o conflito é só da apresentadora. Não há segunda chave de sala.
   if (!cabineId && !apresentadoraId) return []
 
   const values = [tenantId, dataInicio, dataFim, conflictBlockingStatuses]

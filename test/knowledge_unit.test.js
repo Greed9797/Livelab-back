@@ -3,6 +3,7 @@ import multipart from '@fastify/multipart'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { knowledgeUnitRoutes } from '../src/routes/knowledge-unit.js'
+import { knowledgeRoutes } from '../src/routes/knowledge.js'
 
 const TENANT = '11111111-1111-4111-8111-111111111111'
 const OTHER_TENANT = '22222222-2222-4222-8222-222222222222'
@@ -22,6 +23,18 @@ function buildApp({ papel = 'franqueado', tenant = TENANT, queryResults = [] } =
   app.decorate('db', { query, pool: { connect: vi.fn() } })
   app.decorate('withTenant', async (id, fn) => fn({ query: async (sql, params) => query(sql, [id, ...(params ?? []).filter((value) => value !== id)]) }))
   return { app, query, queries }
+}
+
+const IDEMPOTENCY_HEADER = { 'idempotency-key': 'test-create-key' }
+
+function buildLegacyKnowledgeApp({ query = vi.fn().mockResolvedValue({ rows: [{ id: 'article-1' }] }) } = {}) {
+  const app = Fastify()
+  app.decorate('authenticate', async (request) => { request.user = { sub: 'user-1', tenant_id: TENANT, papel: 'franqueador_master' } })
+  app.decorate('requirePapel', (roles) => async (request, reply) => {
+    if (!roles.includes(request.user?.papel)) return reply.code(403).send({ error: 'Forbidden' })
+  })
+  app.decorate('db', { query, pool: { connect: vi.fn() } })
+  return { app, query }
 }
 
 describe('local knowledge base security and editing', () => {
@@ -145,7 +158,7 @@ describe('local knowledge base security and editing', () => {
   it('allows an empty draft for the upload-first flow and validates content at publish', async () => {
     const { app, query } = buildApp({ queryResults: [{ rows: [{ id: MATERIAL, revision: 1, status: 'draft' }] }] })
     await app.register(knowledgeUnitRoutes)
-    const draft = await app.inject({ method: 'POST', url: '/v1/knowledge/unit/materials', payload: { titulo: 'Rascunho sem arquivo' } })
+    const draft = await app.inject({ method: 'POST', url: '/v1/knowledge/unit/materials', headers: IDEMPOTENCY_HEADER, payload: { titulo: 'Rascunho sem arquivo' } })
     expect(draft.statusCode).toBe(201)
     expect(query).toHaveBeenCalledTimes(1)
     await app.close()
@@ -156,7 +169,7 @@ describe('local knowledge base security and editing', () => {
     const auditLog = vi.fn().mockResolvedValue(undefined)
     app.decorate('audit', { log: auditLog })
     await app.register(knowledgeUnitRoutes)
-    const response = await app.inject({ method: 'POST', url: '/v1/knowledge/unit/materials', payload: { titulo: 'Playbook', content_markdown: 'texto' } })
+    const response = await app.inject({ method: 'POST', url: '/v1/knowledge/unit/materials', headers: IDEMPOTENCY_HEADER, payload: { titulo: 'Playbook', content_markdown: 'texto' } })
     expect(response.statusCode).toBe(201)
     expect(auditLog).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'knowledge.material.create',
@@ -261,6 +274,96 @@ describe('local knowledge base security and editing', () => {
     const response = await app.inject({ method: 'GET', url: `/v1/knowledge/unit/materials/${MATERIAL}` })
     expect(response.statusCode).toBe(404)
     expect(query.mock.calls[0][1]).toContain(OTHER_TENANT)
+    await app.close()
+  })
+
+  it('rejects create with published status before inserting', async () => {
+    const { app, query } = buildApp()
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/knowledge/unit/materials',
+      headers: IDEMPOTENCY_HEADER,
+      payload: { titulo: 'Publicado direto', status: 'published', content_markdown: 'texto' },
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.json()).toEqual({ error: 'Use a ação publicar.' })
+    expect(query).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('requires Idempotency-Key on create', async () => {
+    const { app, query } = buildApp()
+    await app.register(knowledgeUnitRoutes)
+    const response = await app.inject({ method: 'POST', url: '/v1/knowledge/unit/materials', payload: { titulo: 'Sem chave', content_markdown: 'texto' } })
+    expect(response.statusCode).toBe(400)
+    expect(response.json().error).toMatch(/Idempotency-Key/)
+    expect(query).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('rejects inactive or foreign categories on create and patch', async () => {
+    const category = '55555555-5555-4555-8555-555555555555'
+    const { app, query } = buildApp({ queryResults: [
+      { rows: [] },
+      { rows: [{ is_active: false }] },
+      { rows: [{ is_active: false }] },
+    ] })
+    await app.register(knowledgeUnitRoutes)
+
+    const missing = await app.inject({
+      method: 'POST',
+      url: '/v1/knowledge/unit/materials',
+      headers: { 'idempotency-key': 'cat-missing' },
+      payload: { titulo: 'Com categoria', category_id: category },
+    })
+    const inactive = await app.inject({
+      method: 'POST',
+      url: '/v1/knowledge/unit/materials',
+      headers: { 'idempotency-key': 'cat-inactive' },
+      payload: { titulo: 'Com categoria inativa', category_id: category },
+    })
+    const patchInactive = await app.inject({
+      method: 'PATCH',
+      url: `/v1/knowledge/unit/materials/${MATERIAL}`,
+      payload: { category_id: category, expected_revision: 1 },
+    })
+
+    expect(missing.statusCode).toBe(400)
+    expect(missing.json().error).toBe('Categoria inválida')
+    expect(inactive.statusCode).toBe(400)
+    expect(inactive.json().error).toBe('Categoria inativa')
+    expect(patchInactive.statusCode).toBe(400)
+    expect(patchInactive.json().error).toBe('Categoria inativa')
+    expect(query).toHaveBeenCalledTimes(3)
+    await app.close()
+  })
+
+  it('rejects unsafe legacy network article writes', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [{ id: 'article-1' }] })
+    const { app } = buildLegacyKnowledgeApp({ query })
+    await app.register(knowledgeRoutes)
+
+    const html = await app.inject({
+      method: 'POST',
+      url: '/v1/knowledge/articles',
+      payload: { titulo: 'Ataque', content_markdown: '<script>alert(1)</script>' },
+    })
+    const video = await app.inject({
+      method: 'POST',
+      url: '/v1/knowledge/articles',
+      payload: { titulo: 'Vídeo', video_provider: 'youtube', video_url: 'https://evil.example/watch?v=abc' },
+    })
+    const ok = await app.inject({
+      method: 'POST',
+      url: '/v1/knowledge/articles',
+      payload: { titulo: 'OK', content_markdown: 'texto seguro' },
+    })
+
+    expect(html.statusCode).toBe(400)
+    expect(video.statusCode).toBe(400)
+    expect(ok.statusCode).toBe(201)
+    expect(query).toHaveBeenCalledTimes(1)
     await app.close()
   })
 })

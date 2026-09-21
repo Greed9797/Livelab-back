@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { safeUrl, unsafeMarkdown } from './knowledge-unit.js'
 
 // PUBLIC: Knowledge base é global/compartilhada entre todos os tenants por design.
 // Tabelas `manuais` e `knowledge_categories` NÃO têm coluna tenant_id (migrations
@@ -70,6 +71,12 @@ const articleSchema = z.object({
 )
 
 const ALLOWED_COVER_MIME = ['image/jpeg', 'image/png', 'image/webp']
+
+function articleContentError(data) {
+  if (unsafeMarkdown(data.content_markdown)) return 'O conteúdo contém HTML ou URL não permitido'
+  if (!safeUrl(data.url) || !safeUrl(data.video_url, 'video') || !safeUrl(data.cover_image_url)) return 'URL externa não permitida'
+  return null
+}
 
 export async function knowledgeRoutes(app) {
   const masterOnly = [app.authenticate, app.requirePapel(['franqueador_master'])]
@@ -313,6 +320,8 @@ export async function knowledgeRoutes(app) {
     const parsed = articleSchema.safeParse(req.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const d = parsed.data
+    const contentError = articleContentError(d)
+    if (contentError) return reply.code(400).send({ error: contentError })
     const slug = slugify(d.titulo) + '-' + Math.random().toString(36).slice(2, 8)
     const readMin = calcReadMinutes(d.content_markdown)
     const publishedAt = d.status === 'published' ? new Date() : null
@@ -346,6 +355,8 @@ export async function knowledgeRoutes(app) {
     const parsed = articleSchema.partial().safeParse(req.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const d = parsed.data
+    const contentError = articleContentError(d)
+    if (contentError) return reply.code(400).send({ error: contentError })
     const updates = []
     const values = []
     let idx = 1

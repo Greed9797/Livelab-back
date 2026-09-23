@@ -6,7 +6,6 @@ import { syncAgendaEventForLive } from '../lib/live-agenda-sync.js'
 import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
-import { pendingCollisionSql } from '../lib/presenter-pending.js'
 
 export const CONFLITO_HORARIO = 'conflito_horario'
 
@@ -290,14 +289,12 @@ async function manterComissaoFranquiaSemCabine(db, { tenantId, liveId, comissaoF
 }
 
 const MSG_CONFLITO_APRESENTADORA = 'Já existe uma live oficial desta apresentadora neste horário. Confira o registro e use Vincular live existente.'
-const MSG_CONFLITO_MARCA = 'Conflito de horário com outra live ou envio da mesma marca.'
 
-// Mesma recusa da aprovação sem cabine (sobreposição da apresentadora) e a
-// mesma marcação que a lista já mostra como "Em conciliação" (pendingCollisionSql).
+// A mesma recusa da aprovação individual sem cabine: live oficial da mesma
+// apresentadora sobrepondo o horário. "Em conciliação" não recusa.
 export async function motivoConflitoAprovacaoSemCabine(db, { tenantId, submissionId }) {
   const result = await db.query(
-    `SELECT ${pendingCollisionSql('s')} AS em_conciliacao,
-            EXISTS (
+    `SELECT EXISTS (
               SELECT 1 FROM lives l
               JOIN apresentadoras a ON a.id = s.apresentadora_id AND a.tenant_id = s.tenant_id
               WHERE l.tenant_id = s.tenant_id
@@ -314,9 +311,7 @@ export async function motivoConflitoAprovacaoSemCabine(db, { tenantId, submissio
     [submissionId, tenantId],
   )
   const row = result.rows[0]
-  if (!row) return null
-  if (row.conflito_apresentadora === true) return MSG_CONFLITO_APRESENTADORA
-  if (row.em_conciliacao === true) return MSG_CONFLITO_MARCA
+  if (row?.conflito_apresentadora === true) return MSG_CONFLITO_APRESENTADORA
   return null
 }
 

@@ -7,6 +7,99 @@ import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribu
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 
+export function submissionTimesAreApprovable({ iniciado_em, encerrado_em }, now = new Date()) {
+  const start = new Date(iniciado_em)
+  const end = new Date(encerrado_em)
+  return Number.isFinite(start.valueOf()) && Number.isFinite(end.valueOf()) && end > start && end <= now && (end - start) <= 24 * 60 * 60 * 1000
+}
+
+export function oficialPayloadFromSubmission(submissao) {
+  return {
+    marca_id: submissao.marca_id,
+    iniciado_em: submissao.iniciado_em,
+    encerrado_em: submissao.encerrado_em,
+    gmv_oficial: submissao.gmv_declarado,
+    pedidos_oficiais: submissao.pedidos_declarados,
+    live_impressions_oficiais: submissao.live_impressions_declaradas ?? null,
+    manual_views_oficiais: submissao.manual_views_declaradas ?? null,
+  }
+}
+
+/**
+ * Aprova uma submissão criando live oficial (sem vínculo) ou vinculando live_id.
+ * Deve rodar dentro de withPortalPresenterDb. Lança Error com statusCode.
+ */
+export async function aprovarSubmissaoComOficial(db, {
+  tenantId,
+  revisorId,
+  submissionId,
+  parsed,
+  recordHistory,
+}) {
+  const sub = await db.query(`SELECT * FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid FOR UPDATE`, [submissionId, tenantId])
+  if (!sub.rows[0]) {
+    const error = new Error('Submissão não encontrada ou já revisada.')
+    error.statusCode = 409
+    throw error
+  }
+  if (sub.rows[0].status === 'aprovada' && parsed.live_id === sub.rows[0].live_oficial_id) {
+    return { id: sub.rows[0].id, status: sub.rows[0].status, live_oficial_id: sub.rows[0].live_oficial_id, revisado_em: sub.rows[0].revisado_em }
+  }
+  if (!['pendente', 'devolvida'].includes(sub.rows[0].status)) {
+    const error = new Error('Submissão não encontrada ou já revisada.')
+    error.statusCode = 409
+    throw error
+  }
+  if (sub.rows[0].arquivamento_status) {
+    const error = new Error('Aguarde a resposta da apresentadora à solicitação de arquivamento.')
+    error.statusCode = 409
+    throw error
+  }
+  if (parsed.versao_esperada !== undefined && parsed.versao_esperada !== sub.rows[0].versao) {
+    const error = new Error('O envio foi alterado. Atualize a lista e confira os dados novamente.')
+    error.statusCode = 409
+    throw error
+  }
+  if (sub.rows[0].status === 'devolvida' && (parsed.versao_esperada === undefined || !parsed.motivo_revisao)) {
+    const error = new Error('Para validar um envio devolvido, confira a versão atual e informe o motivo da revisão.')
+    error.statusCode = 422
+    throw error
+  }
+  let liveId = parsed.live_id
+  if (liveId) {
+    const linked = await db.query(`SELECT id FROM apresentadora_live_submissoes WHERE tenant_id=$1::uuid AND apresentadora_id=$3::uuid AND live_oficial_id=$2::uuid FOR UPDATE`, [tenantId, liveId, sub.rows[0].apresentadora_id])
+    if (linked.rows[0]) {
+      const error = new Error('A live oficial já está vinculada a outra submissão.')
+      error.statusCode = 409
+      throw error
+    }
+    const allowed = await db.query(`SELECT 1 FROM lives l JOIN apresentadoras a ON a.id=$3::uuid AND a.tenant_id=l.tenant_id WHERE l.id=$1::uuid AND l.tenant_id=$2::uuid AND l.status='encerrada' AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.marca_id=$4::uuid AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date=(($5::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date) AND (l.apresentador_id=a.user_id OR EXISTS (SELECT 1 FROM live_apresentadores la WHERE la.live_id=l.id AND la.tenant_id=l.tenant_id AND la.apresentador_id=a.user_id) OR EXISTS (SELECT 1 FROM live_apresentadoras_v2 lav WHERE lav.live_id=l.id AND lav.tenant_id=l.tenant_id AND lav.apresentadora_id=a.id)) FOR UPDATE OF l LIMIT 1`, [liveId, tenantId, sub.rows[0].apresentadora_id, sub.rows[0].marca_id, sub.rows[0].iniciado_em])
+    if (!allowed.rows[0]) {
+      const error = new Error('A live oficial precisa ser da mesma marca, dia e apresentadora, e estar encerrada.')
+      error.statusCode = 422
+      throw error
+    }
+  } else {
+    if (!parsed.marca_id || parsed.gmv_oficial == null || parsed.pedidos_oficiais == null || !submissionTimesAreApprovable(parsed)) {
+      const error = new Error('Para criar a live oficial, informe marca, início, fim, GMV e pedidos conferidos pela gestão.')
+      error.statusCode = 422
+      throw error
+    }
+    parsed.live_impressions_oficiais ??= sub.rows[0].live_impressions_declaradas ?? null
+    parsed.manual_views_oficiais ??= sub.rows[0].manual_views_declaradas ?? null
+    liveId = await criarLiveOficialDaSubmissao(db, { tenantId, revisorId, submissao: sub.rows[0], oficial: parsed })
+  }
+  const createdOfficial = !parsed.live_id
+  const updated = await db.query(`UPDATE apresentadora_live_submissoes SET status='aprovada',live_oficial_id=$4::uuid,revisado_por=$3::uuid,revisado_em=NOW(),atualizado_em=NOW(),live_impressions_oficiais=CASE WHEN $5::boolean THEN $6::bigint ELSE live_impressions_oficiais END,manual_views_oficiais=CASE WHEN $5::boolean THEN $7::int ELSE manual_views_oficiais END WHERE id=$1::uuid AND tenant_id=$2::uuid AND status IN ('pendente','devolvida') RETURNING id,status,live_oficial_id,revisado_em`, [submissionId, tenantId, revisorId, liveId, createdOfficial, parsed.live_impressions_oficiais ?? null, parsed.manual_views_oficiais ?? null])
+  if (!updated.rows[0]) {
+    const error = new Error('Submissão já aprovada.')
+    error.statusCode = 409
+    throw error
+  }
+  await recordHistory(db, { tenantId, submissionId: updated.rows[0].id, version: sub.rows[0].versao, action: 'aprovada', actorId: revisorId, motivo: parsed.motivo_revisao ?? null })
+  return updated.rows[0]
+}
+
 // Materializa um relato APROVADO dentro da transação do revisor. Não aceita
 // A identidade vem da submissão bloqueada; os valores oficiais foram conferidos
 // pelo gestor. Os mesmos helpers do registro manual mantêm agenda/rateio/comissão.

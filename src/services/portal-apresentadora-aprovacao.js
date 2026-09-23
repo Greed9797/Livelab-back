@@ -6,6 +6,20 @@ import { syncAgendaEventForLive } from '../lib/live-agenda-sync.js'
 import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
+import { pendingCollisionSql } from '../lib/presenter-pending.js'
+
+export const CONFLITO_HORARIO = 'conflito_horario'
+
+export function conflitoHorarioError(message) {
+  const error = new Error(message)
+  error.statusCode = 409
+  error.code = CONFLITO_HORARIO
+  return error
+}
+
+export function isConflitoHorarioError(error) {
+  return error?.code === CONFLITO_HORARIO
+}
 
 export function submissionTimesAreApprovable({ iniciado_em, encerrado_em }, now = new Date()) {
   const start = new Date(iniciado_em)
@@ -164,9 +178,7 @@ export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, sub
       AND COALESCE(encerrado_em,previsto_fim,'infinity'::timestamptz) > $3::timestamptz LIMIT 1`,
     [tenantId, cabineId, oficial.iniciado_em, oficial.encerrado_em])
     if (conflict.rows[0]) {
-      const error = new Error('Já existe uma live nesse horário e cabine. Confira o registro e use Vincular live existente.')
-      error.statusCode = 409
-      throw error
+      throw conflitoHorarioError('Já existe uma live nesse horário e cabine. Confira o registro e use Vincular live existente.')
     }
   } else if (ref.user_id) {
     const conflict = await db.query(`SELECT id FROM lives WHERE tenant_id=$1::uuid AND apresentador_id=$2::uuid
@@ -175,9 +187,7 @@ export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, sub
       AND COALESCE(encerrado_em,previsto_fim,'infinity'::timestamptz) > $3::timestamptz LIMIT 1`,
     [tenantId, ref.user_id, oficial.iniciado_em, oficial.encerrado_em])
     if (conflict.rows[0]) {
-      const error = new Error('Já existe uma live oficial desta apresentadora neste horário. Confira o registro e use Vincular live existente.')
-      error.statusCode = 409
-      throw error
+      throw conflitoHorarioError('Já existe uma live oficial desta apresentadora neste horário. Confira o registro e use Vincular live existente.')
     }
   }
 
@@ -271,4 +281,126 @@ async function manterComissaoFranquiaSemCabine(db, { tenantId, liveId, comissaoF
       WHERE id = $1::uuid AND tenant_id = $2::uuid AND comissao_calculada = 0`,
     [liveId, tenantId, comissaoFranquia],
   )
+}
+
+const MSG_CONFLITO_APRESENTADORA = 'Já existe uma live oficial desta apresentadora neste horário. Confira o registro e use Vincular live existente.'
+const MSG_CONFLITO_MARCA = 'Conflito de horário com outra live ou envio da mesma marca.'
+
+// Mesma recusa da aprovação sem cabine (sobreposição da apresentadora) e a
+// mesma marcação que a lista já mostra como "Em conciliação" (pendingCollisionSql).
+export async function motivoConflitoAprovacaoSemCabine(db, { tenantId, submissionId }) {
+  const result = await db.query(
+    `SELECT ${pendingCollisionSql('s')} AS em_conciliacao,
+            EXISTS (
+              SELECT 1 FROM lives l
+              JOIN apresentadoras a ON a.id = s.apresentadora_id AND a.tenant_id = s.tenant_id
+              WHERE l.tenant_id = s.tenant_id
+                AND a.user_id IS NOT NULL
+                AND l.apresentador_id = a.user_id
+                AND l.uniao_destino_id IS NULL
+                AND l.uniao_desfeita_em IS NULL
+                AND l.status <> 'cancelada'
+                AND l.iniciado_em < s.encerrado_em
+                AND COALESCE(l.encerrado_em, l.previsto_fim, 'infinity'::timestamptz) > s.iniciado_em
+            ) AS conflito_apresentadora
+       FROM apresentadora_live_submissoes s
+      WHERE s.id = $1::uuid AND s.tenant_id = $2::uuid`,
+    [submissionId, tenantId],
+  )
+  const row = result.rows[0]
+  if (!row) return null
+  if (row.conflito_apresentadora === true) return MSG_CONFLITO_APRESENTADORA
+  if (row.em_conciliacao === true) return MSG_CONFLITO_MARCA
+  return null
+}
+
+function describeSubmission(row) {
+  return {
+    id: row.id,
+    apresentadora_nome: row.apresentadora_nome ?? null,
+    marca_nome: row.marca_nome ?? null,
+    iniciado_em: row.iniciado_em ?? null,
+  }
+}
+
+function byInicio(a, b) {
+  const ta = new Date(a.iniciado_em).getTime()
+  const tb = new Date(b.iniciado_em).getTime()
+  if (ta !== tb) return (Number.isFinite(ta) ? ta : 0) - (Number.isFinite(tb) ? tb : 0)
+  return String(a.id).localeCompare(String(b.id))
+}
+
+/**
+ * Aprova cada envio na própria transação. Conflito vira skipped_conflito.
+ * Uma falha não desfaz os que já commitou. Não grava comissão inventada:
+ * o insert continua em aprovarSubmissaoComOficial / criarLiveOficialDaSubmissao.
+ */
+export async function aprovarPendentesSemConflito({
+  rows,
+  tenantId,
+  revisorId,
+  recordHistory,
+  normalizeOfficialMetrics,
+  runInDb,
+  approve = aprovarSubmissaoComOficial,
+  conflict = motivoConflitoAprovacaoSemCabine,
+}) {
+  const approved = []
+  const skipped = []
+  const skipped_conflito = []
+  const failed = []
+
+  for (const row of [...rows].sort(byInicio)) {
+    const described = describeSubmission(row)
+    if (row.status !== 'pendente') {
+      skipped.push({ ...described, reason: 'Envio não está pendente.' })
+      continue
+    }
+    if (row.arquivamento_status) {
+      skipped.push({ ...described, reason: 'Aguardando resposta de arquivamento.' })
+      continue
+    }
+    const normalized = normalizeOfficialMetrics(oficialPayloadFromSubmission(row))
+    if (!normalized?.data) {
+      skipped.push({ ...described, reason: normalized?.error ?? 'Dados inválidos.' })
+      continue
+    }
+    const oficial = normalized.data
+    if (!oficial.marca_id || oficial.gmv_oficial == null || oficial.pedidos_oficiais == null || !submissionTimesAreApprovable(oficial)) {
+      skipped.push({ ...described, reason: 'Dados incompletos ou horário inválido para aprovação automática.' })
+      continue
+    }
+
+    try {
+      const outcome = await runInDb(async (db) => {
+        const reason = await conflict(db, { tenantId, submissionId: row.id })
+        if (reason) return { conflito: reason }
+        const result = await approve(db, {
+          tenantId,
+          revisorId,
+          submissionId: row.id,
+          parsed: oficial,
+          recordHistory,
+        })
+        return { result }
+      })
+      if (outcome?.conflito) {
+        const item = { ...described, reason: outcome.conflito }
+        skipped_conflito.push(item)
+        skipped.push({ ...item, conflito: true })
+        continue
+      }
+      approved.push({ ...described, live_oficial_id: outcome.result.live_oficial_id })
+    } catch (error) {
+      if (isConflitoHorarioError(error)) {
+        const item = { ...described, reason: error.message }
+        skipped_conflito.push(item)
+        skipped.push({ ...item, conflito: true })
+        continue
+      }
+      failed.push({ ...described, error: error?.message ?? 'Erro ao aprovar envio.' })
+    }
+  }
+
+  return { approved, skipped, skipped_conflito, failed }
 }

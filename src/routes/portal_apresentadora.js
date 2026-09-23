@@ -2,13 +2,17 @@ import { z } from 'zod'
 import { getOperationalRanking as getPerformanceRanking } from '../lib/operational-ranking.js'
 import { monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { presenterFixedSql } from '../config/presenter_defaults.js'
-import { criarLiveOficialDaSubmissao } from '../services/portal-apresentadora-aprovacao.js'
+import {
+  aprovarSubmissaoComOficial,
+  oficialPayloadFromSubmission,
+  submissionTimesAreApprovable,
+} from '../services/portal-apresentadora-aprovacao.js'
 import { getOwnPortalPerformance } from '../services/portal-apresentadora-performance.js'
 import { withPortalPresenterDb } from '../services/portal-apresentadora-db.js'
 import { getOwnPortalRemuneration } from '../services/portal-apresentadora-remuneracao.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 import { parsePortalCount, parsePortalMoney } from '../lib/portal-submission-input.js'
-import { saoPauloDateInput } from '../lib/timezone.js'
+import { saoPauloDateInput, saoPauloDayBounds } from '../lib/timezone.js'
 import { invalidateTenant } from '../lib/dashboard-cache.js'
 import { invalidateHomeDashboard } from './home.js'
 
@@ -48,6 +52,7 @@ const devolucaoSchema = z.object({ motivo: z.string().trim().min(1).max(1000), a
   .refine(data => !data.arquivar || data.versao_esperada !== undefined, { message: 'Atualize o envio antes de solicitar arquivamento.' })
 const arquivamentoSchema = z.object({ acao: z.enum(['confirmar', 'contestar']), motivo: z.string().trim().min(1).max(1000).optional(), versao_esperada: z.number().int().positive() }).strict()
   .refine(data => data.acao !== 'contestar' || Boolean(data.motivo), { message: 'Informe o motivo da contestação.' })
+const batchApproveDaySchema = z.object({ data: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict()
 
 function normalizeSubmissionMetrics(data) {
   const gmv = parsePortalMoney(data.gmv_declarado)
@@ -132,10 +137,8 @@ function monthOr400(query, reply) {
   return monthRangeFromQuery({ mes: mes ?? undefined })
 }
 
-function requiresPast({ iniciado_em, encerrado_em }, now = new Date()) {
-  const start = new Date(iniciado_em)
-  const end = new Date(encerrado_em)
-  return Number.isFinite(start.valueOf()) && Number.isFinite(end.valueOf()) && end > start && end <= now && (end - start) <= 24 * 60 * 60 * 1000
+function requiresPast(payload, now = new Date()) {
+  return submissionTimesAreApprovable(payload, now)
 }
 
 export function requiresCurrentPortalMonth({ iniciado_em, encerrado_em }, now = new Date()) {
@@ -347,38 +350,76 @@ export async function portalApresentadoraRoutes(app) {
     })
   })
 
+  app.post('/v1/lives/submissoes-apresentadoras/aprovar-dia', { preHandler: reviewAccess }, async (request, reply) => {
+    const parsed = batchApproveDaySchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    if (!saoPauloDayBounds(parsed.data.data)) return reply.code(400).send({ error: 'data inválida.' })
+    const tenantId = request.user.tenant_id
+    const revisorId = request.user.sub
+    const rows = await withPortalPresenterDb(app, tenantId, async (db) => db.query(
+      `SELECT id, status, arquivamento_status, marca_id, iniciado_em, encerrado_em,
+              gmv_declarado, pedidos_declarados, live_impressions_declaradas, manual_views_declaradas
+         FROM apresentadora_live_submissoes
+        WHERE tenant_id=$1::uuid
+          AND (iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date=$2::date
+        ORDER BY criado_em ASC`,
+      [tenantId, parsed.data.data],
+    ))
+    const approved = []
+    const skipped = []
+    const failed = []
+    for (const row of rows.rows) {
+      if (row.status !== 'pendente') {
+        skipped.push({ id: row.id, reason: 'Envio não está pendente.' })
+        continue
+      }
+      if (row.arquivamento_status) {
+        skipped.push({ id: row.id, reason: 'Aguardando resposta de arquivamento.' })
+        continue
+      }
+      const rawOficial = oficialPayloadFromSubmission(row)
+      const normalized = normalizeOfficialMetrics(rawOficial)
+      if (!normalized.data) {
+        skipped.push({ id: row.id, reason: normalized.error })
+        continue
+      }
+      if (!normalized.data.marca_id || normalized.data.gmv_oficial == null || normalized.data.pedidos_oficiais == null || !submissionTimesAreApprovable(normalized.data)) {
+        skipped.push({ id: row.id, reason: 'Dados incompletos ou horário inválido para aprovação automática.' })
+        continue
+      }
+      try {
+        const result = await withPortalPresenterDb(app, tenantId, async (db) => aprovarSubmissaoComOficial(db, {
+          tenantId,
+          revisorId,
+          submissionId: row.id,
+          parsed: normalized.data,
+          recordHistory,
+        }))
+        approved.push({ id: result.id, live_oficial_id: result.live_oficial_id })
+      } catch (error) {
+        failed.push({ id: row.id, error: error.message ?? 'Erro ao aprovar envio.' })
+      }
+    }
+    return { data: parsed.data.data, approved, skipped, failed }
+  })
+
   app.post('/v1/lives/submissoes-apresentadoras/:id/aprovar', { preHandler: reviewAccess }, async (request, reply) => {
     const idCheck = uuid.safeParse(request.params?.id); const parsed = reviewSchema.safeParse(request.body); if (!idCheck.success || !parsed.success) return reply.code(400).send({ error: !idCheck.success ? 'id inválido' : parsed.error.issues[0].message })
     const normalized = normalizeOfficialMetrics(parsed.data); if (!normalized.data) return reply.code(400).send({ error: normalized.error, field_errors: { [normalized.field]: normalized.error } })
     parsed.data = normalized.data
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
-      const sub = await db.query(`SELECT * FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid FOR UPDATE`, [idCheck.data, request.user.tenant_id])
-      if (!sub.rows[0]) return reply.code(409).send({ error: 'Submissão não encontrada ou já revisada.' })
-      if (sub.rows[0].status === 'aprovada' && parsed.data.live_id === sub.rows[0].live_oficial_id) return { id: sub.rows[0].id, status: sub.rows[0].status, live_oficial_id: sub.rows[0].live_oficial_id, revisado_em: sub.rows[0].revisado_em }
-      if (!['pendente', 'devolvida'].includes(sub.rows[0].status)) return reply.code(409).send({ error: 'Submissão não encontrada ou já revisada.' })
-      if (sub.rows[0].arquivamento_status) return reply.code(409).send({ error: 'Aguarde a resposta da apresentadora à solicitação de arquivamento.' })
-      if (parsed.data.versao_esperada !== undefined && parsed.data.versao_esperada !== sub.rows[0].versao) return reply.code(409).send({ error: 'O envio foi alterado. Atualize a lista e confira os dados novamente.' })
-      if (sub.rows[0].status === 'devolvida' && (parsed.data.versao_esperada === undefined || !parsed.data.motivo_revisao)) return reply.code(422).send({ error: 'Para validar um envio devolvido, confira a versão atual e informe o motivo da revisão.' })
-      let liveId = parsed.data.live_id
-      if (liveId) {
-        const linked = await db.query(`SELECT id FROM apresentadora_live_submissoes WHERE tenant_id=$1::uuid AND apresentadora_id=$3::uuid AND live_oficial_id=$2::uuid FOR UPDATE`, [request.user.tenant_id, liveId, sub.rows[0].apresentadora_id])
-        if (linked.rows[0]) return reply.code(409).send({ error: 'A live oficial já está vinculada a outra submissão.' })
-        const allowed = await db.query(`SELECT 1 FROM lives l JOIN apresentadoras a ON a.id=$3::uuid AND a.tenant_id=l.tenant_id WHERE l.id=$1::uuid AND l.tenant_id=$2::uuid AND l.status='encerrada' AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.marca_id=$4::uuid AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date=(($5::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date) AND (l.apresentador_id=a.user_id OR EXISTS (SELECT 1 FROM live_apresentadores la WHERE la.live_id=l.id AND la.tenant_id=l.tenant_id AND la.apresentador_id=a.user_id) OR EXISTS (SELECT 1 FROM live_apresentadoras_v2 lav WHERE lav.live_id=l.id AND lav.tenant_id=l.tenant_id AND lav.apresentadora_id=a.id)) FOR UPDATE OF l LIMIT 1`, [liveId, request.user.tenant_id, sub.rows[0].apresentadora_id, sub.rows[0].marca_id, sub.rows[0].iniciado_em])
-        if (!allowed.rows[0]) return reply.code(422).send({ error: 'A live oficial precisa ser da mesma marca, dia e apresentadora, e estar encerrada.' })
-      } else {
-        if (!parsed.data.marca_id || parsed.data.gmv_oficial == null || parsed.data.pedidos_oficiais == null || !requiresPast(parsed.data)) return reply.code(422).send({ error: 'Para criar a live oficial, informe marca, início, fim, GMV e pedidos conferidos pela gestão.' })
-        // Funnel values stay optional. When the manager approves a creation,
-        // declared values are the editable default; absent on both sides stays
-        // NULL instead of being silently converted to zero.
-        parsed.data.live_impressions_oficiais ??= sub.rows[0].live_impressions_declaradas ?? null
-        parsed.data.manual_views_oficiais ??= sub.rows[0].manual_views_declaradas ?? null
-        liveId = await criarLiveOficialDaSubmissao(db, { tenantId: request.user.tenant_id, revisorId: request.user.sub, submissao: sub.rows[0], oficial: parsed.data })
+      try {
+        return await aprovarSubmissaoComOficial(db, {
+          tenantId: request.user.tenant_id,
+          revisorId: request.user.sub,
+          submissionId: idCheck.data,
+          parsed: parsed.data,
+          recordHistory,
+        })
+      } catch (error) {
+        if (error.statusCode) return reply.code(error.statusCode).send({ error: error.message })
+        throw error
       }
-      const createdOfficial = !parsed.data.live_id
-      const updated = await db.query(`UPDATE apresentadora_live_submissoes SET status='aprovada',live_oficial_id=$4::uuid,revisado_por=$3::uuid,revisado_em=NOW(),atualizado_em=NOW(),live_impressions_oficiais=CASE WHEN $5::boolean THEN $6::bigint ELSE live_impressions_oficiais END,manual_views_oficiais=CASE WHEN $5::boolean THEN $7::int ELSE manual_views_oficiais END WHERE id=$1::uuid AND tenant_id=$2::uuid AND status IN ('pendente','devolvida') RETURNING id,status,live_oficial_id,revisado_em`, [idCheck.data, request.user.tenant_id, request.user.sub, liveId, createdOfficial, parsed.data.live_impressions_oficiais ?? null, parsed.data.manual_views_oficiais ?? null])
-      if (!updated.rows[0]) throw Object.assign(new Error('Submissão já aprovada.'), { statusCode: 409 })
-      await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: updated.rows[0].id, version: sub.rows[0].versao, action: 'aprovada', actorId: request.user.sub, motivo: parsed.data.motivo_revisao ?? null })
-      return updated.rows[0]
     })
   })
 

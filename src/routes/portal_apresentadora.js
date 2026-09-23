@@ -3,8 +3,8 @@ import { getOperationalRanking as getPerformanceRanking } from '../lib/operation
 import { monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { presenterFixedSql } from '../config/presenter_defaults.js'
 import {
+  aprovarPendentesSemConflito,
   aprovarSubmissaoComOficial,
-  oficialPayloadFromSubmission,
   submissionTimesAreApprovable,
 } from '../services/portal-apresentadora-aprovacao.js'
 import { getOwnPortalPerformance } from '../services/portal-apresentadora-performance.js'
@@ -53,6 +53,14 @@ const devolucaoSchema = z.object({ motivo: z.string().trim().min(1).max(1000), a
 const arquivamentoSchema = z.object({ acao: z.enum(['confirmar', 'contestar']), motivo: z.string().trim().min(1).max(1000).optional(), versao_esperada: z.number().int().positive() }).strict()
   .refine(data => data.acao !== 'contestar' || Boolean(data.motivo), { message: 'Informe o motivo da contestação.' })
 const batchApproveDaySchema = z.object({ data: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).strict()
+const batchApproveGroupSchema = z.object({ ids: z.array(uuid).min(1).max(100) }).strict()
+const SUBMISSAO_APROVACAO_SELECT = `SELECT s.id, s.status, s.arquivamento_status, s.marca_id, s.apresentadora_id,
+       s.iniciado_em, s.encerrado_em, s.gmv_declarado, s.pedidos_declarados,
+       s.live_impressions_declaradas, s.manual_views_declaradas,
+       a.nome AS apresentadora_nome, m.nome AS marca_nome
+  FROM apresentadora_live_submissoes s
+  LEFT JOIN apresentadoras a ON a.id = s.apresentadora_id AND a.tenant_id = s.tenant_id
+  LEFT JOIN marcas m ON m.id = s.marca_id AND m.tenant_id = s.tenant_id`
 
 function normalizeSubmissionMetrics(data) {
   const gmv = parsePortalMoney(data.gmv_declarado)
@@ -147,6 +155,18 @@ export function requiresCurrentPortalMonth({ iniciado_em, encerrado_em }, now = 
   const fim = saoPauloDateInput(encerrado_em)
   const hoje = saoPauloDateInput(now)
   return Boolean(inicio && fim && hoje && inicio === fim && inicio.slice(0, 7) === hoje.slice(0, 7))
+}
+
+function aprovarLoteSemConflito(app, request, rows) {
+  const tenantId = request.user.tenant_id
+  return aprovarPendentesSemConflito({
+    rows,
+    tenantId,
+    revisorId: request.user.sub,
+    recordHistory,
+    normalizeOfficialMetrics,
+    runInDb: (work) => withPortalPresenterDb(app, tenantId, work),
+  })
 }
 
 export async function portalApresentadoraRoutes(app) {
@@ -355,52 +375,30 @@ export async function portalApresentadoraRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     if (!saoPauloDayBounds(parsed.data.data)) return reply.code(400).send({ error: 'data inválida.' })
     const tenantId = request.user.tenant_id
-    const revisorId = request.user.sub
     const rows = await withPortalPresenterDb(app, tenantId, async (db) => db.query(
-      `SELECT id, status, arquivamento_status, marca_id, iniciado_em, encerrado_em,
-              gmv_declarado, pedidos_declarados, live_impressions_declaradas, manual_views_declaradas
-         FROM apresentadora_live_submissoes
-        WHERE tenant_id=$1::uuid
-          AND (iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date=$2::date
-        ORDER BY criado_em ASC`,
+      `${SUBMISSAO_APROVACAO_SELECT}
+        WHERE s.tenant_id=$1::uuid
+          AND (s.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date=$2::date`,
       [tenantId, parsed.data.data],
     ))
-    const approved = []
-    const skipped = []
-    const failed = []
-    for (const row of rows.rows) {
-      if (row.status !== 'pendente') {
-        skipped.push({ id: row.id, reason: 'Envio não está pendente.' })
-        continue
-      }
-      if (row.arquivamento_status) {
-        skipped.push({ id: row.id, reason: 'Aguardando resposta de arquivamento.' })
-        continue
-      }
-      const rawOficial = oficialPayloadFromSubmission(row)
-      const normalized = normalizeOfficialMetrics(rawOficial)
-      if (!normalized.data) {
-        skipped.push({ id: row.id, reason: normalized.error })
-        continue
-      }
-      if (!normalized.data.marca_id || normalized.data.gmv_oficial == null || normalized.data.pedidos_oficiais == null || !submissionTimesAreApprovable(normalized.data)) {
-        skipped.push({ id: row.id, reason: 'Dados incompletos ou horário inválido para aprovação automática.' })
-        continue
-      }
-      try {
-        const result = await withPortalPresenterDb(app, tenantId, async (db) => aprovarSubmissaoComOficial(db, {
-          tenantId,
-          revisorId,
-          submissionId: row.id,
-          parsed: normalized.data,
-          recordHistory,
-        }))
-        approved.push({ id: result.id, live_oficial_id: result.live_oficial_id })
-      } catch (error) {
-        failed.push({ id: row.id, error: error.message ?? 'Erro ao aprovar envio.' })
-      }
-    }
-    return { data: parsed.data.data, approved, skipped, failed }
+    const result = await aprovarLoteSemConflito(app, request, rows.rows)
+    return { data: parsed.data.data, ...result }
+  })
+
+  app.post('/v1/lives/submissoes-apresentadoras/aprovar-sem-conflito', { preHandler: reviewAccess }, async (request, reply) => {
+    const parsed = batchApproveGroupSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const tenantId = request.user.tenant_id
+    const ids = [...new Set(parsed.data.ids)]
+    const rows = await withPortalPresenterDb(app, tenantId, async (db) => db.query(
+      `${SUBMISSAO_APROVACAO_SELECT}
+        WHERE s.tenant_id=$1::uuid AND s.id = ANY($2::uuid[])`,
+      [tenantId, ids],
+    ))
+    const found = new Set(rows.rows.map((row) => row.id))
+    const missing = ids.filter((id) => !found.has(id)).map((id) => ({ id, reason: 'Envio não encontrado.', apresentadora_nome: null, marca_nome: null, iniciado_em: null }))
+    const result = await aprovarLoteSemConflito(app, request, rows.rows)
+    return { ...result, skipped: [...missing, ...result.skipped] }
   })
 
   app.post('/v1/lives/submissoes-apresentadoras/:id/aprovar', { preHandler: reviewAccess }, async (request, reply) => {

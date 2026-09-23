@@ -1974,14 +1974,15 @@ export async function livesRoutes(app) {
     const status = String(request.query?.status ?? 'encerrada')
 
     return app.withTenant(tenant_id, async (db) => {
-      const params = [tenant_id, dayBounds.start, dayBounds.end]
-      let where = `WHERE l.tenant_id = $1::uuid AND ${activeLiveSql('l')} AND l.iniciado_em >= $2::timestamptz AND l.iniciado_em < $3::timestamptz`
-      if (status && status !== 'todas') {
-        params.push(status)
-        where += ` AND l.status = $${params.length}`
-      }
+      const queryResumoDiaLives = async (rangeStart, rangeEnd) => {
+        const params = [tenant_id, rangeStart, rangeEnd]
+        let where = `WHERE l.tenant_id = $1::uuid AND ${activeLiveSql('l')} AND l.iniciado_em >= $2::timestamptz AND l.iniciado_em < $3::timestamptz`
+        if (status && status !== 'todas') {
+          params.push(status)
+          where += ` AND l.status = $${params.length}`
+        }
 
-      const result = await db.query(
+        return db.query(
         `SELECT l.id, l.iniciado_em, l.encerrado_em, l.previsto_fim,
                 COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) AS gmv,
                 COALESCE(l.manual_orders, l.final_orders_count, 0) AS pedidos,
@@ -2039,17 +2040,38 @@ export async function livesRoutes(app) {
          ) va_marca ON true
          ${where}
          ORDER BY l.iniciado_em ASC`,
-        params
-      )
+          params
+        )
+      }
+
+      const result = await queryResumoDiaLives(dayBounds.start, dayBounds.end)
 
       const includeDeclarations = ['franqueador_master', 'franqueado', 'gerente', 'operacional', 'produtor_live'].includes(request.user.papel) && ['encerrada', 'todas'].includes(status)
+      const pendingEnd = new Date(Date.parse(`${data}T12:00:00Z`) + 86400000).toISOString().slice(0, 10)
       const declarations = includeDeclarations ? await pendingRows(db, {
         tenantId: tenant_id, start: data,
-        end: new Date(Date.parse(`${data}T12:00:00Z`) + 86400000).toISOString().slice(0, 10),
+        end: pendingEnd,
       }) : []
+
+      const mesInicio = `${data.slice(0, 7)}-01`
+      const mesBounds = saoPauloDayBounds(mesInicio)
+      let livesMes
+      if (mesBounds) {
+        const mesResult = await queryResumoDiaLives(mesBounds.start, dayBounds.end)
+        const mesDeclarations = includeDeclarations ? await pendingRows(db, {
+          tenantId: tenant_id, start: mesInicio,
+          end: pendingEnd,
+        }) : []
+        livesMes = [
+          ...mesResult.rows,
+          ...mesDeclarations.filter(row => row.pendente_aprovacao === true).map(pendingRecord),
+        ]
+      }
+
       return buildResumoDia({
         data,
         lives: [...result.rows, ...declarations.filter(row => row.pendente_aprovacao === true).map(pendingRecord)],
+        livesMes,
       })
     })
   })

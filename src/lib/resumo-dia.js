@@ -94,10 +94,35 @@ export function formatSaoPauloTimestamp(date) {
   return dateParts.replace(', ', ' às ')
 }
 
-export function buildResumoDia({ data, lives = [], now = new Date() }) {
+const RESUMO_SEPARATOR = '━━━━━━━━━━━━'
+
+function liveGmv(live) {
+  return toNum(live.gmv ?? live.ads_gmv ?? live.manual_gmv ?? live.fat_gerado)
+}
+
+function isLiveIncludedInSubtotal(live) {
+  return live.registro_tipo !== 'submissao' || (live.revisao_status === 'pendente' && !live.em_conciliacao)
+}
+
+export function sumGmvResumoSubtotal(lives) {
+  let total = 0
+  for (const live of lives) {
+    if (!isLiveIncludedInSubtotal(live)) continue
+    total += liveGmv(live)
+  }
+  return Math.round(total * 100) / 100
+}
+
+function acumuladoMesLabel(emConciliacao, hasPendentes) {
+  if (emConciliacao) return '*Acumulado do mês (em conciliação):*'
+  if (hasPendentes) return '*Acumulado do mês (provisório):*'
+  return '*Acumulado do mês:*'
+}
+
+export function buildResumoDia({ data, lives = [], livesMes = undefined, now = new Date() }) {
   const pendentes = lives.filter(live => live.registro_tipo === 'submissao' && live.revisao_status === 'pendente')
   const emConciliacao = pendentes.some(live => live.em_conciliacao)
-  lives = lives.filter(live => live.registro_tipo !== 'submissao' || (live.revisao_status === 'pendente' && !live.em_conciliacao))
+  lives = lives.filter(isLiveIncludedInSubtotal)
   const totalLives = lives.length
   let totalGmv = 0
   let totalPedidos = 0
@@ -107,7 +132,7 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
   const apresentadorasMap = new Map()
 
   for (const live of lives) {
-    const liveGmv = toNum(live.gmv ?? live.ads_gmv ?? live.manual_gmv ?? live.fat_gerado)
+    const liveGmvValue = liveGmv(live)
     const livePedidos = toNum(live.pedidos ?? live.manual_orders ?? live.final_orders_count)
 
     let liveMins = 0
@@ -119,7 +144,7 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
       }
     }
 
-    totalGmv += liveGmv
+    totalGmv += liveGmvValue
     totalPedidos += livePedidos
     totalMinutos += liveMins
 
@@ -139,7 +164,7 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
       })
     }
     const marcaObj = marcasMap.get(marcaKey)
-    marcaObj.gmv += liveGmv
+    marcaObj.gmv += liveGmvValue
     marcaObj.pedidos += livePedidos
     marcaObj.minutos += liveMins
     marcaObj.lives_count += 1
@@ -167,9 +192,9 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
         if (p.gmv != null) {
           pGmv = toNum(p.gmv)
         } else if (p.percentual != null) {
-          pGmv = (liveGmv * toNum(p.percentual)) / 100
+          pGmv = (liveGmvValue * toNum(p.percentual)) / 100
         } else if (p.papel === 'principal') {
-          pGmv = liveGmv
+          pGmv = liveGmvValue
         }
 
         let pMins = 0
@@ -198,7 +223,7 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
         })
       }
       const apObj = apresentadorasMap.get(pKey)
-      apObj.gmv += liveGmv
+      apObj.gmv += liveGmvValue
       apObj.minutos += liveMins
       apObj.lives_count += 1
     }
@@ -240,8 +265,12 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
   const dateFormatted = formatSaoPauloDate(data)
   const timestampFormatted = formatSaoPauloTimestamp(now)
 
+  const acumuladoMesGmv = livesMes === undefined
+    ? undefined
+    : sumGmvResumoSubtotal(livesMes)
+
   // Montagem do texto para WhatsApp (Opção 2 - Mais arejado, alinhado à esquerda sem bullets)
-  const separator = '━━━━━━━━━━━━━━━━━━━━'
+  const separator = RESUMO_SEPARATOR
   const lines = [
     '📊 *RESUMO DO DIA — LIVES*',
     `📅 *Data:* ${dateFormatted}`,
@@ -257,25 +286,17 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
   } else {
     lines.push(`💰 *${emConciliacao ? 'Subtotal (em conciliação)' : pendentes.length ? 'GMV provisório' : 'GMV Total'}:* ${formatMoneyBRL(totalGmv)}`)
     lines.push(`⚡ *GMV/h:* ${formatMoneyBRL(totalGmvPorHora)}/h`)
-    lines.push(`🛒 *Vendas:* ${totalPedidos} ${totalPedidos === 1 ? 'pedido' : 'pedidos'}`)
     lines.push(`⏱️ *Tempo no Ar:* ${formatMinsToHours(totalMinutos)} (${totalLives} ${totalLives === 1 ? 'live' : 'lives'})`)
+    if (acumuladoMesGmv !== undefined) {
+      lines.push(`${acumuladoMesLabel(emConciliacao, pendentes.length > 0)} ${formatMoneyBRL(acumuladoMesGmv)}`)
+    }
     lines.push('')
 
     lines.push(separator)
     lines.push('🏷️ *POR MARCA*')
     for (const m of marcas) {
       lines.push(`*${m.nome}*`)
-      const parts = [
-        formatMoneyBRL(m.gmv),
-        m.horas_formatadas,
-        `${formatMoneyBRL(m.gmv_por_hora)}/h`,
-        `${m.pedidos} ${m.pedidos === 1 ? 'pedido' : 'pedidos'}`,
-      ]
-      const views = countFragment(m.visualizacoes, 'visualização', 'visualizações')
-      const impressions = countFragment(m.impressoes, 'impressão', 'impressões')
-      if (views) parts.push(views)
-      if (impressions) parts.push(impressions)
-      lines.push(parts.join(' · '))
+      lines.push(`${formatMoneyBRL(m.gmv)} · ${m.horas_formatadas} · ${formatMoneyBRL(m.gmv_por_hora)}/h`)
       lines.push('')
     }
     if (lines[lines.length - 1] === '') lines.pop()
@@ -315,6 +336,7 @@ export function buildResumoDia({ data, lives = [], now = new Date() }) {
       horas_formatadas: formatMinsToHours(totalMinutos),
       gmv_por_hora: totalGmvPorHora,
       lives_count: totalLives,
+      acumulado_mes: acumuladoMesGmv ?? null,
     },
     marcas,
     apresentadoras,

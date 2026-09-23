@@ -38,7 +38,10 @@ describe('GET /v1/lives/resumo-dia', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json().totais).toMatchObject({ gmv: 119.99, gmv_pendente_aprovacao: 119.99, total_provisorio: null, em_conciliacao: true })
     expect(response.json().texto_whatsapp).toContain('Sem comissão antes da validação')
-    expect(calls[1].params.slice(0, 3)).toEqual([tenantId, '2026-09-11', '2026-09-12'])
+    const pendingCall = calls.find((c) => String(c.sql).includes('apresentadora_live_submissoes'))
+    expect(pendingCall.params.slice(0, 3)).toEqual([tenantId, '2026-09-11', '2026-09-12'])
+    const mesCall = calls.find((c) => String(c.params?.[1] ?? '').startsWith('2026-09-01'))
+    expect(mesCall?.params.slice(0, 3)).toEqual([tenantId, '2026-09-01T00:00:00 America/Sao_Paulo', '2026-09-12T00:00:00 America/Sao_Paulo'])
     await app.close()
   })
   it('rejects invalid date format with 400', async () => {
@@ -124,6 +127,8 @@ describe('GET /v1/lives/resumo-dia', () => {
     expect(body.texto_whatsapp).toContain('🎤 *POR APRESENTADORA*')
     expect(body.texto_whatsapp).not.toContain('visualiza')
     expect(body.texto_whatsapp).not.toContain('impress')
+    expect(body.texto_whatsapp).not.toContain('pedidos')
+    expect(body.totais.acumulado_mes).toBe(8000)
 
     expect(calls[0].sql).toContain('l.manual_views')
     expect(calls[0].sql).toContain('l.final_peak_viewers')

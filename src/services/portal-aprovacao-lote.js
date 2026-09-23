@@ -3,12 +3,10 @@ import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribu
 import { comissaoValorFromPct } from '../lib/comissao-sem-cabine.js'
 import { calcularComissaoFranquia } from './comissao.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
-import { pendingCollisionSql } from '../lib/presenter-pending.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const MSG_CONFLITO_APRESENTADORA = 'Já existe uma live oficial desta apresentadora neste horário. Confira o registro e use Vincular live existente.'
-const MSG_CONFLITO_MARCA = 'Conflito de horário com outra live ou envio da mesma marca.'
 const MSG_MARCA_INVALIDA = 'Marca ou apresentadora não é válida para esta unidade.'
 const MSG_CLIENTE = 'Confira o vínculo e a situação do cliente antes de aprovar.'
 const MSG_JA_REVISADA = 'Submissão não encontrada ou já revisada.'
@@ -82,7 +80,6 @@ export function franquiaDaLinha(info, { presenterBands, defaultBands, gmvMes }) 
 export function motivoRecusaDaLinha(info) {
   if (!info) return MSG_JA_REVISADA
   if (info.conflito_apresentadora === true) return MSG_CONFLITO_APRESENTADORA
-  if (info.em_conciliacao === true) return MSG_CONFLITO_MARCA
   const apresentadoraOk = info.apresentadora_ativa === true
     && info.apresentadora_arquivada !== true
     && info.user_ativo === true
@@ -125,7 +122,6 @@ function contextoSql() {
              mc.id AS marca_condicao_id,
              mc.comissao_franquia_pct AS condicao_pct,
              mc.comissao_franqueadora_pct AS condicao_franqueadora_pct,
-             ${pendingCollisionSql('s')} AS em_conciliacao,
              EXISTS (
                SELECT 1 FROM lives l
                WHERE l.tenant_id = s.tenant_id
@@ -419,7 +415,7 @@ export async function aprovarLoteNaSessao({
     const info = byId.get(item.row.id)
     const described = item.described
     const recusa = motivoRecusaDaLinha(info)
-    if (recusa === MSG_CONFLITO_APRESENTADORA || recusa === MSG_CONFLITO_MARCA) {
+    if (recusa === MSG_CONFLITO_APRESENTADORA) {
       pushConflict(buckets, described, recusa)
       continue
     }

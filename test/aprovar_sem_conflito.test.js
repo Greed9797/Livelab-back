@@ -32,17 +32,21 @@ describe('motivoConflitoAprovacaoSemCabine', () => {
     const query = vi.fn(async (sql) => {
       expect(sql).not.toMatch(/FOR UPDATE/i)
       expect(sql).toContain('apresentador_id')
-      expect(sql).toContain('pending_peer')
-      return { rows: [{ em_conciliacao: false, conflito_apresentadora: true }] }
+      expect(sql).not.toContain('pending_peer')
+      expect(sql).not.toContain('em_conciliacao')
+      return { rows: [{ conflito_apresentadora: true }] }
     })
     await expect(motivoConflitoAprovacaoSemCabine({ query }, { tenantId: MARCA, submissionId: MARCA }))
       .resolves.toBe('Já existe uma live oficial desta apresentadora neste horário. Confira o registro e use Vincular live existente.')
   })
 
-  it('recusa a conciliação que a lista já mostra, mesmo sem sobreposição da apresentadora', async () => {
-    const query = vi.fn(async () => ({ rows: [{ em_conciliacao: true, conflito_apresentadora: false }] }))
+  it('não recusa em conciliação nem mesma marca quando a apresentadora não sobrepõe', async () => {
+    const query = vi.fn(async (sql) => {
+      expect(sql).not.toContain('pending_peer')
+      return { rows: [{ conflito_apresentadora: false }] }
+    })
     await expect(motivoConflitoAprovacaoSemCabine({ query }, { tenantId: MARCA, submissionId: MARCA }))
-      .resolves.toBe('Conflito de horário com outra live ou envio da mesma marca.')
+      .resolves.toBeNull()
   })
 
   it('libera envio sem as duas marcas de conflito', async () => {
@@ -242,7 +246,7 @@ describe('aprovar lote numa sessão', () => {
           return contexto([
             info('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
             info('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', { iniciado_em: '2020-01-02T18:00:00.000Z', encerrado_em: '2020-01-02T19:00:00.000Z' }),
-            info('cccccccc-cccc-4ccc-8ccc-cccccccccccc', { iniciado_em: '2020-01-02T12:00:00.000Z', encerrado_em: '2020-01-02T13:00:00.000Z', em_conciliacao: true }),
+            info('cccccccc-cccc-4ccc-8ccc-cccccccccccc', { iniciado_em: '2020-01-02T12:00:00.000Z', encerrado_em: '2020-01-02T13:00:00.000Z', conflito_apresentadora: true }),
           ])
         }
         if (String(sql).includes('lote-aprovacao:gravar')) {
@@ -280,7 +284,7 @@ describe('aprovar lote numa sessão', () => {
       'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     ])
     expect(result.skipped_conflito.map((item) => item.id)).toEqual(['cccccccc-cccc-4ccc-8ccc-cccccccccccc'])
-    expect(result.skipped_conflito[0].reason).toMatch(/mesma marca/)
+    expect(result.skipped_conflito[0].reason).toMatch(/apresentadora neste horário/)
     expect(lifts).toEqual([{ tenantId: MARCA, apresentadoraId: APRESENTADORA, mesReferencia: '2020-01' }])
     expect(sqls.some((sql) => String(sql).includes('lote-aprovacao:reparar'))).toBe(true)
   })
@@ -320,5 +324,66 @@ describe('aprovar lote numa sessão', () => {
     expect(result.skipped_conflito.map((item) => item.id)).toEqual(['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'])
     expect(result.failed.map((item) => item.id)).toEqual(['cccccccc-cccc-4ccc-8ccc-cccccccccccc'])
     expect(gravadas).toBe(2)
+  })
+
+  it('aprova dois envios que a aprovação individual aceita e pula só a sobreposição da apresentadora', async () => {
+    const contextoSql = __test.contextoSql()
+    expect(contextoSql).not.toMatch(/FOR UPDATE/i)
+    expect(contextoSql).not.toMatch(/pending_peer/)
+    expect(contextoSql).not.toMatch(/em_conciliacao/)
+    const gravadas = []
+    const session = {
+      query: async (sql) => {
+        if (String(sql).includes('lote-aprovacao:contexto')) {
+          return contexto([
+            info('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', { em_conciliacao: true }),
+            info('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', {
+              em_conciliacao: true,
+              apresentadora_id: '66666666-6666-4666-8666-666666666666',
+              user_id: '55555555-5555-4555-8555-555555555555',
+            }),
+            info('cccccccc-cccc-4ccc-8ccc-cccccccccccc', {
+              conflito_apresentadora: true,
+              iniciado_em: '2020-01-02T18:00:00.000Z',
+              encerrado_em: '2020-01-02T19:00:00.000Z',
+            }),
+          ])
+        }
+        if (String(sql).includes('lote-aprovacao:gravar')) {
+          gravadas.push(sql)
+          expect(sql).not.toMatch(/marcas/i)
+          return { rows: [{ outcome: 'approved', live_id: LIVE }] }
+        }
+        throw new Error(`query inesperada: ${String(sql).slice(0, 80)}`)
+      },
+      transaction: async (fn) => fn({ query: async () => ({ rows: [] }) }),
+    }
+    const result = await aprovarPendentesSemConflito({
+      rows: [
+        row('cccccccc-cccc-4ccc-8ccc-cccccccccccc', { iniciado_em: '2020-01-02T18:00:00.000Z', encerrado_em: '2020-01-02T19:00:00.000Z' }),
+        row('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'),
+        row('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
+      ],
+      tenantId: MARCA,
+      revisorId: MARCA,
+      recordHistory: async () => {},
+      normalizeOfficialMetrics: passthrough,
+      session,
+      recalculateMonth: async () => {},
+    })
+
+    expect(gravadas).toHaveLength(2)
+    expect(result.approved.map((item) => item.id)).toEqual([
+      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    ])
+    expect(result.skipped_conflito).toEqual([
+      expect.objectContaining({
+        id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        reason: 'Já existe uma live oficial desta apresentadora neste horário. Confira o registro e use Vincular live existente.',
+      }),
+    ])
+    expect(result.failed).toEqual([])
+    expect(result.skipped.filter((item) => item.conflito).map((item) => item.id)).toEqual(['cccccccc-cccc-4ccc-8ccc-cccccccccccc'])
   })
 })

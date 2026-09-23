@@ -5,6 +5,7 @@ import {
   formatMoneyBRL,
   formatSaoPauloDate,
   formatSaoPauloTimestamp,
+  sumGmvResumoSubtotal,
 } from '../src/lib/resumo-dia.js'
 
 describe('resumo-dia helpers', () => {
@@ -134,8 +135,11 @@ describe('resumo-dia helpers', () => {
     expect(result.texto_whatsapp).toContain('📊 *RESUMO DO DIA — LIVES*')
     expect(result.texto_whatsapp).toContain('💰 *GMV Total:*')
     expect(result.texto_whatsapp).toContain('⚡ *GMV/h:*')
-    expect(result.texto_whatsapp).toContain('🛒 *Vendas:* 50 pedidos')
+    expect(result.texto_whatsapp).not.toContain('🛒 *Vendas:*')
+    expect(result.texto_whatsapp).not.toContain('pedidos')
     expect(result.texto_whatsapp).toContain('⏱️ *Tempo no Ar:* 5h 00min (2 lives)')
+    expect(result.texto_whatsapp).toContain('━━━━━━━━━━━━')
+    expect(result.texto_whatsapp).not.toContain('━━━━━━━━━━━━━━━━━━━━')
     expect(result.texto_whatsapp).toContain('🏷️ *POR MARCA*')
     expect(result.texto_whatsapp).toContain('*Marca B*')
     expect(result.texto_whatsapp).toContain('🎤 *POR APRESENTADORA*')
@@ -144,7 +148,65 @@ describe('resumo-dia helpers', () => {
     expect(result.texto_whatsapp).not.toContain('• ')
   })
 
-  it('adds stored views and impressions on each brand and omits missing values', () => {
+  it('includes month-to-date subtotal in whatsapp when livesMes is provided', () => {
+    const lives = [
+      {
+        iniciado_em: '2026-09-22T13:00:00-03:00',
+        encerrado_em: '2026-09-22T15:00:00-03:00',
+        gmv: 1000,
+        marca_nome: 'Marca A',
+        apresentadora_nome: 'Ana',
+      },
+    ]
+    const livesMes = [
+      {
+        iniciado_em: '2026-09-01T13:00:00-03:00',
+        encerrado_em: '2026-09-01T15:00:00-03:00',
+        gmv: 2000,
+        marca_nome: 'Marca A',
+        apresentadora_nome: 'Ana',
+      },
+      ...lives,
+      {
+        registro_tipo: 'submissao',
+        revisao_status: 'pendente',
+        em_conciliacao: true,
+        gmv: 999,
+        marca_nome: 'Marca X',
+        apresentadora_nome: 'Bia',
+      },
+    ]
+
+    expect(sumGmvResumoSubtotal(livesMes)).toBe(3000)
+
+    const result = buildResumoDia({
+      data: '2026-09-22',
+      lives,
+      livesMes,
+      now: new Date('2026-09-22T19:00:00-03:00'),
+    })
+
+    expect(result.totais.acumulado_mes).toBe(3000)
+    expect(result.texto_whatsapp).toContain('*Acumulado do mês:* R$ 3.000,00')
+    expect(result.texto_whatsapp).not.toContain('R$ 999,00')
+  })
+
+  it('omits month accumulation line when livesMes is not provided', () => {
+    const result = buildResumoDia({
+      data: '2026-09-11',
+      lives: [{
+        iniciado_em: '2026-09-11T13:00:00-03:00',
+        encerrado_em: '2026-09-11T15:00:00-03:00',
+        gmv: 100,
+        marca_nome: 'M',
+        apresentadora_nome: 'A',
+      }],
+    })
+    expect(result.totais.acumulado_mes).toBeNull()
+    expect(result.texto_whatsapp).not.toContain('Acumulado do mês')
+  })
+
+  it('keeps brand lines to GMV, airtime and GMV/h only', () => {
     const result = buildResumoDia({
       data: '2026-09-11',
       now: new Date('2026-09-11T19:00:00-03:00'),
@@ -206,12 +268,13 @@ describe('resumo-dia helpers', () => {
       visualizacoes: 1000,
       impressoes: 8400,
     })
-    expect(result.texto_whatsapp).toContain('R$ 1.500,00 · 2h 00min · R$ 750,00/h · 15 pedidos · 1.000 visualizações · 8.400 impressões')
-    expect(result.texto_whatsapp).toContain('R$ 200,00 · 1h 00min · R$ 200,00/h · 2 pedidos\n')
-    expect(result.texto_whatsapp).toContain('R$ 100,00 · 1h 00min · R$ 100,00/h · 1 pedido · 80 visualizações\n')
-    expect(result.texto_whatsapp).not.toContain('80 visualizações ·')
-    expect(result.texto_whatsapp).toContain('R$ 50,00 · 1h 00min · R$ 50,00/h · 1 pedido · 0 visualizações · 0 impressões')
-    expect(result.texto_whatsapp).not.toContain('99 visualizações')
+    expect(result.texto_whatsapp).toContain('R$ 1.500,00 · 2h 00min · R$ 750,00/h')
+    expect(result.texto_whatsapp).toContain('R$ 200,00 · 1h 00min · R$ 200,00/h')
+    expect(result.texto_whatsapp).toContain('R$ 100,00 · 1h 00min · R$ 100,00/h')
+    expect(result.texto_whatsapp).toContain('R$ 50,00 · 1h 00min · R$ 50,00/h')
+    expect(result.texto_whatsapp).not.toContain('visualiza')
+    expect(result.texto_whatsapp).not.toContain('impress')
+    expect(result.texto_whatsapp).not.toContain('pedido')
     const presenterBlock = result.texto_whatsapp.split('🎤 *POR APRESENTADORA*')[1]
     expect(presenterBlock).not.toContain('visualiza')
     expect(presenterBlock).not.toContain('impress')

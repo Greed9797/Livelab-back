@@ -8,7 +8,7 @@ import {
   submissionTimesAreApprovable,
 } from '../services/portal-apresentadora-aprovacao.js'
 import { getOwnPortalPerformance } from '../services/portal-apresentadora-performance.js'
-import { withPortalPresenterDb } from '../services/portal-apresentadora-db.js'
+import { withPortalPresenterDb, withPortalPresenterSession } from '../services/portal-apresentadora-db.js'
 import { getOwnPortalRemuneration } from '../services/portal-apresentadora-remuneracao.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 import { parsePortalCount, parsePortalMoney } from '../lib/portal-submission-input.js'
@@ -159,14 +159,14 @@ export function requiresCurrentPortalMonth({ iniciado_em, encerrado_em }, now = 
 
 function aprovarLoteSemConflito(app, request, rows) {
   const tenantId = request.user.tenant_id
-  return aprovarPendentesSemConflito({
+  return withPortalPresenterSession(app, tenantId, (session) => aprovarPendentesSemConflito({
     rows,
     tenantId,
     revisorId: request.user.sub,
     recordHistory,
     normalizeOfficialMetrics,
-    runInDb: (work) => withPortalPresenterDb(app, tenantId, work),
-  })
+    session,
+  }))
 }
 
 export async function portalApresentadoraRoutes(app) {

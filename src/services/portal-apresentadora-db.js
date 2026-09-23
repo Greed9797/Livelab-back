@@ -63,3 +63,58 @@ export async function withPortalPresenterDb(app, tenantId, work) {
     client.release(releaseError ?? undefined)
   }
 }
+
+// Uma conexão para o lote inteiro. Cada envio limpo segue na própria transação
+// (um script SQL, autocommit). SET ROLE de sessão evita BEGIN/SET ROLE/COMMIT
+// por live: a API está em us-west e o banco em sa-east, ~180ms por ida.
+export async function withPortalPresenterSession(app, tenantId, work) {
+  assertTenantId(tenantId, 'withPortalPresenterSession')
+  const pool = app.db?.pool
+  if (!pool?.connect) {
+    const error = new Error('Executor isolado do portal não está disponível')
+    error.statusCode = 503
+    throw error
+  }
+
+  const client = await pool.connect()
+  let established = false
+  let poison = null
+  try {
+    await client.query(`SET ROLE ${PORTAL_RUNTIME_ROLE}`)
+    await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
+    established = true
+    const query = (text, params) => client.query(text, params)
+    const transaction = async (fn) => {
+      await client.query('BEGIN')
+      try {
+        const result = await fn({ query, inPortalTransaction: true })
+        await client.query('COMMIT')
+        return result
+      } catch (error) {
+        try {
+          await client.query('ROLLBACK')
+        } catch (rollbackError) {
+          poison = rollbackError
+        }
+        throw error
+      }
+    }
+    return await work({ query, transaction })
+  } catch (error) {
+    if (!established) {
+      error.statusCode = 503
+      error.code = error.code ?? 'PORTAL_RUNTIME_UNAVAILABLE'
+    }
+    throw error
+  } finally {
+    if (established && !poison) {
+      try {
+        await client.query('RESET ROLE')
+        await client.query('RESET app.tenant_id')
+      } catch (cleanupError) {
+        poison = cleanupError
+      }
+    }
+    client.release(poison ?? undefined)
+  }
+}

@@ -58,8 +58,8 @@ describe('cabine opcional na live', () => {
     const query = vi.fn(async (sql) => {
       const s = String(sql)
       if (s.includes('FROM cabines')) throw new Error('não deveria consultar cabine')
-      if (s.includes('comissao_confirmada')) return { rows: [{ condicao_pct: null, marca_pct: 0 }] }
-      if (s.includes('FROM marcas') && !s.includes('comissao_confirmada')) {
+      if (s.includes('AS condicao_pct')) return { rows: [{ condicao_pct: null, marca_pct: 0 }] }
+      if (s.includes('FROM marcas') && !s.includes('AS condicao_pct')) {
         return { rows: [{ id: marcaId, cliente_id: null, tipo: 'afiliada' }] }
       }
       if (s.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: 0 }] }
@@ -93,7 +93,7 @@ describe('cabine opcional na live', () => {
   it('POST /v1/lives/manual sem cabine usa o percentual confirmado da marca', async () => {
     const query = vi.fn(async (sql) => {
       const s = String(sql)
-      if (s.includes('comissao_confirmada')) return { rows: [{ condicao_pct: '10', marca_pct: 0 }] }
+      if (s.includes('AS condicao_pct')) return { rows: [{ condicao_pct: '10', marca_pct: 0 }] }
       if (s.includes('FROM marcas')) return { rows: [{ id: marcaId, cliente_id: null, tipo: 'afiliada' }] }
       if (s.includes('INSERT INTO lives')) return { rows: [{ id: liveId }] }
       return { rows: [] }

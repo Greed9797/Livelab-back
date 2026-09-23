@@ -13,6 +13,17 @@ import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, submissao, oficial }) {
   const cabineId = oficial.cabine_id ?? null
 
+  // Sem cabine não há linha de cabine para travar. FOR UPDATE em marcas estoura
+  // 42501: a role do portal só tem SELECT nessa tabela
+  // ("permission denied for table marcas") e o aprovar vira HTTP 500.
+  // O lock de transação serializa dois envios da mesma apresentadora.
+  if (!cabineId) {
+    await db.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`live-approve:${tenantId}:${submissao.apresentadora_id}`],
+    )
+  }
+
   const refs = cabineId
     ? await db.query(`SELECT m.cliente_id, m.tipo, a.user_id, a.comissao_pct AS apresentadora_pct,
         cl.status AS cliente_status, ct.comissao_pct AS contrato_pct
@@ -33,8 +44,7 @@ export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, sub
       LEFT JOIN clientes cl ON cl.id=m.cliente_id AND cl.tenant_id=m.tenant_id
       WHERE m.id=$2::uuid AND m.tenant_id=$1::uuid AND ${marcaStatusOperacionalSql('m', 'cl')}='ativa'
         AND a.ativo IS TRUE AND a.arquivada IS DISTINCT FROM TRUE
-        AND (m.cliente_id IS NULL OR cl.id IS NOT NULL)
-      FOR UPDATE OF m`, [tenantId, oficial.marca_id, submissao.apresentadora_id])
+        AND (m.cliente_id IS NULL OR cl.id IS NOT NULL)`, [tenantId, oficial.marca_id, submissao.apresentadora_id])
 
   const ref = refs.rows[0]
   if (!ref) {
@@ -130,5 +140,42 @@ export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, sub
       mesReferencia: saoPauloDateInput(oficial.iniciado_em).slice(0, 7),
     })
   }
+  // O motor trata percentual ausente como 0. Sem cabine isso gravaria comissão
+  // inventada por cima do valor (ou do NULL) resolvido acima.
+  if (!cabineId) await manterComissaoFranquiaSemCabine(db, { tenantId, liveId, comissaoFranquia })
   return liveId
+}
+
+async function manterComissaoFranquiaSemCabine(db, { tenantId, liveId, comissaoFranquia }) {
+  if (comissaoFranquia == null) {
+    await db.query(
+      `UPDATE lives SET comissao_calculada = NULL
+        WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+      [liveId, tenantId],
+    )
+    await db.query(
+      `UPDATE vendas_atribuidas SET comissao_franquia = NULL
+        WHERE tenant_id = $1::uuid AND origem = 'live' AND origem_id = $2::uuid`,
+      [tenantId, liveId],
+    )
+    return
+  }
+
+  const zeros = await db.query(
+    `SELECT id FROM vendas_atribuidas
+      WHERE tenant_id = $1::uuid AND origem = 'live' AND origem_id = $2::uuid
+        AND comissao_franquia = 0`,
+    [tenantId, liveId],
+  )
+  if (zeros.rows.length !== 1) return
+  await db.query(
+    `UPDATE vendas_atribuidas SET comissao_franquia = $3
+      WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+    [zeros.rows[0].id, tenantId, comissaoFranquia],
+  )
+  await db.query(
+    `UPDATE lives SET comissao_calculada = $3
+      WHERE id = $1::uuid AND tenant_id = $2::uuid AND comissao_calculada = 0`,
+    [liveId, tenantId, comissaoFranquia],
+  )
 }

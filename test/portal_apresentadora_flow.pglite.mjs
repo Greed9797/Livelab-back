@@ -301,6 +301,22 @@ try {
  assert.equal(history[4].snapshot.arquivamento_status,'confirmado')
  assert.equal((await counts()).lives,historicalCounts.lives)
  assert.equal((await counts()).sales,historicalCounts.sales)
+ // Cabine omitida: a role do portal não pode FOR UPDATE em marcas nem ler
+ // comissao_confirmada. Isso tem de responder fora de 500 e não gravar 0.
+ const noCabinBrand=id(90)
+ await db.query(`INSERT INTO marcas(id,tenant_id,nome,status,tipo,comissao_franquia_pct,comissao_franqueadora_pct) VALUES ($1,$2,'COFARI','ativa','afiliada',0,0)`,[noCabinBrand,tenant])
+ const noCabinPayload={marca_id:noCabinBrand,iniciado_em:'2026-09-23T09:59:00.000Z',encerrado_em:'2026-09-23T13:01:00.000Z',gmv_declarado:176,pedidos_declarados:2,live_impressions_declaradas:4,manual_views_declaradas:1,request_id:id(91)}
+ const noCabinSub=check(await inject('POST',own,noCabinPayload),201)
+ const noCabinApproved=check(await inject('POST',`${review}/${noCabinSub.id}/aprovar`,{marca_id:noCabinBrand,iniciado_em:noCabinPayload.iniciado_em,encerrado_em:noCabinPayload.encerrado_em,gmv_oficial:176,pedidos_oficiais:2,live_impressions_oficiais:4,manual_views_oficiais:1},{headers}),200)
+ const noCabinLive=(await db.query('SELECT cabine_id,comissao_calculada,fat_gerado,final_orders_count,live_impressions,manual_views FROM lives WHERE id=$1',[noCabinApproved.live_oficial_id])).rows[0]
+ assert.equal(noCabinLive.cabine_id,null)
+ assert.equal(noCabinLive.comissao_calculada,null)
+ assert.equal(Number(noCabinLive.fat_gerado),176)
+ assert.equal(Number(noCabinLive.final_orders_count),2)
+ assert.equal(Number(noCabinLive.live_impressions),4)
+ assert.equal(Number(noCabinLive.manual_views),1)
+ const noCabinSale=(await db.query(`SELECT comissao_franquia FROM vendas_atribuidas WHERE origem='live' AND origem_id=$1`,[noCabinApproved.live_oficial_id])).rows[0]
+ assert.equal(noCabinSale.comissao_franquia,null)
  await db.query("UPDATE users SET papel='apresentadora' WHERE id=$1",[manager])
  check(await inject('GET',review,undefined,{headers}),403)
  check(await inject('POST',`${review}/${cancellation.id}/devolver`,{motivo:'stale manager'},{headers}),403)

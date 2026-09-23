@@ -13,7 +13,7 @@ function dbReturning(handler) {
 describe('resolveComissaoPctSemCabine', () => {
   it('usa o percentual confirmado da marca e não consulta a faixa', async () => {
     const db = dbReturning((sql) => {
-      if (sql.includes('comissao_confirmada')) return { rows: [{ condicao_pct: '12.5', marca_pct: 0 }] }
+      if (sql.includes('AS condicao_pct')) return { rows: [{ condicao_pct: '12.5', marca_pct: 0 }] }
       if (sql.includes('apresentadora_comissao_faixas')) throw new Error('faixa não deveria ser consultada')
       return { rows: [] }
     })
@@ -28,7 +28,7 @@ describe('resolveComissaoPctSemCabine', () => {
 
   it('cai na faixa da apresentadora quando a marca não tem percentual informado', async () => {
     const db = dbReturning((sql) => {
-      if (sql.includes('comissao_confirmada')) return { rows: [{ condicao_pct: null, marca_pct: 0 }] }
+      if (sql.includes('AS condicao_pct')) return { rows: [{ condicao_pct: null, marca_pct: 0 }] }
       if (sql.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: 0 }] }
       if (sql.includes('apresentadora_comissao_faixas')) return { rows: [{ comissao_pct: '1.5' }] }
       return { rows: [] }
@@ -43,7 +43,7 @@ describe('resolveComissaoPctSemCabine', () => {
 
   it('devolve null quando marca e faixa não existem — não inventa 0', async () => {
     const db = dbReturning((sql) => {
-      if (sql.includes('comissao_confirmada')) return { rows: [{ condicao_pct: null, marca_pct: 0 }] }
+      if (sql.includes('AS condicao_pct')) return { rows: [{ condicao_pct: null, marca_pct: 0 }] }
       if (sql.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: 0 }] }
       return { rows: [] }
     })
@@ -59,7 +59,7 @@ describe('resolveComissaoPctSemCabine', () => {
   it('não trata o placeholder 0 da franqueadora como fonte', async () => {
     const db = dbReturning((sql) => {
       expect(sql).not.toContain('comissao_franqueadora_pct')
-      if (sql.includes('comissao_confirmada')) return { rows: [] }
+      if (sql.includes('AS condicao_pct')) return { rows: [] }
       return { rows: [] }
     })
 

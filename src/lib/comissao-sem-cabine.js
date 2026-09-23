@@ -1,11 +1,13 @@
 /**
  * Comissão da live quando não há cabine (e portanto não há contrato da cabine).
  *
- * Ordem: percentual confirmado da marca (condição vigente, senão
- * marcas.comissao_franquia_pct quando foi de fato informado) e, se essa fonte
- * não existe, a faixa da apresentadora (própria, senão padrão do tenant).
+ * Ordem: percentual da condição vigente quando é maior que zero, senão
+ * marcas.comissao_franquia_pct quando foi de fato informado (> 0) e, se essa
+ * fonte não existe, a faixa da apresentadora (própria, senão padrão do tenant).
  *
- * Fonte ausente devolve null. Não devolve 0 para inventar comissão.
+ * Zero não entra. A coluna nasce com DEFAULT 0, e a role do portal não pode
+ * ler comissao_confirmada (revogada na migration 156) — selecioná-la no aprovar
+ * estoura 42501. Fonte ausente devolve null. Não devolve 0 para inventar comissão.
  * comissao_franqueadora (royalty) fica de fora — o placeholder 0 dela não entra aqui.
  */
 
@@ -35,13 +37,13 @@ async function marcaFranquiaPct(db, { tenantId, marcaId, data }) {
   const result = await db.query(
     `SELECT
        CASE
-         WHEN mc.comissao_confirmada IS TRUE THEN mc.comissao_franquia_pct
+         WHEN mc.comissao_franquia_pct > 0 THEN mc.comissao_franquia_pct
          ELSE NULL
        END AS condicao_pct,
        m.comissao_franquia_pct AS marca_pct
      FROM marcas m
      LEFT JOIN LATERAL (
-       SELECT c.comissao_franquia_pct, c.comissao_confirmada
+       SELECT c.comissao_franquia_pct
          FROM marca_condicoes_comerciais c
         WHERE c.tenant_id = m.tenant_id
           AND c.marca_id = m.id

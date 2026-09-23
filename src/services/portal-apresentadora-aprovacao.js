@@ -49,6 +49,7 @@ export async function aprovarSubmissaoComOficial(db, {
   submissionId,
   parsed,
   recordHistory,
+  deferMonthRecalc = false,
 }) {
   const sub = await db.query(`SELECT * FROM apresentadora_live_submissoes WHERE id=$1::uuid AND tenant_id=$2::uuid FOR UPDATE`, [submissionId, tenantId])
   if (!sub.rows[0]) {
@@ -101,7 +102,7 @@ export async function aprovarSubmissaoComOficial(db, {
     }
     parsed.live_impressions_oficiais ??= sub.rows[0].live_impressions_declaradas ?? null
     parsed.manual_views_oficiais ??= sub.rows[0].manual_views_declaradas ?? null
-    liveId = await criarLiveOficialDaSubmissao(db, { tenantId, revisorId, submissao: sub.rows[0], oficial: parsed })
+    liveId = await criarLiveOficialDaSubmissao(db, { tenantId, revisorId, submissao: sub.rows[0], oficial: parsed, deferMonthRecalc })
   }
   const createdOfficial = !parsed.live_id
   const updated = await db.query(`UPDATE apresentadora_live_submissoes SET status='aprovada',live_oficial_id=$4::uuid,revisado_por=$3::uuid,revisado_em=NOW(),atualizado_em=NOW(),live_impressions_oficiais=CASE WHEN $5::boolean THEN $6::bigint ELSE live_impressions_oficiais END,manual_views_oficiais=CASE WHEN $5::boolean THEN $7::int ELSE manual_views_oficiais END WHERE id=$1::uuid AND tenant_id=$2::uuid AND status IN ('pendente','devolvida') RETURNING id,status,live_oficial_id,revisado_em`, [submissionId, tenantId, revisorId, liveId, createdOfficial, parsed.live_impressions_oficiais ?? null, parsed.manual_views_oficiais ?? null])
@@ -117,7 +118,7 @@ export async function aprovarSubmissaoComOficial(db, {
 // Materializa um relato APROVADO dentro da transação do revisor. Não aceita
 // A identidade vem da submissão bloqueada; os valores oficiais foram conferidos
 // pelo gestor. Os mesmos helpers do registro manual mantêm agenda/rateio/comissão.
-export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, submissao, oficial }) {
+export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, submissao, oficial, deferMonthRecalc = false }) {
   const cabineId = oficial.cabine_id ?? null
 
   // Sem cabine não há linha de cabine para travar. FOR UPDATE em marcas estoura
@@ -236,12 +237,17 @@ export async function criarLiveOficialDaSubmissao(db, { tenantId, revisorId, sub
     apresentadoraConfirmadaId: submissao.apresentadora_id,
   })
   const sales = await calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedidos, retroLift: false })
-  for (const apresentadoraId of new Set(sales.map(row => row.apresentadora_id).filter(Boolean))) {
-    await recalcularVendasAtribuidasApresentadora(db, {
-      tenantId,
-      apresentadoraId,
-      mesReferencia: saoPauloDateInput(oficial.iniciado_em).slice(0, 7),
-    })
+  // O lote aprova ~20 lives. Recalcular o mês inteiro em cada uma repetia a mesma
+  // escada (a importação já adia isso: 9 linhas levavam 177s). O lote chama o
+  // retro-lift uma vez por apresentadora, depois que cada live já commitou.
+  if (!deferMonthRecalc) {
+    for (const apresentadoraId of new Set(sales.map(row => row.apresentadora_id).filter(Boolean))) {
+      await recalcularVendasAtribuidasApresentadora(db, {
+        tenantId,
+        apresentadoraId,
+        mesReferencia: saoPauloDateInput(oficial.iniciado_em).slice(0, 7),
+      })
+    }
   }
   // O motor trata percentual ausente como 0. Sem cabine isso gravaria comissão
   // inventada por cima do valor (ou do NULL) resolvido acima.
@@ -335,6 +341,19 @@ function byInicio(a, b) {
  * Uma falha não desfaz os que já commitou. Não grava comissão inventada:
  * o insert continua em aprovarSubmissaoComOficial / criarLiveOficialDaSubmissao.
  */
+function linhaProntaParaAprovar(row, normalizeOfficialMetrics) {
+  const described = describeSubmission(row)
+  if (row.status !== 'pendente') return { described, skip: 'Envio não está pendente.' }
+  if (row.arquivamento_status) return { described, skip: 'Aguardando resposta de arquivamento.' }
+  const normalized = normalizeOfficialMetrics(oficialPayloadFromSubmission(row))
+  if (!normalized?.data) return { described, skip: normalized?.error ?? 'Dados inválidos.' }
+  const oficial = normalized.data
+  if (!oficial.marca_id || oficial.gmv_oficial == null || oficial.pedidos_oficiais == null || !submissionTimesAreApprovable(oficial)) {
+    return { described, skip: 'Dados incompletos ou horário inválido para aprovação automática.' }
+  }
+  return { described, oficial }
+}
+
 export async function aprovarPendentesSemConflito({
   rows,
   tenantId,
@@ -342,35 +361,42 @@ export async function aprovarPendentesSemConflito({
   recordHistory,
   normalizeOfficialMetrics,
   runInDb,
+  session,
   approve = aprovarSubmissaoComOficial,
   conflict = motivoConflitoAprovacaoSemCabine,
+  recalculateMonth,
 }) {
   const approved = []
   const skipped = []
   const skipped_conflito = []
   const failed = []
+  const actionable = []
 
   for (const row of [...rows].sort(byInicio)) {
-    const described = describeSubmission(row)
-    if (row.status !== 'pendente') {
-      skipped.push({ ...described, reason: 'Envio não está pendente.' })
+    const ready = linhaProntaParaAprovar(row, normalizeOfficialMetrics)
+    if (ready.skip) {
+      skipped.push({ ...ready.described, reason: ready.skip })
       continue
     }
-    if (row.arquivamento_status) {
-      skipped.push({ ...described, reason: 'Aguardando resposta de arquivamento.' })
-      continue
-    }
-    const normalized = normalizeOfficialMetrics(oficialPayloadFromSubmission(row))
-    if (!normalized?.data) {
-      skipped.push({ ...described, reason: normalized?.error ?? 'Dados inválidos.' })
-      continue
-    }
-    const oficial = normalized.data
-    if (!oficial.marca_id || oficial.gmv_oficial == null || oficial.pedidos_oficiais == null || !submissionTimesAreApprovable(oficial)) {
-      skipped.push({ ...described, reason: 'Dados incompletos ou horário inválido para aprovação automática.' })
-      continue
-    }
+    actionable.push({ row, described: ready.described, oficial: ready.oficial })
+  }
 
+  if (session) {
+    const { aprovarLoteNaSessao } = await import('./portal-aprovacao-lote.js')
+    await aprovarLoteNaSessao({
+      actionable,
+      tenantId,
+      revisorId,
+      recordHistory,
+      session,
+      approve,
+      ...(recalculateMonth ? { recalculateMonth } : {}),
+      buckets: { approved, skipped, skipped_conflito, failed },
+    })
+    return { approved, skipped, skipped_conflito, failed }
+  }
+
+  for (const { row, described, oficial } of actionable) {
     try {
       const outcome = await runInDb(async (db) => {
         const reason = await conflict(db, { tenantId, submissionId: row.id })

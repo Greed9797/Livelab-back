@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { withPortalPresenterDb } from '../src/services/portal-apresentadora-db.js'
+import { withPortalPresenterDb, withPortalPresenterSession } from '../src/services/portal-apresentadora-db.js'
 
 const tenant = '11111111-1111-4111-8111-111111111111'
 
@@ -51,5 +51,26 @@ describe('portal runtime role executor', () => {
     const app = { db: { pool: { connect: vi.fn(async () => ({ query, release })) } } }
     await expect(withPortalPresenterDb(app, tenant, (db) => db.query('SELECT fail'))).rejects.toBe(workFailure)
     expect(release).toHaveBeenCalledWith(rollbackFailure)
+  })
+
+  it('keeps one portal session and resets the role before release', async () => {
+    const query = vi.fn(async () => ({ rows: [] }))
+    const release = vi.fn()
+    const app = { db: { pool: { connect: vi.fn(async () => ({ query, release })) } } }
+    await withPortalPresenterSession(app, tenant, async (session) => {
+      await session.query('SELECT 1')
+      await session.transaction(async (db) => { await db.query('SELECT 2') })
+    })
+    expect(query.mock.calls.map(([sql]) => sql)).toEqual([
+      'SET ROLE livelab_portal_runtime',
+      "SELECT set_config('app.tenant_id', $1, false)",
+      'SELECT 1',
+      'BEGIN',
+      'SELECT 2',
+      'COMMIT',
+      'RESET ROLE',
+      'RESET app.tenant_id',
+    ])
+    expect(release).toHaveBeenCalledWith(undefined)
   })
 })

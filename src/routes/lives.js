@@ -18,6 +18,7 @@ import { tombstoneApprovedSubmissionsForDeletedLive } from '../services/live-app
 import { buildResumoDia } from '../lib/resumo-dia.js'
 import { comissaoValorFromPct, resolveComissaoPctSemCabine } from '../lib/comissao-sem-cabine.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
+import { liveHasFinancialHistory } from '../lib/live-archive.js'
 import { pendingCollisionSql, pendingRecord, pendingRows } from '../lib/presenter-pending.js'
 
 function parseIntegerMetric(value) {
@@ -1679,7 +1680,7 @@ export async function livesRoutes(app) {
         params.push(fCabineId)
         where += ` AND l.cabine_id = $${params.length}::uuid`
       }
-      where += ` AND ${activeLiveSql('l')}`
+      where += ` AND ${activeLiveSql('l')} AND l.arquivada_em IS NULL`
       if (dataInicioBounds) {
         params.push(dataInicioBounds.start)
         where += ` AND l.iniciado_em >= $${params.length}::timestamptz`
@@ -1847,7 +1848,7 @@ export async function livesRoutes(app) {
           SELECT s.id,s.iniciado_em,'submissao'::text FROM apresentadora_live_submissoes s
           LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id
           LEFT JOIN apresentadoras a ON a.id=s.apresentadora_id AND a.tenant_id=s.tenant_id
-          WHERE s.tenant_id=${bind[0]}::uuid AND s.status IN ('pendente','devolvida')
+          WHERE s.tenant_id=${bind[0]}::uuid AND s.status = 'pendente'
             AND s.arquivamento_status IS NULL
             AND (${bind[1]}::uuid IS NULL OR s.marca_id=${bind[1]}::uuid)
             AND (${bind[2]}::uuid IS NULL OR s.apresentadora_id=${bind[2]}::uuid)
@@ -1976,7 +1977,7 @@ export async function livesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const queryResumoDiaLives = async (rangeStart, rangeEnd) => {
         const params = [tenant_id, rangeStart, rangeEnd]
-        let where = `WHERE l.tenant_id = $1::uuid AND ${activeLiveSql('l')} AND l.iniciado_em >= $2::timestamptz AND l.iniciado_em < $3::timestamptz`
+        let where = `WHERE l.tenant_id = $1::uuid AND ${activeLiveSql('l')} AND l.arquivada_em IS NULL AND l.iniciado_em >= $2::timestamptz AND l.iniciado_em < $3::timestamptz`
         if (status && status !== 'todas') {
           params.push(status)
           where += ` AND l.status = $${params.length}`
@@ -2118,6 +2119,7 @@ export async function livesRoutes(app) {
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status <> 'cancelada'
             AND ${activeLiveSql('l')}
+            AND l.arquivada_em IS NULL
             AND l.cabine_id IS NOT NULL
             AND l.iniciado_em >= NOW() - ($1::int || ' days')::interval
         )
@@ -2190,6 +2192,7 @@ export async function livesRoutes(app) {
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.id = ANY($1::uuid[])
           AND ${activeLiveSql('l')}
+          AND l.arquivada_em IS NULL
       `, [ids])
 
       const byId = new Map(detalhe.rows.map((r) => [r.id, r]))
@@ -2230,6 +2233,101 @@ export async function livesRoutes(app) {
     })
   })
 
+  const liveWriteAccess = [app.authenticate, app.requirePapel(WRITE_LIVES)]
+
+  // POST /v1/lives/:id/arquivar — some da lista do gestor. Não mexe em GMV nem comissão.
+  app.post('/v1/lives/:id/arquivar', { preHandler: liveWriteAccess }, async (request, reply) => {
+    const idCheck = z.string().uuid().safeParse(request.params?.id)
+    if (!idCheck.success) return reply.code(400).send({ error: 'id inválido' })
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      await db.query('BEGIN')
+      try {
+        const liveQ = await db.query(
+          `SELECT id, status
+             FROM lives
+            WHERE id = $1
+              AND tenant_id = $2::uuid
+            FOR UPDATE`,
+          [idCheck.data, tenant_id],
+        )
+        const live = liveQ.rows[0]
+        if (!live) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Live não encontrada' })
+        }
+        if (live.status === 'em_andamento') {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'Encerre a live antes de arquivar.' })
+        }
+        const updated = await db.query(
+          `UPDATE lives
+              SET arquivada_em = COALESCE(arquivada_em, NOW())
+            WHERE id = $1
+              AND tenant_id = $2::uuid
+          RETURNING id, arquivada_em`,
+          [idCheck.data, tenant_id],
+        )
+        await db.query('COMMIT')
+        return updated.rows[0]
+      } catch (error) {
+        await db.query('ROLLBACK')
+        throw error
+      }
+    })
+  })
+
+  // POST /v1/lives/submissoes-apresentadoras/:id/arquivar
+  // Tira o envio da lista do gestor. Não grava venda nem zera o GMV declarado.
+  app.post('/v1/lives/submissoes-apresentadoras/:id/arquivar', { preHandler: liveWriteAccess }, async (request, reply) => {
+    const idCheck = z.string().uuid().safeParse(request.params?.id)
+    if (!idCheck.success) return reply.code(400).send({ error: 'id inválido' })
+    const { tenant_id, sub } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      await db.query('BEGIN')
+      try {
+        const updated = await db.query(
+          `UPDATE apresentadora_live_submissoes
+              SET status = 'cancelada',
+                  arquivamento_status = 'confirmado',
+                  atualizado_em = NOW(),
+                  versao = versao + 1
+            WHERE id = $1::uuid
+              AND tenant_id = $2::uuid
+              AND status IN ('pendente', 'devolvida')
+              AND arquivamento_status IS NULL
+              AND live_oficial_id IS NULL
+          RETURNING id, status, arquivamento_status, versao, gmv_declarado`,
+          [idCheck.data, tenant_id],
+        )
+        const row = updated.rows[0]
+        if (!row) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'Envio não encontrado ou já saiu da lista.' })
+        }
+        await db.query(
+          `INSERT INTO apresentadora_live_submissao_historico
+             (tenant_id, submissao_id, versao, acao, ator_id, motivo, snapshot)
+           SELECT $1::uuid, $2::uuid, $3, 'cancelada', $4::uuid, $5,
+                  jsonb_build_object(
+                    'status', s.status,
+                    'gmv_declarado', s.gmv_declarado,
+                    'arquivamento_status', s.arquivamento_status
+                  )
+             FROM apresentadora_live_submissoes s
+            WHERE s.id = $2::uuid
+              AND s.tenant_id = $1::uuid`,
+          [tenant_id, row.id, row.versao, sub, 'Arquivada pelo gestor'],
+        )
+        await db.query('COMMIT')
+        return { id: row.id, status: row.status, arquivamento_status: row.arquivamento_status, versao: row.versao }
+      } catch (error) {
+        await db.query('ROLLBACK')
+        throw error
+      }
+    })
+  })
+
   // DELETE /v1/lives/:id
   app.delete('/v1/lives/:id', { preHandler: gestorRoleAccess }, async (request, reply) => {
     const { tenant_id } = request.user
@@ -2237,7 +2335,19 @@ export async function livesRoutes(app) {
       await db.query('BEGIN')
       try {
         const liveQ = await db.query(
-          `SELECT id, status, cabine_id, iniciado_em, agenda_evento_id
+          `SELECT id, status, cabine_id, iniciado_em, agenda_evento_id,
+                  fat_gerado, manual_gmv, ads_gmv, comissao_calculada, comissao_apresentadora_valor,
+                  EXISTS (
+                    SELECT 1 FROM vendas_atribuidas va
+                     WHERE va.tenant_id = lives.tenant_id
+                       AND va.origem = 'live'
+                       AND va.origem_id = lives.id
+                  ) AS tem_venda_atribuida,
+                  EXISTS (
+                    SELECT 1 FROM live_metric_revisions r
+                     WHERE r.tenant_id = lives.tenant_id
+                       AND r.live_id = lives.id
+                  ) AS tem_revisao_gmv
              FROM lives
             WHERE id = $1
               AND tenant_id = $2::uuid
@@ -2248,6 +2358,13 @@ export async function livesRoutes(app) {
         if (!live) {
           await db.query('ROLLBACK')
           return reply.code(404).send({ error: 'Live não encontrada' })
+        }
+        if (liveHasFinancialHistory(live)) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({
+            error: 'Esta live tem GMV ou comissão registrados e não pode ser excluída. Arquive para tirá-la da lista sem apagar o histórico.',
+            code: 'LIVE_COM_HISTORICO_FINANCEIRO',
+          })
         }
 
         if (live.status === 'em_andamento' && live.cabine_id) {

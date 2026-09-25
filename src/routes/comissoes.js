@@ -452,7 +452,7 @@ export async function comissoesRoutes(app) {
          LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
          LEFT JOIN LATERAL (
-           SELECT COALESCE(SUM(${officialLineGmvExpr('va_mes')}), 0) + COALESCE(${officialLineGmvExpr('va')}, 0) AS gmv_mes
+           SELECT COALESCE(SUM(${officialLineGmvExpr('va_mes', { monthBase: true })}), 0) + COALESCE(${officialLineGmvExpr('va', { monthBase: true })}, 0) AS gmv_mes
            FROM vendas_atribuidas va_mes
            WHERE va_mes.tenant_id = va.tenant_id
              AND va_mes.apresentadora_id = va.apresentadora_id
@@ -759,7 +759,7 @@ export async function comissoesRoutes(app) {
          FROM vendas_atribuidas va
          LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
          LEFT JOIN LATERAL (
-           SELECT COALESCE(SUM(${officialLineGmvExpr('va_mes')}), 0) + COALESCE(${officialLineGmvExpr('va')}, 0) AS gmv_mes
+           SELECT COALESCE(SUM(${officialLineGmvExpr('va_mes', { monthBase: true })}), 0) + COALESCE(${officialLineGmvExpr('va', { monthBase: true })}, 0) AS gmv_mes
            FROM vendas_atribuidas va_mes
            WHERE va_mes.tenant_id = va.tenant_id
              AND va_mes.apresentadora_id = va.apresentadora_id

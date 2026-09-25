@@ -129,8 +129,9 @@ describe('remuneração de apresentadoras', () => {
     const query = vi.fn(async (sql) => {
       if (sql.startsWith('BEGIN') || sql === 'COMMIT') return { rows: [] }
       if (sql.includes('WITH lives_atendidas')) {
-        expect(sql).toContain('UNION')
-        expect(sql).toContain('live_apresentadores la')
+        expect(sql).toContain('live_apresentadoras_v2 lav_credit')
+        expect(sql).toContain('l.arquivada_em IS NULL')
+        expect(sql).not.toContain('live_apresentadores la')
         expect(sql).toContain('live_apresentadoras_v2 lav')
         expect(sql).toContain("l.status = 'encerrada'")
         expect(sql).toContain("AT TIME ZONE 'America/Sao_Paulo'")

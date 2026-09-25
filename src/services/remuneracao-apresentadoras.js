@@ -1,6 +1,7 @@
 import { presenterFixedAtSql } from '../config/presenter_defaults.js'
 import { prorateFatorSql } from '../lib/financeiro-remuneracao.js'
 import { apresentadoraHorasSql, liveGmvSql, liveHoursSql, liveOrdersSql } from '../lib/metric-sql.js'
+import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
 
 export const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 export const DATA_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
@@ -148,33 +149,11 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
     const [result, memoriaQ] = await Promise.all([
       db.query(`
     WITH lives_atendidas AS (
-      -- Principal legado: lives.apresentador_id aponta para users.id, enquanto
-      -- o Financeiro usa apresentadoras.id.
       SELECT l.id AS live_id
       FROM lives l
-      JOIN apresentadoras a
-        ON a.user_id = l.apresentador_id AND a.tenant_id = l.tenant_id
-      WHERE l.tenant_id = $1::uuid AND a.id = $2::uuid
-
-      UNION
-
-      -- Secundária legada: vínculo mantém users.id.
-      SELECT l.id AS live_id
-      FROM lives l
-      JOIN live_apresentadores la
-        ON la.live_id = l.id AND la.tenant_id = l.tenant_id
-      JOIN apresentadoras a
-        ON a.user_id = la.apresentador_id AND a.tenant_id = l.tenant_id
-      WHERE l.tenant_id = $1::uuid AND a.id = $2::uuid
-
-      UNION
-
-      -- Split atual: vínculo já guarda apresentadoras.id.
-      SELECT l.id AS live_id
-      FROM lives l
-      JOIN live_apresentadoras_v2 lav
-        ON lav.live_id = l.id AND lav.tenant_id = l.tenant_id
-      WHERE l.tenant_id = $1::uuid AND lav.apresentadora_id = $2::uuid
+      JOIN apresentadoras a ON a.id = $2::uuid AND a.tenant_id = l.tenant_id
+      WHERE l.tenant_id = $1::uuid
+        AND ${presenterCreditedSql('l', 'a.id')}
     )
     SELECT
       l.id AS live_id,
@@ -234,7 +213,8 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
     ) comissao ON true
     WHERE l.status = 'encerrada'
       AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
-      AND l.iniciado_em >= ($3::date::timestamp) AT TIME ZONE 'America/Sao_Paulo'
+      AND ${notArchivedSql('l')}
+      AND l.iniciado_em >= ($3::timestamp) AT TIME ZONE 'America/Sao_Paulo'
       AND l.iniciado_em < (($4::date::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo')
     ORDER BY l.iniciado_em ASC, l.id ASC
       `, [tenantId, apresentadoraId, inicio, fim]),

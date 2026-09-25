@@ -13,6 +13,7 @@ import { aplicarRetroLiftDoMes, calcularComissoesDaLive } from '../services/comm
 import { getOperationalRanking as getPerformanceRanking } from '../lib/operational-ranking.js'
 import { apresentadoraHorasPresencaSql, liveGmvSql } from '../lib/metric-sql.js'
 import { activeLiveJoinSql, activeLiveSql } from '../lib/live-merge-sql.js'
+import { notArchivedSql, presenterFanoutSql, presenterGmvShareSql } from '../lib/live-count-sql.js'
 import { classificarDia, intervaloDeDias, somarDias } from '../lib/calendario-blumenau.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { applyApresentadorasToLive, rateioAbsoluto } from '../lib/live-rateio.js'
@@ -40,6 +41,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export function analyticsLiveRangeSql(alias = 'l', fromParam = '$1', toParam = '$2') {
   return `
     AND ${activeLiveSql(alias)}
+    AND ${notArchivedSql(alias)}
     AND ${alias}.iniciado_em >= (${fromParam}::timestamp) AT TIME ZONE '${ANALYTICS_TZ}'
     AND ${alias}.iniciado_em < ((${toParam}::timestamp) + INTERVAL '1 day') AT TIME ZONE '${ANALYTICS_TZ}'
   `
@@ -1829,6 +1831,8 @@ export async function analyticsRoutes(app) {
               FROM lives l
               WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
                 AND l.status = 'encerrada'
+                AND ${activeLiveSql('l')}
+                AND ${notArchivedSql('l')}
                 AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= (date_trunc('month', $2::date) - interval '11 months')::date
                 AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date < (date_trunc('month', $2::date) + interval '1 month')::date
                 ${clienteLiveFilter}
@@ -1855,6 +1859,8 @@ export async function analyticsRoutes(app) {
               FROM lives l
               WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
                 AND l.status = 'encerrada'
+                AND ${activeLiveSql('l')}
+                AND ${notArchivedSql('l')}
                 AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= (date_trunc('month', $2::date) - interval '11 months')::date
                 AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date < (date_trunc('month', $2::date) + interval '1 month')::date
                 ${clienteLiveFilter}
@@ -1967,28 +1973,6 @@ export async function analyticsRoutes(app) {
           impressoes_pendentes_aprovacao: declarations.reduce((sum, row) => sum + Number(row.live_impressions_declaradas ?? 0), 0),
           visualizacoes_pendentes_aprovacao: declarations.reduce((sum, row) => sum + Number(row.manual_views_declaradas ?? 0), 0),
           gmv_pendente_aprovacao: round2(declarations.reduce((sum, row) => sum + Number(row.gmv_declarado ?? 0), 0)) }
-        const add = (target, key, value) => { target[key] = Number(target[key] ?? 0) + value }
-        const temporal = (rows, key, value) => {
-          let row = rows.find(item => String(item[key] instanceof Date ? item[key].toISOString().slice(0, 10) : item[key]) === value)
-          if (!row) { row = { [key]: value }; rows.push(row) }
-          return row
-        }
-        for (const item of declarations.filter(row => !row.em_conciliacao)) {
-          const gmv = Number(item.gmv_declarado ?? 0), orders = Number(item.pedidos_declarados ?? 0)
-          const hours = Math.max(0, (new Date(item.encerrado_em) - new Date(item.iniciado_em)) / 3600000)
-          const day = new Date(new Date(item.iniciado_em).valueOf() - 3 * 3600000).toISOString().slice(0, 10)
-          for (const key of ['gmv_total', 'gmv_lives']) add(sales, key, gmv)
-          for (const key of ['pedidos_total', 'pedidos_lives']) add(sales, key, orders)
-          add(liveOps, 'total_lives', 1); add(liveOps, 'horas_live', hours)
-          add(liveOps, 'viewers_total', Number(item.manual_views_declaradas ?? 0))
-          const month = temporal(monthlyQ.rows, 'mes', day.slice(0, 7))
-          add(month, 'gmv', gmv); add(month, 'gmv_lives', gmv); add(month, 'pedidos', orders); add(month, 'total_lives', 1)
-          const daily = temporal(hoursQ.rows, 'dia', day)
-          add(daily, 'gmv_lives', gmv); add(daily, 'pedidos_lives', orders); add(daily, 'horas', hours)
-        }
-        monthlyQ.rows.sort((a, b) => String(a.mes).localeCompare(String(b.mes)))
-        hoursQ.rows.sort((a, b) => String(a.dia).localeCompare(String(b.dia)))
-
         const gmvTotal = round2(sales.gmv_total)
         const pedidosTotal = toInt(sales.pedidos_total)
         const ticketMedio = pedidosTotal > 0 ? round2(gmvTotal / pedidosTotal) : 0
@@ -2270,10 +2254,22 @@ export async function analyticsRoutes(app) {
             AND COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
             AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
             AND EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) >= 300
+            AND ${notArchivedSql('l')}
             AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date >= $1::date
             AND (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date <= $2::date
             AND ($3::uuid IS NULL OR l.marca_id = $3::uuid)
-            AND ($4::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $4::uuid)
+            AND (
+              ap_v2.apresentadora_id IS NOT NULL
+              OR NOT EXISTS (
+                SELECT 1 FROM live_apresentadoras_v2 lav_any
+                WHERE lav_any.live_id = l.id AND lav_any.tenant_id = l.tenant_id
+              )
+            )
+            AND (
+              $4::uuid IS NULL
+              OR ap_v2.apresentadora_id = $4::uuid
+              OR (ap_v2.apresentadora_id IS NULL AND ap_user.id = $4::uuid)
+            )
         `, [fromDate, toDate, marcaId, apresentadoraId])
 
         const r = { ...result.rows[0] }
@@ -2285,13 +2281,6 @@ export async function analyticsRoutes(app) {
           gmv_pendente_aprovacao: round2(declarations.reduce((sum, row) => sum + Number(row.gmv_declarado ?? 0), 0)),
           impressoes_pendentes_aprovacao: declarations.reduce((sum, row) => sum + Number(row.live_impressions_declaradas ?? 0), 0),
           visualizacoes_pendentes_aprovacao: declarations.reduce((sum, row) => sum + Number(row.manual_views_declaradas ?? 0), 0) }
-        for (const item of declarations.filter(row => !row.em_conciliacao)) {
-          const values = { total_lives: 1, gmv: Number(item.gmv_declarado ?? 0), pedidos: Number(item.pedidos_declarados ?? 0),
-            impressoes: Number(item.live_impressions_declaradas ?? 0), visualizacoes: Number(item.manual_views_declaradas ?? 0),
-            lives_com_impressoes_registradas: item.live_impressions_declaradas == null ? 0 : 1,
-            horas_live: Math.max(0, (new Date(item.encerrado_em) - new Date(item.iniciado_em)) / 3600000) }
-          for (const [key, value] of Object.entries(values)) r[key] = Number(r[key] ?? 0) + value
-        }
         const impressoes = toInt(r.impressoes)
         const visualizacoes = toInt(r.visualizacoes)
         const impressoesProduto = toInt(r.impressoes_produto)
@@ -2491,32 +2480,26 @@ export async function analyticsRoutes(app) {
         const result = await db.query(`
           WITH live_base AS (
             SELECT
+              l.id AS live_id,
               (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
               l.marca_id,
               COALESCE(m.nome, 'Sem marca') AS marca_nome,
-              COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
-              COALESCE(ap_v2.nome, ap_user.nome, u.nome, 'Sem apresentadora') AS apresentadora_nome,
+              ap_v2.apresentadora_id,
+              COALESCE(ap_v2.nome, 'Sem apresentadora') AS apresentadora_nome,
+              ${presenterGmvShareSql('l', 'ap_v2')} AS gmv,
               CASE
-                WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
-                  THEN COALESCE(
-                    ap_v2.gmv_rateado,
-                    COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) * ap_v2.percentual_rateio / 100.0,
-                    CASE WHEN ap_v2.papel = 'principal' THEN COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) ELSE 0 END
-                  )
-                ELSE COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)
-              END AS gmv,
-              CASE
-                WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
-                  THEN COALESCE(live_sales.pedidos, CASE WHEN ap_v2.papel = 'principal' THEN COALESCE(l.manual_orders, l.final_orders_count, 0) ELSE 0 END)
+                WHEN ap_v2.from_rateio THEN COALESCE(
+                  live_sales.pedidos,
+                  CASE WHEN ap_v2.papel = 'principal' THEN COALESCE(l.manual_orders, l.final_orders_count, 0) ELSE 0 END
+                )
                 ELSE COALESCE(l.manual_orders, l.final_orders_count, 0)
               END::int AS pedidos,
               CASE
-                WHEN $4::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
-                  THEN COALESCE(
-                    ap_v2.segundos_rateio / 3600.0,
-                    LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) * ap_v2.percentual_rateio / 100.0,
-                    CASE WHEN ap_v2.papel = 'principal' THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) ELSE 0 END
-                  )
+                WHEN ap_v2.from_rateio THEN COALESCE(
+                  ap_v2.segundos_rateio / 3600.0,
+                  LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) * ap_v2.percentual_rateio / 100.0,
+                  CASE WHEN ap_v2.papel = 'principal' THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0) ELSE 0 END
+                )
                 WHEN COALESCE(l.encerrado_em, l.previsto_fim) IS NOT NULL
                  AND COALESCE(l.encerrado_em, l.previsto_fim) > l.iniciado_em
                   THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.previsto_fim) - l.iniciado_em)) / 3600.0, 24.0)
@@ -2524,25 +2507,14 @@ export async function analyticsRoutes(app) {
               END AS horas
             FROM lives l
             LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
-            LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
-            LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
-            LEFT JOIN LATERAL (
-              SELECT lav.apresentadora_id, a.nome, lav.gmv_rateado, lav.segundos_rateio,
-                     lav.percentual_rateio, lav.papel
-              FROM live_apresentadoras_v2 lav
-              JOIN apresentadoras a ON a.id = lav.apresentadora_id AND a.tenant_id = lav.tenant_id
-              WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
-                AND ($4::uuid IS NULL OR lav.apresentadora_id = $4::uuid)
-              ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC
-              LIMIT 1
-            ) ap_v2 ON true
+            ${presenterFanoutSql({ live: 'l', rateio: 'ap_v2', presenterParam: '$4::uuid', withName: true })}
             LEFT JOIN LATERAL (
               SELECT SUM(va.pedidos)::int AS pedidos
               FROM vendas_atribuidas va
               WHERE va.tenant_id = l.tenant_id
                 AND va.origem = 'live'
                 AND va.origem_id = l.id
-                AND va.apresentadora_id = COALESCE(ap_v2.apresentadora_id, ap_user.id)
+                AND va.apresentadora_id = ap_v2.apresentadora_id
                 AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
             ) live_sales ON true
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
@@ -2550,7 +2522,14 @@ export async function analyticsRoutes(app) {
               AND ${activeLiveSql('l')}
               ${analyticsLiveRangeSql('l')}
               AND ($3::uuid IS NULL OR l.marca_id = $3::uuid)
-              AND ($4::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $4::uuid)
+              AND (
+                ap_v2.apresentadora_id IS NOT NULL
+                OR NOT EXISTS (
+                  SELECT 1 FROM live_apresentadoras_v2 lav_any
+                  WHERE lav_any.live_id = l.id AND lav_any.tenant_id = l.tenant_id
+                )
+              )
+              AND ($4::uuid IS NULL OR ap_v2.apresentadora_id = $4::uuid)
           ),
           live_daily AS (
             SELECT
@@ -2559,7 +2538,8 @@ export async function analyticsRoutes(app) {
               marca_nome,
               apresentadora_id,
               apresentadora_nome,
-              COUNT(*)::int AS total_lives,
+              array_agg(DISTINCT live_id) AS live_ids,
+              COUNT(DISTINCT live_id)::int AS total_lives,
               COALESCE(SUM(gmv), 0) AS gmv_lives,
               COALESCE(SUM(pedidos), 0)::int AS pedidos_lives,
               COALESCE(SUM(horas), 0) AS horas_live
@@ -2613,6 +2593,7 @@ export async function analyticsRoutes(app) {
             COALESCE(ld.marca_nome, vd.marca_nome, 'Sem marca') AS marca_nome,
             COALESCE(ld.apresentadora_id, vd.apresentadora_id) AS apresentadora_id,
             COALESCE(ld.apresentadora_nome, vd.apresentadora_nome, 'Sem apresentadora') AS apresentadora_nome,
+            ld.live_ids,
             COALESCE(ld.total_lives, 0)::int AS total_lives,
             COALESCE(vd.total_videos, 0)::int AS total_videos,
             COALESCE(ld.gmv_lives, 0) AS gmv_lives,
@@ -2680,14 +2661,13 @@ export async function analyticsRoutes(app) {
           rows: merged.map((row) => {
             const gmvPendente = round2(row.gmv_pendente)
             const pedidosPendentes = toInt(row.pedidos_pendentes)
-            const horasPendentes = round1(row.horas_pendentes)
             const totalPendentes = toInt(row.total_lives_pendentes)
-            const gmvLives = round2(Number(row.gmv_lives ?? 0) + gmvPendente)
+            const gmvLives = round2(Number(row.gmv_lives ?? 0))
             const gmvVideos = round2(row.gmv_videos)
             const gmvTotal = round2(gmvLives + gmvVideos)
-            const totalLives = toInt(row.total_lives) + totalPendentes
-            const horasLive = round1(Number(row.horas_live ?? 0) + horasPendentes)
-            const pedidos = toInt(row.pedidos) + pedidosPendentes
+            const totalLives = toInt(row.total_lives)
+            const horasLive = round1(Number(row.horas_live ?? 0))
+            const pedidos = toInt(row.pedidos)
             const comissao = round2(row.comissao_apresentadora)
             const comissaoBase = round2(row.comissao_gmv_base)
             const comissaoPct = comissaoBase > 0 ? round2((comissao / comissaoBase) * 100) : 0
@@ -2697,6 +2677,7 @@ export async function analyticsRoutes(app) {
               marca_nome: row.marca_nome ?? 'Sem marca',
               apresentadora_id: row.apresentadora_id ?? null,
               apresentadora_nome: row.apresentadora_nome ?? 'Sem apresentadora',
+              live_ids: Array.isArray(row.live_ids) ? row.live_ids : null,
               gmv_total: gmvTotal,
               gmv_lives: gmvLives,
               gmv_videos: gmvVideos,
@@ -2792,36 +2773,22 @@ export async function analyticsRoutes(app) {
             -- Com LIMIT 1 a principal ficaria com 100% das horas e quem só revezou sumiria do
             -- dia — viraria falta de quem estava lá.
             SELECT
-              COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
+              ap_v2.apresentadora_id AS apresentadora_id,
               (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
               SUM(${apresentadoraHorasPresencaSql()}) AS horas
             FROM lives l
-            LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
-            -- Terceira identidade possível, e a única que guarda apresentadoras.id de verdade
-            -- quando a live não tem apresentador_id nem linha em v2 (import de Ads sem
-            -- apresentadora; migration 091 tolera o estado com um RAISE NOTICE). Sem ela as
-            -- horas caíam num grupo NULL, sumiam sem log, e o dia de quem fez a live virava
-            -- vermelho. Mesmo COALESCE de três termos que a query irmã de lives.js já usa.
-            LEFT JOIN agenda_eventos ae ON ae.id = l.agenda_evento_id AND ae.tenant_id = l.tenant_id
             LEFT JOIN LATERAL (
               SELECT lav.apresentadora_id, lav.segundos_rateio, lav.percentual_rateio, lav.gmv_rateado
               FROM live_apresentadoras_v2 lav
               WHERE lav.live_id = l.id AND lav.tenant_id = l.tenant_id
               UNION ALL
-              -- Legado live_apresentadores: o lançamento manual grava a 2ª apresentadora SÓ
-              -- aqui quando o seed de turnos escreveu uma linha só (src/routes/lives.js), e o
-              -- PATCH de edição faz o mesmo. A tabela é legado para DINHEIRO, mas para PRESENÇA
-              -- ela é prova: sem esta metade, quem só aparece na V1 contribui 0h e leva vermelho
-              -- num dia em que fez a live inteira ao lado da outra.
-              SELECT ap_v1.id, NULL::int, NULL::numeric, NULL::numeric
-              FROM live_apresentadores la
-              JOIN apresentadoras ap_v1
-                ON ap_v1.user_id = la.apresentador_id AND ap_v1.tenant_id = l.tenant_id
-              WHERE la.live_id = l.id
+              SELECT ap_only.id, NULL::int, NULL::numeric, NULL::numeric
+              FROM apresentadoras ap_only
+              WHERE ap_only.tenant_id = l.tenant_id
+                AND ap_only.user_id = l.apresentador_id
                 AND NOT EXISTS (
-                  SELECT 1 FROM live_apresentadoras_v2 dup
-                  WHERE dup.live_id = l.id AND dup.tenant_id = l.tenant_id
-                    AND dup.apresentadora_id = ap_v1.id
+                  SELECT 1 FROM live_apresentadoras_v2 lav_any
+                  WHERE lav_any.live_id = l.id AND lav_any.tenant_id = l.tenant_id
                 )
             ) ap_v2 ON true
             -- Turno dela na agenda: tempo de CALENDÁRIO, o único sinal que separa
@@ -2845,6 +2812,7 @@ export async function analyticsRoutes(app) {
               -- corrente, que por isso soma 0h até alguém encerrar, sai como 'em_curso' na
               -- classificação — nunca como falta.
               AND l.status = 'encerrada'
+              AND ${notArchivedSql('l')}
               -- ::timestamp, e nao ::date: x AT TIME ZONE z e acucar para timezone(z, x), e com
               -- um date a resolução de overload escolhe timezone(text, timestamptz), lendo a data como
               -- meia-noite no TimeZone da SESSÃO (UTC no Supabase) antes de converter. O
@@ -2852,7 +2820,7 @@ export async function analyticsRoutes(app) {
               -- dia — descartando a live das 19h de hoje e pintando o dia de vermelho.
               AND l.iniciado_em >= ($1::timestamp) AT TIME ZONE '${ANALYTICS_TZ}'
               AND l.iniciado_em < (($2::timestamp) + INTERVAL '1 day') AT TIME ZONE '${ANALYTICS_TZ}'
-            GROUP BY COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id), (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date
+            GROUP BY ap_v2.apresentadora_id, (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date
           ),
           -- Quem já apareceu em ALGUMA live, em qualquer época — não só na janela. É o que
           -- separa "apresentadora de verdade sem data_inicio preenchida" de "perfil que nunca
@@ -2863,13 +2831,21 @@ export async function analyticsRoutes(app) {
           historico AS (
             SELECT v.apresentadora_id AS id
             FROM live_apresentadoras_v2 v
+            JOIN lives lv ON lv.id = v.live_id AND lv.tenant_id = v.tenant_id
             WHERE v.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND ${activeLiveSql('lv')}
+              AND ${notArchivedSql('lv')}
             UNION
             SELECT ap_h.id
             FROM lives lv
             JOIN apresentadoras ap_h ON ap_h.user_id = lv.apresentador_id AND ap_h.tenant_id = lv.tenant_id
             WHERE lv.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND ${activeLiveSql('lv')}
+              AND ${notArchivedSql('lv')}
+              AND NOT EXISTS (
+                SELECT 1 FROM live_apresentadoras_v2 lav_hist
+                WHERE lav_hist.live_id = lv.id AND lav_hist.tenant_id = lv.tenant_id
+              )
           )
           -- Presença é física, não pertence a marca: nenhum filtro de marca aqui. Com marca_id,
           -- quem naquele dia fez live de outra marca sumiria e viraria vermelho falso.

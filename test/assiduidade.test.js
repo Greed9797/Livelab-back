@@ -187,13 +187,13 @@ describe('GET /v1/analytics/assiduidade', () => {
     expect(sql).toContain("l.status = 'encerrada'")
     expect(sql).toContain("(l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date")
 
-    // Legado live_apresentadores entra por UNION: a 2ª apresentadora do lançamento manual só
-    // existe lá, e sem isto ela contribui 0h e leva vermelho num dia que trabalhou inteiro.
-    expect(sql).toContain('FROM live_apresentadores la')
+    // Rateio vence agenda e o vínculo legado: só quem está em v2, ou a usuária da live se não houver rateio.
+    expect(sql).not.toContain('FROM live_apresentadores la')
+    expect(sql).not.toContain('ae.apresentadora_id')
+    expect(sql).toContain('l.arquivada_em IS NULL')
     // Turno real da agenda: separa co-apresentação (sobreposta) de revezamento (sequencial).
     expect(sql).toContain('FROM agenda_evento_apresentadoras aea')
-    // Terceira identidade: a apresentadora do evento de agenda recupera a live sem atribuição.
-    expect(sql).toContain('COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id)')
+    expect(sql).toContain('ap_v2.apresentadora_id AS apresentadora_id')
     // Vínculo e histórico viajam junto: sem eles a fileira cobra dias fora do contrato.
     expect(sql).toContain('a.data_inicio::text')
     expect(sql).toContain('a.data_fim::text')

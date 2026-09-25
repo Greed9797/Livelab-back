@@ -12,6 +12,7 @@ const CLIENTES_CACHE_TTL_MS = Number(process.env.CLIENTES_CACHE_TTL_MS ?? 300_00
 import { getClienteOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
 import { SECURITY } from '../config/security.js'
 // Aceita só URL https:// ou data URI de imagem. Teto de 100KB evita que um
@@ -361,7 +362,8 @@ export async function clientesRoutes(app) {
              FROM lives l
              WHERE l.tenant_id = $1::uuid AND l.status = 'encerrada' AND l.cliente_id IS NOT NULL
                AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
-               AND l.iniciado_em::date >= $2::date AND l.iniciado_em::date <= $3::date
+               AND ${notArchivedSql('l')}
+               AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$2', '$3')}
              UNION ALL
              SELECT m.cliente_id AS id, vr.gmv_atribuido AS gmv, 0 AS is_live, 1 AS is_video
              FROM video_registros vr

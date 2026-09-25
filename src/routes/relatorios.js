@@ -13,6 +13,7 @@ import {
   buildClientePDFHtml,
 } from '../services/reports.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
+import { notArchivedSql } from '../lib/live-count-sql.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 
 const RATE = { rateLimit: { max: 10, timeWindow: '1 minute' } }
@@ -194,6 +195,7 @@ export async function relatoriosRoutes(app) {
              AND l.cliente_id = $2
              AND l.status = 'encerrada'
              AND ${activeLiveSql('l')}
+             AND ${notArchivedSql('l')}
              AND COALESCE(l.encerrada_em, l.iniciada_em, l.data_inicio)::date BETWEEN $3::date AND $4::date
            ORDER BY data ASC`,
           [tenant_id, clienteId, range.startDate, range.endDate]

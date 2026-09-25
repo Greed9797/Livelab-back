@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { SECURITY } from '../config/security.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
+import { notArchivedSql } from '../lib/live-count-sql.js'
 
 const criarFranquiaSchema = z.object({
   nome: z.string().min(2),
@@ -43,9 +44,10 @@ export async function tenantsRoutes(app) {
                COUNT(*)::int                       AS lives_mes,
                COALESCE(SUM(${liveGmvSql('l')}), 0)::float AS gmv_mes
         FROM lives l
-        WHERE l.iniciado_em >= date_trunc('month', NOW())
+        WHERE ${notArchivedSql('l')}
           AND ${activeLiveSql('l')}
-          AND l.iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
+          AND l.iniciado_em >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) AT TIME ZONE 'America/Sao_Paulo'
+          AND l.iniciado_em < (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month') AT TIME ZONE 'America/Sao_Paulo'
         GROUP BY l.tenant_id
       )
       SELECT t.id, t.nome, t.ativo, t.criado_em,
@@ -73,9 +75,10 @@ export async function tenantsRoutes(app) {
                COALESCE(SUM(${liveGmvSql('l')}), 0)::float AS gmv_mes
         FROM lives l
         WHERE l.tenant_id = $1
+          AND ${notArchivedSql('l')}
           AND ${activeLiveSql('l')}
-          AND l.iniciado_em >= date_trunc('month', NOW())
-          AND l.iniciado_em <  date_trunc('month', NOW()) + INTERVAL '1 month'
+          AND l.iniciado_em >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) AT TIME ZONE 'America/Sao_Paulo'
+          AND l.iniciado_em < (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + INTERVAL '1 month') AT TIME ZONE 'America/Sao_Paulo'
         GROUP BY l.tenant_id
       )
       SELECT t.id, t.nome, t.ativo, t.criado_em,

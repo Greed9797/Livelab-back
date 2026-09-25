@@ -18,6 +18,7 @@ import { tombstoneApprovedSubmissionsForDeletedLive } from '../services/live-app
 import { buildResumoDia } from '../lib/resumo-dia.js'
 import { comissaoValorFromPct, resolveComissaoPctSemCabine } from '../lib/comissao-sem-cabine.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
+import { presenterCreditedSql } from '../lib/live-count-sql.js'
 import { liveHasFinancialHistory } from '../lib/live-archive.js'
 import { pendingCollisionSql, pendingRecord, pendingRows } from '../lib/presenter-pending.js'
 
@@ -1505,9 +1506,9 @@ export async function livesRoutes(app) {
                 COALESCE(l.marca_id, va_marca.marca_id) AS marca_id,
                 va_marca.marca_nome AS marca_nome,
                 ${tiktokUsernameSql({ marca: 'va_marca', cliente: 'cl_tiktok', contrato: 'ct' })} AS tiktok_username,
-                COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
-                COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
-                COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
+                COALESCE(ap_v2.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
+                COALESCE(ap_v2.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
+                COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
                 ap_extra.apresentadora_id AS apresentadora2_id,
                 ap_extra.apresentadora_id AS apresentador2_id,
                 ap_extra.nome AS apresentadora2_nome,
@@ -1695,16 +1696,7 @@ export async function livesRoutes(app) {
       }
       if (fApresentadoraId) {
         params.push(fApresentadoraId)
-        where += ` AND (
-          EXISTS (
-            SELECT 1
-              FROM live_apresentadoras_v2 lav_filter
-             WHERE lav_filter.live_id = l.id
-               AND lav_filter.tenant_id = l.tenant_id
-               AND lav_filter.apresentadora_id = $${params.length}::uuid
-          )
-          OR COALESCE(ae.apresentadora_id, ap_user.id) = $${params.length}::uuid
-        )`
+        where += ` AND ${presenterCreditedSql('l', `$${params.length}::uuid`)}`
       }
       if (fQ) {
         // Busca textual server-side: marca, cliente, apresentadora, resumo da live
@@ -1715,7 +1707,7 @@ export async function livesRoutes(app) {
         const qi = params.length
         where += ` AND (cl.nome ILIKE $${qi}
           OR va_marca.marca_nome ILIKE $${qi}
-          OR COALESCE(ap_v2.nomes, ap_agenda.nome, ap_user.nome, u.nome) ILIKE $${qi}
+          OR COALESCE(ap_v2.nomes, ap_user.nome, u.nome) ILIKE $${qi}
           OR l.resumo ILIKE $${qi}
           OR ae.observacoes ILIKE $${qi})`
       }
@@ -1825,11 +1817,10 @@ export async function livesRoutes(app) {
       // `cabines` é INNER JOIN: descarta lives órfãs, então precisa estar na query 1 para
       // que o COUNT bata. Os demais são 1:1 (PK ou LATERAL LIMIT 1; apresentadoras.user_id
       // tem índice único — migration 048), logo só entram quando um filtro os referencia.
-      const needsApresentadora = Boolean(fApresentadoraId || fQ)
       const needsMarca = Boolean(fMarcaId || fQ)
       const pageJoins = [joinCabines]
       if (fQ) pageJoins.push(joinClientes, joinUsers)
-      if (needsApresentadora) pageJoins.push(joinApUser, joinAe)
+      if (fQ) pageJoins.push(joinApUser, joinAe)
       if (fQ) pageJoins.push(joinApAgenda)
       if (fQ) pageJoins.push(joinApV2)
       if (needsMarca) pageJoins.push(joinVaMarca)
@@ -1906,9 +1897,9 @@ export async function livesRoutes(app) {
                 COALESCE(l.marca_id, va_marca.marca_id) AS marca_id,
                 va_marca.marca_nome AS marca_nome,
                 ${tiktokUsernameSql({ marca: 'va_marca', cliente: 'cl_tiktok', contrato: 'ct' })} AS tiktok_username,
-                COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
-                COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
-                COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
+                COALESCE(ap_v2.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentadora_nome,
+                COALESCE(ap_v2.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END) AS apresentador_nome,
+                COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
                 CASE WHEN ap_v2.total >= 2 THEN ap_v2.apresentadora2_id ELSE ap_extra.apresentadora_id END AS apresentadora2_id,
                 CASE WHEN ap_v2.total >= 2 THEN ap_v2.apresentadora2_id ELSE ap_extra.apresentadora_id END AS apresentador2_id,
                 CASE WHEN ap_v2.total >= 2 THEN ap_v2.apresentadora2_nome ELSE ap_extra.nome END AS apresentadora2_nome,
@@ -1992,8 +1983,8 @@ export async function livesRoutes(app) {
                 l.live_impressions,
                 COALESCE(l.marca_id, va_marca.marca_id) AS marca_id,
                 COALESCE(va_marca.marca_nome, cl.nome, 'Sem marca') AS marca_nome,
-                COALESCE(ap_v2.nome, ap_agenda.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END, 'Sem apresentadora') AS apresentadora_nome,
-                COALESCE(ap_v2.apresentadora_id, ae.apresentadora_id, ap_user.id) AS apresentadora_id,
+                COALESCE(ap_v2.nome, ap_user.nome, CASE WHEN u.papel IN ('apresentador', 'apresentadora', 'produtor_live') THEN u.nome END, 'Sem apresentadora') AS apresentadora_nome,
+                COALESCE(ap_v2.apresentadora_id, ap_user.id) AS apresentadora_id,
                 ap_v2.apresentadoras
          FROM lives l
          LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id

@@ -35,7 +35,7 @@ describe('buildComissaoFilters — mes=YYYY-MM', () => {
     for (const kind of ['apresentadoras', 'marcas']) {
       const response = await app.inject({ method: 'GET', url: `/v1/ranking/${kind}?mes=2026-09` })
       expect(response.statusCode).toBe(200)
-      expect(response.json()[0]).toMatchObject({ gmv_total: 19.99, pendente_aprovacao: true, comissao_variavel: 0 })
+      expect(response.json()[0]).toMatchObject({ gmv_total: 0, total_lives: 0, gmv_pendente_aprovacao: 19.99, total_lives_pendentes_aprovacao: 1, pendente_aprovacao: true, comissao_variavel: 0 })
       const financial = await app.inject({ method: 'GET', url: `/v1/comissoes/${kind}?mes=2030-09` })
       expect(financial.statusCode).toBe(200)
       expect(financial.json()).toEqual([])

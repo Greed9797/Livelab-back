@@ -9,6 +9,7 @@ import { prorateFatorSql } from '../lib/financeiro-remuneracao.js'
 import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl } from '../lib/dashboard-cache.js'
 import { activeLiveJoinSql, activeLiveSql } from '../lib/live-merge-sql.js'
+import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
 
 const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
 
@@ -63,8 +64,8 @@ function marcaFixoMensalSql() {
           FROM lives l
           WHERE l.tenant_id = $3::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
             AND ${activeLiveSql('l')}
-            AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
-            AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
+            AND ${notArchivedSql('l')}
+            AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
             AND (${liveGmvSql('l')} > 0 OR ${liveOrdersSql('l')} > 0)
           UNION
           SELECT vr.marca_id, date_trunc('month', vr.data::timestamp) AS mes
@@ -173,8 +174,8 @@ export async function financeiroRoutes(app) {
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND ${activeLiveSql('l')}
-            AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
-            AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
+            AND ${notArchivedSql('l')}
+            AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
         ),
         video_periodo AS (
           SELECT
@@ -217,8 +218,8 @@ export async function financeiroRoutes(app) {
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND ${activeLiveSql('l')}
-            AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
-            AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
+            AND ${notArchivedSql('l')}
+            AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
             AND mc.id IS NOT NULL
           GROUP BY mc.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
           UNION ALL
@@ -363,8 +364,8 @@ export async function financeiroRoutes(app) {
       LEFT JOIN lives l ON l.tenant_id = t.id
         AND l.status = 'encerrada'
         ${activeLiveJoinSql('l')}
-        AND l.iniciado_em::date >= $1::date
-        AND l.iniciado_em::date <= $2::date
+        AND ${notArchivedSql('l')}
+        AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
       GROUP BY t.id, t.nome, t.cidade, t.uf, t.plano
       ORDER BY gmv_total DESC
     `, [startDate, endDate])
@@ -416,8 +417,8 @@ export async function financeiroRoutes(app) {
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND ${activeLiveSql('l')}
-            AND l.iniciado_em::date >= $1::date
-            AND l.iniciado_em::date <= $2::date
+            AND ${notArchivedSql('l')}
+            AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
           UNION ALL
           SELECT m.cliente_id, vr.marca_id,
                  vr.gmv_atribuido AS gmv,
@@ -490,13 +491,13 @@ export async function financeiroRoutes(app) {
       // (que referenciava colunas inexistentes va.data_referencia/va.status → 500).
       const entradas = await db.query(`
         SELECT dia, SUM(valor)::numeric AS valor FROM (
-          SELECT l.iniciado_em::date AS dia, ${liveGmvSql('l')} AS valor
+          SELECT (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia, ${liveGmvSql('l')} AS valor
           FROM lives l
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND ${activeLiveSql('l')}
-            AND l.iniciado_em::date >= $1::date
-            AND l.iniciado_em::date <= $2::date
+            AND ${notArchivedSql('l')}
+            AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
           UNION ALL
           SELECT vr.data AS dia, vr.gmv_atribuido AS valor
           FROM video_registros vr
@@ -662,8 +663,8 @@ export async function financeiroRoutes(app) {
          WHERE l.tenant_id = $3::uuid
            AND l.status = 'encerrada'
            AND ${activeLiveSql('l')}
-           AND l.iniciado_em >= ($1::date) AT TIME ZONE 'America/Sao_Paulo'
-           AND l.iniciado_em < (($2::date) + 1) AT TIME ZONE 'America/Sao_Paulo'
+           AND ${notArchivedSql('l')}
+           AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
            AND ${liveGmvSql('l')} > 0
            AND NOT EXISTS (
              SELECT 1 FROM vendas_atribuidas va

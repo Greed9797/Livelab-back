@@ -6,6 +6,7 @@ import { syncAgendaEventForLive } from '../lib/live-agenda-sync.js'
 import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
+import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
 
 export const CONFLITO_HORARIO = 'conflito_horario'
 
@@ -87,7 +88,7 @@ export async function aprovarSubmissaoComOficial(db, {
       error.statusCode = 409
       throw error
     }
-    const allowed = await db.query(`SELECT 1 FROM lives l JOIN apresentadoras a ON a.id=$3::uuid AND a.tenant_id=l.tenant_id WHERE l.id=$1::uuid AND l.tenant_id=$2::uuid AND l.status='encerrada' AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.marca_id=$4::uuid AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date=(($5::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date) AND (l.apresentador_id=a.user_id OR EXISTS (SELECT 1 FROM live_apresentadores la WHERE la.live_id=l.id AND la.tenant_id=l.tenant_id AND la.apresentador_id=a.user_id) OR EXISTS (SELECT 1 FROM live_apresentadoras_v2 lav WHERE lav.live_id=l.id AND lav.tenant_id=l.tenant_id AND lav.apresentadora_id=a.id)) FOR UPDATE OF l LIMIT 1`, [liveId, tenantId, sub.rows[0].apresentadora_id, sub.rows[0].marca_id, sub.rows[0].iniciado_em])
+    const allowed = await db.query(`SELECT 1 FROM lives l JOIN apresentadoras a ON a.id=$3::uuid AND a.tenant_id=l.tenant_id WHERE l.id=$1::uuid AND l.tenant_id=$2::uuid AND l.status='encerrada' AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND ${notArchivedSql('l')} AND l.marca_id=$4::uuid AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date=(($5::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date) AND ${presenterCreditedSql('l', 'a.id')} FOR UPDATE OF l LIMIT 1`, [liveId, tenantId, sub.rows[0].apresentadora_id, sub.rows[0].marca_id, sub.rows[0].iniciado_em])
     if (!allowed.rows[0]) {
       const error = new Error('A live oficial precisa ser da mesma marca, dia e apresentadora, e estar encerrada.')
       error.statusCode = 422

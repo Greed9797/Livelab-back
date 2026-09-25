@@ -5,6 +5,7 @@ import { pendingRows } from '../lib/presenter-pending.js'
 import { tiktokUsernameSql } from '../lib/tiktok-username.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
+import { notArchivedSql } from '../lib/live-count-sql.js'
 import { countWeekdaysInMonth, countWeekdaysUpTo } from '../lib/dias_uteis.js'
 
 // 45s (e não 30s) de propósito: o front faz refetch do dashboard a cada 30s
@@ -108,6 +109,7 @@ export async function homeRoutes(app) {
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
               AND ${activeLiveSql('l')}
+              AND ${notArchivedSql('l')}
               AND COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0) > 0
             UNION ALL
             SELECT date_trunc('month', va.data::timestamp AT TIME ZONE 'America/Sao_Paulo') AS m
@@ -167,6 +169,7 @@ export async function homeRoutes(app) {
         WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND l.status = 'encerrada'
           AND ${activeLiveSql('l')}
+            AND ${notArchivedSql('l')}
           AND l.iniciado_em >= ($1::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
           AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `, [mesStart]),
@@ -206,6 +209,7 @@ export async function homeRoutes(app) {
               AND l.tenant_id = c.tenant_id
               AND l.status = 'em_andamento'
               AND ${activeLiveSql('l')}
+            AND ${notArchivedSql('l')}
             ORDER BY (l.id = c.live_atual_id) DESC, l.iniciado_em DESC
             LIMIT 1
         ) l ON true
@@ -228,9 +232,10 @@ export async function homeRoutes(app) {
 	              AND tenant_id = c.tenant_id
 	              AND status = 'encerrada'
 	              AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
+	              AND arquivada_em IS NULL
 	              AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
 	              AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
-	              AND date_trunc('day', iniciado_em) = date_trunc('day', NOW())
+	              AND (iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date = (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
         ) enc ON true
         WHERE c.tenant_id = current_setting('app.tenant_id', true)::uuid
           AND c.ativo IS NOT FALSE
@@ -287,6 +292,7 @@ export async function homeRoutes(app) {
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND status = 'encerrada'
           AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
+          AND arquivada_em IS NULL
           AND iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
           AND iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `, [mesStart, cutoffDay]),
@@ -310,6 +316,7 @@ export async function homeRoutes(app) {
           WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
             AND l.status = 'encerrada'
             AND ${activeLiveSql('l')}
+            AND ${notArchivedSql('l')}
             AND l.iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
             AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
         ),
@@ -374,6 +381,7 @@ export async function homeRoutes(app) {
         FROM lives
         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
+          AND arquivada_em IS NULL
           AND iniciado_em >= ((NOW() AT TIME ZONE 'America/Sao_Paulo')::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
           AND iniciado_em < (((NOW() AT TIME ZONE 'America/Sao_Paulo')::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `),
@@ -449,11 +457,13 @@ export async function homeRoutes(app) {
            WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
              AND status = 'em_andamento'
              AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
+          AND arquivada_em IS NULL
              AND apresentador_id IS NULL) AS lives_sem_apresentador,
           (SELECT COUNT(*) FROM lives
            WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
              AND status = 'em_andamento'
              AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
+          AND arquivada_em IS NULL
              AND iniciado_em < NOW() - INTERVAL '4 hours') AS lives_abertas_mais_4h,
           (SELECT COUNT(*)
            FROM lives l
@@ -481,6 +491,7 @@ export async function homeRoutes(app) {
             AND l.tenant_id = c.tenant_id
             AND l.status = 'em_andamento'
             AND ${activeLiveSql('l')}
+            AND ${notArchivedSql('l')}
           ORDER BY (l.id = c.live_atual_id) DESC, l.iniciado_em DESC
           LIMIT 1
         ) l ON true
@@ -511,6 +522,7 @@ export async function homeRoutes(app) {
           WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
           AND status = 'encerrada'
           AND uniao_destino_id IS NULL AND uniao_desfeita_em IS NULL
+          AND arquivada_em IS NULL
           AND COALESCE(encerrado_em, previsto_fim) IS NOT NULL
             AND COALESCE(encerrado_em, previsto_fim) > iniciado_em
             AND iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
@@ -676,6 +688,7 @@ export async function homeRoutes(app) {
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
               AND ${activeLiveSql('l')}
+            AND ${notArchivedSql('l')}
               AND l.iniciado_em >= (($1::date - INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
               AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
               AND date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
@@ -761,6 +774,7 @@ export async function homeRoutes(app) {
             WHERE l.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND l.status = 'encerrada'
               AND ${activeLiveSql('l')}
+            AND ${notArchivedSql('l')}
               AND (
                 (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date = hoje_sp.d
                 OR to_char(l.iniciado_em AT TIME ZONE 'America/Sao_Paulo', 'YYYY-MM') = (SELECT mes_prev FROM prev_day)
@@ -810,16 +824,6 @@ export async function homeRoutes(app) {
         gmvIntradayPromise,
       ])
       const pending = (await pendingPromise).filter(row => row.pendente_aprovacao === true)
-      const safePending = pending.filter(row => !row.em_conciliacao)
-      const pendingGmv = safePending.reduce((sum, row) => sum + Number(row.gmv_declarado ?? 0), 0)
-      const pendingOrders = safePending.reduce((sum, row) => sum + Number(row.pedidos_declarados ?? 0), 0)
-      const pendingHours = safePending.reduce((sum, row) => sum + Math.max(0, (new Date(row.encerrado_em) - new Date(row.iniciado_em)) / 3600000), 0)
-      const pendingByDay = new Map()
-      for (const row of safePending) {
-        const day = Number(new Intl.DateTimeFormat('en-US', { timeZone: 'America/Sao_Paulo', day: 'numeric' }).format(new Date(row.iniciado_em)))
-        const previous = pendingByDay.get(day) ?? { gmv: 0, pedidos: 0 }
-        pendingByDay.set(day, { gmv: previous.gmv + Number(row.gmv_declarado ?? 0), pedidos: previous.pedidos + Number(row.pedidos_declarados ?? 0) })
-      }
 
       const proximasLives = agendaHoje
         .filter((r) => r.tipo === 'live' && ['planejado', 'confirmado'].includes(r.status) && new Date(r.data_inicio) > new Date())
@@ -852,8 +856,8 @@ export async function homeRoutes(app) {
           const row = byDay[i + 1]
           return {
             dia: i + 1,
-            gmv: round2(Number(row?.gmv ?? 0) + (pendingByDay.get(i + 1)?.gmv ?? 0)),
-            pedidos: Number(row?.pedidos ?? 0) + (pendingByDay.get(i + 1)?.pedidos ?? 0),
+            gmv: round2(Number(row?.gmv ?? 0)),
+            pedidos: Number(row?.pedidos ?? 0),
             prev: round2(row?.prev ?? 0),
           }
         })
@@ -907,12 +911,12 @@ export async function homeRoutes(app) {
       })
 
       const gmvOperacional = gmvOperacionalQ.rows[0] ?? {}
-      const gmvMes = round2(Number(gmvOperacional.gmv_total_mes ?? gmvOperacional.gmv_mes ?? 0) + pendingGmv)
-      const gmvLivesMes = round2(Number(gmvOperacional.gmv_lives_mes ?? 0) + pendingGmv)
+      const gmvMes = round2(Number(gmvOperacional.gmv_total_mes ?? gmvOperacional.gmv_mes ?? 0))
+      const gmvLivesMes = round2(Number(gmvOperacional.gmv_lives_mes ?? 0))
       const gmvVideosMes = round2(gmvOperacional.gmv_videos_mes)
-      const pedidosLivesMes = Number(gmvOperacional.pedidos_lives_mes ?? 0) + pendingOrders
+      const pedidosLivesMes = Number(gmvOperacional.pedidos_lives_mes ?? 0)
       const pedidosVideosMes = Number(gmvOperacional.pedidos_videos_mes ?? 0)
-      const pedidosTotalMes = gmvOperacional.pedidos_total_mes == null ? pedidosLivesMes + pedidosVideosMes : Number(gmvOperacional.pedidos_total_mes) + pendingOrders
+      const pedidosTotalMes = gmvOperacional.pedidos_total_mes == null ? pedidosLivesMes + pedidosVideosMes : Number(gmvOperacional.pedidos_total_mes)
       const videosMes = Number(gmvOperacional.videos_mes ?? 0)
 
       // A série diária e o total do mês são duas queries diferentes sobre os mesmos dados.
@@ -929,7 +933,7 @@ export async function homeRoutes(app) {
         }, 'home: serie diaria zerada com total do mes positivo — grafico do mes vai desenhar reta em zero')
       }
       const videosMesAnterior = Number(gmvOperacional.videos_mes_anterior ?? 0)
-      const livesMes = Number(livesMesQ.rows[0].lives_mes) + safePending.length
+      const livesMes = Number(livesMesQ.rows[0].lives_mes)
       const livesMesAnterior = Number(livesMesQ.rows[0].lives_mes_anterior ?? 0)
       const gmvMesAnterior = round2(gmvOperacional.gmv_mes_anterior)
       const gmvLivesMesAnterior = round2(gmvOperacional.gmv_lives_mes_anterior)
@@ -1003,7 +1007,7 @@ export async function homeRoutes(app) {
 
       const liveCabinesAtivas = cabinesFormatadas.filter(c => c.status === 'ao_vivo')
       const gmvAoVivoAgora = round2(liveCabinesAtivas.reduce((acc, c) => acc + Number(c.gmv_atual ?? 0), 0))
-      const horasLiveMes = parseFloat((Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0) + pendingHours).toFixed(1))
+      const horasLiveMes = parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes ?? 0).toFixed(1))
       const horasLiveMesAnterior = parseFloat(Number(horasLiveMesQ.rows[0]?.horas_live_mes_anterior ?? 0).toFixed(1))
       const gmvPorLiveMes = livesMes > 0 ? round2(gmvMes / livesMes) : 0
       // GMV/hora exclui vídeos — mesma convenção do analytics.js (gmv_lives / horas)

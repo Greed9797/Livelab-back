@@ -1,5 +1,6 @@
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { activeLiveJoinSql, activeLiveSql } from '../lib/live-merge-sql.js'
+import { notArchivedSql } from '../lib/live-count-sql.js'
 
 const MASTER_PIPELINE_STAGES = [
   'Lead captado',
@@ -1388,7 +1389,9 @@ export async function franqueadoRoutes(app) {
             LEFT JOIN lives l
               ON l.tenant_id = t.id
              ${activeLiveJoinSql('l')}
-             AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
+             AND ${notArchivedSql('l')}
+             AND l.iniciado_em >= date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) AT TIME ZONE 'America/Sao_Paulo'
+             AND l.iniciado_em < (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + interval '1 month') AT TIME ZONE 'America/Sao_Paulo'
             WHERE t.id != $1
               AND ($2::uuid[] IS NULL OR t.id = ANY($2::uuid[]))
             GROUP BY t.id, t.nome
@@ -1509,21 +1512,22 @@ export async function franqueadoRoutes(app) {
         `
           WITH meses AS (
             SELECT generate_series(
-              date_trunc('month', NOW()) - interval '5 months',
-              date_trunc('month', NOW()),
+              (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) - interval '5 months')::date,
+              date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo'))::date,
               interval '1 month'
             )::date AS mes_inicio
           ),
           agregados AS (
             SELECT
-              date_trunc('month', COALESCE(l.encerrado_em, l.iniciado_em))::date AS mes_inicio,
+              date_trunc('month', COALESCE(l.encerrado_em, l.iniciado_em) AT TIME ZONE 'America/Sao_Paulo')::date AS mes_inicio,
               COUNT(*)::int AS lives,
 	              COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS gmv
             FROM lives l
             WHERE l.tenant_id = $1
               AND ${activeLiveSql('l')}
-              AND COALESCE(l.encerrado_em, l.iniciado_em) >= date_trunc('month', NOW()) - interval '5 months'
-              AND COALESCE(l.encerrado_em, l.iniciado_em) < date_trunc('month', NOW()) + interval '1 month'
+              AND ${notArchivedSql('l')}
+              AND COALESCE(l.encerrado_em, l.iniciado_em) >= (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) - interval '5 months') AT TIME ZONE 'America/Sao_Paulo'
+              AND COALESCE(l.encerrado_em, l.iniciado_em) < (date_trunc('month', (NOW() AT TIME ZONE 'America/Sao_Paulo')) + interval '1 month') AT TIME ZONE 'America/Sao_Paulo'
             GROUP BY 1
           )
           SELECT

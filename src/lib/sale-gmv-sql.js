@@ -16,20 +16,29 @@ export function officialLiveGmvSql(alias = 'l') {
   END`
 }
 
-function lineSumSql(saleAlias) {
+function lineSumSql(saleAlias, statusSql) {
   return `(
     SELECT SUM(va_line.gmv)
       FROM vendas_atribuidas va_line
      WHERE va_line.tenant_id = ${saleAlias}.tenant_id
        AND va_line.origem = 'live'
        AND va_line.origem_id = ${saleAlias}.origem_id
-       AND COALESCE(va_line.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+       AND ${statusSql}
   )`
 }
 
-/** GMV da linha. Live: parte proporcional do GMV oficial. O resto: a coluna da venda. */
-export function officialLineGmvExpr(saleAlias = 'va') {
-  const sum = lineSumSql(saleAlias)
+/**
+ * GMV da linha. Live: parte proporcional do GMV oficial. O resto: a coluna da venda.
+ *
+ * A base do mês não pode herdar o predicado que trata status nulo como
+ * pendente_aprovacao: isso puxaria submissão ainda não aprovada para a soma.
+ * Lá o denominador usa o mesmo corte da lateral, status <> 'reprovada'.
+ */
+export function officialLineGmvExpr(saleAlias = 'va', { monthBase = false } = {}) {
+  const statusSql = monthBase
+    ? `va_line.status_aprovacao <> 'reprovada'`
+    : `COALESCE(va_line.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'`
+  const sum = lineSumSql(saleAlias, statusSql)
   const official = `(
     SELECT ${officialLiveGmvSql('live_row')}
       FROM lives live_row

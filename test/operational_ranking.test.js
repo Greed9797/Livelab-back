@@ -14,8 +14,11 @@ describe('operational ranking projection', () => {
       { marca_id: 'a', pendente_aprovacao: true, em_conciliacao: true, gmv_declarado: '100' },
     ])
     const [row] = await getOperationalRanking({}, { tenantId: 'tenant', clienteId: 'client', range: { start: '2026-09-01', end: '2026-10-01' }, groupBy: 'marca', limit: 10 })
-    expect(row.gmv_total).toBe(119.99)
+    expect(row.gmv_total).toBe(100)
+    expect(row.total_lives).toBe(1)
+    expect(row.pedidos).toBe(2)
     expect(row.gmv_pendente_aprovacao).toBe(119.99)
+    expect(row.total_lives_pendentes_aprovacao).toBe(2)
     expect(row.total_provisorio).toBeNull()
     for (const key of ['comissao_variavel','comissao_apresentadora','comissao_franquia','fixo','total_recebido']) expect(row[key]).toBe(original[key])
     expect(original.gmv_total).toBe(100)

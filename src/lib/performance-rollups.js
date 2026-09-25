@@ -2,6 +2,7 @@ import { presenterFixedCapSql } from '../config/presenter_defaults.js'
 import { apresentadoraHorasSql } from './metric-sql.js'
 import { liveGmvSql } from './metric-sql.js'
 import { activeLiveSql } from './live-merge-sql.js'
+import { notArchivedSql } from './live-count-sql.js'
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
 
@@ -172,11 +173,23 @@ export async function getPerformanceRanking(db, {
         WHERE l.tenant_id = $1::uuid
           AND l.status = 'encerrada'
           AND ${activeLiveSql('l')}
-          AND l.iniciado_em >= ($2::date) AT TIME ZONE '${ANALYTICS_TZ}'
-          AND l.iniciado_em < ($3::date) AT TIME ZONE '${ANALYTICS_TZ}'
+          AND ${notArchivedSql('l')}
+          AND l.iniciado_em >= ($2::timestamp) AT TIME ZONE '${ANALYTICS_TZ}'
+          AND l.iniciado_em < ($3::timestamp) AT TIME ZONE '${ANALYTICS_TZ}'
           AND ($5::uuid IS NULL OR l.cliente_id = $5::uuid)
           AND ($6::uuid IS NULL OR l.marca_id = $6::uuid)
-          AND ($7::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $7::uuid)
+          AND (
+            ap_v2.apresentadora_id IS NOT NULL
+            OR NOT EXISTS (
+              SELECT 1 FROM live_apresentadoras_v2 lav_any
+              WHERE lav_any.live_id = l.id AND lav_any.tenant_id = l.tenant_id
+            )
+          )
+          AND (
+            $7::uuid IS NULL
+            OR ap_v2.apresentadora_id = $7::uuid
+            OR (ap_v2.apresentadora_id IS NULL AND ap_user.id = $7::uuid)
+          )
           AND ($8::text IS NULL OR $8::text = 'live')
       ),
       video_source AS (
@@ -265,7 +278,9 @@ export async function getPerformanceRanking(db, {
       LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
       LEFT JOIN marca_totais mt ON mt.marca_id = combined.marca_id
       GROUP BY combined.marca_id, m.nome, COALESCE(m.logo_url, c.logo_url), COALESCE(m.site, c.site)
-      HAVING COALESCE(SUM(combined.gmv), 0) <> 0 OR COALESCE(SUM(combined.pedidos), 0) <> 0
+      HAVING COUNT(*) FILTER (WHERE combined.origem = 'live') > 0
+        OR COALESCE(SUM(combined.gmv), 0) <> 0
+        OR COALESCE(SUM(combined.pedidos), 0) <> 0
       ORDER BY gmv_total DESC, pedidos DESC, marca_nome ASC
       LIMIT $4::int
     `, params)
@@ -320,11 +335,23 @@ export async function getPerformanceRanking(db, {
       WHERE l.tenant_id = $1::uuid
         AND l.status = 'encerrada'
         AND ${activeLiveSql('l')}
-        AND l.iniciado_em >= ($2::date) AT TIME ZONE '${ANALYTICS_TZ}'
-        AND l.iniciado_em < ($3::date) AT TIME ZONE '${ANALYTICS_TZ}'
+        AND ${notArchivedSql('l')}
+        AND l.iniciado_em >= ($2::timestamp) AT TIME ZONE '${ANALYTICS_TZ}'
+        AND l.iniciado_em < ($3::timestamp) AT TIME ZONE '${ANALYTICS_TZ}'
         AND ($5::uuid IS NULL OR l.cliente_id = $5::uuid)
         AND ($6::uuid IS NULL OR l.marca_id = $6::uuid)
-        AND ($7::uuid IS NULL OR COALESCE(ap_v2.apresentadora_id, ap_user.id) = $7::uuid)
+        AND (
+          ap_v2.apresentadora_id IS NOT NULL
+          OR NOT EXISTS (
+            SELECT 1 FROM live_apresentadoras_v2 lav_any
+            WHERE lav_any.live_id = l.id AND lav_any.tenant_id = l.tenant_id
+          )
+        )
+        AND (
+          $7::uuid IS NULL
+          OR ap_v2.apresentadora_id = $7::uuid
+          OR (ap_v2.apresentadora_id IS NULL AND ap_user.id = $7::uuid)
+        )
         AND ($8::text IS NULL OR $8::text = 'live')
     ),
     video_source AS (
@@ -388,7 +415,9 @@ export async function getPerformanceRanking(db, {
     LEFT JOIN apresentadoras a ON a.id = combined.apresentadora_id AND a.tenant_id = $1::uuid
     LEFT JOIN fixo_vigente fv ON fv.apresentadora_id = combined.apresentadora_id
     GROUP BY combined.apresentadora_id, a.nome, a.foto_url
-    HAVING COALESCE(SUM(combined.gmv), 0) <> 0 OR COALESCE(SUM(combined.pedidos), 0) <> 0
+    HAVING COUNT(*) FILTER (WHERE combined.origem = 'live') > 0
+      OR COALESCE(SUM(combined.gmv), 0) <> 0
+      OR COALESCE(SUM(combined.pedidos), 0) <> 0
     ORDER BY gmv_total DESC, total_recebido DESC, apresentadora_nome ASC
     LIMIT $4::int
   `, params)

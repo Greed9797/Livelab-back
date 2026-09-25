@@ -1,5 +1,6 @@
 import { getClienteId } from '../lib/cliente_resolver.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
+import { notArchivedSql } from '../lib/live-count-sql.js'
 
 const DASHBOARD_TZ = 'America/Sao_Paulo'
 
@@ -202,7 +203,7 @@ async function fetchClienteLives(db, tenantId, clienteId, periodo, custoHora) {
     ) snap ON true
     WHERE l.tenant_id = $1
       AND l.cliente_id = $2
-      AND ${activeLiveSql('l')}
+      AND ${activeLiveSql('l')} AND ${notArchivedSql('l')}
       AND l.status IN ('encerrada', 'em_andamento')
       AND l.iniciado_em >= p.inicio
       AND l.iniciado_em < p.fim
@@ -354,7 +355,7 @@ export async function clienteDashboardRoutes(app) {
         ) ls ON true
         WHERE l.tenant_id = $1
           AND l.cliente_id = $2
-          AND ${activeLiveSql('l')}
+          AND ${activeLiveSql('l')} AND ${notArchivedSql('l')}
           AND l.status = 'em_andamento'
         LIMIT 1
       `, [tenant_id, cliente_id])
@@ -425,7 +426,7 @@ export async function clienteDashboardRoutes(app) {
           CROSS JOIN periodo p
           WHERE l.tenant_id = $1
             AND l.status IN ('encerrada', 'em_andamento')
-            AND ${activeLiveSql('l')}
+            AND ${activeLiveSql('l')} AND ${notArchivedSql('l')}
             AND l.iniciado_em >= p.inicio
             AND l.iniciado_em < p.fim
           GROUP BY l.cliente_id
@@ -454,7 +455,7 @@ export async function clienteDashboardRoutes(app) {
           JOIN clientes c ON c.id = l.cliente_id
           WHERE l.tenant_id = $1
             AND l.status = 'encerrada'
-            AND ${activeLiveSql('l')}
+            AND ${activeLiveSql('l')} AND ${notArchivedSql('l')}
             AND l.iniciado_em >= CURRENT_DATE - INTERVAL '90 days'
             AND c.status = 'ativo'
           GROUP BY l.cliente_id, c.nicho
@@ -552,7 +553,7 @@ export async function clienteDashboardRoutes(app) {
           WHERE l.tenant_id = $1
             AND l.cliente_id = $2
             AND l.status IN ('encerrada', 'em_andamento')
-            AND ${activeLiveSql('l')}
+            AND ${activeLiveSql('l')} AND ${notArchivedSql('l')}
             AND l.iniciado_em >= p.inicio
             AND l.iniciado_em < p.fim
         ), deltas AS (
@@ -589,7 +590,7 @@ export async function clienteDashboardRoutes(app) {
           WHERE l.tenant_id = $1
             AND l.cliente_id = $2
             AND l.status IN ('encerrada', 'em_andamento')
-            AND ${activeLiveSql('l')}
+            AND ${activeLiveSql('l')} AND ${notArchivedSql('l')}
             AND l.iniciado_em >= p.inicio
             AND l.iniciado_em < p.fim
             AND NOT EXISTS (SELECT 1 FROM snapshot_hours)
@@ -637,7 +638,7 @@ export async function clienteDashboardRoutes(app) {
           ON l.tenant_id = $1
          AND l.cliente_id = $2
          AND l.status IN ('encerrada', 'em_andamento')
-         AND ${activeLiveSql('l')}
+         AND ${activeLiveSql('l')} AND ${notArchivedSql('l')}
          AND EXTRACT(YEAR FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int = m.ano
          AND EXTRACT(MONTH FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int = m.mes
         LEFT JOIN LATERAL (
@@ -909,7 +910,7 @@ export async function clienteDashboardRoutes(app) {
           ) snap ON true
           LEFT JOIN users u ON u.id = l.apresentador_id
           WHERE l.id = $1 AND l.status = 'em_andamento'
-            AND ${activeLiveSql('l')}
+            AND ${activeLiveSql('l')} AND ${notArchivedSql('l')}
         `, [cabine.live_atual_id])
 
         if (liveQ.rows[0]) {
@@ -947,7 +948,7 @@ export async function clienteDashboardRoutes(app) {
           AND l.cabine_id = $2
           AND l.cliente_id = $3
           AND l.status IN ('encerrada', 'em_andamento')
-          AND ${activeLiveSql('l')}
+          AND ${activeLiveSql('l')} AND ${notArchivedSql('l')}
         ORDER BY l.iniciado_em DESC
         LIMIT 20
       `, [tenant_id, cabineId, cliente_id])

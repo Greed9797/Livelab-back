@@ -101,7 +101,7 @@ function liveGmv(live) {
 }
 
 function isLiveIncludedInSubtotal(live) {
-  return live.registro_tipo !== 'submissao' || (live.revisao_status === 'pendente' && !live.em_conciliacao)
+  return live.registro_tipo !== 'submissao'
 }
 
 export function sumGmvResumoSubtotal(lives) {

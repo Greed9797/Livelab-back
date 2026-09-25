@@ -145,7 +145,7 @@ export async function clienteInsightsRoutes(app) {
          FROM lives l CROSS JOIN periodo p
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
            AND l.status = 'encerrada'
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
            AND l.iniciado_em >= p.inicio AND l.iniciado_em < p.fim`,
         [tenantId, cliente.id, periodo.ano, periodo.mes],
       )
@@ -158,7 +158,7 @@ export async function clienteInsightsRoutes(app) {
          LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
            AND l.status IN ('ao_vivo', 'em_andamento')
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
          ORDER BY l.iniciado_em DESC LIMIT 3`,
         [tenantId, cliente.id],
       )
@@ -185,7 +185,7 @@ export async function clienteInsightsRoutes(app) {
          FROM lives l
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
            AND l.status = 'encerrada'
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
            AND l.iniciado_em >= (date_trunc('month', NOW() AT TIME ZONE '${TZ}') - INTERVAL '5 months')
          GROUP BY 1 ORDER BY 1`,
         [tenantId, cliente.id],
@@ -251,7 +251,7 @@ export async function clienteInsightsRoutes(app) {
          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
            AND l.status = 'encerrada' AND l.status_publicacao = 'publicado'
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
            AND l.iniciado_em >= p.inicio AND l.iniciado_em < p.fim
          ORDER BY l.iniciado_em DESC LIMIT 200`,
         [tenantId, cliente.id, periodo.ano, periodo.mes],
@@ -302,7 +302,7 @@ export async function clienteInsightsRoutes(app) {
          FROM lives l
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
            AND l.status = 'encerrada'
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
            AND l.iniciado_em AT TIME ZONE '${TZ}' >= $3::date
            AND l.iniciado_em AT TIME ZONE '${TZ}' < ($4::date + INTERVAL '1 day')
          GROUP BY 1 ORDER BY 1`,
@@ -352,7 +352,7 @@ export async function clienteInsightsRoutes(app) {
          FROM lives l CROSS JOIN periodo p
          WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
            AND l.status = 'encerrada'
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
            AND l.iniciado_em >= p.inicio AND l.iniciado_em < p.fim`,
         [tenantId, cliente.id, periodo.ano, periodo.mes],
       )
@@ -669,7 +669,7 @@ async function _fetchMetricasPeriodo(db, tenantId, clienteId, periodo) {
     WHERE l.tenant_id = $1::uuid
       AND l.cliente_id = $2::uuid
       AND l.status != 'cancelada'
-      AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+      AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
       AND l.iniciado_em >= p.inicio
       AND l.iniciado_em  < p.fim
   `, [tenantId, clienteId, periodo.ano, periodo.mes])
@@ -727,7 +727,7 @@ async function _fetchSessoesPeriodo(db, tenantId, clienteId, periodo, opts = {})
     LEFT JOIN apresentadoras a ON a.user_id     = l.apresentador_id AND a.tenant_id = l.tenant_id
     WHERE l.tenant_id = $1::uuid
       AND l.cliente_id = $2::uuid
-      AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+      AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
       AND l.status != 'cancelada'
       AND l.iniciado_em >= p.inicio
       AND l.iniciado_em  < p.fim

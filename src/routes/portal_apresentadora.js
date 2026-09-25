@@ -15,6 +15,7 @@ import { parsePortalCount, parsePortalMoney } from '../lib/portal-submission-inp
 import { saoPauloDateInput, saoPauloDayBounds } from '../lib/timezone.js'
 import { invalidateTenant } from '../lib/dashboard-cache.js'
 import { invalidateHomeDashboard } from './home.js'
+import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
 
 const PORTAL_PAPEIS = ['apresentador', 'apresentadora']
 const REVIEW_PAPEIS = ['franqueador_master', 'franqueado', 'gerente', 'operacional', 'produtor_live']
@@ -350,10 +351,9 @@ export async function portalApresentadoraRoutes(app) {
         LEFT JOIN cabines c ON c.id=l.cabine_id AND c.tenant_id=l.tenant_id
         WHERE l.tenant_id=$1::uuid AND l.status='encerrada' AND l.marca_id=$2::uuid
           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
+          AND ${notArchivedSql('l')}
           AND (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date=(($3::timestamptz AT TIME ZONE 'America/Sao_Paulo')::date)
-          AND (l.apresentador_id=(SELECT user_id FROM apresentadoras WHERE id=$4::uuid AND tenant_id=$1::uuid)
-            OR EXISTS (SELECT 1 FROM live_apresentadores la WHERE la.live_id=l.id AND la.tenant_id=l.tenant_id AND la.apresentador_id=(SELECT user_id FROM apresentadoras WHERE id=$4::uuid AND tenant_id=$1::uuid))
-            OR EXISTS (SELECT 1 FROM live_apresentadoras_v2 lav WHERE lav.live_id=l.id AND lav.tenant_id=l.tenant_id AND lav.apresentadora_id=$4::uuid))
+          AND ${presenterCreditedSql('l', '$4::uuid')}
           AND NOT EXISTS (SELECT 1 FROM apresentadora_live_submissoes linked WHERE linked.tenant_id=l.tenant_id AND linked.live_oficial_id=l.id AND linked.apresentadora_id=$4::uuid)
         ) SELECT page.*,totals.total_count FROM (SELECT COUNT(*) AS total_count FROM candidates) totals
         LEFT JOIN LATERAL (SELECT * FROM candidates ORDER BY ABS(EXTRACT(EPOCH FROM (iniciado_em-$3::timestamptz))),id LIMIT 25 OFFSET $5) page ON TRUE`, [request.user.tenant_id, s.marca_id, s.iniciado_em, s.apresentadora_id, page * 25])

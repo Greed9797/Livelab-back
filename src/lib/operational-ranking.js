@@ -33,12 +33,8 @@ export async function getOperationalRanking(db, options) {
     row.gmv_pendente_aprovacao += Number(item.gmv_declarado ?? 0)
     row.total_lives_pendentes_aprovacao++
     row.em_conciliacao ||= Boolean(item.em_conciliacao)
-    if (item.em_conciliacao) continue
-    const gmv = Number(item.gmv_declarado ?? 0)
-    row.gmv_lives += gmv; row.gmv_total += gmv; row.gmv = row.gmv_total
-    row.pedidos += Number(item.pedidos_declarados ?? 0)
-    row.horas_live += Math.max(0, (new Date(item.encerrado_em)-new Date(item.iniciado_em))/3600000)
-    row.total_lives++
+    // A pending submission keeps its own fields. It does not increment official
+    // lives, GMV, orders or hours.
   }
   if (pendingOnlyPresenters.length) {
     // Preserve the existing contractual fixed amount in new ranking entries.

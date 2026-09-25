@@ -36,7 +36,7 @@ describe('GET /v1/lives/resumo-dia', () => {
     await livesRoutes(app)
     const response = await app.inject({ method: 'GET', url: '/v1/lives/resumo-dia?data=2026-09-11' })
     expect(response.statusCode).toBe(200)
-    expect(response.json().totais).toMatchObject({ gmv: 119.99, gmv_pendente_aprovacao: 119.99, total_provisorio: null, em_conciliacao: true })
+    expect(response.json().totais).toMatchObject({ gmv: 100, gmv_pendente_aprovacao: 119.99, total_provisorio: null, em_conciliacao: true })
     expect(response.json().texto_whatsapp).toContain('Sem comissão antes da validação')
     const pendingCall = calls.find((c) => String(c.sql).includes('apresentadora_live_submissoes'))
     expect(pendingCall.params.slice(0, 3)).toEqual([tenantId, '2026-09-11', '2026-09-12'])

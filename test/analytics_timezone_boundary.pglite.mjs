@@ -10,7 +10,10 @@ await db.exec(`
   SET TIME ZONE 'UTC';
   CREATE TABLE lives (
     id text PRIMARY KEY,
-    iniciado_em timestamptz NOT NULL
+    iniciado_em timestamptz NOT NULL,
+    uniao_destino_id uuid,
+    uniao_desfeita_em timestamptz,
+    arquivada_em timestamptz
   );
   INSERT INTO lives (id, iniciado_em) VALUES
     ('before-start', TIMESTAMPTZ '2026-09-01 02:59:59+00'),
@@ -36,11 +39,11 @@ assert.deepEqual(rows, [
 const { rows: dayRows } = await db.query(`
   SELECT sample.id
     FROM (VALUES
-      ('before-day', TIMESTAMPTZ '2026-09-05 02:59:59+00'),
-      ('at-day-start', TIMESTAMPTZ '2026-09-05 03:00:00+00'),
-      ('at-day-end', TIMESTAMPTZ '2026-09-06 02:59:59+00'),
-      ('after-day', TIMESTAMPTZ '2026-09-06 03:00:00+00')
-    ) AS sample(id, iniciado_em)
+      ('before-day', TIMESTAMPTZ '2026-09-05 02:59:59+00', NULL::uuid, NULL::timestamptz, NULL::timestamptz),
+      ('at-day-start', TIMESTAMPTZ '2026-09-05 03:00:00+00', NULL::uuid, NULL::timestamptz, NULL::timestamptz),
+      ('at-day-end', TIMESTAMPTZ '2026-09-06 02:59:59+00', NULL::uuid, NULL::timestamptz, NULL::timestamptz),
+      ('after-day', TIMESTAMPTZ '2026-09-06 03:00:00+00', NULL::uuid, NULL::timestamptz, NULL::timestamptz)
+    ) AS sample(id, iniciado_em, uniao_destino_id, uniao_desfeita_em, arquivada_em)
    WHERE TRUE
      ${analyticsLiveRangeSql('sample')}
    ORDER BY sample.iniciado_em

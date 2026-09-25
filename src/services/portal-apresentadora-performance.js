@@ -1,5 +1,6 @@
 import { apresentadoraHorasSql, liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { pendingCollisionSql } from '../lib/presenter-pending.js'
+import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
 
 // Official lives remain the sole source for commission. Pending portal submissions
 // are added only to operational performance with an explicit provisional marker.
@@ -7,17 +8,6 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
   const result = await db.query(`
     WITH own_profile AS (
       SELECT id, user_id FROM apresentadoras WHERE tenant_id=$1::uuid AND id=$2::uuid
-    ), own_lives AS (
-      SELECT COALESCE(l.uniao_destino_id,l.id) AS id FROM lives l JOIN own_profile a ON a.user_id=l.apresentador_id
-      WHERE l.tenant_id=$1::uuid
-      UNION
-      SELECT COALESCE(l.uniao_destino_id,l.id) AS id FROM live_apresentadores la JOIN own_profile a ON a.user_id=la.apresentador_id
-      JOIN lives l ON l.id=la.live_id AND l.tenant_id=la.tenant_id
-      WHERE la.tenant_id=$1::uuid
-      UNION
-      SELECT COALESCE(l.uniao_destino_id,l.id) AS id FROM live_apresentadoras_v2 lav JOIN own_profile a ON a.id=lav.apresentadora_id
-      JOIN lives l ON l.id=lav.live_id AND l.tenant_id=lav.tenant_id
-      WHERE lav.tenant_id=$1::uuid
     )
     SELECT l.id, l.iniciado_em, l.encerrado_em, l.uniao_id, m.nome AS marca_nome, c.nome AS cabine_nome,
       CASE WHEN v2.apresentadora_id IS NOT NULL THEN COALESCE(
@@ -29,7 +19,8 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
       COALESCE(own_sales.pedidos,
         CASE WHEN v2.papel='principal' OR (v2.apresentadora_id IS NULL AND l.apresentador_id=(SELECT user_id FROM own_profile))
           THEN ${liveOrdersSql('l')} ELSE 0 END)::int AS pedidos
-    FROM own_lives ol JOIN lives l ON l.id=ol.id AND l.tenant_id=$1::uuid
+    FROM lives l
+    JOIN own_profile credited ON ${presenterCreditedSql('l', 'credited.id')}
     LEFT JOIN marcas m ON m.id=l.marca_id AND m.tenant_id=l.tenant_id
     LEFT JOIN cabines c ON c.id=l.cabine_id AND c.tenant_id=l.tenant_id
     LEFT JOIN live_apresentadoras_v2 v2 ON v2.live_id=l.id AND v2.tenant_id=l.tenant_id AND v2.apresentadora_id=$2::uuid
@@ -64,10 +55,12 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
           ELSE GREATEST(0,100-COALESCE(legacy.explicit_percentage,0)) / GREATEST(COALESCE(legacy.unspecified,1),1)
         END AS percentual_rateio
     ) attribution
-    WHERE l.status='encerrada'
+    WHERE l.tenant_id=$1::uuid
+      AND l.status='encerrada'
       AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
-      AND l.iniciado_em >= ($3::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
-      AND l.iniciado_em < ($4::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
+      AND ${notArchivedSql('l')}
+      AND l.iniciado_em >= ($3::timestamp AT TIME ZONE 'America/Sao_Paulo')
+      AND l.iniciado_em < ($4::timestamp AT TIME ZONE 'America/Sao_Paulo')
     ORDER BY l.iniciado_em DESC,l.id
   `, [tenantId, apresentadoraId, range.start, range.end])
 
@@ -78,29 +71,27 @@ export async function getOwnPortalPerformance(db, { tenantId, apresentadoraId, r
     LEFT JOIN marcas m ON m.id=s.marca_id AND m.tenant_id=s.tenant_id
     LEFT JOIN cabines c ON c.id=s.cabine_id AND c.tenant_id=s.tenant_id
     WHERE s.tenant_id=$1::uuid AND s.apresentadora_id=$2::uuid AND s.status='pendente'
-      AND s.iniciado_em >= ($3::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
-      AND s.iniciado_em < ($4::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
+      AND s.iniciado_em >= ($3::timestamp AT TIME ZONE 'America/Sao_Paulo')
+      AND s.iniciado_em < ($4::timestamp AT TIME ZONE 'America/Sao_Paulo')
     ORDER BY s.iniciado_em DESC,s.id`, [tenantId, apresentadoraId, range.start, range.end])
   const items = result.rows.map(row => ({
     id: row.id, iniciado_em: row.iniciado_em, encerrado_em: row.encerrado_em,
     marca_nome: row.marca_nome ?? null, cabine_nome: row.cabine_nome ?? null,
     ...(row.uniao_id ? { uniao_id: row.uniao_id } : {}),
     gmv: Number(row.gmv ?? 0), horas: Math.max(0, Number(row.horas ?? 0)), pedidos: Number(row.pedidos ?? 0),
-  })).concat(pending.rows.filter(row => row.pendente_aprovacao === true).map(row => ({
-    id: `submissao:${row.id}`, iniciado_em: row.iniciado_em, encerrado_em: row.encerrado_em,
-    marca_nome: row.marca_nome ?? null, cabine_nome: row.cabine_nome ?? null,
-    gmv: Number(row.gmv ?? 0), horas: Math.max(0, (new Date(row.encerrado_em).valueOf() - new Date(row.iniciado_em).valueOf()) / 3_600_000), pedidos: Number(row.pedidos ?? 0),
-    pendente_aprovacao: true,
+  }))
+  const pendingItems = pending.rows.filter(row => row.pendente_aprovacao === true).map(row => ({
+    gmv: Number(row.gmv ?? 0),
     em_conciliacao: Boolean(row.em_conciliacao),
-  })))
-  const activeItems = items.filter(item => !item.em_conciliacao)
-  const sums = activeItems.reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, horas: sum.horas + item.horas, pedidos: sum.pedidos + item.pedidos }), { gmv: 0, horas: 0, pedidos: 0 })
-  const pendingSums = items.filter(item => item.pendente_aprovacao).reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, lives: sum.lives + 1 }), { gmv: 0, lives: 0 })
+  }))
+  const sums = items.reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, horas: sum.horas + item.horas, pedidos: sum.pedidos + item.pedidos }), { gmv: 0, horas: 0, pedidos: 0 })
+  const pendingSums = pendingItems.reduce((sum, item) => ({ gmv: sum.gmv + item.gmv, lives: sum.lives + 1 }), { gmv: 0, lives: 0 })
+  const emConciliacao = pendingItems.some(item => item.em_conciliacao)
   return { items, desempenho: {
-    gmv_validado: Math.round(items.filter(item => !item.pendente_aprovacao).reduce((sum, item) => sum + item.gmv, 0) * 100) / 100,
-    total_lives: activeItems.length, gmv_lives: Math.round(sums.gmv * 100) / 100,
-    em_conciliacao: items.some(item => item.em_conciliacao),
-    total_provisorio: items.some(item => item.em_conciliacao) ? null : Math.round(sums.gmv * 100) / 100,
+    gmv_validado: Math.round(sums.gmv * 100) / 100,
+    total_lives: items.length, gmv_lives: Math.round(sums.gmv * 100) / 100,
+    em_conciliacao: emConciliacao,
+    total_provisorio: emConciliacao ? null : Math.round(sums.gmv * 100) / 100,
     horas_live: Math.round(sums.horas * 100) / 100,
     gmv_por_hora: sums.horas > 0 ? Math.round(sums.gmv / sums.horas * 100) / 100 : null,
     pedidos: sums.pedidos,

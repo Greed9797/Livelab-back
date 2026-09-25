@@ -17,6 +17,7 @@ import { calcularComissaoFranquia } from './comissao.js'
 import { MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
 import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribuidas.js'
 import { sincronizarSnapshotComissaoApresentadora } from './comissao-snapshot.js'
+import { officialLiveGmv } from '../lib/official-gmv.js'
 
 /**
  * Calcula e persiste comissões para uma live encerrada.
@@ -25,7 +26,8 @@ import { sincronizarSnapshotComissaoApresentadora } from './comissao-snapshot.js
  * @param {object} opts
  * @param {string} opts.liveId    - UUID da live
  * @param {string} opts.tenantId  - UUID do tenant
- * @param {number} opts.gmv       - GMV final (fat_gerado ou manual_gmv, prioridade de quem chamar)
+ * @param {number} [opts.gmv]    - só vale se a linha não trouxer ads/manual/fat.
+ *                                 Com as colunas, a ordem é liveGmvSql.
  * @param {number} [opts.pedidos] - pedidos oficiais da live (atribuídos 100% à apresentadora principal)
  * @returns {Promise<Array>}      - array de vendas_atribuidas upsertadas (uma por apresentadora)
  */
@@ -40,6 +42,9 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
        l.marca_id    AS live_marca_id,
        l.apresentador_id,
        l.iniciado_em,
+       l.ads_gmv,
+       l.manual_gmv,
+       l.fat_gerado,
        c.id          AS contrato_id,
        c.comissao_pct,
        m.id          AS marca_id,
@@ -76,7 +81,12 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
     throw new Error(`comissao: live ${liveId} sem marca resolvível (tenant ${tenantId})`)
   }
 
-  const gmvNum = Number(gmv ?? 0)
+  // A linha gravada manda. O argumento só existe para quem ainda não devolve
+  // as três colunas (teste antigo). Ausente nas três não vira 0 e não grava venda.
+  const colunasOficiais = ['ads_gmv', 'manual_gmv', 'fat_gerado'].some((key) => Object.prototype.hasOwnProperty.call(live, key))
+  const gmvDaLinha = colunasOficiais ? officialLiveGmv(live) : undefined
+  const gmvNum = gmvDaLinha === undefined ? Number(gmv ?? 0) : gmvDaLinha
+  if (gmvNum == null) return []
   const data = saoPauloDateInput(live.iniciado_em ?? new Date())
 
   // 2. Comissão franquia/franqueadora POR LIVE = gmv * pct (parte variável).

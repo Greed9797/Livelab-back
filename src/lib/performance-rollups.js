@@ -3,6 +3,33 @@ import { apresentadoraHorasSql } from './metric-sql.js'
 import { liveGmvSql } from './metric-sql.js'
 import { activeLiveSql } from './live-merge-sql.js'
 import { notArchivedSql } from './live-count-sql.js'
+import { officialLiveGmvSql, scaledStoredCommissionSql } from './sale-gmv-sql.js'
+
+/**
+ * Parte do GMV oficial que entra na comissão desta linha.
+ * Mesma cascata do GMV exibido (rateio absoluto, percentual, principal),
+ * sem o piso 0: as três colunas nulas continuam nulas e a comissão gravada fica.
+ */
+function officialShareSql(live, rateio, { presenterFilter = false } = {}) {
+  const gmv = `(${officialLiveGmvSql(live)})`
+  const share = `COALESCE(
+                ${rateio}.gmv_rateado,
+                ${gmv} * ${rateio}.percentual_rateio / 100.0,
+                CASE WHEN ${rateio}.papel = 'principal' THEN ${gmv} ELSE 0 END
+              )`
+  if (presenterFilter) {
+    return `CASE
+            WHEN $7::uuid IS NOT NULL AND ${rateio}.apresentadora_id IS NOT NULL
+              THEN ${share}
+            ELSE ${gmv}
+          END`
+  }
+  return `CASE
+          WHEN ${rateio}.apresentadora_id IS NOT NULL
+            THEN ${share}
+          ELSE ${gmv}
+        END`
+}
 
 const ANALYTICS_TZ = 'America/Sao_Paulo'
 
@@ -103,7 +130,7 @@ export async function getPerformanceRanking(db, {
               THEN COALESCE(live_commission.pedidos, CASE WHEN ap_v2.papel = 'principal' THEN COALESCE(l.manual_orders, l.final_orders_count, 0) ELSE 0 END)
             ELSE COALESCE(l.manual_orders, l.final_orders_count, 0)
           END::int AS pedidos,
-          COALESCE(live_commission.comissao_apresentadora, 0) AS comissao_apresentadora,
+          ${scaledStoredCommissionSql('live_commission.comissao_apresentadora', 'live_commission.gmv_gravado', officialShareSql('l', 'ap_v2', { presenterFilter: true }))} AS comissao_apresentadora,
           CASE WHEN mc.id IS NOT NULL
             THEN COALESCE((CASE
               WHEN $7::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
@@ -112,7 +139,7 @@ export async function getPerformanceRanking(db, {
                   CASE WHEN ap_v2.papel = 'principal' THEN ${liveGmvSql('l')} ELSE 0 END)
               ELSE ${liveGmvSql('l')}
             END) * mc.comissao_franquia_pct / 100.0, 0)
-            ELSE COALESCE(live_commission.comissao_franquia, 0)
+            ELSE ${scaledStoredCommissionSql('live_commission.comissao_franquia', 'live_commission.gmv_gravado', officialShareSql('l', 'ap_v2', { presenterFilter: true }))}
           END AS comissao_franquia,
           CASE WHEN mc.id IS NOT NULL
             THEN COALESCE((CASE
@@ -122,7 +149,7 @@ export async function getPerformanceRanking(db, {
                   CASE WHEN ap_v2.papel = 'principal' THEN ${liveGmvSql('l')} ELSE 0 END)
               ELSE ${liveGmvSql('l')}
             END) * mc.comissao_franqueadora_pct / 100.0, 0)
-            ELSE COALESCE(live_commission.comissao_franqueadora, 0)
+            ELSE ${scaledStoredCommissionSql('live_commission.comissao_franqueadora', 'live_commission.gmv_gravado', officialShareSql('l', 'ap_v2', { presenterFilter: true }))}
           END AS comissao_franqueadora,
           CASE
             WHEN $7::uuid IS NOT NULL AND ap_v2.apresentadora_id IS NOT NULL
@@ -160,6 +187,7 @@ export async function getPerformanceRanking(db, {
         LEFT JOIN LATERAL (
           SELECT
             SUM(va.pedidos)::int AS pedidos,
+            COALESCE(SUM(va.gmv), 0) AS gmv_gravado,
             COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_apresentadora,
             COALESCE(SUM(va.comissao_franquia), 0) AS comissao_franquia,
             COALESCE(SUM(va.comissao_franqueadora), 0) AS comissao_franqueadora
@@ -311,7 +339,7 @@ export async function getPerformanceRanking(db, {
             ELSE 0
           END
         )::int AS pedidos,
-        COALESCE(live_commission.comissao_apresentadora, 0) AS comissao_apresentadora,
+        ${scaledStoredCommissionSql('live_commission.comissao_apresentadora', 'live_commission.gmv_gravado', officialShareSql('l', 'ap_v2'))} AS comissao_apresentadora,
         ${apresentadoraHorasSql()} AS horas
       FROM lives l
       LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
@@ -324,6 +352,7 @@ export async function getPerformanceRanking(db, {
       ) ap_v2 ON true
       LEFT JOIN LATERAL (
         SELECT SUM(va.pedidos)::int AS pedidos,
+               COALESCE(SUM(va.gmv), 0) AS gmv_gravado,
                COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao_apresentadora
         FROM vendas_atribuidas va
         WHERE va.tenant_id = l.tenant_id

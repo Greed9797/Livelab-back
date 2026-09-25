@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
 import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
+import { officialLineCommissionExpr, officialLineGmvExpr } from '../lib/sale-gmv-sql.js'
 import { marcaResolveLateralSql, MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
 import { resolveMonthRange } from '../lib/operacional.js'
 import { presenterFixedAtSql } from '../config/presenter_defaults.js'
@@ -557,13 +558,14 @@ export async function financeiroRoutes(app) {
       const comissaoFranquia = await db.query(`
         -- SUM(va.comissao_franquia) permanece no inventário como fallback legado;
         -- condições temporais substituem esse valor quando existe snapshot.
+        -- O GMV da live segue liveGmvSql; vídeo continua na coluna da venda.
         SELECT va.marca_id, m.nome AS marca_nome,
                COALESCE(vc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca,
                date_trunc('month', va.data::timestamp)::date AS mes,
                COALESCE(SUM(CASE WHEN vc.id IS NOT NULL
-                                 THEN va.gmv * COALESCE(vc.comissao_franquia_pct, 0) / 100.0
-                                 ELSE va.comissao_franquia END), 0) AS valor,
-               COALESCE(SUM(va.gmv), 0) AS gmv,
+                                 THEN (${officialLineGmvExpr('va')}) * COALESCE(vc.comissao_franquia_pct, 0) / 100.0
+                                 ELSE (${officialLineCommissionExpr('va', 'comissao_franquia')}) END), 0) AS valor,
+               COALESCE(SUM(${officialLineGmvExpr('va')}), 0) AS gmv,
                COUNT(DISTINCT va.origem_id) FILTER (WHERE va.origem = 'live')::int AS lives
         FROM vendas_atribuidas va
         JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
@@ -579,8 +581,8 @@ export async function financeiroRoutes(app) {
           AND ${VENDA_NAO_REPROVADA}
         GROUP BY va.marca_id, m.nome, vc.tipo_cobranca, m.tipo_cobranca, date_trunc('month', va.data::timestamp)::date
         HAVING COALESCE(SUM(CASE WHEN vc.id IS NOT NULL
-                                 THEN va.gmv * COALESCE(vc.comissao_franquia_pct, 0) / 100.0
-                                 ELSE va.comissao_franquia END), 0) <> 0
+                                 THEN (${officialLineGmvExpr('va')}) * COALESCE(vc.comissao_franquia_pct, 0) / 100.0
+                                 ELSE (${officialLineCommissionExpr('va', 'comissao_franquia')}) END), 0) <> 0
         ORDER BY valor DESC
       `, [startDate, endDate, tenant_id])
 
@@ -597,16 +599,17 @@ export async function financeiroRoutes(app) {
 
       // SAÍDA: comissão por apresentadora (vendas não-reprovadas do período)
       const comissaoApresentadoras = await db.query(`
+        -- SUM(va.comissao_apresentadora) lida na mesma ordem de liveGmvSql
         SELECT va.apresentadora_id, a.nome,
-               COALESCE(SUM(va.comissao_apresentadora), 0) AS valor,
-               COALESCE(SUM(va.gmv), 0) AS gmv
+               COALESCE(SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}), 0) AS valor,
+               COALESCE(SUM(${officialLineGmvExpr('va')}), 0) AS gmv
         FROM vendas_atribuidas va
         JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
         WHERE va.tenant_id = $3::uuid
           AND va.data >= $1::date AND va.data <= $2::date
           AND ${VENDA_NAO_REPROVADA}
         GROUP BY va.apresentadora_id, a.nome
-        HAVING COALESCE(SUM(va.comissao_apresentadora), 0) <> 0
+        HAVING COALESCE(SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}), 0) <> 0
         ORDER BY valor DESC
       `, [startDate, endDate, tenant_id])
 

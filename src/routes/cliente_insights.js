@@ -8,6 +8,7 @@ import { calcularStatusOperacional } from '../services/status_operacional.js'
 import { isFimDeSemanaSP } from '../services/comissao.js'
 import { buildRelatorioOperacionalPdf } from '../services/reports.js'
 import { liveGmvSql, liveOrdersSql, liveHoursSql } from '../lib/metric-sql.js'
+import { liveSaleCommissionLateralSql } from '../lib/sale-gmv-sql.js'
 
 const TZ = 'America/Sao_Paulo'
 
@@ -634,8 +635,9 @@ async function _fetchMetricasPeriodo(db, tenantId, clienteId, periodo) {
       SUM(l.comissao_calculada) FILTER (WHERE l.status = 'encerrada')
         AS comissao_livelab_total,
 
-      -- Comissão apresentadora acumulada
-      SUM(l.comissao_apresentadora_valor) FILTER (WHERE l.status = 'encerrada')
+      -- Comissão apresentadora acumulada. A venda pode estar congelada no fat_gerado;
+      -- a leitura usa o GMV oficial da live, na mesma ordem de liveGmvSql.
+      SUM(COALESCE(va_comissao.comissao_apresentadora, l.comissao_apresentadora_valor)) FILTER (WHERE l.status = 'encerrada')
         AS comissao_apresentadora_total,
 
       -- Views: live_impressions (migration 111)
@@ -666,6 +668,7 @@ async function _fetchMetricasPeriodo(db, tenantId, clienteId, periodo) {
 
     FROM lives l
     CROSS JOIN periodo p
+    ${liveSaleCommissionLateralSql('l')}
     WHERE l.tenant_id = $1::uuid
       AND l.cliente_id = $2::uuid
       AND l.status != 'cancelada'
@@ -710,8 +713,8 @@ async function _fetchSessoesPeriodo(db, tenantId, clienteId, periodo, opts = {})
       -- Mesmo alias de antes: o mapeamento em JS mais abaixo lê r.fat_gerado.
       ${liveGmvSql('l')} AS fat_gerado,
       l.comissao_calculada,
-      l.comissao_apresentadora_valor,
-      l.comissao_apresentadora_pct,
+      COALESCE(va_comissao.comissao_apresentadora, l.comissao_apresentadora_valor) AS comissao_apresentadora_valor,
+      COALESCE(va_comissao.pct_apresentadora, l.comissao_apresentadora_pct) AS comissao_apresentadora_pct,
       l.product_clicks  AS clicks,
       l.live_impressions AS views_raw,
       l.status_operacional,
@@ -723,6 +726,7 @@ async function _fetchSessoesPeriodo(db, tenantId, clienteId, periodo, opts = {})
       COUNT(*) OVER() AS total_count
     FROM lives l
     CROSS JOIN periodo p
+    ${liveSaleCommissionLateralSql('l')}
     LEFT JOIN users u         ON u.id          = l.apresentador_id
     LEFT JOIN apresentadoras a ON a.user_id     = l.apresentador_id AND a.tenant_id = l.tenant_id
     WHERE l.tenant_id = $1::uuid

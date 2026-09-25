@@ -2,6 +2,7 @@ import { presenterFixedAtSql } from '../config/presenter_defaults.js'
 import { prorateFatorSql } from '../lib/financeiro-remuneracao.js'
 import { apresentadoraHorasSql, liveGmvSql, liveHoursSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
+import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr, officialLiveGmvSql, scaledStoredCommissionSql } from '../lib/sale-gmv-sql.js'
 
 export const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 export const DATA_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
@@ -75,7 +76,7 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes, aprese
     `, apresentadoraId ? [tenantId, fim, apresentadoraId] : [tenantId, fim]),
     db.query(`
       SELECT va.apresentadora_id, a.nome,
-             COALESCE(SUM(va.comissao_apresentadora), 0) AS valor
+             COALESCE(SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}), 0) AS valor
       FROM vendas_atribuidas va
       JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
       WHERE va.tenant_id = $1::uuid
@@ -172,7 +173,18 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
       END AS gmv_atribuido,
       ${apresentadoraHorasSql({ live: 'l', rateio: 'split_atual' })} AS horas_atribuidas,
       ${liveOrdersSql('l')} AS pedidos,
-      COALESCE(comissao.valor, 0) AS comissao
+      ${scaledStoredCommissionSql(
+        'comissao.valor',
+        'comissao.gmv_gravado',
+        `CASE
+        WHEN split_atual.apresentadora_id IS NOT NULL THEN COALESCE(
+          split_atual.gmv_rateado,
+          (${officialLiveGmvSql('l')}) * split_atual.percentual_rateio / 100.0,
+          CASE WHEN split_atual.papel = 'principal' THEN (${officialLiveGmvSql('l')}) ELSE 0 END
+        )
+        ELSE (${officialLiveGmvSql('l')})
+      END`,
+      )} AS comissao
     FROM lives_atendidas atendida
     JOIN lives l ON l.id = atendida.live_id AND l.tenant_id = $1::uuid
     LEFT JOIN cabines cabine ON cabine.id = l.cabine_id AND cabine.tenant_id = l.tenant_id
@@ -203,7 +215,8 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
     -- A comissão é individual e pertence à competência selecionada. O LATERAL
     -- agregado impede que várias vendas multipliquem a linha da live.
     LEFT JOIN LATERAL (
-      SELECT COALESCE(SUM(va.comissao_apresentadora), 0) AS valor
+      SELECT COALESCE(SUM(va.comissao_apresentadora), 0) AS valor,
+             COALESCE(SUM(va.gmv), 0) AS gmv_gravado
       FROM vendas_atribuidas va
       WHERE va.tenant_id = l.tenant_id
         AND va.origem = 'live' AND va.origem_id = l.id
@@ -223,10 +236,10 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
       // competência mudaria o total mostrado no documento de pagamento.
       db.query(`
         SELECT
-          va.id, va.data::text AS data, va.origem, va.gmv, va.comissao_apresentadora,
-          CASE WHEN va.gmv > 0
-            THEN ROUND((va.comissao_apresentadora / va.gmv * 100)::numeric, 2)
-            ELSE 0 END AS pct_aplicado,
+          va.id, va.data::text AS data, va.origem,
+          (${officialLineGmvExpr('va')}) AS gmv,
+          (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
+          ${officialLinePctExpr('va')} AS pct_aplicado,
           m.nome AS marca_nome,
           month_gmv.gmv_mes AS base_gmv_mes,
           faixa.gmv_inicio AS faixa_gmv_inicio,
@@ -236,7 +249,7 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
         FROM vendas_atribuidas va
         LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
         LEFT JOIN LATERAL (
-          SELECT COALESCE(SUM(va_mes.gmv), 0) + COALESCE(va.gmv, 0) AS gmv_mes
+          SELECT COALESCE(SUM(${officialLineGmvExpr('va_mes')}), 0) + COALESCE(${officialLineGmvExpr('va')}, 0) AS gmv_mes
           FROM vendas_atribuidas va_mes
           WHERE va_mes.tenant_id = va.tenant_id
             AND va_mes.apresentadora_id = va.apresentadora_id

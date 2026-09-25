@@ -19,6 +19,8 @@ import { buildResumoDia } from '../lib/resumo-dia.js'
 import { comissaoValorFromPct, resolveComissaoPctSemCabine } from '../lib/comissao-sem-cabine.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { presenterCreditedSql } from '../lib/live-count-sql.js'
+import { officialGmvFromPayload } from '../lib/official-gmv.js'
+import { liveSaleCommissionLateralSql } from '../lib/sale-gmv-sql.js'
 import { liveHasFinancialHistory } from '../lib/live-archive.js'
 import { pendingCollisionSql, pendingRecord, pendingRows } from '../lib/presenter-pending.js'
 
@@ -171,16 +173,19 @@ const liveManualEditSchema = z.object({
   })).min(1).optional(),
 })
 
-function officialGmvFromPayload(payload = {}, fallback = {}) {
-  return Number(
-    payload.ads_gmv
-    ?? payload.manual_gmv
-    ?? payload.fat_gerado
-    ?? fallback.ads_gmv
-    ?? fallback.manual_gmv
-    ?? fallback.fat_gerado
-    ?? 0
-  )
+function comissaoFranquiaDoGmv(gmv, pct) {
+  if (gmv == null) return null
+  return Number(gmv) * (Number(pct) / 100)
+}
+
+function snapshotDoGmv(gmv, apresentadoraPct, iniciadoEm, temApresentadora) {
+  if (gmv == null) return { pct: null, valor: null }
+  return calcularComissaoApresentadora({
+    fatGerado: gmv,
+    apresentadoraPct,
+    iniciadoEm,
+    temApresentadora,
+  })
 }
 
 function officialOrdersFromPayload(payload = {}, fallback = {}) {
@@ -794,16 +799,17 @@ export async function livesRoutes(app) {
             [d.cabine_id]
           )
           const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
-          comissao = officialGmvFromPayload(d) * (comissaoPct / 100)
+          comissao = comissaoFranquiaDoGmv(officialGmvFromPayload(d), comissaoPct)
         } else {
+          const gmvManualCriacao = officialGmvFromPayload(d)
           const pct = await resolveComissaoPctSemCabine(db, {
             tenantId: tenant_id,
             marcaId: resolvedMarcaId,
             apresentadoraId: d.apresentador_id ?? null,
-            gmv: officialGmvFromPayload(d),
+            gmv: gmvManualCriacao ?? 0,
             data: d.data,
           })
-          comissao = comissaoValorFromPct(officialGmvFromPayload(d), pct)
+          comissao = gmvManualCriacao == null ? null : comissaoValorFromPct(gmvManualCriacao, pct)
         }
 
         // Resolve apresentadoras.id → users.id + comissao_pct (para snapshot operacional)
@@ -833,13 +839,13 @@ export async function livesRoutes(app) {
         const encerrado = saoPauloTimestamp(d.data, d.hora_fim)
 
         // Comissão apresentadora — snapshot operacional por live
-        const fatGeradoManual   = Number(officialGmvFromPayload(d) ?? 0)
-        const comApresManual    = calcularComissaoApresentadora({
-          fatGerado:        fatGeradoManual,
-          apresentadoraPct: apresentadoraComissaoPct,
-          iniciadoEm:       iniciado,
-          temApresentadora: apresentadorUserId != null,
-        })
+        const fatGeradoManual   = officialGmvFromPayload(d)
+        const comApresManual    = snapshotDoGmv(
+          fatGeradoManual,
+          apresentadoraComissaoPct,
+          iniciado,
+          apresentadorUserId != null,
+        )
 
         const ins = await db.query(
           `INSERT INTO lives
@@ -1038,7 +1044,7 @@ export async function livesRoutes(app) {
               [cabineId, tenant_id]
             )
             const pct = Number(cab.rows[0]?.comissao_pct ?? 0)
-            comissao = officialGmvFromPayload(d, live) * (pct / 100)
+            comissao = comissaoFranquiaDoGmv(officialGmvFromPayload(d, live), pct)
           } else {
             const marcaId = d.marca_id !== undefined ? d.marca_id : (live.marca_id ?? null)
             let apresentadoraId = d.apresentador_id !== undefined ? d.apresentador_id : null
@@ -1049,14 +1055,15 @@ export async function livesRoutes(app) {
               )
               apresentadoraId = ap.rows[0]?.id ?? null
             }
+            const gmvPatch = officialGmvFromPayload(d, live)
             const pct = await resolveComissaoPctSemCabine(db, {
               tenantId: tenant_id,
               marcaId,
               apresentadoraId,
-              gmv: officialGmvFromPayload(d, live),
+              gmv: gmvPatch ?? 0,
               data: live.iniciado_em ? saoPauloDateInput(live.iniciado_em) : null,
             })
-            comissao = comissaoValorFromPct(officialGmvFromPayload(d, live), pct)
+            comissao = gmvPatch == null ? null : comissaoValorFromPct(gmvPatch, pct)
           }
         }
 
@@ -1156,12 +1163,12 @@ export async function livesRoutes(app) {
               : null
           }
           const inicioParaComApres = live.iniciado_em ? new Date(live.iniciado_em) : new Date()
-          const comApresPatch = calcularComissaoApresentadora({
-            fatGerado:        Number(gmvAtualPatch ?? 0),
-            apresentadoraPct: apPctPatch,
-            iniciadoEm:       inicioParaComApres,
-            temApresentadora: apResolvido != null,
-          })
+          const comApresPatch = snapshotDoGmv(
+            gmvAtualPatch,
+            apPctPatch,
+            inicioParaComApres,
+            apResolvido != null,
+          )
           addField('comissao_apresentadora_pct',   comApresPatch.pct)
           addField('comissao_apresentadora_valor',  comApresPatch.valor)
         }
@@ -1572,14 +1579,7 @@ export async function livesRoutes(app) {
            ORDER BY (m.id = l.marca_id) DESC, va.criado_em DESC NULLS LAST
            LIMIT 1
          ) va_marca ON true
-         LEFT JOIN LATERAL (
-           SELECT SUM(va_c.comissao_apresentadora) AS comissao_apresentadora,
-                  ROUND(SUM(va_c.comissao_apresentadora) / NULLIF(SUM(va_c.gmv), 0) * 100, 2) AS pct_apresentadora
-           FROM vendas_atribuidas va_c
-           WHERE va_c.tenant_id = l.tenant_id
-             AND va_c.origem = 'live'
-             AND va_c.origem_id = l.id
-         ) va_comissao ON true
+         ${liveSaleCommissionLateralSql('l')}
          LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id
          LEFT JOIN LATERAL (
            SELECT viewer_count, total_viewers, total_orders, gmv,
@@ -1795,14 +1795,7 @@ export async function livesRoutes(app) {
          ) va_marca ON true`
       // A lista mostra valor e percentual da mesma agregação. Uma única passada
       // por vendas_atribuidas por live evita duas subconsultas correlacionadas.
-      const joinVaComissao = `LEFT JOIN LATERAL (
-           SELECT SUM(va_c.comissao_apresentadora) AS comissao_apresentadora,
-                  ROUND(SUM(va_c.comissao_apresentadora) / NULLIF(SUM(va_c.gmv), 0) * 100, 2) AS pct_apresentadora
-           FROM vendas_atribuidas va_c
-           WHERE va_c.tenant_id = l.tenant_id
-             AND va_c.origem = 'live'
-             AND va_c.origem_id = l.id
-         ) va_comissao ON true`
+      const joinVaComissao = liveSaleCommissionLateralSql('l')
       const joinClTiktok = `LEFT JOIN clientes cl_tiktok ON cl_tiktok.id = COALESCE(va_marca.cliente_id, l.cliente_id, ct.cliente_id) AND cl_tiktok.tenant_id = l.tenant_id`
       const joinLs = `LEFT JOIN LATERAL (
            SELECT viewer_count, total_viewers, total_orders, gmv,
@@ -2448,7 +2441,8 @@ export async function livesRoutes(app) {
 
       try {
         const liveQ = await db.query(
-          `SELECT id, cabine_id, cliente_id, apresentador_id, status, iniciado_em, marca_id, agenda_evento_id
+          `SELECT id, cabine_id, cliente_id, apresentador_id, status, iniciado_em, marca_id, agenda_evento_id,
+                  ads_gmv, manual_gmv, fat_gerado
            FROM lives
            WHERE id = $1 AND tenant_id = $2::uuid AND status = 'em_andamento'
            FOR UPDATE`,
@@ -2486,7 +2480,7 @@ export async function livesRoutes(app) {
           contrato = contratoQ.rows[0]
 
           const comissaoPct = Number(contrato?.comissao_pct ?? 0)
-          comissao = officialGmvFromPayload(parsed.data) * (comissaoPct / 100)
+          comissao = comissaoFranquiaDoGmv(officialGmvFromPayload(parsed.data, live), comissaoPct)
         } else {
           let apresentadoraId = parsed.data.apresentadora_id ?? null
           if (!apresentadoraId && live.apresentador_id) {
@@ -2496,14 +2490,15 @@ export async function livesRoutes(app) {
             )
             apresentadoraId = ap.rows[0]?.id ?? null
           }
+          const gmvEncerrar = officialGmvFromPayload(parsed.data, live)
           const pct = await resolveComissaoPctSemCabine(db, {
             tenantId: tenant_id,
             marcaId: live.marca_id ?? null,
             apresentadoraId,
-            gmv: officialGmvFromPayload(parsed.data),
+            gmv: gmvEncerrar ?? 0,
             data: live.iniciado_em ? saoPauloDateInput(live.iniciado_em) : null,
           })
-          comissao = comissaoValorFromPct(officialGmvFromPayload(parsed.data), pct)
+          comissao = gmvEncerrar == null ? null : comissaoValorFromPct(gmvEncerrar, pct)
         }
         const encerradoEm = parsed.data.encerrado_em ? new Date(parsed.data.encerrado_em) : null
         let encerramentoApresentadorUserId = null
@@ -2535,12 +2530,12 @@ export async function livesRoutes(app) {
         // Snapshot operacional de comissão apresentadora
         const temApresentadora = (encerramentoApresentadorUserId ?? live.apresentador_id) != null
         const inicioEncerrar   = live.iniciado_em ? new Date(live.iniciado_em) : new Date()
-        const comApresEncerrar = calcularComissaoApresentadora({
-          fatGerado:        Number(officialGmvFromPayload(parsed.data) ?? 0),
-          apresentadoraPct: encerramentoApresentadoraComissaoPct,
-          iniciadoEm:       inicioEncerrar,
+        const comApresEncerrar = snapshotDoGmv(
+          officialGmvFromPayload(parsed.data, live),
+          encerramentoApresentadoraComissaoPct,
+          inicioEncerrar,
           temApresentadora,
-        })
+        )
 
         await db.query(
           `UPDATE lives
@@ -2764,7 +2759,7 @@ export async function livesRoutes(app) {
         await db.query('COMMIT')
 
         // Motor de comissões — recalcula variável da apresentadora; fixo entra no ranking consolidado.
-        const gmvFinal = officialGmvFromPayload(parsed.data)
+        const gmvFinal = officialGmvFromPayload(parsed.data, live)
         const pedidosFinal = officialOrdersFromPayload(parsed.data)
         app.withTenant(tenant_id, async (db2) => {
           try {

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { READ_COMISSOES, READ_APRESENTADORAS, WRITE_APRESENTADORAS, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
+import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr } from '../lib/sale-gmv-sql.js'
 import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { getOperationalRanking } from '../lib/operational-ranking.js'
@@ -430,11 +431,11 @@ export async function comissoesRoutes(app) {
            va.origem,
            va.origem_id,
            va.data,
-           va.gmv,
+           (${officialLineGmvExpr('va')}) AS gmv,
            va.pedidos,
-           va.comissao_apresentadora,
-           va.comissao_franquia,
-           va.comissao_franqueadora,
+           (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
+           (${officialLineCommissionExpr('va', 'comissao_franquia')}) AS comissao_franquia,
+           (${officialLineCommissionExpr('va', 'comissao_franqueadora')}) AS comissao_franqueadora,
            va.status_aprovacao,
            va.criado_em,
            va.atualizado_em,
@@ -451,7 +452,7 @@ export async function comissoesRoutes(app) {
          LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
          LEFT JOIN LATERAL (
-           SELECT COALESCE(SUM(va_mes.gmv), 0) + COALESCE(va.gmv, 0) AS gmv_mes
+           SELECT COALESCE(SUM(${officialLineGmvExpr('va_mes')}), 0) + COALESCE(${officialLineGmvExpr('va')}, 0) AS gmv_mes
            FROM vendas_atribuidas va_mes
            WHERE va_mes.tenant_id = va.tenant_id
              AND va_mes.apresentadora_id = va.apresentadora_id
@@ -608,15 +609,12 @@ export async function comissoesRoutes(app) {
       const result = await db.query(
         `SELECT
            va.id,
-           va.gmv,
-           va.comissao_apresentadora,
-           va.comissao_franquia,
-           va.comissao_franqueadora,
+           (${officialLineGmvExpr('va')}) AS gmv,
+           (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
+           (${officialLineCommissionExpr('va', 'comissao_franquia')}) AS comissao_franquia,
+           (${officialLineCommissionExpr('va', 'comissao_franqueadora')}) AS comissao_franqueadora,
            va.status_aprovacao,
-           CASE WHEN va.gmv > 0
-             THEN ROUND((va.comissao_apresentadora / va.gmv * 100)::numeric, 2)
-             ELSE 0
-           END AS pct_apresentadora,
+           ${officialLinePctExpr('va')} AS pct_apresentadora,
            va.marca_id,
            m.nome AS marca_nome,
            va.apresentadora_id,
@@ -665,15 +663,12 @@ export async function comissoesRoutes(app) {
         `SELECT
            va.origem_id AS live_id,
            va.data,
-           va.gmv,
-           va.comissao_apresentadora,
-           va.comissao_franquia,
-           va.comissao_franqueadora,
+           (${officialLineGmvExpr('va')}) AS gmv,
+           (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
+           (${officialLineCommissionExpr('va', 'comissao_franquia')}) AS comissao_franquia,
+           (${officialLineCommissionExpr('va', 'comissao_franqueadora')}) AS comissao_franqueadora,
            va.status_aprovacao,
-           CASE WHEN va.gmv > 0
-             THEN ROUND((va.comissao_apresentadora / va.gmv * 100)::numeric, 2)
-             ELSE 0
-           END AS pct_aplicado,
+           ${officialLinePctExpr('va')} AS pct_aplicado,
            m.nome AS marca_nome,
            COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome, COALESCE(a.nome, 'Sem apresentadora') AS nome
          FROM vendas_atribuidas va
@@ -709,10 +704,10 @@ export async function comissoesRoutes(app) {
       const result = await db.query(
         `SELECT
            va.origem_id AS live_id,
-           SUM(va.gmv) AS gmv,
-           SUM(va.comissao_apresentadora) AS comissao_apresentadora,
-           CASE WHEN SUM(va.gmv) > 0
-             THEN ROUND((SUM(va.comissao_apresentadora) / SUM(va.gmv) * 100)::numeric, 2)
+           SUM(${officialLineGmvExpr('va')}) AS gmv,
+           SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
+           CASE WHEN SUM(${officialLineGmvExpr('va')}) > 0
+             THEN ROUND((SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}) / SUM(${officialLineGmvExpr('va')}) * 100)::numeric, 2)
              ELSE 0 END AS pct_aplicado
          FROM vendas_atribuidas va
          WHERE va.tenant_id = $1::uuid
@@ -751,11 +746,10 @@ export async function comissoesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT
-           va.id, va.data, va.origem, va.gmv,
-           va.comissao_apresentadora,
-           CASE WHEN va.gmv > 0
-             THEN ROUND((va.comissao_apresentadora / va.gmv * 100)::numeric, 2)
-             ELSE 0 END AS pct_aplicado,
+           va.id, va.data, va.origem,
+           (${officialLineGmvExpr('va')}) AS gmv,
+           (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
+           ${officialLinePctExpr('va')} AS pct_aplicado,
            m.nome AS marca_nome,
            month_gmv.gmv_mes AS base_gmv_mes,
            faixa.gmv_inicio AS faixa_gmv_inicio,
@@ -765,7 +759,7 @@ export async function comissoesRoutes(app) {
          FROM vendas_atribuidas va
          LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
          LEFT JOIN LATERAL (
-           SELECT COALESCE(SUM(va_mes.gmv), 0) + COALESCE(va.gmv, 0) AS gmv_mes
+           SELECT COALESCE(SUM(${officialLineGmvExpr('va_mes')}), 0) + COALESCE(${officialLineGmvExpr('va')}, 0) AS gmv_mes
            FROM vendas_atribuidas va_mes
            WHERE va_mes.tenant_id = va.tenant_id
              AND va_mes.apresentadora_id = va.apresentadora_id
@@ -830,10 +824,10 @@ export async function comissoesRoutes(app) {
            COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
            COALESCE(m.nome, 'Sem marca')         AS marca_nome,
            va.origem,
-           va.gmv,
-           va.comissao_apresentadora,
-           va.comissao_franquia,
-           va.comissao_franqueadora,
+           (${officialLineGmvExpr('va')}) AS gmv,
+           (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
+           (${officialLineCommissionExpr('va', 'comissao_franquia')}) AS comissao_franquia,
+           (${officialLineCommissionExpr('va', 'comissao_franqueadora')}) AS comissao_franqueadora,
            va.status_aprovacao AS status
          FROM vendas_atribuidas va
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id

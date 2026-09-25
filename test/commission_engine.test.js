@@ -74,6 +74,90 @@ describe('commission engine', () => {
     expect(retroLift[1]).toContain('2026-05-01')
   })
 
+  it('grava o manual_gmv da live mesmo quando o chamador manda o fat_gerado', async () => {
+    const insertedRows = []
+    const queryMock = vi.fn(async (sql, values) => {
+      if (sql.includes('FROM lives l')) {
+        return {
+          rows: [{
+            id: 'live-haag',
+            cliente_id: 'cliente-1',
+            apresentador_id: 'user-1',
+            iniciado_em: '2026-08-12T11:44:00.000Z',
+            contrato_id: 'contrato-1',
+            comissao_pct: '15',
+            marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            comissao_franquia_pct: '15',
+            comissao_franqueadora_pct: '0',
+            ads_gmv: null,
+            manual_gmv: 1592,
+            fat_gerado: 2533.69,
+          }],
+        }
+      }
+
+      if (sql.includes('SELECT DISTINCT ap.id AS apresentadora_id')) {
+        return {
+          rows: [
+            { apresentadora_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', comissao_live_pct: null, percentual_rateio: null },
+          ],
+        }
+      }
+
+      if (sql.includes('FROM vendas_atribuidas')) return { rows: [{ gmv_mes: '0' }] }
+      if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [] }
+
+      if (sql.includes('INSERT INTO vendas_atribuidas')) {
+        insertedRows.push({ gmv: values[5], comissao_apresentadora: values[7] })
+        return { rows: [{ gmv: values[5], comissao_apresentadora: values[7] }] }
+      }
+
+      return { rows: [] }
+    })
+
+    await calcularComissoesDaLive({ query: queryMock }, {
+      tenantId: 'tenant-1',
+      liveId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      gmv: 2533.69,
+    })
+
+    expect(insertedRows).toHaveLength(1)
+    expect(insertedRows[0].gmv).toBe(1592)
+    expect(insertedRows[0].comissao_apresentadora).toBeCloseTo(15.92, 2)
+  })
+
+  it('não grava venda com GMV zero quando ads, manual e fat estão ausentes', async () => {
+    const insertedRows = []
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('FROM lives l')) {
+        return {
+          rows: [{
+            id: 'live-vazia',
+            marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            iniciado_em: '2026-08-12T11:44:00.000Z',
+            ads_gmv: null,
+            manual_gmv: null,
+            fat_gerado: null,
+          }],
+        }
+      }
+      if (sql.includes('INSERT INTO vendas_atribuidas')) {
+        insertedRows.push(sql)
+        return { rows: [] }
+      }
+      return { rows: [] }
+    })
+
+    const rows = await calcularComissoesDaLive({ query: queryMock }, {
+      tenantId: 'tenant-1',
+      liveId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      gmv: 2533.69,
+    })
+
+    expect(rows).toEqual([])
+    expect(insertedRows).toEqual([])
+  })
+
   it('splits weekend live GMV and presenter commission across two presenters', async () => {
     const insertedRows = []
     const queryMock = vi.fn(async (sql, values) => {

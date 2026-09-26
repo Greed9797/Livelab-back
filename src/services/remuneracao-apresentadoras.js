@@ -2,7 +2,8 @@ import { presenterFixedAtSql } from '../config/presenter_defaults.js'
 import { prorateFatorSql } from '../lib/financeiro-remuneracao.js'
 import { apresentadoraHorasSql, liveGmvSql, liveHoursSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
-import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr, officialLiveGmvSql, sameCalendarMonthSql, scaledStoredCommissionSql } from '../lib/sale-gmv-sql.js'
+import { activeLiveSql } from '../lib/live-merge-sql.js'
+import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr, officialLiveGmvSql, scaledStoredCommissionSql } from '../lib/sale-gmv-sql.js'
 
 export const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 export const DATA_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
@@ -81,6 +82,29 @@ function centavosDoBanco(valor) {
 
 const valorResposta = (centavos) => centavos / 100
 
+// Venda que entra no pagamento do mês. Vídeo continua pela data da venda.
+// Live só entra se for a live oficial do mês: encerrada, não absorvida por união,
+// não arquivada, iniciada no mês de São Paulo, e a apresentadora creditada nela.
+// A cópia em vendas_atribuidas de uma live que saiu dessa lista não é fonte.
+function saleInOfficialPresenterMonthSql({ sale, live, startSql, endSql }) {
+  return `(
+    (${sale}.origem IS DISTINCT FROM 'live'
+      AND ${sale}.data >= ${startSql}
+      AND ${sale}.data <= ${endSql})
+    OR (
+      ${sale}.origem = 'live'
+      AND ${sale}.data >= ${startSql}
+      AND ${sale}.data <= ${endSql}
+      AND ${live}.status = 'encerrada'
+      AND ${activeLiveSql(live)}
+      AND ${notArchivedSql(live)}
+      AND ${live}.iniciado_em >= (${startSql}::timestamp) AT TIME ZONE 'America/Sao_Paulo'
+      AND ${live}.iniciado_em < ((${endSql}::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo')
+      AND ${presenterCreditedSql(live, `${sale}.apresentadora_id`)}
+    )
+  )`
+}
+
 // Fonte privada do fechamento. Mantém exatamente o fixo histórico do DRE, mas não
 // reutiliza rankings públicos (eles excluem vendas de GMV zero via HAVING).
 export async function buscarFechamentoApresentadoras(db, { tenantId, mes, apresentadoraId }) {
@@ -106,8 +130,12 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes, aprese
              ROUND(COALESCE(SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}), 0), 2) AS valor
       FROM vendas_atribuidas va
       JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
+      LEFT JOIN lives l_oficial
+        ON va.origem = 'live'
+       AND l_oficial.id = va.origem_id
+       AND l_oficial.tenant_id = va.tenant_id
       WHERE va.tenant_id = $1::uuid
-        AND va.data >= $2::date AND va.data <= $3::date
+        AND ${saleInOfficialPresenterMonthSql({ sale: 'va', live: 'l_oficial', startSql: '$2::date', endSql: '$3::date' })}
         AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
         AND va.apresentadora_id IS NOT NULL
         ${apresentadoraId ? 'AND va.apresentadora_id = $4::uuid' : ''}
@@ -275,14 +303,27 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
           (va.origem = 'live' AND EXTRACT(DOW FROM va.data) IN (0, 6)) AS fim_de_semana
         FROM vendas_atribuidas va
         LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
+        LEFT JOIN lives l_oficial
+          ON va.origem = 'live'
+         AND l_oficial.id = va.origem_id
+         AND l_oficial.tenant_id = va.tenant_id
         LEFT JOIN LATERAL (
           SELECT COALESCE(SUM(${officialLineGmvExpr('va_mes')}), 0) + COALESCE(${officialLineGmvExpr('va')}, 0) AS gmv_mes
           FROM vendas_atribuidas va_mes
+          LEFT JOIN lives l_mes
+            ON va_mes.origem = 'live'
+           AND l_mes.id = va_mes.origem_id
+           AND l_mes.tenant_id = va_mes.tenant_id
           WHERE va_mes.tenant_id = va.tenant_id
             AND va_mes.apresentadora_id = va.apresentadora_id
-            AND ${sameCalendarMonthSql('va_mes.data', 'va.data')}
             AND va_mes.id <> va.id
             AND COALESCE(va_mes.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+            AND ${saleInOfficialPresenterMonthSql({
+              sale: 'va_mes',
+              live: 'l_mes',
+              startSql: `date_trunc('month', (va.data)::timestamp)::date`,
+              endSql: `(date_trunc('month', (va.data)::timestamp) + interval '1 month' - interval '1 day')::date`,
+            })}
         ) month_gmv ON true
         LEFT JOIN LATERAL (
           SELECT f.gmv_inicio, f.gmv_fim, f.comissao_pct
@@ -297,7 +338,7 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
         ) faixa ON true
         WHERE va.tenant_id = $1::uuid
           AND va.apresentadora_id = $2::uuid
-          AND va.data >= $3::date AND va.data <= $4::date
+          AND ${saleInOfficialPresenterMonthSql({ sale: 'va', live: 'l_oficial', startSql: '$3::date', endSql: '$4::date' })}
           AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
         ORDER BY va.data ASC, va.criado_em ASC, va.id ASC
       `, [tenantId, apresentadoraId, inicio, fim]),

@@ -33,6 +33,9 @@ describe('remuneração de apresentadoras', () => {
     expect(fechamento.apresentadoras).toEqual([expect.objectContaining({ fixo: 2700, comissao: 35.5, adicionais: 125.25, total: 2860.75 })])
     expect(fechamento.totais).toEqual({ fixo: 2700, comissao: 35.5, adicionais: 125.25, total: 2860.75 })
     expect(String(query.mock.calls[1][0])).toContain("COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'")
+    expect(String(query.mock.calls[1][0])).toContain("l_oficial.status = 'encerrada'")
+    expect(String(query.mock.calls[1][0])).toContain('l_oficial.arquivada_em IS NULL')
+    expect(String(query.mock.calls[1][0])).toContain("AT TIME ZONE 'America/Sao_Paulo'")
     expect(String(query.mock.calls[1][0])).not.toContain('HAVING')
   })
 
@@ -165,6 +168,8 @@ describe('remuneração de apresentadoras', () => {
       expect(sql).toContain('FROM vendas_atribuidas va')
       expect(sql).not.toMatch(/LIMIT\s+500/i)
       expect(sql).toContain("<> 'reprovada'")
+      expect(sql).toContain("l_oficial.status = 'encerrada'")
+      expect(sql).toContain('l_oficial.arquivada_em IS NULL')
       return { rows: [
         { id: 'v-live', data: '2026-09-06', origem: 'live', marca_nome: 'Marca A', gmv: '500', comissao_apresentadora: '20.25', pct_aplicado: '4.05', base_gmv_mes: '550', faixa_gmv_inicio: '0', faixa_gmv_fim: null, faixa_pct: '4.05', fim_de_semana: true },
         { id: 'v-video', data: '2026-09-07', origem: 'video', marca_nome: 'Marca A', gmv: '50', comissao_apresentadora: '2.75', pct_aplicado: '5.5', base_gmv_mes: '550', faixa_gmv_inicio: null, faixa_gmv_fim: null, faixa_pct: null, fim_de_semana: false },
@@ -200,6 +205,7 @@ describe('remuneração de apresentadoras', () => {
       CREATE TABLE apresentadoras (
         id uuid PRIMARY KEY,
         tenant_id uuid NOT NULL,
+        user_id uuid,
         nome text NOT NULL,
         ativo boolean NOT NULL DEFAULT true,
         arquivada boolean,
@@ -217,9 +223,20 @@ describe('remuneração de apresentadoras', () => {
       CREATE TABLE lives (
         id uuid PRIMARY KEY,
         tenant_id uuid NOT NULL,
+        apresentador_id uuid,
+        status text,
+        iniciado_em timestamptz,
+        arquivada_em timestamptz,
+        uniao_destino_id uuid,
+        uniao_desfeita_em timestamptz,
         ads_gmv numeric,
         manual_gmv numeric,
         fat_gerado numeric
+      );
+      CREATE TABLE live_apresentadoras_v2 (
+        live_id uuid,
+        tenant_id uuid,
+        apresentadora_id uuid
       );
       CREATE TABLE vendas_atribuidas (
         id uuid PRIMARY KEY,
@@ -252,24 +269,34 @@ describe('remuneração de apresentadoras', () => {
     const liveZero = '77777777-7777-4777-8777-777777777777'
     const liveSemGmv = '88888888-8888-4888-8888-888888888888'
     const liveNula = '99999999-9999-4999-8999-999999999999'
+    const liveArquivada = '12121212-1212-4212-8212-121212121212'
+    const liveDeOutra = '13131313-1313-4313-8313-131313131313'
+    const userAna = '14141414-1414-4414-8414-141414141414'
+    const userBia = '15151515-1515-4515-8515-151515151515'
+    const userCia = '16161616-1616-4616-8616-161616161616'
+    const userDia = '17171717-1717-4717-8717-171717171717'
     await db.exec(`
-      INSERT INTO apresentadoras (id, tenant_id, nome, ativo, arquivada, fixo) VALUES
-        ('${presenterId}', '${tenantId}', 'Ana', true, false, 2700),
-        ('${zeroId}', '${tenantId}', 'Bia', true, false, 2700),
-        ('${ausenteId}', '${tenantId}', 'Cia', true, false, 2700),
-        ('${nulaId}', '${tenantId}', 'Dia', true, false, 2700);
-      INSERT INTO lives (id, tenant_id, ads_gmv, manual_gmv, fat_gerado) VALUES
-        ('${liveOficial}', '${tenantId}', NULL, 1592, 2533.69),
-        ('${liveZero}', '${tenantId}', NULL, 500, NULL),
-        ('${liveSemGmv}', '${tenantId}', NULL, NULL, NULL),
-        ('${liveNula}', '${tenantId}', NULL, 800, NULL);
+      INSERT INTO apresentadoras (id, tenant_id, user_id, nome, ativo, arquivada, fixo) VALUES
+        ('${presenterId}', '${tenantId}', '${userAna}', 'Ana', true, false, 2700),
+        ('${zeroId}', '${tenantId}', '${userBia}', 'Bia', true, false, 2700),
+        ('${ausenteId}', '${tenantId}', '${userCia}', 'Cia', true, false, 2700),
+        ('${nulaId}', '${tenantId}', '${userDia}', 'Dia', true, false, 2700);
+      INSERT INTO lives (id, tenant_id, apresentador_id, status, iniciado_em, arquivada_em, ads_gmv, manual_gmv, fat_gerado) VALUES
+        ('${liveOficial}', '${tenantId}', '${userAna}', 'encerrada', '2026-09-10 15:00:00+00', NULL, NULL, 1592, 2533.69),
+        ('${liveZero}', '${tenantId}', '${userBia}', 'encerrada', '2026-09-11 15:00:00+00', NULL, NULL, 500, NULL),
+        ('${liveSemGmv}', '${tenantId}', '${userCia}', 'encerrada', '2026-09-12 15:00:00+00', NULL, NULL, NULL, NULL),
+        ('${liveNula}', '${tenantId}', '${userDia}', 'encerrada', '2026-09-13 15:00:00+00', NULL, NULL, 800, NULL),
+        ('${liveArquivada}', '${tenantId}', '${userAna}', 'encerrada', '2026-09-06 15:00:00+00', '2026-09-20 15:00:00+00', NULL, NULL, 3077.08),
+        ('${liveDeOutra}', '${tenantId}', '${userBia}', 'encerrada', '2026-09-07 15:00:00+00', NULL, NULL, NULL, 474.05);
       INSERT INTO vendas_atribuidas
         (id, tenant_id, origem, origem_id, apresentadora_id, gmv, comissao_apresentadora, status_aprovacao, data)
       VALUES
         ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '${tenantId}', 'live', '${liveOficial}', '${presenterId}', 2533.69, 25.34, 'aprovada', '2026-09-10'),
         ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '${tenantId}', 'live', '${liveZero}', '${zeroId}', 0, 0, 'aprovada', '2026-09-11'),
         ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '${tenantId}', 'live', '${liveSemGmv}', '${ausenteId}', 100, 4, 'aprovada', '2026-09-12'),
-        ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '${tenantId}', 'live', '${liveNula}', '${nulaId}', NULL, NULL, 'aprovada', '2026-09-13');
+        ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '${tenantId}', 'live', '${liveNula}', '${nulaId}', NULL, NULL, 'aprovada', '2026-09-13'),
+        ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', '${tenantId}', 'live', '${liveArquivada}', '${presenterId}', 3077.08, 30.77, 'aprovada', '2026-09-06'),
+        ('ffffffff-ffff-4fff-8fff-ffffffffffff', '${tenantId}', 'live', '${liveDeOutra}', '${presenterId}', 474.05, 4.74, 'aprovada', '2026-09-07');
     `)
     let tail = Promise.resolve()
     const writes = []
@@ -292,6 +319,8 @@ describe('remuneração de apresentadoras', () => {
 
     const gravado = await db.query(`SELECT apresentadora_id, gmv::text AS gmv, comissao_apresentadora::text AS comissao FROM vendas_atribuidas ORDER BY data`)
     expect(gravado.rows).toEqual([
+      { apresentadora_id: presenterId, gmv: '3077.08', comissao: '30.77' },
+      { apresentadora_id: presenterId, gmv: '474.05', comissao: '4.74' },
       { apresentadora_id: presenterId, gmv: '2533.69', comissao: '25.34' },
       { apresentadora_id: zeroId, gmv: '0', comissao: '0' },
       { apresentadora_id: ausenteId, gmv: '100', comissao: '4' },

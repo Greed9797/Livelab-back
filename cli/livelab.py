@@ -46,6 +46,7 @@ ROTAS = [
     ('POST', '/v1/lives/manual', 'Cadastrar live já encerrada (data, hora, GMV, pedidos)'),
     ('POST', '/v1/lives', 'Iniciar live ao vivo numa cabine'),
     ('PATCH', '/v1/lives/:id', 'Editar live'),
+    ('PATCH', '/v1/lives/:id/publicar', 'Publicar a live (rascunho → revisado → publicado)'),
     ('GET', '/v1/marcas', 'Listar marcas (inclui cliente_nome e configuracao_comercial / pendências)'),
     ('GET', '/v1/marcas/:id', 'Ver uma marca'),
     ('GET', '/v1/marcas/:id/condicoes', 'Histórico de condições comerciais por competência'),

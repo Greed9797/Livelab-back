@@ -2827,7 +2827,7 @@ export async function livesRoutes(app) {
   })
 
   // PATCH /v1/lives/:id/publicar — altera status_publicacao de live
-  app.patch('/v1/lives/:id/publicar', { preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'operacional'])] }, async (request, reply) => {
+  app.patch('/v1/lives/:id/publicar', { preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'operacional', 'automacao'])] }, async (request, reply) => {
     const parsed = publicarSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 

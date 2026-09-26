@@ -71,7 +71,9 @@ describe('allowlist da chave de API', () => {
     // sub-rota de escrita e id que não é uuid ficam de fora, mesmo com prefixo na lista
     expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666')).toBe(true)
     expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666/encerrar')).toBe(false)
-    expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666/publicar')).toBe(false)
+    expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666/publicar')).toBe(true)
+    expect(chaveAlcancaRota('POST', '/v1/lives/66666666-6666-4666-8666-666666666666/publicar')).toBe(false)
+    expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666/publicar/extra')).toBe(false)
     expect(chaveAlcancaRota('POST', '/v1/lives/66666666-6666-4666-8666-666666666666/arquivar')).toBe(false)
     expect(chaveAlcancaRota('DELETE', '/v1/lives/66666666-6666-4666-8666-666666666666')).toBe(false)
     expect(chaveAlcancaRota('POST', '/v1/lives/uniao')).toBe(false)
@@ -236,7 +238,7 @@ describe('autenticação por chave de API', () => {
     expect(res.statusCode).toBe(403)
   })
 
-  it('deixa a chave no PATCH da live e recusa encerrar, publicar, arquivar, apagar e unir', async () => {
+  it('deixa a chave no PATCH da live e em publicar, e recusa encerrar, arquivar, apagar e unir', async () => {
     const id = '66666666-6666-4666-8666-666666666666'
     const liberado = await buildApp(chaveViva, { metodo: 'PATCH', caminho: '/v1/lives/:id' })
     const ok = await liberado.app.inject({
@@ -248,9 +250,18 @@ describe('autenticação por chave de API', () => {
     expect(ok.statusCode).toBe(200)
     await liberado.app.close()
 
+    const publicar = await buildApp(chaveViva, { metodo: 'PATCH', caminho: '/v1/lives/:id/publicar' })
+    const pub = await publicar.app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${id}/publicar`,
+      headers: { 'x-api-key': CHAVE, 'content-type': 'application/json' },
+      payload: { status_publicacao: 'publicado' },
+    })
+    expect(pub.statusCode).toBe(200)
+    await publicar.app.close()
+
     const bloqueadas = [
       ['PATCH', `/v1/lives/${id}/encerrar`, '/v1/lives/:id/encerrar'],
-      ['PATCH', `/v1/lives/${id}/publicar`, '/v1/lives/:id/publicar'],
       ['POST', `/v1/lives/${id}/arquivar`, '/v1/lives/:id/arquivar'],
       ['DELETE', `/v1/lives/${id}`, '/v1/lives/:id'],
       ['POST', '/v1/lives/uniao', '/v1/lives/uniao'],

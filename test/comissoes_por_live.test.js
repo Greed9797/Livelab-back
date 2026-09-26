@@ -140,7 +140,10 @@ describe('GET /v1/comissoes/por-live', () => {
 
     const sql = queryMock.mock.calls[0][0]
     expect(sql).toContain("va.origem = 'live'")
-    expect(sql).toContain("to_char(va.data::date, 'YYYY-MM') = $2")
+    expect(sql).not.toContain('to_char(')
+    expect(sql).toContain('va.data >= $2::date')
+    expect(sql).toContain('va.data < $3::date')
+    expect(queryMock.mock.calls[0][1]).toEqual(['tenant-uuid-1', '2026-05-01', '2026-06-01'])
     expect(sql).toContain('ORDER BY va.data DESC')
   })
 
@@ -174,22 +177,60 @@ describe('GET /v1/comissoes/por-live', () => {
 })
 
 describe('POST /v1/comissoes/reprocessar', () => {
-  it('sem lives candidatas devolve os três contadores zerados', async () => {
+  it('sem mês não varre o histórico', async () => {
+    const queryMock = vi.fn()
+    const app = buildApp(queryMock)
+    await app.register(comissoesRoutes)
+    const response = await app.inject({ method: 'POST', url: '/v1/comissoes/reprocessar', payload: {} })
+    expect(response.statusCode).toBe(400)
+    expect(queryMock).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('agosto usa o recorte de São Paulo e não lê outros meses', async () => {
     calcularMock.mockClear()
     const queryMock = vi.fn().mockResolvedValue({ rows: [] })
     const app = buildApp(queryMock)
     await app.register(comissoesRoutes)
 
-    const response = await app.inject({ method: 'POST', url: '/v1/comissoes/reprocessar' })
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/comissoes/reprocessar',
+      payload: { mes: '2026-08' },
+    })
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({ orfas: 0, divergentes_gmv: 0, ignoradas: 0 })
     const sql = String(queryMock.mock.calls[0][0])
     expect(sql).toContain('NOT EXISTS')
     expect(sql).toContain('IS DISTINCT FROM')
-    expect(sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
+    expect(sql).toContain('WHEN l.ads_gmv IS NULL AND l.manual_gmv IS NULL AND l.fat_gerado IS NULL THEN NULL')
     expect(sql).toContain('> 0')
-    expect(sql).not.toContain('comissao_apresentadora')
+    expect(sql).toContain("AT TIME ZONE 'America/Sao_Paulo'")
+    expect(sql).toContain('l.iniciado_em >= ($2::timestamp)')
+    expect(sql).toContain('l.iniciado_em < ($3::timestamp)')
+    expect(sql).not.toContain('LIMIT 500')
+    expect(sql).toContain('va.gmv <> 0')
+    expect(sql).toContain('va.comissao_apresentadora <> 0')
+    expect(queryMock.mock.calls[0][1]).toEqual(['tenant-uuid-1', '2026-08-01', '2026-09-01'])
+    expect(calcularMock).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('sem lives candidatas devolve os três contadores zerados', async () => {
+    calcularMock.mockClear()
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+    const app = buildApp(queryMock)
+    await app.register(comissoesRoutes)
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/comissoes/reprocessar',
+      payload: { mes: '2026-08' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ orfas: 0, divergentes_gmv: 0, ignoradas: 0 })
     expect(calcularMock).not.toHaveBeenCalled()
     await app.close()
   })
@@ -212,13 +253,18 @@ describe('POST /v1/comissoes/reprocessar', () => {
     const app = buildApp(queryMock)
     await app.register(comissoesRoutes)
 
-    const response = await app.inject({ method: 'POST', url: '/v1/comissoes/reprocessar' })
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/comissoes/reprocessar',
+      payload: { mes: '2026-08' },
+    })
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({ orfas: 1, divergentes_gmv: 1, ignoradas: 2 })
     const ids = calcularMock.mock.calls.map((call) => call[1].liveId)
-    expect(ids).toEqual(['live-orfa', 'live-div'])
+    expect(ids).toEqual(['live-orfa'])
     expect(calcularMock.mock.calls[0][1].gmv).toBe(200)
+    expect(calcularMock.mock.calls[0][1].retroLift).toBe(false)
     await app.close()
   })
 })

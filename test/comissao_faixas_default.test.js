@@ -271,6 +271,11 @@ describe('POST /v1/comissoes/recalcular-mes', () => {
       })
       expect(response.statusCode).toBe(202)
       expect(response.json()).toMatchObject({ mes: '2026-06', apresentadoras: 1 })
+      const sql = String(queryMock.mock.calls[0][0])
+      expect(sql).toContain('data >= $2::date')
+      expect(sql).toContain('data < $3::date')
+      expect(sql).not.toContain('date_trunc')
+      expect(queryMock.mock.calls[0][1]).toEqual(['tenant-uuid-1', '2026-06-01', '2026-07-01'])
       await app.close()
     }
   })

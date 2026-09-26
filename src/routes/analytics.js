@@ -12,6 +12,7 @@ import {
 import { aplicarRetroLiftDoMes, calcularComissoesDaLive } from '../services/commission-engine.js'
 import { getOperationalRanking as getPerformanceRanking } from '../lib/operational-ranking.js'
 import { apresentadoraHorasPresencaSql, liveGmvSql } from '../lib/metric-sql.js'
+import { officialLineCommissionExpr, officialLineGmvExpr } from '../lib/sale-gmv-sql.js'
 import { activeLiveJoinSql, activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql, presenterFanoutSql, presenterGmvShareSql } from '../lib/live-count-sql.js'
 import { classificarDia, intervaloDeDias, somarDias } from '../lib/calendario-blumenau.js'
@@ -2576,8 +2577,8 @@ export async function analyticsRoutes(app) {
               va.data::date AS dia,
               va.marca_id,
               va.apresentadora_id,
-              COALESCE(SUM(va.comissao_apresentadora), 0) AS comissao,
-              COALESCE(SUM(va.gmv), 0) AS gmv_base
+              COALESCE(SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}), 0) AS comissao,
+              COALESCE(SUM(${officialLineGmvExpr('va')}), 0) AS gmv_base
             FROM vendas_atribuidas va
             WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
               AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'

@@ -1,8 +1,9 @@
 import { z } from 'zod'
 import { READ_COMISSOES, READ_APRESENTADORAS, WRITE_APRESENTADORAS, WRITE_FINANCEIRO } from '../config/role_groups.js'
-import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
-import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr } from '../lib/sale-gmv-sql.js'
+import { liveOrdersSql } from '../lib/metric-sql.js'
+import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr, officialLiveGmvSql, sameCalendarMonthSql } from '../lib/sale-gmv-sql.js'
 import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
+import { saoPauloDateInput } from '../lib/timezone.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { getOperationalRanking } from '../lib/operational-ranking.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
@@ -197,13 +198,25 @@ export async function comissoesRoutes(app) {
   const writeAccess = [app.authenticate, app.requirePapel(APROVADORES)]
 
   // POST /v1/comissoes/reprocessar — cria vendas_atribuidas das lives encerradas
-  // sem linha e recalcula as que já têm linha com GMV diferente de liveGmvSql.
-  // Comissão 0 com GMV igual não é motivo de recálculo. GMV nulo/zero sem linha
-  // não ganha placeholder.
-  app.post('/v1/comissoes/reprocessar', { preHandler: writeAccess }, async (request) => {
+  // SEM linha, só na competência pedida. O recorte é o das contagens de live:
+  // iniciado_em em America/Sao_Paulo, fim exclusivo. Sem mês, a rota varria
+  // todas as encerradas (ORDER BY + LIMIT 500) e estourava o statement_timeout
+  // de 30s. O mês inteiro entra: o LIMIT 500 era o recorte do histórico, não
+  // da competência. Linha já gravada com GMV diferente não é reescrita aqui —
+  // a leitura escala pelo GMV oficial. GMV nulo não vira 0. GMV/comissão gravados 0 ficam 0.
+  app.post('/v1/comissoes/reprocessar', { preHandler: writeAccess }, async (request, reply) => {
+    const parsed = z.object({
+      mes: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'mes deve estar no formato YYYY-MM'),
+    }).safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { mes } = parsed.data
+    if (mes > saoPauloDateInput(new Date()).slice(0, 7)) {
+      return reply.code(400).send({ error: 'Não é possível recalcular um mês futuro' })
+    }
     const { tenant_id } = request.user
+    const { start, end } = monthRangeFromQuery({ mes })
     return app.withTenant(tenant_id, async (db) => {
-      const gmvSql = liveGmvSql('l')
+      const gmvSql = officialLiveGmvSql('l')
       const pedidosSql = liveOrdersSql('l')
       const lives = await db.query(
         `SELECT l.id,
@@ -214,12 +227,15 @@ export async function comissoesRoutes(app) {
                     SELECT 1 FROM vendas_atribuidas va
                      WHERE va.tenant_id = l.tenant_id
                        AND va.origem = 'live' AND va.origem_id = l.id
-                  ) AND ${gmvSql} > 0 THEN 'orfa'
+                  ) AND (${gmvSql}) > 0 THEN 'orfa'
                   WHEN EXISTS (
                     SELECT 1 FROM vendas_atribuidas va
                      WHERE va.tenant_id = l.tenant_id
                        AND va.origem = 'live' AND va.origem_id = l.id
-                       AND va.gmv IS DISTINCT FROM ${gmvSql}
+                       AND va.gmv IS NOT NULL AND va.gmv <> 0
+                       AND va.comissao_apresentadora IS NOT NULL AND va.comissao_apresentadora <> 0
+                       AND (${gmvSql}) IS NOT NULL
+                       AND va.gmv IS DISTINCT FROM (${gmvSql})
                   ) THEN 'divergente'
                   ELSE 'ignorada'
                 END AS classe
@@ -227,16 +243,20 @@ export async function comissoesRoutes(app) {
           WHERE l.tenant_id = $1::uuid
             AND l.status = 'encerrada'
             AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL
-          ORDER BY l.encerrado_em DESC NULLS LAST
-          LIMIT 500`,
-        [tenant_id],
+            AND l.iniciado_em >= ($2::timestamp) AT TIME ZONE 'America/Sao_Paulo'
+            AND l.iniciado_em < ($3::timestamp) AT TIME ZONE 'America/Sao_Paulo'`,
+        [tenant_id, start, end],
       )
 
       let orfas = 0
       let divergentesGmv = 0
       let ignoradas = 0
       for (const live of lives.rows) {
-        if (live.classe !== 'orfa' && live.classe !== 'divergente') {
+        if (live.classe === 'divergente') {
+          divergentesGmv += 1
+          continue
+        }
+        if (live.classe !== 'orfa') {
           ignoradas += 1
           continue
         }
@@ -247,6 +267,7 @@ export async function comissoesRoutes(app) {
             tenantId: tenant_id,
             gmv: Number(live.gmv),
             pedidos: Number(live.pedidos),
+            retroLift: false,
           })
         } catch (err) {
           app.log.warn({ err, liveId: live.id }, '[reprocessar] falha em live')
@@ -257,8 +278,7 @@ export async function comissoesRoutes(app) {
           ignoradas += 1
           continue
         }
-        if (live.classe === 'orfa') orfas += 1
-        else divergentesGmv += 1
+        orfas += 1
       }
 
       invalidateTenant(tenant_id)
@@ -456,7 +476,7 @@ export async function comissoesRoutes(app) {
            FROM vendas_atribuidas va_mes
            WHERE va_mes.tenant_id = va.tenant_id
              AND va_mes.apresentadora_id = va.apresentadora_id
-             AND date_trunc('month', va_mes.data::timestamp) = date_trunc('month', va.data::timestamp)
+             AND ${sameCalendarMonthSql('va_mes.data', 'va.data')}
              AND va_mes.id <> va.id
              AND va_mes.status_aprovacao <> 'reprovada'
          ) month_gmv ON true
@@ -676,9 +696,10 @@ export async function comissoesRoutes(app) {
          LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
          WHERE va.tenant_id = $1::uuid
            AND va.origem = 'live'
-           AND to_char(va.data::date, 'YYYY-MM') = $2
+           AND va.data >= $2::date
+           AND va.data < $3::date
          ORDER BY va.data DESC, va.criado_em DESC`,
-        [tenant_id, mes],
+        [tenant_id, `${mes}-01`, monthRangeFromQuery({ mes }).end],
       )
 
       return result.rows.map((r) => ({
@@ -763,9 +784,9 @@ export async function comissoesRoutes(app) {
            FROM vendas_atribuidas va_mes
            WHERE va_mes.tenant_id = va.tenant_id
              AND va_mes.apresentadora_id = va.apresentadora_id
-             AND date_trunc('month', va_mes.data::timestamp) = date_trunc('month', va.data::timestamp)
-             AND va_mes.id <> va.id
-             AND va_mes.status_aprovacao <> 'reprovada'
+            AND ${sameCalendarMonthSql('va_mes.data', 'va.data')}
+            AND va_mes.id <> va.id
+            AND va_mes.status_aprovacao <> 'reprovada'
          ) month_gmv ON true
          LEFT JOIN LATERAL (
            SELECT f.gmv_inicio, f.gmv_fim, f.comissao_pct
@@ -1086,10 +1107,11 @@ export async function comissoesRoutes(app) {
     const { mes } = parsed.data
     const { tenant_id } = request.user
 
-    if (mes > new Date().toISOString().slice(0, 7)) {
+    if (mes > saoPauloDateInput(new Date()).slice(0, 7)) {
       return reply.code(400).send({ error: 'Não é possível recalcular um mês futuro' })
     }
 
+    const { start, end } = monthRangeFromQuery({ mes })
     const alvos = await app.withTenant(tenant_id, async (db) => {
       const result = await db.query(
         `SELECT DISTINCT apresentadora_id
@@ -1098,9 +1120,9 @@ export async function comissoesRoutes(app) {
             AND apresentadora_id IS NOT NULL
             AND origem IN ('live', 'video')
             AND COALESCE(status_aprovacao, 'pendente_aprovacao') = 'pendente_aprovacao'
-            AND data >= date_trunc('month', $2::date)::date
-            AND data < (date_trunc('month', $2::date) + interval '1 month')::date`,
-        [tenant_id, `${mes}-01`],
+            AND data >= $2::date
+            AND data < $3::date`,
+        [tenant_id, start, end],
       )
       return result.rows.map((r) => r.apresentadora_id)
     })

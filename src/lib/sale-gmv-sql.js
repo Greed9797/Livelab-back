@@ -9,6 +9,16 @@
  * continuam no gmv da própria venda.
  */
 
+/**
+ * Mês civil da data externa, aplicado como intervalo na coluna interna.
+ * date_trunc na coluna interna não usa o índice e lê os outros meses.
+ * A data da venda já é o calendário de São Paulo.
+ */
+export function sameCalendarMonthSql(innerDateExpr, outerDateExpr) {
+  const start = `date_trunc('month', (${outerDateExpr})::timestamp)::date`
+  return `${innerDateExpr} >= ${start} AND ${innerDateExpr} < (${start} + interval '1 month')::date`
+}
+
 export function officialLiveGmvSql(alias = 'l') {
   return `CASE
     WHEN ${alias}.ads_gmv IS NULL AND ${alias}.manual_gmv IS NULL AND ${alias}.fat_gerado IS NULL THEN NULL

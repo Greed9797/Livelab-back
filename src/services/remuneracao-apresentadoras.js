@@ -2,7 +2,7 @@ import { presenterFixedAtSql } from '../config/presenter_defaults.js'
 import { prorateFatorSql } from '../lib/financeiro-remuneracao.js'
 import { apresentadoraHorasSql, liveGmvSql, liveHoursSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
-import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr, officialLiveGmvSql, scaledStoredCommissionSql } from '../lib/sale-gmv-sql.js'
+import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr, officialLiveGmvSql, sameCalendarMonthSql, scaledStoredCommissionSql } from '../lib/sale-gmv-sql.js'
 
 export const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 export const DATA_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
@@ -280,7 +280,7 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
           FROM vendas_atribuidas va_mes
           WHERE va_mes.tenant_id = va.tenant_id
             AND va_mes.apresentadora_id = va.apresentadora_id
-            AND date_trunc('month', va_mes.data::timestamp) = date_trunc('month', va.data::timestamp)
+            AND ${sameCalendarMonthSql('va_mes.data', 'va.data')}
             AND va_mes.id <> va.id
             AND COALESCE(va_mes.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
         ) month_gmv ON true

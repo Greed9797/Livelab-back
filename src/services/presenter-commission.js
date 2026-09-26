@@ -1,4 +1,5 @@
-import { isWeekendInSaoPaulo } from '../lib/timezone.js'
+import { anoMesRange } from '../lib/ano-mes.js'
+import { isWeekendInSaoPaulo, saoPauloDateInput } from '../lib/timezone.js'
 import { defaultPresenterCommissionPct } from '../config/presenter_defaults.js'
 
 export const NIL_UUID = '00000000-0000-0000-0000-000000000000'
@@ -55,14 +56,19 @@ export async function resolvePresenterCommissionPct(db, {
   }
 
   // GMV acumulado do mês (exclui a própria venda em recálculo p/ não duplicar).
-  const baseGmvQ = data ? await db.query(
+  // Intervalo sargável no calendário de São Paulo: date_trunc na coluna
+  // obrigava a ler os outros meses da apresentadora para achar um só.
+  const dia = data ? saoPauloDateInput(data) : null
+  const mesDaVenda = dia && /^\d{4}-\d{2}/.test(dia) ? anoMesRange(dia.slice(0, 7)) : null
+  const baseGmvQ = mesDaVenda ? await db.query(
     `SELECT COALESCE(SUM(gmv), 0) AS gmv_mes
      FROM vendas_atribuidas
      WHERE tenant_id = $1::uuid
        AND apresentadora_id = $2::uuid
-       AND date_trunc('month', data::timestamp) = date_trunc('month', $3::date::timestamp)
-       AND NOT (origem = $4 AND origem_id = $5::uuid)`,
-    [tenantId, apresentadoraId, data, origem, origemId ?? NIL_UUID],
+       AND data >= $3::date
+       AND data < $4::date
+       AND NOT (origem = $5 AND origem_id = $6::uuid)`,
+    [tenantId, apresentadoraId, mesDaVenda.inicio, mesDaVenda.proximo, origem, origemId ?? NIL_UUID],
   ) : { rows: [{ gmv_mes: 0 }] }
   const baseGmv = toNumber(baseGmvQ.rows[0]?.gmv_mes) + toNumber(gmv)
 

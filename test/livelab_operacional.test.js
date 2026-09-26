@@ -989,6 +989,40 @@ describe('LIVELAB operational routes', () => {
     expect(JSON.parse(updateCall[1][2])).toEqual([{ id: 'venda-1', ap: 10000, franquia: 50000, franqueadora: 10000 }])
   })
 
+  it('recalcularVendasAtribuidasApresentadora não grava 0 quando o GMV está ausente ou zerado', async () => {
+    for (const gmv of [null, '0', '0.00']) {
+      const queryMock = vi.fn(async (sql) => {
+        if (sql.includes('SELECT id, origem, origem_id')) {
+          return { rows: [{
+            id: 'venda-zerada',
+            origem: 'live',
+            origem_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            apresentadora_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+            data: '2026-08-12',
+            gmv,
+            status_aprovacao: 'pendente_aprovacao',
+            resolved_marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            gmv_excluding_origin: '0',
+            comissao_franquia_pct: '10',
+            comissao_franqueadora_pct: '2',
+          }] }
+        }
+        if (sql.includes('FROM apresentadora_comissao_faixas')) return { rows: [] }
+        if (sql.includes('FROM tenant_comissao_faixas_default')) return { rows: [] }
+        if (sql.includes('UPDATE vendas_atribuidas')) throw new Error('GMV ausente ou zero não pode ser reescrito')
+        return { rows: [] }
+      })
+
+      const result = await recalcularVendasAtribuidasApresentadora({ query: queryMock }, {
+        tenantId: 'tenant-1',
+        apresentadoraId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        mesReferencia: '2026-08',
+      })
+      expect(result).toEqual({ updated: 0 })
+    }
+  })
+
   it('upsertVendaAtribuida does not overwrite approved sales', async () => {
     const approved = {
       id: 'venda-aprovada',

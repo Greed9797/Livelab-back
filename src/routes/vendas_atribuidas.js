@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { anoMesRange } from '../lib/ano-mes.js'
 import { READ_VENDAS_ATRIBUIDAS, WRITE_FINANCEIRO, WRITE_VENDAS_ATRIBUIDAS } from '../config/role_groups.js'
 import { NIL_UUID, resolvePresenterCommissionPct } from '../services/presenter-commission.js'
 import { sincronizarSnapshotComissaoApresentadora } from '../services/comissao-snapshot.js'
@@ -181,11 +182,21 @@ async function sincronizarSnapshotDaVenda(db, tenantId, venda) {
 export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, apresentadoraId, mesReferencia }) {
   if (!tenantId || !apresentadoraId) return { updated: 0 }
 
-  const mesInicioSql = mesReferencia
-    ? `date_trunc('month', $3::date)::date`
-    : `date_trunc('month', CURRENT_DATE)::date`
+  // Competência pedida: dias civis do mês (a coluna data já é o calendário de
+  // São Paulo). Sem mesReferencia, o mês corrente também é o de SP — CURRENT_DATE
+  // no Railway é UTC e, depois das 21h, varreria o mês seguinte.
   const params = [tenantId, apresentadoraId]
-  if (mesReferencia) params.push(`${mesReferencia}-01`)
+  let inicioSql
+  let fimSql
+  if (mesReferencia) {
+    const { inicio, proximo } = anoMesRange(mesReferencia)
+    params.push(inicio, proximo)
+    inicioSql = '$3::date'
+    fimSql = '$4::date'
+  } else {
+    inicioSql = `date_trunc('month', (CURRENT_TIMESTAMP AT TIME ZONE 'America/Sao_Paulo'))::date`
+    fimSql = `(${inicioSql} + interval '1 month')::date`
+  }
 
   // A janela inclui TODAS as vendas do mês, inclusive aprovadas, como o resolver
   // individual. Excluir a origem inteira preserva a semântica mesmo com duplicatas.
@@ -202,8 +213,8 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
                 SUM(gmv) OVER () - SUM(gmv) OVER (PARTITION BY origem, origem_id) AS gmv_excluding_origin
            FROM vendas_atribuidas
           WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid
-            AND data >= ${mesInicioSql}
-            AND data < (${mesInicioSql} + interval '1 month')
+            AND data >= ${inicioSql}
+            AND data < ${fimSql}
        ) va
        LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = $1::uuid
        LEFT JOIN LATERAL (
@@ -233,18 +244,22 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
   )).rows
   const updates = []
   for (const venda of pendentes) {
+    // GMV ausente ou gravado 0 não vira comissão 0. A leitura oficial também
+    // conserva a comissão gravada nesses dois casos.
+    const gmv = Number(venda.gmv)
+    if (!Number.isFinite(gmv) || gmv === 0) continue
     const pct = await resolvePresenterCommissionPct(db, {
       tenantId, apresentadoraId, origem: venda.origem, origemId: venda.origem_id,
       data: venda.data, gmv: venda.gmv,
       monthlyContext: { gmvExcludingOrigin: venda.gmv_excluding_origin, presenterBands, defaultBands },
     })
-    const gmv = Number(venda.gmv ?? 0)
     const update = { id: venda.id, ap: gmv * (pct / 100),
       franquia: gmv * (Number(venda.comissao_franquia_pct ?? 0) / 100),
       franqueadora: gmv * (Number(venda.comissao_franqueadora_pct ?? 0) / 100) }
     if (venda.marca_condicao_id) update.marca_condicao_id = venda.marca_condicao_id
     updates.push(update)
   }
+  if (!updates.length) return { updated: 0 }
   // Um único UPDATE substitui centenas de round trips. Revalida aprovação no
   // momento da escrita para não sobrescrever uma venda aprovada em paralelo.
   const changed = await db.query(

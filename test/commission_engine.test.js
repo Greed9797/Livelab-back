@@ -69,9 +69,9 @@ describe('commission engine', () => {
     // Retro-lift do cliff: após gravar a venda, o engine recalcula o MÊS da venda
     // da apresentadora (vendas anteriores podem subir de faixa com o GMV novo).
     const retroLift = queryMock.mock.calls.find(([sql]) =>
-      sql.includes("gmv_excluding_origin") && sql.includes("date_trunc('month', $3::date)"))
+      sql.includes('gmv_excluding_origin') && sql.includes('data >= $3::date') && sql.includes('data < $4::date'))
     expect(retroLift).toBeTruthy()
-    expect(retroLift[1]).toContain('2026-05-01')
+    expect(retroLift[1]).toEqual(expect.arrayContaining(['2026-05-01', '2026-06-01']))
   })
 
   it('grava o manual_gmv da live mesmo quando o chamador manda o fat_gerado', async () => {

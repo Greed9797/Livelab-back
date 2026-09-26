@@ -197,12 +197,13 @@ describe('autenticação por chave de API', () => {
     }
   })
 
-  it('recusa DELETE /v1/lives/:id para a chave', async () => {
-    const id = '66666666-6666-4666-8666-666666666666'
+  it('recusa DELETE /v1/lives/:id e não apaga a live', async () => {
+    const liveUuid = '66666666-6666-4666-8666-666666666666'
+    expect(chaveAlcancaRota('DELETE', `/v1/lives/${liveUuid}`)).toBe(false)
     const { app, query } = await buildApp(chaveViva, { metodo: 'DELETE', caminho: '/v1/lives/:id' })
     const res = await app.inject({
       method: 'DELETE',
-      url: `/v1/lives/${id}`,
+      url: `/v1/lives/${liveUuid}`,
       headers: { 'x-api-key': CHAVE },
     })
     expect(res.statusCode).toBe(403)

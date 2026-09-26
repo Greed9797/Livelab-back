@@ -121,24 +121,60 @@ describe('arquivar e excluir', () => {
     await app.close()
   })
 
-  it('recusa excluir live com GMV gravado e não apaga a linha', async () => {
+  it('gestor exclui live com venda atribuída e não mexe na comissão de outra live', async () => {
+    const otherLiveId = '99999999-9999-4999-8999-999999999999'
+    const submissionId = '33333333-3333-4333-8333-333333333333'
     const query = vi.fn(async (sql) => {
       if (/SELECT id, status/i.test(sql) && /FROM lives/i.test(sql)) {
-        return { rows: [{ id: liveId, status: 'encerrada', fat_gerado: '320.50', manual_gmv: null }] }
+        return {
+          rows: [{
+            id: liveId,
+            status: 'encerrada',
+            fat_gerado: '320.50',
+            manual_gmv: null,
+            comissao_apresentadora_valor: '40.00',
+            tem_venda_atribuida: true,
+          }],
+        }
+      }
+      if (/UPDATE apresentadora_live_submissoes/i.test(sql) && /live_oficial_excluida_id/i.test(sql)) {
+        return { rows: [{ id: submissionId, versao: 2 }] }
       }
       return { rows: [] }
     })
-    const { app } = buildApp({ queryMock: query })
+    const { app } = buildApp({ papel: 'franqueado', queryMock: query })
     await app.register(livesRoutes)
     const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
-    expect(res.statusCode).toBe(409)
-    expect(res.json().code).toBe('LIVE_COM_HISTORICO_FINANCEIRO')
-    expect(query.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(false)
-    expect(query.mock.calls.some(([sql]) => /DELETE FROM vendas_atribuidas/i.test(sql))).toBe(false)
+    expect(res.statusCode).toBe(204)
+
+    const calls = query.mock.calls.map(([sql, params]) => ({ sql, params: params ?? [] }))
+    const vendas = calls.find(({ sql }) => /DELETE FROM vendas_atribuidas/i.test(sql))
+    const revisoes = calls.find(({ sql }) => /DELETE FROM live_metric_revisions/i.test(sql))
+    const apagouLive = calls.find(({ sql }) => /DELETE FROM lives/i.test(sql))
+    expect(vendas?.sql).toMatch(/origem\s*=\s*'live'/i)
+    expect(vendas?.sql).toMatch(/origem_id\s*=\s*\$1/i)
+    expect(vendas?.sql).toMatch(/tenant_id\s*=\s*\$2/i)
+    expect(vendas?.params).toEqual([liveId, 'tenant-1'])
+    expect(revisoes?.sql).toMatch(/live_id\s*=\s*\$1/i)
+    expect(revisoes?.sql).toMatch(/tenant_id\s*=\s*\$2/i)
+    expect(revisoes?.params).toEqual([liveId, 'tenant-1'])
+    expect(apagouLive?.params).toEqual([liveId, 'tenant-1'])
+
+    const tombstone = calls.find(({ sql }) => /UPDATE apresentadora_live_submissoes/i.test(sql))
+    expect(tombstone?.sql).toMatch(/live_oficial_excluida_id/i)
+    expect(tombstone?.params).toEqual(['tenant-1', liveId])
+    const historico = calls.find(({ sql }) => /live_oficial_excluida/i.test(sql) && /INSERT INTO apresentadora_live_submissao_historico/i.test(sql))
+    expect(historico?.params?.[1]).toBe(submissionId)
+
+    const params = calls.flatMap(({ params: values }) => values)
+    expect(params).not.toContain(otherLiveId)
+    expect(calls.some(({ sql }) => /UPDATE\s+lives/i.test(sql))).toBe(false)
+    expect(calls.some(({ sql }) => /comissao_\w*\s*=\s*0|manual_gmv\s*=\s*0|fat_gerado\s*=\s*0|ads_gmv\s*=\s*0/i.test(sql))).toBe(false)
+    expect(res.body).not.toContain('LIVE_COM_HISTORICO_FINANCEIRO')
     await app.close()
   })
 
-  it('gestor master também não apaga live com GMV gravado', async () => {
+  it('gestor master também exclui live com GMV gravado', async () => {
     const query = vi.fn(async (sql) => {
       if (/SELECT id, status/i.test(sql) && /FROM lives/i.test(sql)) {
         return { rows: [{ id: liveId, status: 'encerrada', fat_gerado: '320.50', manual_gmv: null }] }
@@ -148,9 +184,10 @@ describe('arquivar e excluir', () => {
     const { app } = buildApp({ papel: 'franqueador_master', queryMock: query })
     await app.register(livesRoutes)
     const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
-    expect(res.statusCode).toBe(409)
-    expect(res.json().code).toBe('LIVE_COM_HISTORICO_FINANCEIRO')
-    expect(query.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(false)
+    expect(res.statusCode).toBe(204)
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(true)
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM vendas_atribuidas/i.test(sql))).toBe(true)
+    expect(res.body).not.toContain('LIVE_COM_HISTORICO_FINANCEIRO')
     await app.close()
   })
 

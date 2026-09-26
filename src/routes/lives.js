@@ -21,7 +21,6 @@ import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { presenterCreditedSql } from '../lib/live-count-sql.js'
 import { officialGmvFromPayload } from '../lib/official-gmv.js'
 import { liveSaleCommissionLateralSql } from '../lib/sale-gmv-sql.js'
-import { liveHasFinancialHistory } from '../lib/live-archive.js'
 import { pendingCollisionSql, pendingRecord, pendingRows } from '../lib/presenter-pending.js'
 
 function parseIntegerMetric(value) {
@@ -2319,19 +2318,7 @@ export async function livesRoutes(app) {
       await db.query('BEGIN')
       try {
         const liveQ = await db.query(
-          `SELECT id, status, cabine_id, iniciado_em, agenda_evento_id,
-                  fat_gerado, manual_gmv, ads_gmv, comissao_calculada, comissao_apresentadora_valor,
-                  EXISTS (
-                    SELECT 1 FROM vendas_atribuidas va
-                     WHERE va.tenant_id = lives.tenant_id
-                       AND va.origem = 'live'
-                       AND va.origem_id = lives.id
-                  ) AS tem_venda_atribuida,
-                  EXISTS (
-                    SELECT 1 FROM live_metric_revisions r
-                     WHERE r.tenant_id = lives.tenant_id
-                       AND r.live_id = lives.id
-                  ) AS tem_revisao_gmv
+          `SELECT id, status, cabine_id, iniciado_em, agenda_evento_id
              FROM lives
             WHERE id = $1
               AND tenant_id = $2::uuid
@@ -2342,13 +2329,6 @@ export async function livesRoutes(app) {
         if (!live) {
           await db.query('ROLLBACK')
           return reply.code(404).send({ error: 'Live não encontrada' })
-        }
-        if (liveHasFinancialHistory(live)) {
-          await db.query('ROLLBACK')
-          return reply.code(409).send({
-            error: 'Esta live tem GMV ou comissão registrados e não pode ser excluída. Arquive para tirá-la da lista sem apagar o histórico.',
-            code: 'LIVE_COM_HISTORICO_FINANCEIRO',
-          })
         }
 
         if (live.status === 'em_andamento' && live.cabine_id) {
@@ -2396,7 +2376,19 @@ export async function livesRoutes(app) {
           actorId: request.user.sub,
         })
 
-        await db.query(`DELETE FROM vendas_atribuidas WHERE origem = 'live' AND origem_id = $1 AND tenant_id = $2::uuid`, [request.params.id, tenant_id])
+        await db.query(
+          `DELETE FROM vendas_atribuidas
+            WHERE origem = 'live'
+              AND origem_id = $1
+              AND tenant_id = $2::uuid`,
+          [request.params.id, tenant_id],
+        )
+        await db.query(
+          `DELETE FROM live_metric_revisions
+            WHERE live_id = $1
+              AND tenant_id = $2::uuid`,
+          [request.params.id, tenant_id],
+        )
         await db.query('DELETE FROM live_apresentadoras_v2 WHERE live_id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
         await db.query('DELETE FROM live_apresentadores WHERE live_id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])
         await db.query('DELETE FROM live_snapshots WHERE live_id = $1 AND tenant_id = $2::uuid', [request.params.id, tenant_id])

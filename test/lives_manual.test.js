@@ -832,3 +832,142 @@ describe('origem_dados por chave de API (BOT)', () => {
     expect(res.statusCode).toBe(400)
   })
 })
+
+describe('PATCH /v1/lives/:id status por chave de API', () => {
+  const chave = { id: 'key-1', nome: 'grok bot' }
+  const liveId = '22222222-2222-4222-8222-222222222222'
+
+  function liveAberta(overrides = {}) {
+    return {
+      id: liveId,
+      status: 'em_andamento',
+      tipo: 'cliente',
+      origem_dados: 'manual',
+      cabine_id: null,
+      marca_id: null,
+      cliente_id: null,
+      fat_gerado: null,
+      manual_gmv: null,
+      ads_gmv: null,
+      final_orders_count: null,
+      manual_orders: null,
+      iniciado_em: '2026-09-24T17:00:00.000Z',
+      encerrado_em: null,
+      ...overrides,
+    }
+  }
+
+  function mockDaLive(row) {
+    return vi.fn().mockImplementation((sql) => {
+      if (/FROM lives/.test(sql)) return { rows: [row] }
+      return { rows: [] }
+    })
+  }
+
+  function updateLives(queryMock) {
+    return queryMock.mock.calls.find(([sql]) => /UPDATE lives SET/.test(sql))
+  }
+
+  it('grava encerrada e não reescreve origem nem GMV omitido', async () => {
+    const queryMock = mockDaLive(liveAberta())
+    const { app } = buildApp({ queryMock, papel: 'automacao', viaApiKey: chave })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}`,
+      payload: { status: 'encerrada', origem_dados: 'api' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({ ok: true })
+    const update = updateLives(queryMock)
+    expect(update[0]).toContain('status =')
+    expect(update[0]).toContain('encerrado_em =')
+    expect(update[0]).not.toMatch(/origem_dados\s*=/)
+    expect(update[0]).not.toMatch(/fat_gerado|manual_gmv|ads_gmv/)
+    expect(update[1]).toContain('encerrada')
+    expect(update[1]).not.toContain('api')
+    expect(update[1]).not.toContain('manual')
+    expect(update[1]).not.toContain('bot')
+    expect(update[1]).not.toContain(0)
+    await app.close()
+  })
+
+  it('grava em_andamento numa live encerrada, a mesma volta que o gestor tem', async () => {
+    const queryMock = mockDaLive(liveAberta({
+      status: 'encerrada',
+      encerrado_em: '2026-09-24T21:00:00.000Z',
+    }))
+    const { app } = buildApp({ queryMock, papel: 'automacao', viaApiKey: chave })
+    await registerLiveRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}`,
+      payload: { status: 'em_andamento' },
+    })
+
+    expect(res.statusCode).toBe(200)
+    const update = updateLives(queryMock)
+    expect(update[1][0]).toBe('em_andamento')
+    expect(update[0]).not.toContain('encerrado_em')
+    expect(update[0]).not.toMatch(/origem_dados\s*=/)
+    await app.close()
+  })
+
+  it('recusa status fora do enum com o mesmo 400 do gestor', async () => {
+    for (const viaApiKey of [chave, undefined]) {
+      const queryMock = vi.fn()
+      const { app } = buildApp({
+        queryMock,
+        papel: viaApiKey ? 'automacao' : 'franqueado',
+        viaApiKey,
+      })
+      await registerLiveRoutes(app)
+
+      const res = await app.inject({
+        method: 'PATCH',
+        url: `/v1/lives/${liveId}`,
+        payload: { status: 'faturada' },
+      })
+
+      expect(res.statusCode).toBe(400)
+      expect(queryMock).not.toHaveBeenCalled()
+      await app.close()
+    }
+  })
+
+  it('grava cancelada e o PATCH seguinte da live cancelada continua 409', async () => {
+    const queryMock = mockDaLive(liveAberta({
+      status: 'encerrada',
+      encerrado_em: '2026-09-24T21:00:00.000Z',
+    }))
+    const { app } = buildApp({ queryMock, papel: 'automacao', viaApiKey: chave })
+    await registerLiveRoutes(app)
+
+    const gravou = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}`,
+      payload: { status: 'cancelada' },
+    })
+    expect(gravou.statusCode).toBe(200)
+    const update = updateLives(queryMock)
+    expect(update[1]).toContain('cancelada')
+    expect(update[0]).not.toMatch(/origem_dados\s*=/)
+    await app.close()
+
+    const travada = mockDaLive(liveAberta({ status: 'cancelada', origem_dados: 'manual' }))
+    const { app: app2 } = buildApp({ queryMock: travada, papel: 'automacao', viaApiKey: chave })
+    await registerLiveRoutes(app2)
+    const bloqueio = await app2.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}`,
+      payload: { status: 'encerrada' },
+    })
+    expect(bloqueio.statusCode).toBe(409)
+    expect(bloqueio.json().error).toBe('Live cancelada não pode ser editada')
+    expect(updateLives(travada)).toBeUndefined()
+    await app2.close()
+  })
+})

@@ -316,7 +316,7 @@ export async function portalApresentadoraRoutes(app) {
     return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
       const profile = await resolveOwnProfile(db, request.user.tenant_id, request.user.sub, request.user.papel); if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
       return inSubmissionTransaction(db, async () => {
-        const row = await db.query(`UPDATE apresentadora_live_submissoes SET status='cancelada',atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status='devolvida' AND arquivamento_status IS NULL RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id])
+        const row = await db.query(`UPDATE apresentadora_live_submissoes SET status='cancelada',atualizado_em=NOW(),versao=versao+1 WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid AND status IN ('pendente','devolvida') AND arquivamento_status IS NULL AND live_oficial_id IS NULL RETURNING id,status,versao`, [idCheck.data, request.user.tenant_id, profile.id])
         if (!row.rows[0]) return reply.code(404).send({ error: 'Submissão não encontrada ou não pode ser cancelada.' })
         await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: row.rows[0].id, version: row.rows[0].versao, action: 'cancelada', actorId: request.user.sub })
         return { ok: true, ...row.rows[0] }

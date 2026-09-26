@@ -69,7 +69,12 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('GET', '/v1/comissoes/marcas')).toBe(true)
     expect(chaveAlcancaRota('PATCH', '/v1/marcas/66666666-6666-4666-8666-666666666666')).toBe(true)
     // sub-rota de escrita e id que não é uuid ficam de fora, mesmo com prefixo na lista
+    expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666')).toBe(true)
     expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666/encerrar')).toBe(false)
+    expect(chaveAlcancaRota('PATCH', '/v1/lives/66666666-6666-4666-8666-666666666666/publicar')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/lives/66666666-6666-4666-8666-666666666666/arquivar')).toBe(false)
+    expect(chaveAlcancaRota('DELETE', '/v1/lives/66666666-6666-4666-8666-666666666666')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/lives/uniao')).toBe(false)
     expect(chaveAlcancaRota('POST', '/v1/lives/manual')).toBe(true)
     expect(chaveAlcancaRota('POST', '/v1/lives/manual/66666666-6666-4666-8666-666666666666')).toBe(false)
     expect(chaveAlcancaRota('POST', '/v1/lives/manual/x')).toBe(false)
@@ -91,6 +96,8 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('GET', '/v1/configuracoes')).toBe(false)
     expect(chaveAlcancaRota('DELETE', '/v1/lives/abc')).toBe(false)
     expect(chaveAlcancaRota('DELETE', '/v1/lives/66666666-6666-4666-8666-666666666666')).toBe(false)
+    expect(chaveAlcancaRota('DELETE', '/v1/portal/apresentadora/submissoes/66666666-6666-4666-8666-666666666666')).toBe(false)
+    expect(ROTAS_API_KEY.every(([method]) => method !== 'DELETE')).toBe(true)
     expect(chaveAlcancaRota('POST', '/v1/api-keys')).toBe(false)
     // cadastro direto de apresentadora é 410 para todo mundo: não fica na lista
     expect(chaveAlcancaRota('POST', '/v1/apresentadoras')).toBe(false)
@@ -205,6 +212,20 @@ describe('autenticação por chave de API', () => {
     await app.close()
   })
 
+  it('recusa o cancelamento de envio da apresentadora para a chave', async () => {
+    const id = '66666666-6666-4666-8666-666666666666'
+    const { app, query } = await buildApp(chaveViva, { metodo: 'DELETE', caminho: '/v1/portal/apresentadora/submissoes/:id' })
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/portal/apresentadora/submissoes/${id}`,
+      headers: { 'x-api-key': CHAVE },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.json().error).toBe('Esta chave não tem acesso a esta rota')
+    expect(query.mock.calls.some(([sql]) => /apresentadora_live_submissoes/i.test(sql))).toBe(false)
+    await app.close()
+  })
+
   it('barra rota fora da allowlist mesmo com chave válida', async () => {
     const { app } = await buildApp(chaveViva, { metodo: 'GET', caminho: '/v1/financeiro/resumo' })
     const res = await app.inject({
@@ -213,6 +234,38 @@ describe('autenticação por chave de API', () => {
       headers: { 'x-api-key': CHAVE },
     })
     expect(res.statusCode).toBe(403)
+  })
+
+  it('deixa a chave no PATCH da live e recusa encerrar, publicar, arquivar, apagar e unir', async () => {
+    const id = '66666666-6666-4666-8666-666666666666'
+    const liberado = await buildApp(chaveViva, { metodo: 'PATCH', caminho: '/v1/lives/:id' })
+    const ok = await liberado.app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${id}`,
+      headers: { 'x-api-key': CHAVE, 'content-type': 'application/json' },
+      payload: { status: 'encerrada' },
+    })
+    expect(ok.statusCode).toBe(200)
+    await liberado.app.close()
+
+    const bloqueadas = [
+      ['PATCH', `/v1/lives/${id}/encerrar`, '/v1/lives/:id/encerrar'],
+      ['PATCH', `/v1/lives/${id}/publicar`, '/v1/lives/:id/publicar'],
+      ['POST', `/v1/lives/${id}/arquivar`, '/v1/lives/:id/arquivar'],
+      ['DELETE', `/v1/lives/${id}`, '/v1/lives/:id'],
+      ['POST', '/v1/lives/uniao', '/v1/lives/uniao'],
+    ]
+    for (const [method, url, caminho] of bloqueadas) {
+      const { app } = await buildApp(chaveViva, { metodo: method, caminho })
+      const res = await app.inject({
+        method,
+        url,
+        headers: { 'x-api-key': CHAVE },
+      })
+      expect(res.statusCode).toBe(403)
+      expect(res.json().error).toBe('Esta chave não tem acesso a esta rota')
+      await app.close()
+    }
   })
 
   it('sem chave nenhuma segue o caminho do JWT e recusa quem não tem token', async () => {

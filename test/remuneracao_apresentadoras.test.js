@@ -1,3 +1,4 @@
+import { PGlite } from '@electric-sql/pglite'
 import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -58,6 +59,25 @@ describe('remuneração de apresentadoras', () => {
     expect(fechamento.apresentadoras[0]).toMatchObject({ fixo: 2612.9, comissao: 0.1, adicionais: 0.01, total: 2613.01 })
     expect(fechamento.totais.total).toBe(2613.01)
     expect(String(query.mock.calls[0][0])).toContain('ROUND(COALESCE')
+    expect(String(query.mock.calls[1][0])).toContain('ROUND(COALESCE(SUM')
+  })
+
+  it('arredonda comissão proporcional com escala maior que centavos em vez de estourar 500', async () => {
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '2700.00' }] })
+      .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '15.921947831029052489' }] })
+      .mockResolvedValueOnce({ rows: [] })
+    const fechamento = await buscarFechamentoApresentadoras({ query }, { tenantId, mes: '2026-09' })
+    expect(fechamento.apresentadoras[0]).toMatchObject({ fixo: 2700, comissao: 15.92, total: 2715.92 })
+  })
+
+  it('rejeita texto que não é valor monetário', async () => {
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '2700.00' }] })
+      .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: 'nao-e-dinheiro' }] })
+      .mockResolvedValueOnce({ rows: [] })
+    await expect(buscarFechamentoApresentadoras({ query }, { tenantId, mes: '2026-09' }))
+      .rejects.toThrow('Valor monetário inválido retornado pelo banco')
   })
 
   it('aceita apenas sábado/domingo real no mesmo mês e fixa diária em R$100', async () => {
@@ -172,5 +192,111 @@ describe('remuneração de apresentadoras', () => {
     expect(mesInvalido.statusCode).toBe(400)
     expect(query).not.toHaveBeenCalled()
     await app.close()
+  })
+
+  it('fecha o mês com GMV oficial divergente sem reescrever a venda', async () => {
+    const db = new PGlite()
+    await db.exec(`
+      CREATE TABLE apresentadoras (
+        id uuid PRIMARY KEY,
+        tenant_id uuid NOT NULL,
+        nome text NOT NULL,
+        ativo boolean NOT NULL DEFAULT true,
+        arquivada boolean,
+        fixo numeric,
+        data_inicio date,
+        data_fim date
+      );
+      CREATE TABLE apresentadora_fixo_historico (
+        id uuid PRIMARY KEY,
+        tenant_id uuid NOT NULL,
+        apresentadora_id uuid NOT NULL,
+        valor numeric,
+        vigencia_inicio date NOT NULL
+      );
+      CREATE TABLE lives (
+        id uuid PRIMARY KEY,
+        tenant_id uuid NOT NULL,
+        ads_gmv numeric,
+        manual_gmv numeric,
+        fat_gerado numeric
+      );
+      CREATE TABLE vendas_atribuidas (
+        id uuid PRIMARY KEY,
+        tenant_id uuid NOT NULL,
+        origem text NOT NULL,
+        origem_id uuid,
+        apresentadora_id uuid,
+        gmv numeric,
+        comissao_apresentadora numeric,
+        status_aprovacao text,
+        data date
+      );
+      CREATE TABLE apresentadora_remuneracao_adicionais (
+        id uuid PRIMARY KEY,
+        tenant_id uuid NOT NULL,
+        apresentadora_id uuid NOT NULL,
+        competencia date NOT NULL,
+        tipo text NOT NULL,
+        descricao text NOT NULL,
+        data_referencia date,
+        valor numeric NOT NULL,
+        cancelado_em timestamptz,
+        criado_em timestamptz NOT NULL DEFAULT NOW()
+      );
+    `)
+    const zeroId = '33333333-3333-4333-8333-333333333333'
+    const ausenteId = '44444444-4444-4444-8444-444444444444'
+    const nulaId = '55555555-5555-4555-8555-555555555555'
+    const liveOficial = '66666666-6666-4666-8666-666666666666'
+    const liveZero = '77777777-7777-4777-8777-777777777777'
+    const liveSemGmv = '88888888-8888-4888-8888-888888888888'
+    const liveNula = '99999999-9999-4999-8999-999999999999'
+    await db.exec(`
+      INSERT INTO apresentadoras (id, tenant_id, nome, ativo, arquivada, fixo) VALUES
+        ('${presenterId}', '${tenantId}', 'Ana', true, false, 2700),
+        ('${zeroId}', '${tenantId}', 'Bia', true, false, 2700),
+        ('${ausenteId}', '${tenantId}', 'Cia', true, false, 2700),
+        ('${nulaId}', '${tenantId}', 'Dia', true, false, 2700);
+      INSERT INTO lives (id, tenant_id, ads_gmv, manual_gmv, fat_gerado) VALUES
+        ('${liveOficial}', '${tenantId}', NULL, 1592, 2533.69),
+        ('${liveZero}', '${tenantId}', NULL, 500, NULL),
+        ('${liveSemGmv}', '${tenantId}', NULL, NULL, NULL),
+        ('${liveNula}', '${tenantId}', NULL, 800, NULL);
+      INSERT INTO vendas_atribuidas
+        (id, tenant_id, origem, origem_id, apresentadora_id, gmv, comissao_apresentadora, status_aprovacao, data)
+      VALUES
+        ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '${tenantId}', 'live', '${liveOficial}', '${presenterId}', 2533.69, 25.34, 'aprovada', '2026-09-10'),
+        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '${tenantId}', 'live', '${liveZero}', '${zeroId}', 0, 0, 'aprovada', '2026-09-11'),
+        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '${tenantId}', 'live', '${liveSemGmv}', '${ausenteId}', 100, 4, 'aprovada', '2026-09-12'),
+        ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '${tenantId}', 'live', '${liveNula}', '${nulaId}', NULL, NULL, 'aprovada', '2026-09-13');
+    `)
+    let tail = Promise.resolve()
+    const writes = []
+    const client = {
+      query(sql, params) {
+        if (/^\s*(insert|update|delete)\b/i.test(sql)) writes.push(sql)
+        const run = tail.then(() => db.query(sql, params))
+        tail = run.then(() => {}, () => {})
+        return run
+      },
+    }
+
+    const fechamento = await buscarFechamentoApresentadoras(client, { tenantId, mes: '2026-09' })
+    const porNome = Object.fromEntries(fechamento.apresentadoras.map((item) => [item.nome, item]))
+
+    expect(porNome.Ana).toMatchObject({ comissao: 15.92, fixo: 2700 })
+    expect(porNome.Bia.comissao).toBe(0)
+    expect(porNome.Cia.comissao).toBe(4)
+    expect(writes).toEqual([])
+
+    const gravado = await db.query(`SELECT apresentadora_id, gmv::text AS gmv, comissao_apresentadora::text AS comissao FROM vendas_atribuidas ORDER BY data`)
+    expect(gravado.rows).toEqual([
+      { apresentadora_id: presenterId, gmv: '2533.69', comissao: '25.34' },
+      { apresentadora_id: zeroId, gmv: '0', comissao: '0' },
+      { apresentadora_id: ausenteId, gmv: '100', comissao: '4' },
+      { apresentadora_id: nulaId, gmv: null, comissao: null },
+    ])
+    await db.close()
   })
 })

@@ -82,6 +82,45 @@ describe('arquivar e excluir', () => {
     await app.close()
   })
 
+  it('gestor master exclui live sem histórico financeiro', async () => {
+    const query = vi.fn(async (sql) => {
+      if (/SELECT id, status/i.test(sql) && /FROM lives/i.test(sql)) {
+        return {
+          rows: [{
+            id: liveId,
+            status: 'encerrada',
+            fat_gerado: 0,
+            comissao_calculada: '0.00',
+            manual_gmv: null,
+            ads_gmv: null,
+            comissao_apresentadora_valor: null,
+            tem_venda_atribuida: false,
+            tem_revisao_gmv: false,
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ papel: 'franqueador_master', queryMock: query })
+    await app.register(livesRoutes)
+    const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
+    expect(res.statusCode).toBe(204)
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(true)
+    const deleted = query.mock.calls.map(([sql]) => sql).filter((sql) => /DELETE FROM/i.test(sql)).join('\n')
+    expect(deleted).not.toMatch(/fat_gerado\s*=|manual_gmv\s*=|comissao_calculada\s*=/)
+    await app.close()
+  })
+
+  it('apresentador não exclui live', async () => {
+    const query = vi.fn(async () => ({ rows: [] }))
+    const { app } = buildApp({ papel: 'apresentador', queryMock: query })
+    await app.register(livesRoutes)
+    const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
+    expect(res.statusCode).toBe(403)
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(false)
+    await app.close()
+  })
+
   it('gestor exclui live com venda atribuída e não mexe na comissão de outra live', async () => {
     const otherLiveId = '99999999-9999-4999-8999-999999999999'
     const submissionId = '33333333-3333-4333-8333-333333333333'
@@ -135,13 +174,20 @@ describe('arquivar e excluir', () => {
     await app.close()
   })
 
-  it('apresentador não exclui a live', async () => {
-    const query = vi.fn(async () => ({ rows: [] }))
-    const { app } = buildApp({ papel: 'apresentador', queryMock: query })
+  it('gestor master também exclui live com GMV gravado', async () => {
+    const query = vi.fn(async (sql) => {
+      if (/SELECT id, status/i.test(sql) && /FROM lives/i.test(sql)) {
+        return { rows: [{ id: liveId, status: 'encerrada', fat_gerado: '320.50', manual_gmv: null }] }
+      }
+      return { rows: [] }
+    })
+    const { app } = buildApp({ papel: 'franqueador_master', queryMock: query })
     await app.register(livesRoutes)
     const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
-    expect(res.statusCode).toBe(403)
-    expect(query.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(false)
+    expect(res.statusCode).toBe(204)
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(true)
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM vendas_atribuidas/i.test(sql))).toBe(true)
+    expect(res.body).not.toContain('LIVE_COM_HISTORICO_FINANCEIRO')
     await app.close()
   })
 

@@ -30,6 +30,9 @@ export const ROTAS_API_KEY = [
   ['GET', '/v1/lives/:id'],
   ['POST', '/v1/lives'],
   ['POST', '/v1/lives/manual'],
+  // Status operacional (em_andamento | encerrada | cancelada) muda neste PATCH,
+  // o mesmo campo do gestor. Casa só /v1/lives/<uuid> — encerrar, publicar e
+  // arquivar não entram.
   ['PATCH', '/v1/lives/'],
   ['GET', '/v1/marcas'],
   ['GET', '/v1/marcas/:id'],

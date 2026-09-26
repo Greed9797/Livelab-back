@@ -27,7 +27,7 @@ await db.exec(`
   );
   CREATE TABLE lives(
     id uuid PRIMARY KEY, tenant_id uuid, marca_id uuid, iniciado_em timestamptz,
-    fat_gerado numeric(15,2), comissao_calculada numeric(15,2), atualizado_em timestamptz,
+    fat_gerado numeric(15,2), comissao_calculada numeric(15,2),
     faturado_em timestamptz, boleto_id uuid, uniao_destino_id uuid, uniao_desfeita_em timestamptz
   );
   CREATE TABLE vendas_atribuidas(

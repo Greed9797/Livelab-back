@@ -46,9 +46,36 @@ export function dinheiroEmCentavos(value) {
   return Number.isSafeInteger(cents) ? cents : null
 }
 
+// A comissão proporcional (GMV oficial / GMV gravado) chega com escala maior que
+// centavos. Arredondar na leitura evita o 500; não grava 0 no lugar de NULL.
+function centavosDeEscalaMaior(texto) {
+  const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(String(texto).trim().replace(',', '.'))
+  if (!match) return null
+  const sinal = match[1] === '-' ? -1 : 1
+  const inteiro = match[2]
+  const frac = match[3] ?? ''
+  if (inteiro.length > 13) return null
+  let cents = Number(inteiro) * 100 + Number((frac + '00').slice(0, 2))
+  if (frac.length > 2 && frac[2] >= '5') cents += 1
+  cents *= sinal
+  if (!Number.isSafeInteger(cents) || Math.abs(cents) > 999999999999999) return null
+  return cents
+}
+
 function centavosDoBanco(valor) {
-  const cents = dinheiroEmCentavos(typeof valor === 'string' ? valor : Number(valor ?? 0))
-  if (cents == null) throw new Error('Valor monetário inválido retornado pelo banco')
+  if (typeof valor === 'string') {
+    const cents = dinheiroEmCentavos(valor) ?? centavosDeEscalaMaior(valor)
+    if (cents == null) throw new Error('Valor monetário inválido retornado pelo banco')
+    return cents
+  }
+  const numero = Number(valor ?? 0)
+  if (!Number.isFinite(numero)) throw new Error('Valor monetário inválido retornado pelo banco')
+  const exato = dinheiroEmCentavos(numero)
+  if (exato != null) return exato
+  const cents = Math.round(numero * 100)
+  if (!Number.isSafeInteger(cents) || Math.abs(cents) > 999999999999999) {
+    throw new Error('Valor monetário inválido retornado pelo banco')
+  }
   return cents
 }
 
@@ -76,7 +103,7 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes, aprese
     `, apresentadoraId ? [tenantId, fim, apresentadoraId] : [tenantId, fim]),
     db.query(`
       SELECT va.apresentadora_id, a.nome,
-             COALESCE(SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}), 0) AS valor
+             ROUND(COALESCE(SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}), 0), 2) AS valor
       FROM vendas_atribuidas va
       JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
       WHERE va.tenant_id = $1::uuid

@@ -90,6 +90,7 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('POST', '/v1/usuarios')).toBe(false)
     expect(chaveAlcancaRota('GET', '/v1/configuracoes')).toBe(false)
     expect(chaveAlcancaRota('DELETE', '/v1/lives/abc')).toBe(false)
+    expect(chaveAlcancaRota('DELETE', '/v1/lives/66666666-6666-4666-8666-666666666666')).toBe(false)
     expect(chaveAlcancaRota('POST', '/v1/api-keys')).toBe(false)
     // cadastro direto de apresentadora é 410 para todo mundo: não fica na lista
     expect(chaveAlcancaRota('POST', '/v1/apresentadoras')).toBe(false)
@@ -187,6 +188,21 @@ describe('autenticação por chave de API', () => {
       expect(res.statusCode).toBe(401)
       expect(res.json().error).toBe('Chave de API inválida')
     }
+  })
+
+  it('recusa DELETE /v1/lives/:id e não apaga a live', async () => {
+    const liveUuid = '66666666-6666-4666-8666-666666666666'
+    expect(chaveAlcancaRota('DELETE', `/v1/lives/${liveUuid}`)).toBe(false)
+    const { app, query } = await buildApp(chaveViva, { metodo: 'DELETE', caminho: '/v1/lives/:id' })
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/v1/lives/${liveUuid}`,
+      headers: { 'x-api-key': CHAVE },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.json().error).toBe('Esta chave não tem acesso a esta rota')
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(false)
+    await app.close()
   })
 
   it('barra rota fora da allowlist mesmo com chave válida', async () => {

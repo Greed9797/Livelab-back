@@ -82,6 +82,16 @@ describe('arquivar e excluir', () => {
     await app.close()
   })
 
+  it('apresentador não exclui live oficial', async () => {
+    const query = vi.fn(async () => ({ rows: [] }))
+    const { app } = buildApp({ papel: 'apresentador', queryMock: query })
+    await app.register(livesRoutes)
+    const res = await app.inject({ method: 'DELETE', url: `/v1/lives/${liveId}` })
+    expect(res.statusCode).toBe(403)
+    expect(query.mock.calls.some(([sql]) => /DELETE FROM lives/i.test(sql))).toBe(false)
+    await app.close()
+  })
+
   it('recusa excluir live com GMV gravado e não apaga a linha', async () => {
     const query = vi.fn(async (sql) => {
       if (/SELECT id, status/i.test(sql) && /FROM lives/i.test(sql)) {

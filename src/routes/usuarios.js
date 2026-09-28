@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { SECURITY } from '../config/security.js'
 import { DEFAULT_APRESENTADORA_FIXO, MAX_APRESENTADORA_FIXO, ensureDefaultPresenterCommissionTiers, presenterFixedSql } from '../config/presenter_defaults.js'
 import { notify } from '../services/mailer.js'
+import { origemDados } from '../plugins/auth.js'
 import { isPresenterRole, linkedPresenterForUser } from '../services/presenter-identity.js'
 
 const PAPEL_LABELS = {
@@ -128,6 +129,9 @@ async function ensurePresenterProfileForUser(db, {
 
 export async function usuariosRoutes(app) {
   const rbac = [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])]
+  // A chave (papel automacao) entra só neste POST. O handler recusa qualquer
+  // papel que não seja apresentadora, então o resto do cadastro continua fechado.
+  const conviteAccess = [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'automacao'])]
 
   // GET /v1/usuarios?papel=...&ativo=...
   app.get('/v1/usuarios', { preHandler: rbac }, async (request, reply) => {
@@ -182,12 +186,15 @@ export async function usuariosRoutes(app) {
   })
 
   // POST /v1/usuarios/convidar
-  app.post('/v1/usuarios/convidar', { preHandler: rbac }, async (request, reply) => {
+  app.post('/v1/usuarios/convidar', { preHandler: conviteAccess }, async (request, reply) => {
     const parsed = convidarSchema.safeParse(request.body)
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0].message })
     }
     const { nome, email, papel, cliente_id, apresentadora_id, fixo, comissao_pct, foto_url, senha_temporaria } = parsed.data
+    if (request.viaApiKey && !isPresenterRole(papel)) {
+      return reply.code(403).send({ error: 'Esta chave só cadastra apresentadora.' })
+    }
     const tenantId = request.user.tenant_id
 
     // Criação direta: admin pode definir a senha temporária; se omitida (ex:
@@ -268,6 +275,8 @@ export async function usuariosRoutes(app) {
         let apresentadoraId = null
         if (isPresenterRole(papel)) {
           if (apresentadora_id) {
+            // Perfil que já existe: não reescreve origem_dados. Quem uma pessoa
+            // criou continua 'manual' mesmo quando a chave vincula o login.
             const linked = await db.query(
               `UPDATE apresentadoras
                   SET user_id = $1,
@@ -292,10 +301,10 @@ export async function usuariosRoutes(app) {
             await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)
           } else {
             const createdProfile = await db.query(
-              `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, foto_url, ativo)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+              `INSERT INTO apresentadoras (tenant_id, user_id, nome, email, fixo, comissao_pct, foto_url, ativo, origem_dados)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8)
                RETURNING id`,
-              [tenantId, newUser.id, nome, email, fixo ?? DEFAULT_APRESENTADORA_FIXO, comissao_pct ?? 0, foto_url ?? null]
+              [tenantId, newUser.id, nome, email, fixo ?? DEFAULT_APRESENTADORA_FIXO, comissao_pct ?? 0, foto_url ?? null, origemDados(request)]
             )
             apresentadoraId = createdProfile.rows[0]?.id ?? null
             await ensureDefaultPresenterCommissionTiers(db, tenantId, apresentadoraId)

@@ -94,7 +94,13 @@ describe('allowlist da chave de API', () => {
 
     // O que não pode: o dinheiro, as pessoas e as chaves do gateway.
     expect(chaveAlcancaRota('GET', '/v1/financeiro/dashboard')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/usuarios/convidar')).toBe(true)
+    expect(chaveAlcancaRota('POST', '/v1/usuarios/convidar/extra')).toBe(false)
     expect(chaveAlcancaRota('POST', '/v1/usuarios')).toBe(false)
+    expect(chaveAlcancaRota('GET', '/v1/usuarios')).toBe(false)
+    expect(chaveAlcancaRota('PATCH', '/v1/usuarios/66666666-6666-4666-8666-666666666666')).toBe(false)
+    expect(chaveAlcancaRota('DELETE', '/v1/usuarios/66666666-6666-4666-8666-666666666666')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/usuarios/66666666-6666-4666-8666-666666666666/reset-senha')).toBe(false)
     expect(chaveAlcancaRota('GET', '/v1/configuracoes')).toBe(false)
     expect(chaveAlcancaRota('DELETE', '/v1/lives/abc')).toBe(false)
     expect(chaveAlcancaRota('DELETE', '/v1/lives/66666666-6666-4666-8666-666666666666')).toBe(false)

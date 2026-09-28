@@ -56,6 +56,7 @@ ROTAS = [
     ('POST', '/v1/marcas/:id/condicoes', 'Confirmar condição comercial (Idempotency-Key + expected_revision)'),
     ('GET', '/v1/apresentadoras', 'Listar apresentadoras'),
     ('PATCH', '/v1/apresentadoras/:id', 'Editar apresentadora'),
+    ('POST', '/v1/usuarios/convidar', 'Cadastrar usuária apresentadora (nome, email, papel apresentadora ou apresentador)'),
     ('GET', '/v1/comissoes/resumo', 'Resumo de comissão calculada'),
     ('GET', '/v1/comissoes/apresentadoras', 'Comissão por apresentadora. Filtros: mes (AAAA-MM), apresentadora_id'),
     ('GET', '/v1/comissoes/marcas', 'Comissão por marca'),

@@ -68,7 +68,8 @@ describe('usuarios presenter provisioning', () => {
       values[1] === userId &&
       values[2] === 'Jhemily' &&
       values[4] === 2700 &&
-      values[5] === 1.5
+      values[5] === 1.5 &&
+      values[7] === 'manual'
     )).toBe(true)
 
     await app.close()
@@ -95,6 +96,8 @@ describe('usuarios presenter provisioning', () => {
 
     expect(response.statusCode).toBe(201)
     expect(response.json()).toMatchObject({ apresentadora_id: apresentadoraId })
+    const linkSql = query.mock.calls.find(([sql]) => sql.includes('UPDATE apresentadoras'))?.[0]
+    expect(linkSql).not.toContain('origem_dados')
     expect(query.mock.calls.some(([sql, values]) =>
       sql.includes('UPDATE apresentadoras') &&
       values[0] === userId &&

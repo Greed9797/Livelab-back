@@ -17,6 +17,8 @@ const ADMIN = ['franqueador_master', 'franqueado', 'gerente']
 // `users`: vive na coluna `papel` de `api_keys` e chega ao request pelo plugin
 // de auth. Entra só em lives, marcas, apresentadoras e nas leituras
 // correspondentes — nunca em financeiro, usuários ou configurações.
+// O POST /v1/usuarios/convidar da chave é exceção da rota (só papel de
+// apresentadora), não deste grupo.
 const AUTOMACAO = 'automacao'
 const ADMIN_COMERCIAL = [...ADMIN, 'gerente_comercial']
 

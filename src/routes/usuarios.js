@@ -127,6 +127,8 @@ async function ensurePresenterProfileForUser(db, {
   return apresentadoraId
 }
 
+export let convidarUsuario
+
 export async function usuariosRoutes(app) {
   const rbac = [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])]
   // A chave (papel automacao) entra só neste POST. O handler recusa qualquer
@@ -185,8 +187,15 @@ export async function usuariosRoutes(app) {
     })
   })
 
-  // POST /v1/usuarios/convidar
-  app.post('/v1/usuarios/convidar', { preHandler: conviteAccess }, async (request, reply) => {
+  // POST /v1/usuarios e POST /v1/usuarios/convidar — o mesmo cadastro do gestor.
+  convidarUsuario = async function convidarUsuario(request, reply) {
+    if (request.viaApiKey) {
+      const body = request.body && typeof request.body === 'object' ? request.body : {}
+      if (body.papel !== undefined && body.papel !== null && !isPresenterRole(body.papel)) {
+        return reply.code(403).send({ error: 'Esta chave só cadastra apresentadora.' })
+      }
+      if (!isPresenterRole(body.papel)) request.body = { ...body, papel: 'apresentadora' }
+    }
     const parsed = convidarSchema.safeParse(request.body)
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0].message })
@@ -331,7 +340,9 @@ export async function usuariosRoutes(app) {
         throw e
       }
     })
-  })
+  }
+  app.post('/v1/usuarios', { preHandler: conviteAccess }, convidarUsuario)
+  app.post('/v1/usuarios/convidar', { preHandler: conviteAccess }, convidarUsuario)
 
   // PATCH /v1/usuarios/:id
   app.patch('/v1/usuarios/:id', { preHandler: rbac }, async (request, reply) => {

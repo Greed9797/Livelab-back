@@ -15,9 +15,9 @@ const UUID_BODY = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 //
 // Não há DELETE nenhum. Financeiro, boletos, contratos e configurações
 // (esta última guarda as chaves do gateway de pagamento) ficam de fora.
-// De usuários, a chave só alcança o POST exato /v1/usuarios/convidar, e a
-// rota só cria apresentadora. Lista, PATCH, DELETE e reset de senha continuam
-// fechados.
+// De usuários, a chave só alcança os POST exatos /v1/usuarios e
+// /v1/usuarios/convidar, e o POST exato /v1/apresentadoras. As três só criam
+// apresentadora. Lista, PATCH, DELETE e reset de senha continuam fechados.
 // Regra de casamento (GET incluso — sem prefixo solto):
 // - Sem barra final e sem `:id` casa EXATO
 // - PATCH com barra final casa só `<prefixo><uuid>` — nunca sub-rota (encerrar,
@@ -46,9 +46,11 @@ export const ROTAS_API_KEY = [
   ['POST', '/v1/marcas/:id/condicoes'],
   ['GET', '/v1/apresentadoras'],
   ['PATCH', '/v1/apresentadoras/'],
-  // Usuária que apresenta e entra no sistema. Casa EXATO este POST — o mesmo
-  // cadastro do gestor. Sem barra final: /convidar/extra não entra. O resto
-  // de /v1/usuarios (lista, PATCH, DELETE, reset) fica de fora.
+  // Cadastro da apresentadora. Casa EXATO estes POST. Sem barra final:
+  // /usuarios/extra, /apresentadoras/<uuid> e faixas não entram. Lista,
+  // PATCH, DELETE e reset de senha ficam de fora.
+  ['POST', '/v1/apresentadoras'],
+  ['POST', '/v1/usuarios'],
   ['POST', '/v1/usuarios/convidar'],
   ['GET', '/v1/comissoes/resumo'],
   ['GET', '/v1/comissoes/apresentadoras'],

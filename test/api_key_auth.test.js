@@ -94,9 +94,10 @@ describe('allowlist da chave de API', () => {
 
     // O que não pode: o dinheiro, as pessoas e as chaves do gateway.
     expect(chaveAlcancaRota('GET', '/v1/financeiro/dashboard')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/usuarios')).toBe(true)
     expect(chaveAlcancaRota('POST', '/v1/usuarios/convidar')).toBe(true)
     expect(chaveAlcancaRota('POST', '/v1/usuarios/convidar/extra')).toBe(false)
-    expect(chaveAlcancaRota('POST', '/v1/usuarios')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/usuarios/extra')).toBe(false)
     expect(chaveAlcancaRota('GET', '/v1/usuarios')).toBe(false)
     expect(chaveAlcancaRota('PATCH', '/v1/usuarios/66666666-6666-4666-8666-666666666666')).toBe(false)
     expect(chaveAlcancaRota('DELETE', '/v1/usuarios/66666666-6666-4666-8666-666666666666')).toBe(false)
@@ -107,8 +108,9 @@ describe('allowlist da chave de API', () => {
     expect(chaveAlcancaRota('DELETE', '/v1/portal/apresentadora/submissoes/66666666-6666-4666-8666-666666666666')).toBe(false)
     expect(ROTAS_API_KEY.every(([method]) => method !== 'DELETE')).toBe(true)
     expect(chaveAlcancaRota('POST', '/v1/api-keys')).toBe(false)
-    // cadastro direto de apresentadora é 410 para todo mundo: não fica na lista
-    expect(chaveAlcancaRota('POST', '/v1/apresentadoras')).toBe(false)
+    expect(chaveAlcancaRota('POST', '/v1/apresentadoras')).toBe(true)
+    expect(chaveAlcancaRota('POST', '/v1/apresentadoras/66666666-6666-4666-8666-666666666666/faixas-comissao')).toBe(false)
+    expect(chaveAlcancaRota('DELETE', '/v1/apresentadoras/66666666-6666-4666-8666-666666666666')).toBe(false)
     // clientes CRUD continua fora (use marcas + cliente_id/cliente_nome na listagem)
     expect(chaveAlcancaRota('GET', '/v1/clientes')).toBe(false)
     // GET é caminho exato ou um único :id — prefixo não abre sub-rota

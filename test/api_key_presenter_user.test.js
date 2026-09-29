@@ -96,7 +96,7 @@ async function buildApp(cenario) {
   await app.register(authPlugin)
   app.decorate('withTenant', async (_tenantId, fn) => fn({ query }))
   await app.register(usuariosRoutes)
-  if (cenario === 'perfil') await app.register(apresentadorasRoutes)
+  await app.register(apresentadorasRoutes)
   return { app, query }
 }
 
@@ -125,6 +125,60 @@ describe('chave cadastra a apresentadora que o gestor cadastra', () => {
     expect(insertPerfil[1][0]).toBe(tenantId)
     expect(insertPerfil[1][1]).toBe(userId)
     expect(insertPerfil[1][7]).toBe('bot')
+    await app.close()
+  })
+
+  it.each(['/v1/usuarios', '/v1/apresentadoras'])('cria a apresentadora em %s', async (url) => {
+    const { app, query } = await buildApp('cria')
+    const payload = presenterPayload({ origem_dados: 'manual' })
+    delete payload.papel
+    const res = await app.inject({
+      method: 'POST',
+      url,
+      headers: { 'x-api-key': CHAVE },
+      payload,
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toMatchObject({
+      id: userId,
+      papel: 'apresentadora',
+      apresentadora_id: apresentadoraId,
+      pode_apresentar_live: true,
+    })
+    const insertPerfil = query.mock.calls.find(([sql]) => sql.includes('INSERT INTO apresentadoras'))
+    expect(insertPerfil[1][0]).toBe(tenantId)
+    expect(insertPerfil[1][7]).toBe('bot')
+    await app.close()
+  })
+
+  it.each(['/v1/usuarios', '/v1/apresentadoras'])('recusa e-mail duplicado em %s', async (url) => {
+    const { app, query } = await buildApp('duplicata')
+    const res = await app.inject({
+      method: 'POST',
+      url,
+      headers: { 'x-api-key': CHAVE },
+      payload: presenterPayload(),
+    })
+
+    expect(res.statusCode).toBe(409)
+    expect(res.json()).toEqual(DUPLICATA)
+    expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO users'))).toBe(false)
+    await app.close()
+  })
+
+  it.each(['/v1/usuarios', '/v1/apresentadoras'])('recusa outro papel em %s', async (url) => {
+    const { app, query } = await buildApp('cria')
+    const res = await app.inject({
+      method: 'POST',
+      url,
+      headers: { 'x-api-key': CHAVE },
+      payload: presenterPayload({ papel: 'financeiro' }),
+    })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.json().error).toBe('Esta chave só cadastra apresentadora.')
+    expect(query.mock.calls.some(([sql]) => sql.includes('INSERT INTO users'))).toBe(false)
     await app.close()
   })
 
@@ -201,6 +255,7 @@ describe('chave cadastra a apresentadora que o gestor cadastra', () => {
       ['PATCH', `/v1/usuarios/${id}`],
       ['GET', '/v1/usuarios'],
       ['POST', `/v1/usuarios/${id}/reset-senha`],
+      ['DELETE', `/v1/apresentadoras/${id}`],
     ]
     for (const [method, url] of bloqueadas) {
       const res = await app.inject({

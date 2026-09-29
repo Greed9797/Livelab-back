@@ -4,6 +4,7 @@ import { DEFAULT_APRESENTADORA_FIXO, MAX_APRESENTADORA_FIXO, ensureDefaultPresen
 import { moneySchema } from '../lib/money.js'
 import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
 import { isPresenterRole, resolvePresenterId } from '../services/presenter-identity.js'
+import { convidarUsuario } from './usuarios.js'
 
 const imageUrlSchema = z.string().max(500000).nullable().optional()
 
@@ -259,13 +260,16 @@ export async function apresentadorasRoutes(app) {
   })
 
   // POST /v1/apresentadoras
-  // Cadastro direto continua 410 para todo mundo. Quem entra no sistema nasce
-  // em POST /v1/usuarios/convidar (a chave alcança só esse caminho).
+  // Gestor humano continua no 410: o cadastro dele é Configurações > Usuários.
+  // A chave cria aqui a mesma usuária apresentadora, com as mesmas validações.
   app.post('/v1/apresentadoras', { preHandler: writeAccess }, async (request, reply) => {
-    return reply.code(410).send({
-      error: 'Cadastro direto de apresentadora foi desativado. Crie ou vincule apresentadoras em Configurações > Usuários.',
-      flow: 'usuarios.convidar',
-    })
+    if (!request.viaApiKey) {
+      return reply.code(410).send({
+        error: 'Cadastro direto de apresentadora foi desativado. Crie ou vincule apresentadoras em Configurações > Usuários.',
+        flow: 'usuarios.convidar',
+      })
+    }
+    return convidarUsuario(request, reply)
   })
 
   // PATCH /v1/apresentadoras/:id

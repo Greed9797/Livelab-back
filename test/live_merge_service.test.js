@@ -18,7 +18,7 @@ function dbFixture() {
       fat_gerado: '2000', manual_gmv: '2000', ads_gmv: null, final_orders_count: 20, manual_orders: 20,
       live_impressions: 100, manual_views: 200, manual_likes: 10, manual_comments: 5, manual_shares: 2, manual_diamonds: 1,
       ads_cost: '20', product_impressions: 50, product_clicks: 10, avg_viewing_duration: null, new_followers: 3, final_peak_viewers: 80,
-      faturado_em: null, boleto_id: null, uniao_destino_id: null, uniao_id: null, uniao_desfeita_em: null,
+      faturado_em: null, uniao_destino_id: null, uniao_id: null, uniao_desfeita_em: null,
     },
     {
       id: liveB, tenant_id: tenantId, cabine_id: '22222222-2222-4222-8222-222222222222', cabine_numero: 1,
@@ -27,7 +27,7 @@ function dbFixture() {
       fat_gerado: '3000', manual_gmv: '3000', ads_gmv: null, final_orders_count: 30, manual_orders: 30,
       live_impressions: 100, manual_views: 200, manual_likes: 10, manual_comments: 5, manual_shares: 2, manual_diamonds: 1,
       ads_cost: '20', product_impressions: 50, product_clicks: 10, avg_viewing_duration: null, new_followers: 3, final_peak_viewers: 80,
-      faturado_em: null, boleto_id: null, uniao_destino_id: null, uniao_id: null, uniao_desfeita_em: null,
+      faturado_em: null, uniao_destino_id: null, uniao_id: null, uniao_desfeita_em: null,
     },
   ]
   const rateios = [
@@ -41,7 +41,7 @@ function dbFixture() {
   const persistedDestination = {
     id: destinationId, fat_gerado: '5000.00', manual_gmv: '5000.00',
     manual_orders: 50, final_orders_count: 50, comissao_calculada: '500.00',
-    comissao_apresentadora_valor: '250.00', faturado_em: null, boleto_id: null,
+    comissao_apresentadora_valor: '250.00', faturado_em: null,
     uniao_id: unionId, uniao_desfeita_em: null,
   }
   const persistedSales = sales.map((sale) => ({
@@ -172,7 +172,7 @@ describe('undoLiveMerge transaction', () => {
         comissao_calculada: '500.00',
         comissao_apresentadora_valor: '250.00',
         faturado_em: null,
-        boleto_id: null,
+       
         uniao_id: unionId,
         uniao_desfeita_em: null,
       },

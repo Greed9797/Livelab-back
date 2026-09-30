@@ -364,14 +364,6 @@ export async function clienteInsightsRoutes(app) {
       const comissaoVariavel = round2(gmvMes * (comissaoPct / 100))
       const totalDevido = round2(valorFixo + comissaoVariavel)
 
-      const boletosQ = await db.query(
-        `SELECT id, tipo, competencia, vencimento, valor, status, gateway_url
-         FROM boletos
-         WHERE tenant_id = $1::uuid AND cliente_id = $2::uuid
-         ORDER BY vencimento DESC NULLS LAST LIMIT 12`,
-        [tenantId, cliente.id],
-      )
-
       return {
         periodo,
         cliente: { id: cliente.id, nome: cliente.nome },
@@ -385,7 +377,7 @@ export async function clienteInsightsRoutes(app) {
           comissao_variavel: comissaoVariavel,
           total_devido: totalDevido,
         },
-        boletos: boletosQ.rows.map((b) => ({ ...b, valor: toNumber(b.valor) })),
+        boletos: [], // legado: boletos removidos; campo mantido vazio p/ compat do front
       }
     })
   })

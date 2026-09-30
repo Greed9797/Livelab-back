@@ -1,3 +1,4 @@
+import { z } from 'zod'
 import { saoPauloDateInput } from './timezone.js'
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -9,11 +10,69 @@ export const MARCA_CONDICAO_TIPOS_COBRANCA = Object.freeze([
   'fixo_ou_comissao',
 ])
 
+/** Vencimento padrão (planilha): dia 5 do mês seguinte à competência. */
+export const VENCIMENTO_PADRAO = Object.freeze({
+  fixo_vencimento_dia: 5,
+  fixo_vencimento_mes_offset: 1,
+  comissao_vencimento_dia: 5,
+  comissao_vencimento_mes_offset: 1,
+})
+
+export const CAMPOS_VENCIMENTO = Object.freeze(Object.keys(VENCIMENTO_PADRAO))
+
+const inteiro = (value) => (typeof value === 'string' && /^\s*-?\d+\s*$/.test(value) ? Number(value) : value)
+const diaVencimentoSchema = z.preprocess(
+  inteiro,
+  z.number({ error: 'deve ser um inteiro entre 1 e 31' })
+    .int('deve ser um inteiro entre 1 e 31')
+    .min(1, 'deve ser um inteiro entre 1 e 31')
+    .max(31, 'deve ser um inteiro entre 1 e 31'),
+)
+const offsetVencimentoSchema = z.preprocess(
+  inteiro,
+  z.union([z.literal(0), z.literal(1)], { error: 'deve ser 0 (mesmo mês) ou 1 (mês seguinte)' }),
+)
+
+/** Campos de vencimento da condição comercial; todos opcionais (ausente = herdar). */
+export const vencimentoCondicaoSchema = z.object({
+  fixo_vencimento_dia: diaVencimentoSchema.optional(),
+  fixo_vencimento_mes_offset: offsetVencimentoSchema.optional(),
+  comissao_vencimento_dia: diaVencimentoSchema.optional(),
+  comissao_vencimento_mes_offset: offsetVencimentoSchema.optional(),
+})
+
 function invalid(message) {
   const error = new Error(message)
   error.statusCode = 400
   error.code = 'INVALID_MARCA_CONDITION'
   return error
+}
+
+/**
+ * Valida os campos de vencimento presentes em `input`. Retorna só os campos
+ * informados (null/undefined = ausente → a versão herda da anterior ou do padrão).
+ */
+export function normalizarVencimentoCondicao(input = {}) {
+  const provided = {}
+  for (const campo of CAMPOS_VENCIMENTO) {
+    if (input?.[campo] !== undefined && input?.[campo] !== null) provided[campo] = input[campo]
+  }
+  const parsed = vencimentoCondicaoSchema.safeParse(provided)
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0]
+    throw invalid(`${issue.path.join('.')} ${issue.message}`)
+  }
+  return Object.fromEntries(Object.entries(parsed.data).filter(([, value]) => value !== undefined))
+}
+
+/** Completa o vencimento: informado > condição anterior > padrão. */
+export function resolverVencimentoCondicao(informado = {}, anterior = null) {
+  const out = {}
+  for (const campo of CAMPOS_VENCIMENTO) {
+    const herdado = anterior?.[campo]
+    out[campo] = informado?.[campo] ?? (herdado == null ? VENCIMENTO_PADRAO[campo] : Number(herdado))
+  }
+  return out
 }
 
 /** Converte reais para centavos sem usar ponto flutuante na soma final. */
@@ -75,6 +134,9 @@ export function normalizarMarcaCondicao(input = {}, options = {}) {
     comissao_confirmada: Boolean(input.comissao_confirmada),
     origem: options.origem === 'bot' ? 'bot' : 'gestao',
     motivo,
+    // Só entram no objeto quando informados: payload sem vencimento mantém o
+    // mesmo payload_hash de antes da migration 165 (retries idempotentes).
+    ...normalizarVencimentoCondicao(input),
   }
 }
 

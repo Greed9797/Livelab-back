@@ -432,7 +432,6 @@ export async function clientesRoutes(app) {
           ['lives', 'cliente_id'],
           ['marcas', 'cliente_id'],
           ['contratos', 'cliente_id'],
-          ['boletos', 'cliente_id'],
         ]) {
           const result = await db.query(
             `UPDATE ${table}

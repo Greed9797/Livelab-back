@@ -1,7 +1,6 @@
-// W3-F P1 Polish — 3 new behaviors:
+// W3-F P1 Polish — 2 behaviors:
 //   1. Block contrato POST if cliente reprovado < 30 dias
-//   2. Template boleto_pago renderiza corretamente
-//   3. Smoke: audit refactor (aprovar/reprovar/arquivar delegam ao service)
+//   2. Smoke: audit refactor (aprovar/reprovar/arquivar delegam ao service)
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import Fastify from 'fastify'
@@ -88,42 +87,6 @@ describe('POST /v1/contratos — bloqueia cliente reprovado < 30 dias', () => {
     // 201 ou pode ser 400 por outros motivos (pacote, etc.) mas não 409
     expect(r.statusCode).not.toBe(409)
     await app.close()
-  })
-})
-
-// ──────────────────────────────────────────────────────────────────────────────
-// 2. Template boleto_pago renderiza corretamente
-// ──────────────────────────────────────────────────────────────────────────────
-describe('mailer template boleto_pago', () => {
-  it('renderiza subject com valor formatado', () => {
-    const { subject } = renderTemplate('boleto_pago', {
-      cliente_nome: 'João Silva',
-      valor: 1500,
-      vencimento: new Date('2026-04-30'),
-      pago_em: new Date('2026-05-01'),
-    })
-    expect(subject).toMatch(/Pagamento confirmado/)
-    expect(subject).toMatch(/R\$/)
-    expect(subject).toMatch(/recebido/)
-  })
-
-  it('renderiza HTML com nome do cliente e data de pagamento', () => {
-    const { html } = renderTemplate('boleto_pago', {
-      cliente_nome: 'Maria Oliveira',
-      valor: 750.5,
-      vencimento: new Date('2026-04-15'),
-      pago_em: new Date('2026-04-14'),
-    })
-    expect(html).toContain('Maria Oliveira')
-    expect(html).toContain('Pagamento confirmado')
-    expect(html).toContain('Valor pago')
-    expect(html).toContain('Data do pagamento')
-  })
-
-  it('não lança erro quando campos opcionais são omitidos', () => {
-    expect(() =>
-      renderTemplate('boleto_pago', { valor: 0 })
-    ).not.toThrow()
   })
 })
 

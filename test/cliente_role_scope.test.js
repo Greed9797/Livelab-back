@@ -1,7 +1,6 @@
 import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 
-import { boletosRoutes } from '../src/routes/boletos.js'
 import { clientePortalRoutes } from '../src/routes/cliente_portal.js'
 import { knowledgeRoutes } from '../src/routes/knowledge.js'
 
@@ -42,17 +41,6 @@ describe('cliente role go-live scope', () => {
     await app.register(knowledgeRoutes)
 
     const response = await app.inject({ method: 'GET', url: '/v1/knowledge/categories' })
-
-    expect(response.statusCode).toBe(403)
-    expect(queryMock).not.toHaveBeenCalled()
-    await app.close()
-  })
-
-  it('blocks boletos/financeiro shortcut for cliente_parceiro before querying data', async () => {
-    const { app, queryMock } = buildClienteApp()
-    await app.register(boletosRoutes)
-
-    const response = await app.inject({ method: 'GET', url: '/v1/boletos' })
 
     expect(response.statusCode).toBe(403)
     expect(queryMock).not.toHaveBeenCalled()

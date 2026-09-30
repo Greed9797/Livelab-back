@@ -1,5 +1,5 @@
-// Lock distribuído cross-instância para crons, extraído do padrão já usado em
-// billing_engine.js. Necessário porque a flag `_running` em memória só protege
+// Lock distribuído cross-instância para crons, extraído do padrão usado
+// nos crons. Necessário porque a flag `_running` em memória só protege
 // dentro de um processo: com 2 réplicas Railway (ou deploy sobreposto) cada
 // tick roda em dobro.
 //
@@ -8,7 +8,7 @@
 // pool.query() pegaria conexões diferentes e o unlock viraria no-op.
 //
 // Chaves em uso (bigint, mantenha distintas):
-//   7421900119911234 — billing_engine (inline no próprio arquivo)
+//   7421900119911234 — (livre; antigo billing_engine, removido)
 //   7421900119911235 — tiktok poll + syncLives (server.js)
 //   7421900119911236 — recalcular_comissoes
 //   7421900119911237 — encerrar_lives_zumbi

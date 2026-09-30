@@ -38,12 +38,10 @@ import { TikTokService } from './services/tiktok.js'
 import { cleanupOrphanContracts } from './jobs/cleanup_orphan_contracts.js'
 import { cleanupPasswordResetTokens } from './jobs/cleanup_password_reset_tokens.js'
 import * as connectorManager from './services/tiktok-connector-manager.js'
-import { startBillingEngine } from './jobs/billing_engine.js'
 import { startClienteMetricasSnapshotCron } from './jobs/cliente_metricas_snapshot.js'
 import { startAgendaAutostart } from './jobs/agenda_autostart.js'
 import { startRecalcularComissoes } from './jobs/recalcular_comissoes.js'
 import { startEncerrarLivesZumbi } from './jobs/encerrar_lives_zumbi.js'
-import { notifyBoletosVencidos } from './jobs/notify_boletos_vencidos.js'
 import { withAdvisoryLock } from './jobs/advisory_lock.js'
 import { runMigrations } from '../apply_migrations.js'
 import { ensureKnowledgePrivateBucket } from './services/knowledge-storage.js'
@@ -85,8 +83,6 @@ process.on('uncaughtException', registrarFalhaSolta('uncaughtException'))
 // Initialize ConnectorManager with pool access and logger
 connectorManager.init({ db: app.db, log: app.log })
 
-// Initialize Billing Engine for Batch Billing
-startBillingEngine(app.db.pool)
 
 // Snapshot mensal de métricas por cliente (rolling).
 // L4-12 levantou a hipótese de que este cron gravava numa tabela sem leitor.
@@ -168,26 +164,6 @@ cron.schedule('0 3 * * *', async () => {
     app.log.error({ error }, 'Falha ao limpar contratos órfãos')
   }
 })
-
-// Daily: mark overdue boletos as 'vencido' (moved from GET /v1/boletos to avoid mutating state on read)
-cron.schedule('0 1 * * *', async () => {
-  try {
-    await app.db.query(
-      `UPDATE boletos SET status = 'vencido' WHERE status = 'pendente' AND vencimento < CURRENT_DATE`
-    )
-  } catch (error) {
-    app.log.error({ error }, 'Falha ao atualizar boletos vencidos')
-  }
-})
-
-// F1: 02:30 SP — notifica clientes sobre boletos vencidos (1x por boleto, dedupe via notification_log)
-cron.schedule('30 2 * * *', async () => {
-  try {
-    await notifyBoletosVencidos(app)
-  } catch (error) {
-    app.log.error({ error }, 'Falha ao notificar boletos vencidos')
-  }
-}, { timezone: 'America/Sao_Paulo' })
 
 // Daily 03:00 SP — housekeeping: remove password_reset_tokens > 30 days
 // Job tem try/catch interno; nunca derruba o cron loop.

@@ -20,6 +20,10 @@ import { clientesRoutes } from './routes/clientes.js'
 import { contratosRoutes } from './routes/contratos.js'
 import { financeiroRoutes } from './routes/financeiro.js'
 import { remuneracaoApresentadorasRoutes } from './routes/remuneracao_apresentadoras.js'
+import { financeiroReceitasRoutes } from './routes/financeiro_receitas.js'
+import { financeiroCustosRoutes } from './routes/financeiro_custos.js'
+import { financeiroApresentadorasPagamentosRoutes } from './routes/financeiro_apresentadoras_pagamentos.js'
+import { asaasRoutes } from './routes/asaas.js'
 import { relatoriosRoutes } from './routes/relatorios.js'
 import { cabinesRoutes } from './routes/cabines.js'
 import { livesRoutes } from './routes/lives.js'
@@ -27,7 +31,6 @@ import { liveMergeRoutes } from './routes/live-merge.js'
 import { clienteDashboardRoutes } from './routes/cliente_dashboard.js'
 import { leadsRoutes } from './routes/leads.js'
 import { crmRoutes } from './routes/crm.js'
-import { boletosRoutes } from './routes/boletos.js'
 import { excelenciaRoutes } from './routes/excelencia.js'
 import { recomendacoesRoutes } from './routes/recomendacoes.js'
 import { franqueadoRoutes } from './routes/franqueado.js'
@@ -53,7 +56,6 @@ import onboardingRoutes from './routes/onboarding.js'
 import { tenantsRoutes } from './routes/tenants.js'
 import { webhookBioCrmRoutes } from './routes/webhook_bio_crm.js'
 import { webhookMakeCrmRoutes } from './routes/webhook_make_crm.js'
-import { appmaxRoutes } from './routes/appmax.js'
 import { notificacoesRoutes } from './routes/notificacoes.js'
 import { auditLogRoutes } from './routes/audit_log.js'
 import { marcasRoutes } from './routes/marcas.js'
@@ -343,6 +345,10 @@ export async function buildApp(opts = {}) {
   await app.register(contratosRoutes)
   await app.register(financeiroRoutes)
   await app.register(remuneracaoApresentadorasRoutes)
+  await app.register(financeiroReceitasRoutes)
+  await app.register(financeiroCustosRoutes)
+  await app.register(financeiroApresentadorasPagamentosRoutes)
+  await app.register(asaasRoutes)
   await app.register(relatoriosRoutes)
   await app.register(cabinesRoutes)
   await app.register(livesRoutes)
@@ -350,7 +356,6 @@ export async function buildApp(opts = {}) {
   await app.register(clienteDashboardRoutes)
   await app.register(leadsRoutes)
   await app.register(crmRoutes)
-  await app.register(boletosRoutes)
   await app.register(excelenciaRoutes)
   await app.register(recomendacoesRoutes)
   await app.register(franqueadoRoutes)
@@ -376,7 +381,6 @@ export async function buildApp(opts = {}) {
   await app.register(tenantsRoutes)
   await app.register(webhookBioCrmRoutes)
   await app.register(webhookMakeCrmRoutes)
-  await app.register(appmaxRoutes)
   await app.register(notificacoesRoutes)
   await app.register(auditLogRoutes)
   await app.register(marcasRoutes)

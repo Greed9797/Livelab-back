@@ -80,7 +80,7 @@ async function _logNotification(pool, { tenantId, tipo, refId, destinatario, ass
 
 /**
  * Verifica se já existe notificação enviada com sucesso para (tenant, tipo, refId).
- * Usado pra idempotência em jobs (ex: boleto vencido só notifica 1x).
+ * Usado pra idempotência em jobs (ex: notificação só enviada 1x).
  */
 export async function hasSent(pool, { tenantId, tipo, refId }) {
   if (!pool || !tenantId || !tipo || !refId) return false
@@ -110,7 +110,7 @@ export async function hasSent(pool, { tenantId, tipo, refId }) {
  * @param {string} params.html          — corpo HTML
  * @param {string} params.tenantId      — tenant pra RLS no log
  * @param {string} params.tipo          — chave do template (ex: 'live_encerrada')
- * @param {string=} params.refId        — id da entidade relacionada (live, boleto, contrato)
+ * @param {string=} params.refId        — id da entidade relacionada (live, contrato)
  * @param {Object=} params.pool         — pg.Pool pra gravar log (default app.db.pool quando chamado via app)
  * @returns {Promise<{ok: boolean, skipped?: boolean, id?: string, error?: string}>}
  */
@@ -249,25 +249,6 @@ const _templates = {
     `),
   }),
 
-  boleto_vencido: (vars) => ({
-    subject: `Boleto vencido — ${_money(vars.valor)}`,
-    html: _wrap('Boleto em atraso', `
-      <p>Olá <b>${vars.cliente_nome ?? 'Cliente'}</b>,</p>
-      <p>Identificamos que um boleto está em atraso:</p>
-      <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-        <tr><td style="padding:8px;border-bottom:1px solid #eee;"><b>Valor</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${_money(vars.valor)}</td></tr>
-        <tr><td style="padding:8px;border-bottom:1px solid #eee;"><b>Vencimento</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${_fmtDate(vars.vencimento)}</td></tr>
-        <tr><td style="padding:8px;"><b>Descrição</b></td>
-            <td style="padding:8px;text-align:right;">${vars.descricao ?? '—'}</td></tr>
-      </table>
-      ${vars.url ? `<p style="text-align:center;margin:24px 0;">
-        <a href="${vars.url}" style="${_btnStyle}">Pagar boleto</a></p>` : ''}
-      <p>Para evitar bloqueio dos serviços, regularize o pagamento o quanto antes.</p>
-    `),
-  }),
-
   contrato_aprovado: (vars) => ({
     subject: `Contrato aprovado — ${vars.cliente_nome ?? ''}`,
     html: _wrap('Contrato aprovado', `
@@ -297,23 +278,6 @@ const _templates = {
             <td style="padding:8px;text-align:right;">${vars.motivo}</td></tr>` : ''}
       </table>
       <p>O processo pode ser revisado pelo backoffice ou via "Assumir risco".</p>
-    `),
-  }),
-
-  boleto_pago: (vars) => ({
-    subject: `Pagamento confirmado — ${_money(vars.valor)} recebido`,
-    html: _wrap('Pagamento confirmado', `
-      <p>Olá <b>${vars.cliente_nome ?? 'Cliente'}</b>,</p>
-      <p>Confirmamos o recebimento do seu pagamento. Veja os detalhes:</p>
-      <table style="width:100%;border-collapse:collapse;margin:16px 0;">
-        <tr><td style="padding:8px;border-bottom:1px solid #eee;"><b>Valor pago</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;color:#10b981;font-weight:600;">${_money(vars.valor)}</td></tr>
-        <tr><td style="padding:8px;border-bottom:1px solid #eee;"><b>Vencimento</b></td>
-            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right;">${_fmtDate(vars.vencimento)}</td></tr>
-        <tr><td style="padding:8px;"><b>Data do pagamento</b></td>
-            <td style="padding:8px;text-align:right;">${_fmtDate(vars.pago_em)}</td></tr>
-      </table>
-      <p>Obrigado pelo pagamento. Seus serviços continuam ativos.</p>
     `),
   }),
 

@@ -52,7 +52,6 @@ function source(id, start, end, presenter, gmv, orders, overrides = {}) {
     new_followers: 3,
     final_peak_viewers: 80,
     faturado_em: null,
-    boleto_id: null,
     uniao_destino_id: null,
     uniao_id: null,
     uniao_desfeita_em: null,
@@ -135,7 +134,7 @@ describe('buildLiveMergePreview', () => {
     ['DIFFERENT_BRAND', { marca_id: '99999999-9999-4999-8999-999999999999' }],
     ['DIFFERENT_MANAGER', { gestor_id: '99999999-9999-4999-8999-999999999999' }],
     ['NOT_CONTIGUOUS', { iniciado_epoch: '4600.000001' }],
-    ['FINANCIAL_LINK_EXISTS', { boleto_id: '99999999-9999-4999-8999-999999999999' }],
+    ['FINANCIAL_LINK_EXISTS', { faturado_em: '2026-09-01T00:00:00.000Z' }],
     ['ALREADY_MERGED', { uniao_destino_id: liveA }],
   ])('bloqueia %s', (code, override) => {
     const preview = buildLiveMergePreview([

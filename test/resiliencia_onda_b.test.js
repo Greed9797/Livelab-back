@@ -51,8 +51,8 @@ describe('setErrorHandler precisa valer para as rotas registradas via register()
 
 describe('TikTok: falha de rede NÃO pode encerrar live (encerrar = cobrar)', () => {
   // getLiveData devolvia offlineState no catch. offlineState leva ao ramo que faz
-  // UPDATE lives SET status='encerrada', e billing_engine + recalcular_comissoes leem
-  // exatamente 'encerrada' para gerar boleto e comissão. Timeout de rede viraria fatura.
+  // UPDATE lives SET status='encerrada', e recalcular_comissoes lê
+  // exatamente 'encerrada' para gerar comissão. Timeout de rede viraria comissão.
   let fetchOriginal
   beforeEach(() => { fetchOriginal = globalThis.fetch })
   afterEach(() => { globalThis.fetch = fetchOriginal })

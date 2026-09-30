@@ -1,15 +1,13 @@
 // src/routes/relatorios.js
-// F2 — Exportação de relatórios CSV (financeiro, boletos) e PDF (cliente).
+// F2 — Exportação de relatórios CSV (financeiro) e PDF (cliente).
 // Rate limit: 10 req/min por rota; cliente_parceiro só vê o próprio cliente.
 
 import {
   READ_FINANCEIRO,
   READ_CLIENTES,
-  READ_BOLETOS,
 } from '../config/role_groups.js'
 import {
   buildFinanceiroCSV,
-  buildBoletosCSV,
   buildClientePDFHtml,
 } from '../services/reports.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
@@ -88,62 +86,6 @@ export async function relatoriosRoutes(app) {
         .header(
           'Content-Disposition',
           `attachment; filename="financeiro-${range.periodo}.csv"`
-        )
-      return reply.send(csv)
-    }
-  )
-
-  // ─── GET /v1/relatorios/boletos/csv ──────────────────────
-  app.get(
-    '/v1/relatorios/boletos/csv',
-    {
-      preHandler: app.requirePapel(READ_BOLETOS),
-      config: RATE,
-    },
-    async (request, reply) => {
-      const { tenant_id } = request.user
-      const statusRaw = String(request.query?.status ?? '').toLowerCase()
-      const allowedStatus = new Set(['pendente', 'pago', 'vencido'])
-      const status = allowedStatus.has(statusRaw) ? statusRaw : null
-
-      const range = parsePeriodo(request.query?.periodo)
-      if (!range) return reply.code(400).send({ error: 'Período inválido (use YYYY-MM)' })
-
-      const rows = await app.withTenant(tenant_id, async (db) => {
-        const params = [tenant_id, range.startDate, range.endDate]
-        let statusFilter = ''
-        if (status === 'vencido') {
-          // Vencido = pendente com vencimento < hoje
-          statusFilter = `AND b.status = 'pendente' AND b.vencimento < CURRENT_DATE`
-        } else if (status) {
-          params.push(status)
-          statusFilter = `AND b.status = $${params.length}`
-        }
-        const { rows } = await db.query(
-          `SELECT b.id,
-                  cl.nome             AS cliente,
-                  COALESCE(b.valor, 0) AS valor,
-                  b.vencimento,
-                  b.status,
-                  b.pago_em
-           FROM boletos b
-           LEFT JOIN clientes cl ON cl.id = b.cliente_id AND cl.tenant_id = $1::uuid
-           WHERE b.tenant_id = $1::uuid
-             AND b.vencimento::date BETWEEN $2::date AND $3::date
-             ${statusFilter}
-           ORDER BY b.vencimento ASC`,
-          params
-        )
-        return rows
-      })
-
-      const csv = buildBoletosCSV(rows)
-      const tag = status ?? 'todos'
-      reply
-        .header('Content-Type', 'text/csv; charset=utf-8')
-        .header(
-          'Content-Disposition',
-          `attachment; filename="boletos-${tag}-${range.periodo}.csv"`
         )
       return reply.send(csv)
     }

@@ -252,23 +252,6 @@ async function fetchUnitSummaries(
           AND ${activeLiveSql('l')}
           AND COALESCE(l.encerrado_em, l.iniciado_em) < $5::date
         GROUP BY l.tenant_id
-      ),
-      boletos_current AS (
-        SELECT
-          tenant_id,
-          COALESCE(SUM(valor), 0) AS franchisor_current,
-          COALESCE(SUM(valor) FILTER (WHERE status = 'pago'), 0) AS franchisor_received,
-          COALESCE(SUM(valor) FILTER (
-            WHERE status = 'vencido'
-               OR (status = 'pendente' AND vencimento < CURRENT_DATE)
-          ), 0) AS franchisor_overdue,
-          COALESCE(SUM(valor) FILTER (
-            WHERE status = 'pendente' AND vencimento >= CURRENT_DATE
-          ), 0) AS franchisor_pending
-        FROM boletos
-        WHERE competencia >= $2::date
-          AND competencia < $4::date
-        GROUP BY tenant_id
       )
       SELECT
         t.id,
@@ -283,16 +266,15 @@ async function fetchUnitSummaries(
         COALESCE(lc.gmv_current, 0) AS gmv_current,
         COALESCE(lc.commission_current, 0) AS commission_current,
         COALESCE(lp.commission_previous, 0) AS commission_previous,
-        COALESCE(bc.franchisor_current, 0) AS franchisor_current,
-        COALESCE(bc.franchisor_received, 0) AS franchisor_received,
-        COALESCE(bc.franchisor_overdue, 0) AS franchisor_overdue,
-        COALESCE(bc.franchisor_pending, 0) AS franchisor_pending
+        0::numeric AS franchisor_current,
+        0::numeric AS franchisor_received,
+        0::numeric AS franchisor_overdue,
+        0::numeric AS franchisor_pending
       FROM tenants t
       LEFT JOIN clientes_ativos ca ON ca.tenant_id = t.id
       LEFT JOIN contratos_resumo cr ON cr.tenant_id = t.id
       LEFT JOIN lives_current lc ON lc.tenant_id = t.id
       LEFT JOIN lives_previous lp ON lp.tenant_id = t.id
-      LEFT JOIN boletos_current bc ON bc.tenant_id = t.id
       WHERE t.id <> $1
         AND t.criado_em < $4::date
         AND ($6::uuid[] IS NULL OR t.id = ANY($6::uuid[]))
@@ -408,18 +390,6 @@ async function fetchHistoryRows(app, masterTenantId, periodInfo, allowedTenantId
           LIMIT 1
         ) ct ON TRUE
         GROUP BY tm.tenant_id, tm.month_start
-      ),
-      franchisor_revenue AS (
-        SELECT
-          tm.tenant_id,
-          tm.month_start,
-          COALESCE(SUM(b.valor), 0) AS franchisor_revenue
-        FROM tenant_months tm
-        LEFT JOIN boletos b
-          ON b.tenant_id = tm.tenant_id
-         AND b.competencia >= tm.month_start
-         AND b.competencia < (tm.month_start + interval '1 month')
-        GROUP BY tm.tenant_id, tm.month_start
       )
       SELECT
         tm.tenant_id,
@@ -427,7 +397,7 @@ async function fetchHistoryRows(app, masterTenantId, periodInfo, allowedTenantId
         to_char(tm.month_start, 'YYYY-MM') AS period,
         COALESCE(fr.fixed_revenue, 0) AS fixed_revenue,
         COALESCE(cr.commission_revenue, 0) AS commission_revenue,
-        COALESCE(br.franchisor_revenue, 0) AS franchisor_revenue
+        0::numeric AS franchisor_revenue
       FROM tenant_months tm
       LEFT JOIN fixed_revenue fr
         ON fr.tenant_id = tm.tenant_id
@@ -435,9 +405,6 @@ async function fetchHistoryRows(app, masterTenantId, periodInfo, allowedTenantId
       LEFT JOIN commission_revenue cr
         ON cr.tenant_id = tm.tenant_id
        AND cr.month_start = tm.month_start
-      LEFT JOIN franchisor_revenue br
-        ON br.tenant_id = tm.tenant_id
-       AND br.month_start = tm.month_start
       ORDER BY tm.month_start ASC, tm.tenant_name ASC
     `,
     [masterTenantId, periodInfo.historyStart, periodInfo.historyEnd, allowedTenantIds]
@@ -480,148 +447,68 @@ async function fetchUnitClients(app, masterTenantId, periodInfo, allowedTenantId
       }
     })
 
-  try {
-    // MASTER: cross-tenant — clientes de todas as unidades (cl.tenant_id <> $1); só rotas masterAccess
-    const result = await app.db.query(
-      `
-        WITH client_lives AS (
-          SELECT
-            l.tenant_id,
-            l.cliente_id,
-	            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS live_gmv,
-            COALESCE(SUM(${liveGmvSql('l')} * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
-          FROM lives l
-          LEFT JOIN LATERAL (
-            SELECT c.comissao_pct
-            FROM contratos c
-            WHERE c.tenant_id = l.tenant_id
-              AND c.cliente_id = l.cliente_id
-            ORDER BY CASE WHEN c.status = 'ativo' THEN 0 ELSE 1 END, c.criado_em DESC
-            LIMIT 1
-          ) ct ON TRUE
-          WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
-            AND ${activeLiveSql('l')}
-            AND COALESCE(l.encerrado_em, l.iniciado_em) < $3::date
-          GROUP BY l.tenant_id, l.cliente_id
-        ),
-        client_boletos AS (
-          SELECT
-            tenant_id,
-            cliente_id,
-            COALESCE(SUM(valor), 0) AS franchisor_revenue
-          FROM boletos
-          WHERE competencia >= $2::date
-            AND competencia < $3::date
-          GROUP BY tenant_id, cliente_id
-        )
+  // MASTER: cross-tenant — clientes de todas as unidades (cl.tenant_id <> $1); só rotas masterAccess
+  const result = await app.db.query(
+    `
+      WITH client_lives AS (
         SELECT
-          cl.tenant_id,
-          cl.id AS client_id,
-          cl.nome AS client_name,
-          cl.status AS client_status,
-          ct.id AS contract_id,
-          ct.status AS contract_status,
-          COALESCE(ct.comissao_pct, 0) AS contract_pct,
-          COALESCE(ct.valor_fixo, 0) AS monthly_fee,
-          COALESCE(lv.live_gmv, 0) AS live_gmv,
-          COALESCE(lv.live_revenue, 0) AS live_revenue,
-          COALESCE(cb.franchisor_revenue, 0) AS franchisor_revenue
-        FROM clientes cl
+          l.tenant_id,
+          l.cliente_id,
+	            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS live_gmv,
+          COALESCE(SUM(${liveGmvSql('l')} * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
+        FROM lives l
         LEFT JOIN LATERAL (
-          SELECT id, status, comissao_pct, valor_fixo
+          SELECT c.comissao_pct
           FROM contratos c
-          WHERE c.tenant_id = cl.tenant_id
-            AND c.cliente_id = cl.id
-          ORDER BY
-            CASE
-              WHEN c.status = 'ativo' THEN 0
-              WHEN c.status = 'em_analise' THEN 1
-              WHEN c.status = 'enviado' THEN 2
-              ELSE 3
-            END,
-            c.criado_em DESC
+          WHERE c.tenant_id = l.tenant_id
+            AND c.cliente_id = l.cliente_id
+          ORDER BY CASE WHEN c.status = 'ativo' THEN 0 ELSE 1 END, c.criado_em DESC
           LIMIT 1
         ) ct ON TRUE
-        LEFT JOIN client_lives lv
-          ON lv.tenant_id = cl.tenant_id
-         AND lv.cliente_id = cl.id
-        LEFT JOIN client_boletos cb
-          ON cb.tenant_id = cl.tenant_id
-         AND cb.cliente_id = cl.id
-        WHERE cl.tenant_id <> $1
-          AND ($4::uuid[] IS NULL OR cl.tenant_id = ANY($4::uuid[]))
-        ORDER BY cl.tenant_id, (COALESCE(ct.valor_fixo, 0) + COALESCE(lv.live_revenue, 0)) DESC, cl.nome ASC
-      `,
-      [masterTenantId, periodInfo.currentStart, periodInfo.currentEnd, allowedTenantIds]
-    )
+        WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
+          AND ${activeLiveSql('l')}
+          AND COALESCE(l.encerrado_em, l.iniciado_em) < $3::date
+        GROUP BY l.tenant_id, l.cliente_id
+      )
+      SELECT
+        cl.tenant_id,
+        cl.id AS client_id,
+        cl.nome AS client_name,
+        cl.status AS client_status,
+        ct.id AS contract_id,
+        ct.status AS contract_status,
+        COALESCE(ct.comissao_pct, 0) AS contract_pct,
+        COALESCE(ct.valor_fixo, 0) AS monthly_fee,
+        COALESCE(lv.live_gmv, 0) AS live_gmv,
+        COALESCE(lv.live_revenue, 0) AS live_revenue,
+        0 AS franchisor_revenue
+      FROM clientes cl
+      LEFT JOIN LATERAL (
+        SELECT id, status, comissao_pct, valor_fixo
+        FROM contratos c
+        WHERE c.tenant_id = cl.tenant_id
+          AND c.cliente_id = cl.id
+        ORDER BY
+          CASE
+            WHEN c.status = 'ativo' THEN 0
+            WHEN c.status = 'em_analise' THEN 1
+            WHEN c.status = 'enviado' THEN 2
+            ELSE 3
+          END,
+          c.criado_em DESC
+        LIMIT 1
+      ) ct ON TRUE
+      LEFT JOIN client_lives lv
+        ON lv.tenant_id = cl.tenant_id
+       AND lv.cliente_id = cl.id
+      WHERE cl.tenant_id <> $1
+        AND ($4::uuid[] IS NULL OR cl.tenant_id = ANY($4::uuid[]))
+      ORDER BY cl.tenant_id, (COALESCE(ct.valor_fixo, 0) + COALESCE(lv.live_revenue, 0)) DESC, cl.nome ASC
+    `,
+    [masterTenantId, periodInfo.currentStart, periodInfo.currentEnd, allowedTenantIds]
+  )
 
-    return mapRows(result.rows)
-  } catch (err) {
-    app.log.warn({ err }, 'master/unidades: fallback sem boletos por cliente')
-
-    // MASTER: cross-tenant — fallback de clientes de todas as unidades (cl.tenant_id <> $1); só rotas masterAccess
-    const fallback = await app.db.query(
-      `
-        WITH client_lives AS (
-          SELECT
-            l.tenant_id,
-            l.cliente_id,
-	            COALESCE(SUM(COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)), 0) AS live_gmv,
-            COALESCE(SUM(${liveGmvSql('l')} * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
-          FROM lives l
-          LEFT JOIN LATERAL (
-            SELECT c.comissao_pct
-            FROM contratos c
-            WHERE c.tenant_id = l.tenant_id
-              AND c.cliente_id = l.cliente_id
-            ORDER BY CASE WHEN c.status = 'ativo' THEN 0 ELSE 1 END, c.criado_em DESC
-            LIMIT 1
-          ) ct ON TRUE
-          WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
-            AND ${activeLiveSql('l')}
-            AND COALESCE(l.encerrado_em, l.iniciado_em) < $3::date
-          GROUP BY l.tenant_id, l.cliente_id
-        )
-        SELECT
-          cl.tenant_id,
-          cl.id AS client_id,
-          cl.nome AS client_name,
-          cl.status AS client_status,
-          ct.id AS contract_id,
-          ct.status AS contract_status,
-          COALESCE(ct.comissao_pct, 0) AS contract_pct,
-          COALESCE(ct.valor_fixo, 0) AS monthly_fee,
-          COALESCE(lv.live_gmv, 0) AS live_gmv,
-          COALESCE(lv.live_revenue, 0) AS live_revenue,
-          0 AS franchisor_revenue
-        FROM clientes cl
-        LEFT JOIN LATERAL (
-          SELECT id, status, comissao_pct, valor_fixo
-          FROM contratos c
-          WHERE c.tenant_id = cl.tenant_id
-            AND c.cliente_id = cl.id
-          ORDER BY
-            CASE
-              WHEN c.status = 'ativo' THEN 0
-              WHEN c.status = 'em_analise' THEN 1
-              WHEN c.status = 'enviado' THEN 2
-              ELSE 3
-            END,
-            c.criado_em DESC
-          LIMIT 1
-        ) ct ON TRUE
-        LEFT JOIN client_lives lv
-          ON lv.tenant_id = cl.tenant_id
-         AND lv.cliente_id = cl.id
-        WHERE cl.tenant_id <> $1
-          AND ($4::uuid[] IS NULL OR cl.tenant_id = ANY($4::uuid[]))
-        ORDER BY cl.tenant_id, (COALESCE(ct.valor_fixo, 0) + COALESCE(lv.live_revenue, 0)) DESC, cl.nome ASC
-      `,
-      [masterTenantId, periodInfo.currentStart, periodInfo.currentEnd, allowedTenantIds]
-    )
-
-    return mapRows(fallback.rows)
-  }
+  return mapRows(result.rows)
 }
 
 async function fetchStalledContracts(app, masterTenantId, periodInfo, allowedTenantIds = null) {
@@ -1625,26 +1512,6 @@ export async function franqueadoRoutes(app) {
         [request.user.tenant_id, allowed]
       )
 
-      // 3. Boletos vencidos (status='vencido' OU pendente com vencimento < hoje)
-      // MASTER: cross-tenant — alerta boletos vencidos da rede (b.tenant_id <> $1); guard masterAccess
-      const boletosVencidosQuery = app.db.query(
-        `
-          SELECT t.id AS tenant_id, t.nome,
-                 COUNT(b.id)::int AS total_vencidos,
-                 COALESCE(SUM(b.valor), 0) AS valor_total
-          FROM boletos b
-          JOIN tenants t ON t.id = b.tenant_id
-          WHERE b.tenant_id <> $1
-            AND ($2::uuid[] IS NULL OR b.tenant_id = ANY($2::uuid[]))
-            AND (b.status = 'vencido'
-                 OR (b.status = 'pendente' AND b.vencimento < CURRENT_DATE))
-          GROUP BY t.id, t.nome
-          ORDER BY valor_total DESC
-          LIMIT 10
-        `,
-        [request.user.tenant_id, allowed]
-      )
-
       // 4. Contratos expirando em até 30 dias (ativos com fim próximo)
       // MASTER: cross-tenant — alerta contratos expirando da rede (c.tenant_id <> $1); guard masterAccess
       const contratosExpirandoQuery = app.db.query(
@@ -1668,17 +1535,13 @@ export async function franqueadoRoutes(app) {
         [request.user.tenant_id, allowed]
       )
 
-      const [gmvQuedaRes, semLivesRes, boletosRes, contratosRes] = await Promise.all([
+      const [gmvQuedaRes, semLivesRes, contratosRes] = await Promise.all([
         gmvQuedaQuery.catch((err) => {
           request.log.warn({ err }, 'master/alertas: falha gmv_queda')
           return { rows: [] }
         }),
         semLivesQuery.catch((err) => {
           request.log.warn({ err }, 'master/alertas: falha sem_lives')
-          return { rows: [] }
-        }),
-        boletosVencidosQuery.catch((err) => {
-          request.log.warn({ err }, 'master/alertas: falha boletos')
           return { rows: [] }
         }),
         contratosExpirandoQuery.catch((err) => {
@@ -1710,15 +1573,6 @@ export async function franqueadoRoutes(app) {
           nome: row.nome,
           tipo_alerta: 'sem_lives_7dias',
           detalhe: `Última live em ${ultima}`,
-        })
-      }
-
-      for (const row of boletosRes.rows) {
-        alertas.push({
-          tenant_id: row.tenant_id,
-          nome: row.nome,
-          tipo_alerta: 'boleto_vencido',
-          detalhe: `${toInt(row.total_vencidos)} boleto(s) vencido(s) — ${formatCurrency(toMoney(row.valor_total))} em aberto`,
         })
       }
 

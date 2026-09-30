@@ -13,7 +13,7 @@ const UUID_BODY = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 // `app.authenticate` sem `requirePapel` nasceria aberta para a automação, e
 // ninguém ia lembrar de conferir. Aqui o padrão é o contrário — nasce fechada.
 //
-// Não há DELETE nenhum. Financeiro, boletos, contratos e configurações
+// Não há DELETE nenhum. Financeiro, contratos e configurações
 // (esta última guarda as chaves do gateway de pagamento) ficam de fora.
 // De usuários, a chave só alcança os POST exatos /v1/usuarios e
 // /v1/usuarios/convidar, e o POST exato /v1/apresentadoras. As três só criam

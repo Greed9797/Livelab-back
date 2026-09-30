@@ -156,6 +156,11 @@ export const MIGRATIONS_LIST = [
   '159_marca_condicao_origem_bot.sql',
   '160_lives_cabine_opcional.sql',
   '161_lives_gestor_arquivada.sql',
+  '162_gateway_transacoes.sql',
+  '163_drop_boletos.sql',
+  '164_custos_reset_recorrentes_parcelas.sql',
+  '165_receita_titulos_vencimento_condicoes.sql',
+  '166_apresentadora_pagamentos.sql',
 ]
 
 async function ensureMigrationsTable(client) {

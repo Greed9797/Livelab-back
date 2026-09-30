@@ -13,7 +13,7 @@ chamada.
 - Cadastrar e editar marca. Editar apresentadora.
 
 O que você **não** pode: apagar qualquer coisa, criar apresentadora ou usuário,
-mexer em financeiro, boletos, contratos ou configurações. Tentar dá `403`. Não
+mexer em financeiro, contratos ou configurações. Tentar dá `403`. Não
 insista.
 
 Tudo que você cria fica marcado no sistema como **BOT** (`origem_dados = "bot"`).

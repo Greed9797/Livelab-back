@@ -294,7 +294,7 @@ export async function startConnector(liveId, tenantId, username) {
     _log?.warn({ liveId, username }, 'tiktokManager: connector caiu — liberado para o cron reconectar')
 
     // De propósito NÃO chamamos stopConnector aqui: ele grava os campos final_* como se
-    // a live tivesse terminado, e quem lê status='encerrada' é o billing_engine e o
+    // a live tivesse terminado, e quem lê status='encerrada' é o
     // recalcular_comissoes. Uma queda de rede viraria gatilho de cobrança.
   })
 

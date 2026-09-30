@@ -15,7 +15,7 @@ import { join } from 'node:path'
 
 const CRITICAL_TABLES = [
   'live_requests', 'live_apresentadores', 'cliente_metas',
-  'clientes', 'contratos', 'lives', 'cabines', 'users', 'boletos',
+  'clientes', 'contratos', 'lives', 'cabines', 'users',
   'leads', 'apresentadoras', 'pacotes', 'tenant_contact_history',
 ]
 

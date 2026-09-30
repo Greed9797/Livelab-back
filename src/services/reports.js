@@ -37,17 +37,6 @@ function fmtDate(value) {
   return new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo' }).format(d)
 }
 
-function fmtDateTime(value) {
-  if (!value) return ''
-  const d = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(d.getTime())) return String(value)
-  return new Intl.DateTimeFormat('pt-BR', {
-    timeZone: 'America/Sao_Paulo',
-    dateStyle: 'short',
-    timeStyle: 'short',
-  }).format(d)
-}
-
 // CSV escaping per RFC 4180 — quote if contains comma/quote/newline; double up quotes.
 function csvCell(value) {
   if (value === null || value === undefined) return ''
@@ -93,23 +82,6 @@ export function buildFinanceiroCSV(rows) {
     toNum(r.gmv).toFixed(2).replace('.', ','),
     toNum(r.comissao).toFixed(2).replace('.', ','),
     Math.round(toNum(r.duracao_min)),
-  ])
-  return buildCSV(headers, list)
-}
-
-/**
- * Gera CSV de boletos. Espera rows com colunas:
- *   id, cliente, valor, vencimento, status, pago_em
- */
-export function buildBoletosCSV(rows) {
-  const headers = ['id', 'cliente', 'valor', 'vencimento', 'status', 'pago_em']
-  const list = (rows ?? []).map((r) => [
-    r.id ?? '',
-    r.cliente ?? '',
-    toNum(r.valor).toFixed(2).replace('.', ','),
-    fmtDate(r.vencimento),
-    r.status ?? '',
-    r.pago_em ? fmtDateTime(r.pago_em) : '',
   ])
   return buildCSV(headers, list)
 }

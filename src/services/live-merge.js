@@ -65,14 +65,10 @@ export async function loadLiveMergeSources(db, { tenantId, liveIds, lock = false
             l.product_clicks, l.avg_viewing_duration, l.new_followers,
             l.status_operacional, l.problema, l.proxima_acao,
             l.comissao_apresentadora_pct, l.comissao_apresentadora_valor,
-            l.comissao_recalculo_pendente, l.faturado_em, l.boleto_id,
+            l.comissao_recalculo_pendente, l.faturado_em,
             l.agenda_evento_id, l.tiktok_room_id, l.studio_metrics,
             l.ads_import_batch_id, l.ads_import_row_id,
-            l.uniao_destino_id, l.uniao_id, l.uniao_desfeita_em,
-            EXISTS (
-              SELECT 1 FROM boletos b
-               WHERE b.tenant_id = l.tenant_id AND b.live_id = l.id
-            ) AS has_boleto_live_link
+            l.uniao_destino_id, l.uniao_id, l.uniao_desfeita_em
        FROM lives l
        LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
        LEFT JOIN marcas m ON m.id = l.marca_id AND m.tenant_id = l.tenant_id
@@ -172,8 +168,6 @@ function financialFingerprint({ live, sales }) {
       comissao_calculada: sumMoneyDecimal([live.comissao_calculada]),
       comissao_apresentadora_valor: sumMoneyDecimal([live.comissao_apresentadora_valor]),
       faturado_em: live.faturado_em,
-      boleto_id: live.boleto_id,
-      has_boleto_live_link: Boolean(live.has_boleto_live_link),
       uniao_id: live.uniao_id,
       uniao_desfeita_em: live.uniao_desfeita_em,
     },
@@ -350,11 +344,7 @@ export async function mergeLives(db, {
       `/* live-merge:read-destination-financial */
        SELECT id, fat_gerado, manual_gmv, manual_orders, final_orders_count,
               comissao_calculada, comissao_apresentadora_valor, faturado_em,
-              boleto_id, uniao_id, uniao_desfeita_em,
-              EXISTS (
-                SELECT 1 FROM boletos b
-                 WHERE b.tenant_id = lives.tenant_id AND b.live_id = lives.id
-              ) AS has_boleto_live_link
+              uniao_id, uniao_desfeita_em
          FROM lives WHERE tenant_id = $1::uuid AND id = $2::uuid`,
       [tenantId, destinationId],
     )
@@ -477,11 +467,7 @@ export async function undoLiveMerge(db, {
       `/* live-merge:lock-destination */
        SELECT id, fat_gerado, manual_gmv, manual_orders, final_orders_count,
               comissao_calculada, comissao_apresentadora_valor, faturado_em,
-              boleto_id, uniao_id, uniao_desfeita_em,
-              EXISTS (
-                SELECT 1 FROM boletos b
-                 WHERE b.tenant_id = lives.tenant_id AND b.live_id = lives.id
-              ) AS has_boleto_live_link
+              uniao_id, uniao_desfeita_em
          FROM lives WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE`,
       [tenantId, union.live_destino_id],
     )
@@ -500,7 +486,7 @@ export async function undoLiveMerge(db, {
         code: 'UNION_STATE_CHANGED', statusCode: 409,
       })
     }
-    if (destination.faturado_em || destination.boleto_id || destination.has_boleto_live_link) {
+    if (destination.faturado_em) {
       throw new LiveMergeError('A live consolidada possui vínculo de faturamento e não pode ser desfeita automaticamente.', {
         code: 'UNION_FINANCE_CHANGED', statusCode: 409,
       })

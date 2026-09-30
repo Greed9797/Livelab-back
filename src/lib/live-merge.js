@@ -290,7 +290,7 @@ export function buildLiveMergePreview(sources, { requestedLiveIds } = {}) {
     durationTotal += duration
 
     if (!live.marca_id) addBlocker(blockers, 'BRAND_REQUIRED', 'A live precisa ter marca.', live.id)
-    if (live.faturado_em || live.boleto_id || live.has_boleto_live_link) {
+    if (live.faturado_em) {
       addBlocker(blockers, 'FINANCIAL_LINK_EXISTS', 'A live já possui vínculo de faturamento.', live.id)
     }
     if ((live.status_operacional && live.status_operacional !== 'ok')

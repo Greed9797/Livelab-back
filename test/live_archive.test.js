@@ -214,7 +214,6 @@ describe('arquivar e excluir', () => {
     const registry = readFileSync(new URL('../apply_migrations.js', import.meta.url), 'utf8')
     expect(registry).toContain('160_lives_cabine_opcional.sql')
     expect(registry).toContain('161_lives_gestor_arquivada.sql')
-    expect(registry).not.toContain('162_')
     const migration = readFileSync(new URL('../migrations/161_lives_gestor_arquivada.sql', import.meta.url), 'utf8')
     expect(migration).toContain('ADD COLUMN IF NOT EXISTS arquivada_em')
   })

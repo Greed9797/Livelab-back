@@ -131,7 +131,6 @@
 | financeiro | GET | `/v1/financeiro/faturamento` | Sim | READ_FINANCEIRO | financeiro.js |
 | financeiro | GET | `/v1/financeiro/fluxo-caixa` | Sim | READ_FINANCEIRO | financeiro.js |
 | financeiro | POST/GET/DELETE | `/v1/financeiro/custos` | Sim | WRITE/READ_FINANCEIRO | financeiro.js |
-| boletos | GET | `/v1/boletos` | Sim | READ_BOLETOS | boletos.js |
 | contratos | GET/POST/PATCH/DELETE | `/v1/contratos` | Sim | READ/WRITE_CONTRATOS | contratos.js |
 | lives (apresentadores) | POST/DELETE/GET | `/v1/lives/:id/apresentadores` | Sim | franqueado, gerente | live_apresentadores.js |
 | apresentadoras | GET/POST/PATCH/DELETE | `/v1/apresentadoras` | Sim | READ/WRITE_APRESENTADORAS | apresentadoras.js |
@@ -149,8 +148,6 @@
 | **franqueado (público)** | GET | `/v1/public/ranking` | **Não** | — | franqueado.js:1339 |
 | **health** | GET | `/health` | **Não** (opcional token) | — | app.js:192 |
 | **webhook bio-crm** | POST | `/v1/webhooks/bio-crm` | Não (HMAC) | — | webhook_bio_crm.js |
-| **webhook appmax** | GET/POST | `/v1/webhooks/appmax/validate` | Não | — | appmax.js |
-| **webhook appmax** | POST | `/v1/webhooks/appmax` | Não (token header) | — | appmax.js |
 | onboarding | POST | `/v1/onboarding` | Sim | cliente_parceiro | onboarding.js |
 | cliente portal | GET/POST/PATCH | `/v1/cliente/*` | Sim | cliente_parceiro | cliente_portal.js |
 

@@ -112,7 +112,7 @@ export function calcularComissaoFranquia({ gmv, pct }) {
 /**
  * Combina o fixo mensal e a comissão variável de uma marca conforme o tipo de cobrança.
  * Fonte ÚNICA da regra de composição da ENTRADAS — usar em todo rollup mensal (financeiro,
- * billing, master). No SQL, espelhar com `CASE WHEN tipo='fixo_ou_comissao' THEN GREATEST(...)
+ * master). No SQL, espelhar com `CASE WHEN tipo='fixo_ou_comissao' THEN GREATEST(...)
  * ELSE fixo+comissao END`.
  *
  *   - 'fixo_mais_comissao' (default): fixoMensal + comissaoVariavel  (regra aditiva desde a 116)

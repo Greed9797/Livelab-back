@@ -87,8 +87,8 @@ export class TikTokService {
       log.error(`Erro ao buscar dados da live do tenant ${tenantId}:`, error.message)
       // null, NÃO offlineState. offlineState leva ao ramo que faz
       // UPDATE lives SET status='encerrada', e é exatamente 'encerrada' que
-      // billing_engine e recalcular_comissoes leem para gerar boleto e comissão.
-      // Encerrar live por timeout ou queda de rede seria gatilho de COBRANÇA.
+      // recalcular_comissoes lê para gerar comissão.
+      // Encerrar live por timeout ou queda de rede seria gatilho de COMISSÃO.
       // Quem chama (pollAllTenants) já trata: `if (!liveData) continue` — pula este
       // tenant nesta rodada e tenta de novo no próximo ciclo, que é a forma segura de
       // "tentar de novo" aqui.

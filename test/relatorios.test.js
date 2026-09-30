@@ -11,7 +11,6 @@ function buildApp({
   userId = USER_ID,
   liveRows = [],
   cliRows = [{ id: 'cli-1', nome: 'Cliente X', nicho: 'moda', user_id: USER_ID }],
-  boletoRows = [],
   metricsRows = [{ lives_realizadas: 0, gmv_total: 0, horas_realizadas: 0 }],
 } = {}) {
   const app = Fastify()
@@ -30,7 +29,6 @@ function buildApp({
     const queryMock = vi.fn(async (sql) => {
       if (/FROM clientes\s+WHERE id/i.test(sql)) return { rows: cliRows }
       if (/FROM lives l/i.test(sql) && /encerrada/i.test(sql)) return { rows: liveRows }
-      if (/FROM boletos/i.test(sql)) return { rows: boletoRows }
       if (/FROM lives/i.test(sql)) return { rows: liveRows }
       return { rows: metricsRows }
     })
@@ -88,37 +86,6 @@ describe('GET /v1/relatorios/financeiro/csv', () => {
       url: '/v1/relatorios/financeiro/csv?periodo=1999-13',
     })
     expect(res.statusCode).toBe(400)
-    await app.close()
-  })
-})
-
-describe('GET /v1/relatorios/boletos/csv', () => {
-  it('200 csv com filter status=pendente', async () => {
-    const app = buildApp({
-      papel: 'franqueado',
-      boletoRows: [
-        { id: 'b1', cliente: 'X', valor: 99.9, vencimento: '2026-05-15', status: 'pendente', pago_em: null },
-      ],
-    })
-    await app.register(relatoriosRoutes)
-    const res = await app.inject({
-      method: 'GET',
-      url: '/v1/relatorios/boletos/csv?periodo=2026-05&status=pendente',
-    })
-    expect(res.statusCode).toBe(200)
-    expect(res.headers['content-type']).toContain('text/csv')
-    expect(res.headers['content-disposition']).toContain('boletos-pendente-2026-05')
-    await app.close()
-  })
-
-  it('403 quando papel sem READ_BOLETOS (apresentador)', async () => {
-    const app = buildApp({ papel: 'apresentador' })
-    await app.register(relatoriosRoutes)
-    const res = await app.inject({
-      method: 'GET',
-      url: '/v1/relatorios/boletos/csv?periodo=2026-05',
-    })
-    expect(res.statusCode).toBe(403)
     await app.close()
   })
 })

@@ -441,10 +441,7 @@ export async function homeRoutes(app) {
           (SELECT COUNT(*) FROM contratos
            WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
              AND status = 'em_analise') AS contratos_analise,
-          (SELECT COUNT(*) FROM boletos
-           WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-             AND (status = 'vencido'
-              OR (status = 'pendente' AND vencimento < NOW()))) AS boletos_vencidos,
+          0::int AS boletos_vencidos, -- legado: boletos removidos; campo mantido em 0 p/ compat do front
           (SELECT COUNT(*) FROM leads
            WHERE franqueadora_id = $1
              AND pego_por IS NULL

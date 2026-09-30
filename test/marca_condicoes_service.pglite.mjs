@@ -28,7 +28,7 @@ await db.exec(`
   CREATE TABLE lives(
     id uuid PRIMARY KEY, tenant_id uuid, marca_id uuid, iniciado_em timestamptz,
     fat_gerado numeric(15,2), comissao_calculada numeric(15,2), atualizado_em timestamptz,
-    faturado_em timestamptz, boleto_id uuid, uniao_destino_id uuid, uniao_desfeita_em timestamptz
+    faturado_em timestamptz, uniao_destino_id uuid, uniao_desfeita_em timestamptz
   );
   CREATE TABLE vendas_atribuidas(
     id uuid PRIMARY KEY, tenant_id uuid, marca_id uuid, data date, gmv numeric(15,2),
@@ -57,6 +57,7 @@ await db.exec(`
            ('${id(8)}','${tenant}','${marca}','2026-10-15',999,'reprovada',1,1);
 `)
 await db.exec(await readFile(new URL('../migrations/151_marca_condicoes_comerciais.sql', import.meta.url), 'utf8'))
+await db.exec(await readFile(new URL('../migrations/165_receita_titulos_vencimento_condicoes.sql', import.meta.url), 'utf8'))
 await db.query(`SELECT set_config('app.tenant_id',$1,false)`, [tenant])
 
 const preview = await preverCondicaoMarca(db, { tenantId: tenant, marcaId: marca, proposta: proposal })

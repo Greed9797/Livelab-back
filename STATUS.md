@@ -34,7 +34,7 @@
 ### Aplicado
 
 **P1 RLS hardening** (13/27 rotas com `WHERE tenant_id` explícito):
-- analytics, home, clientes, boletos, apresentadoras, cabines, contratos, financeiro, recomendacoes, excelencia, pacotes, cliente_portal, solicitacoes
+- analytics, home, clientes, apresentadoras, cabines, contratos, financeiro, recomendacoes, excelencia, pacotes, cliente_portal, solicitacoes
 - Migration `060_rls_with_check.sql` aplicada — todas policies agora com WITH CHECK
 
 **P2 Testing infra**:
@@ -82,7 +82,7 @@
 ### ✅ P1 — RLS hardening (completo)
 
 - 13/27 rotas com `WHERE tenant_id` explícito + WITH CHECK em policies
-- Rotas: analytics, home, clientes, boletos, apresentadoras, cabines, contratos, financeiro, recomendacoes, excelencia, pacotes, cliente_portal, solicitacoes
+- Rotas: analytics, home, clientes, apresentadoras, cabines, contratos, financeiro, recomendacoes, excelencia, pacotes, cliente_portal, solicitacoes
 - 14 rotas restantes em Wave 3 (cliente_dashboard, franqueado, leads, manuais, onboarding, tenants, tiktok, etc.)
 
 ### 🟡 P2-P4 — Backlog (Wave 2, ~10h)

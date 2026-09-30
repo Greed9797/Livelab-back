@@ -4,7 +4,7 @@
 // o role do Supabase tem BYPASSRLS, então as policies existem mas nunca são
 // exercidas. Aqui criamos um role NOBYPASSRLS de verdade e provamos, contra um
 // banco real com todas as migrations aplicadas, que o tenant A não enxerga nada
-// do tenant B (e vice-versa) em lives, vendas_atribuidas e boletos.
+// do tenant B (e vice-versa) em lives, vendas_atribuidas e marcas.
 //
 // COMO RODAR
 // ----------
@@ -101,17 +101,10 @@ suite('RLS: isolamento entre tenants com role NOBYPASSRLS', () => {
          VALUES ($1, 'live', $2, $3, CURRENT_DATE, 1000) RETURNING id`,
         [tenantId, live.rows[0].id, marca.rows[0].id],
       )
-      const boleto = await admin.query(
-        `INSERT INTO boletos (tenant_id, cliente_id, tipo, valor, vencimento, competencia, idempotency_key)
-         VALUES ($1, $2, 'royalties', 500, CURRENT_DATE, CURRENT_DATE, $3) RETURNING id`,
-        [tenantId, cliente.rows[0].id, `rls-test-${t}-${Date.now()}`],
-      )
-
       ids[t] = {
         tenantId,
         liveId: live.rows[0].id,
         vendaId: venda.rows[0].id,
-        boletoId: boleto.rows[0].id,
         marcaId: marca.rows[0].id,
       }
     }
@@ -126,7 +119,6 @@ suite('RLS: isolamento entre tenants com role NOBYPASSRLS', () => {
     for (const t of ['a', 'b']) {
       if (!ids[t]) continue
       await admin.query(`DELETE FROM vendas_atribuidas WHERE tenant_id = $1`, [ids[t].tenantId])
-      await admin.query(`DELETE FROM boletos WHERE tenant_id = $1`, [ids[t].tenantId])
       await admin.query(`DELETE FROM lives WHERE tenant_id = $1`, [ids[t].tenantId])
       await admin.query(`DELETE FROM marcas WHERE tenant_id = $1`, [ids[t].tenantId])
       await admin.query(`DELETE FROM cabines WHERE tenant_id = $1`, [ids[t].tenantId])
@@ -152,7 +144,7 @@ suite('RLS: isolamento entre tenants com role NOBYPASSRLS', () => {
     const r = await probe.query(
       `SELECT tablename, rowsecurity FROM pg_tables
         WHERE schemaname = 'public'
-          AND tablename IN ('lives', 'vendas_atribuidas', 'boletos')`,
+          AND tablename IN ('lives', 'vendas_atribuidas', 'marcas')`,
     )
     expect(r.rows).toHaveLength(3)
     for (const row of r.rows) expect(row.rowsecurity).toBe(true)
@@ -165,7 +157,7 @@ suite('RLS: isolamento entre tenants com role NOBYPASSRLS', () => {
       for (const [tabela, campo] of [
         ['lives', 'liveId'],
         ['vendas_atribuidas', 'vendaId'],
-        ['boletos', 'boletoId'],
+        ['marcas', 'marcaId'],
       ]) {
         const visiveis = await probe.query(`SELECT id, tenant_id FROM ${tabela}`)
 
@@ -190,15 +182,15 @@ suite('RLS: isolamento entre tenants com role NOBYPASSRLS', () => {
   it('UPDATE/DELETE não alcançam linhas de outro tenant', async () => {
     await probe.query(`SELECT set_config('app.tenant_id', $1, false)`, [ids.a.tenantId])
 
-    const upd = await probe.query(`UPDATE boletos SET valor = 1 WHERE id = $1`, [ids.b.boletoId])
+    const upd = await probe.query(`UPDATE marcas SET nome = 'invadida' WHERE id = $1`, [ids.b.marcaId])
     expect(upd.rowCount).toBe(0)
 
     const del = await probe.query(`DELETE FROM lives WHERE id = $1`, [ids.b.liveId])
     expect(del.rowCount).toBe(0)
 
     // Confirma via admin que a linha do tenant B seguiu intacta.
-    const check = await admin.query(`SELECT valor FROM boletos WHERE id = $1`, [ids.b.boletoId])
-    expect(Number(check.rows[0].valor)).toBe(500)
+    const check = await admin.query(`SELECT nome FROM marcas WHERE id = $1`, [ids.b.marcaId])
+    expect(check.rows[0].nome).toBe('Marca RLS B')
   })
 
   it('INSERT com tenant_id de outro tenant é rejeitado (WITH CHECK)', async () => {
@@ -222,7 +214,7 @@ suite('RLS: isolamento entre tenants com role NOBYPASSRLS', () => {
     const virgem = new pg.Client({ connectionString: probeUrl() })
     await virgem.connect()
     try {
-      for (const tabela of ['lives', 'vendas_atribuidas', 'boletos']) {
+      for (const tabela of ['lives', 'vendas_atribuidas', 'marcas']) {
         const r = await virgem.query(`SELECT COUNT(*)::int AS n FROM ${tabela}`)
         expect(r.rows[0].n).toBe(0)
       }

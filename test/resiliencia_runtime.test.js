@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { esperarDesconexao } from '../src/lib/sse.js'
 import { notify } from '../src/services/mailer.js'
-import { runBillingTick } from '../src/jobs/billing_engine.js'
 
 /**
  * Cada teste aqui corresponde a um jeito concreto de o servidor cair, pendurar ou
@@ -77,55 +76,5 @@ describe('mailer.notify — chamada posicional era silenciosa', () => {
     // tenant, não bug de programação — não pode derrubar o request.
     const r = await notify({ template: 'x' })
     expect(r).toMatchObject({ ok: false, skipped: true })
-  })
-})
-
-describe('billing engine — um tenant quebrado não pode parar o faturamento', () => {
-  // Quatro defeitos moravam neste callback. O pior: connect() fora do try deixava
-  // _billingRunning=true para sempre e o faturamento morria em silêncio até o próximo
-  // deploy. Nenhuma correção aqui introduz retry — repetir faturamento é repetir cobrança.
-  const fakePool = ({ tenants, falhaNoConnect = false, quebrarUnlock = false }) => {
-    const client = {
-      query: vi.fn(async (sql) => {
-        if (/pg_try_advisory_lock/.test(sql)) return { rows: [{ acquired: true }] }
-        if (/pg_advisory_unlock/.test(sql)) {
-          if (quebrarUnlock) throw new Error('unlock falhou')
-          return { rows: [{}] }
-        }
-        return { rows: [] }
-      }),
-      release: vi.fn(),
-    }
-    return {
-      client,
-      connect: async () => {
-        if (falhaNoConnect) throw new Error('EMAXCONNSESSION: max clients reached')
-        return client
-      },
-      query: async (sql) => (/FROM tenants/.test(sql) ? { rows: tenants } : { rows: [] }),
-    }
-  }
-
-  it('conexão indisponível propaga o erro em vez de travar a flag', async () => {
-    const pool = fakePool({ tenants: [], falhaNoConnect: true })
-    // O que importa é o callback do cron ter um finally que reseta _billingRunning.
-    // Aqui provamos que a falha SAI (antes ela sumia junto com a flag presa).
-    await expect(runBillingTick(pool, { hoje: new Date('2026-08-01T05:00:00Z') }))
-      .rejects.toThrow(/EMAXCONNSESSION/)
-  })
-
-  it('unlock que falha devolve a conexão COM erro, para o pg destruí-la', async () => {
-    // Sem isso a conexão volta ao pool ainda segurando o advisory lock; com
-    // idleTimeout de 10min ela sobrevive e o faturamento nunca mais roda.
-    const pool = fakePool({ tenants: [], quebrarUnlock: true })
-    await runBillingTick(pool, { hoje: new Date('2026-08-01T05:00:00Z') })
-    expect(pool.client.release).toHaveBeenCalledTimes(1)
-    expect(pool.client.release.mock.calls[0][0]).toBeInstanceOf(Error)
-  })
-
-  it('fora do dia 1 ou 16 não fatura ninguém', async () => {
-    const pool = fakePool({ tenants: [{ id: 'a' }, { id: 'b' }] })
-    const r = await runBillingTick(pool, { hoje: new Date('2026-08-07T05:00:00Z') })
-    expect(r).toMatchObject({ rodou: false, total: 0 })
   })
 })

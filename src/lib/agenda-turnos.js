@@ -82,7 +82,7 @@ export async function seedRateioPlanejado(db, { tenantId, liveId, agendaEventoId
     // seguinte falha com 25P02 ate um ROLLBACK — entao um catch nu aqui nao salvaria
     // ninguem: o INSERT de fallback logo abaixo estouraria e derrubaria a abertura da
     // live inteira, exatamente o que este seed promete nunca fazer. Mesmo padrao de
-    // "best effort dentro de transacao" ja usado em billing_engine.js e analytics.js.
+    // "best effort dentro de transacao" ja usado em analytics.js.
     //
     // O SAVEPOINT so falha fora de transacao (25P01); nesse caso nao ha o que desfazer e
     // a leitura segue sem ele.

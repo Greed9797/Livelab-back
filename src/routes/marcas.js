@@ -10,7 +10,13 @@ import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
-import { listarCondicoesMarca, preverCondicaoMarca, confirmarCondicaoMarca } from '../services/marca-condicoes.js'
+import {
+  atualizarVencimentoCondicao,
+  confirmarCondicaoMarca,
+  listarCondicoesMarca,
+  preverCondicaoMarca,
+} from '../services/marca-condicoes.js'
+import { vencimentoCondicaoSchema } from '../lib/marca-condicoes.js'
 
 // TTL longo de propósito: a invalidação por evento (writes) é quem mantém a
 // listagem fresca. Este TTL é só o limite de quanto um dado poderia ficar velho
@@ -273,12 +279,18 @@ export async function marcasRoutes(app) {
                 mcc.tipo_cobranca AS comercial_tipo_cobranca,
                 mcc.fixo_confirmado AS comercial_fixo_confirmado,
                 mcc.comissao_confirmada AS comercial_comissao_confirmada,
-                mcc.origem AS comercial_origem
+                mcc.origem AS comercial_origem,
+                mcc.fixo_vencimento_dia AS comercial_fixo_vencimento_dia,
+                mcc.fixo_vencimento_mes_offset AS comercial_fixo_vencimento_mes_offset,
+                mcc.comissao_vencimento_dia AS comercial_comissao_vencimento_dia,
+                mcc.comissao_vencimento_mes_offset AS comercial_comissao_vencimento_mes_offset
          FROM marcas m
          LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
          LEFT JOIN LATERAL (
            SELECT id, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
-                  fixo_confirmado, comissao_confirmada, origem
+                  fixo_confirmado, comissao_confirmada, origem,
+                  fixo_vencimento_dia, fixo_vencimento_mes_offset,
+                  comissao_vencimento_dia, comissao_vencimento_mes_offset
              FROM marca_condicoes_comerciais
             WHERE tenant_id = m.tenant_id AND marca_id = m.id
               AND inicio_vigencia <= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
@@ -521,6 +533,39 @@ export async function marcasRoutes(app) {
     })
   })
 
+  // Ajusta só o vencimento (dia 1-31 e offset 0|1 de fixo e comissão) de uma versão
+  // existente. Valores monetários continuam exigindo nova condição com vigência.
+  app.patch('/v1/marcas/:id/condicoes/:condicaoId/vencimento', { preHandler: writeAccess }, async (request, reply) => {
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    if (!uuidRe.test(request.params.id) || !uuidRe.test(request.params.condicaoId)) {
+      return reply.code(404).send({ code: 'CONDITION_NOT_FOUND', error: 'Condição comercial não encontrada' })
+    }
+    const parsed = vencimentoCondicaoSchema.strict().safeParse(request.body ?? {})
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]
+      return reply.code(400).send({
+        code: 'INVALID_MARCA_CONDITION',
+        error: issue.path.length ? `${issue.path.join('.')} ${issue.message}` : issue.message,
+      })
+    }
+    const { tenant_id, sub } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        const condition = await atualizarVencimentoCondicao(db, {
+          tenantId: tenant_id,
+          marcaId: request.params.id,
+          condicaoId: request.params.condicaoId,
+          vencimento: parsed.data,
+          actorUserId: sub ?? null,
+        })
+        invalidateTenant(tenant_id, LISTAGEM_NAMESPACES)
+        return reply.send(condition)
+      } catch (error) {
+        return responderErroCondicao(reply, error)
+      }
+    })
+  })
+
   app.get('/v1/marcas/:id/apresentadoras', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
@@ -639,12 +684,18 @@ export async function marcasRoutes(app) {
                 mcc.tipo_cobranca AS comercial_tipo_cobranca,
                 mcc.fixo_confirmado AS comercial_fixo_confirmado,
                 mcc.comissao_confirmada AS comercial_comissao_confirmada,
-                mcc.origem AS comercial_origem
+                mcc.origem AS comercial_origem,
+                mcc.fixo_vencimento_dia AS comercial_fixo_vencimento_dia,
+                mcc.fixo_vencimento_mes_offset AS comercial_fixo_vencimento_mes_offset,
+                mcc.comissao_vencimento_dia AS comercial_comissao_vencimento_dia,
+                mcc.comissao_vencimento_mes_offset AS comercial_comissao_vencimento_mes_offset
          FROM marcas m
          LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
          LEFT JOIN LATERAL (
            SELECT id, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
-                  fixo_confirmado, comissao_confirmada, origem
+                  fixo_confirmado, comissao_confirmada, origem,
+                  fixo_vencimento_dia, fixo_vencimento_mes_offset,
+                  comissao_vencimento_dia, comissao_vencimento_mes_offset
              FROM marca_condicoes_comerciais
             WHERE tenant_id = m.tenant_id AND marca_id = m.id
               AND inicio_vigencia <= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date

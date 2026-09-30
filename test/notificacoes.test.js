@@ -54,19 +54,6 @@ describe('mailer service', () => {
       expect(html).toContain('01:00:00')
     })
 
-    it('renders boleto_vencido with money format', () => {
-      const { subject, html } = renderTemplate('boleto_vencido', {
-        cliente_nome: 'João',
-        valor: 99.9,
-        vencimento: '2026-01-01',
-        descricao: 'Mensalidade',
-        url: 'https://pay.test/123',
-      })
-      expect(subject).toContain('99,90')
-      expect(html).toContain('João')
-      expect(html).toContain('https://pay.test/123')
-    })
-
     it('renders contrato_aprovado and contrato_reprovado', () => {
       const aprovado = renderTemplate('contrato_aprovado', { cliente_nome: 'X', score: 80, risco: 'baixo' })
       const reprovado = renderTemplate('contrato_reprovado', { cliente_nome: 'Y', score: 30, risco: 'alto', motivo: 'teste' })
@@ -137,7 +124,7 @@ describe('GET /v1/notificacoes/log', () => {
 
     const res = await app.inject({
       method: 'GET',
-      url: '/v1/notificacoes/log?tipo=boleto_vencido&desde=2026-01-01&pagina=2',
+      url: '/v1/notificacoes/log?tipo=live_encerrada&desde=2026-01-01&pagina=2',
     })
     expect(res.statusCode).toBe(200)
     const body = res.json()

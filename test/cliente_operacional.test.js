@@ -84,7 +84,6 @@ describe('GET /v1/cliente/financeiro', () => {
         expect(s).not.toMatch(/SUM\(\s*l\.fat_gerado\s*\)/)
         return { rows: [{ gmv_mes: gmvMes, lives_mes: 1, pedidos: 0 }] }
       }
-      if (s.includes('FROM boletos')) return { rows: [] }
       return { rows: [] }
     }))
     await app.register(clienteInsightsRoutes)

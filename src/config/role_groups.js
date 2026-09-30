@@ -26,13 +26,6 @@ const ADMIN_COMERCIAL = [...ADMIN, 'gerente_comercial']
 export const READ_FINANCEIRO = [...ADMIN, 'financeiro', 'financeiro_readonly', 'auditor']
 export const WRITE_FINANCEIRO = [...ADMIN, 'financeiro']
 
-// ─── BOLETOS ─────────────────────────────────────────────────────────
-export const READ_BOLETOS = [
-  ...ADMIN,
-  'financeiro', 'financeiro_readonly', 'auditor', 'suporte',
-]
-export const WRITE_BOLETOS = [...ADMIN, 'financeiro']
-
 // ─── CONTRATOS ───────────────────────────────────────────────────────
 export const READ_CONTRATOS = [
   ...ADMIN, 'auditor', 'financeiro_readonly', 'comercial_readonly',

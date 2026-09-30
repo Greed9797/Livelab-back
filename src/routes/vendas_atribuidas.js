@@ -161,7 +161,7 @@ async function movimentoFinanceiroFechado(db, venda, tenantId) {
   const result = await db.query(
     `SELECT 1 FROM lives
       WHERE id = $1::uuid AND tenant_id = $2::uuid
-        AND (faturado_em IS NOT NULL OR boleto_id IS NOT NULL)
+        AND faturado_em IS NOT NULL
       LIMIT 1`,
     [venda.origem_id, tenantId],
   )

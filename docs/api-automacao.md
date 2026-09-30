@@ -33,7 +33,7 @@ Respostas de recusa:
 ## O que a chave alcança
 
 Só o que está nesta lista. Qualquer outra rota responde 403, inclusive `DELETE`
-de qualquer coisa, financeiro, boletos, contratos, usuários e configurações.
+de qualquer coisa, financeiro, contratos, usuários e configurações.
 
 | Método | Rota | Para quê |
 |---|---|---|

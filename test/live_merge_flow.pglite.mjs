@@ -67,7 +67,7 @@ await db.exec(`
     new_followers int, status_operacional text, problema text, proxima_acao text,
     comissao_apresentadora_pct numeric(5,2), comissao_apresentadora_valor numeric(15,2),
     comissao_recalculo_pendente boolean DEFAULT false, faturado_em timestamptz,
-    boleto_id uuid, agenda_evento_id uuid, tiktok_room_id text, studio_metrics jsonb,
+    agenda_evento_id uuid, tiktok_room_id text, studio_metrics jsonb,
     ads_import_batch_id uuid, ads_import_row_id uuid, atualizado_em timestamptz
   );
   CREATE TABLE apresentadoras(
@@ -92,7 +92,6 @@ await db.exec(`
     tenant_id, origem, origem_id,
     COALESCE(apresentadora_id,'00000000-0000-0000-0000-000000000000'::uuid)
   );
-  CREATE TABLE boletos(id uuid PRIMARY KEY, tenant_id uuid, live_id uuid);
 `)
 await db.exec(await readFile(new URL('../migrations/148_lives_origem_apresentadora.sql', import.meta.url), 'utf8'))
 await db.exec(await readFile(new URL('../migrations/150_live_unioes.sql', import.meta.url), 'utf8'))
@@ -348,17 +347,15 @@ assert.equal(sourceHistory.id, unionId)
 assert.equal(sourceHistory.ativo, true)
 assert.equal(destinationHistory.id, unionId)
 
-// A billing row can be linked directly through boletos.live_id without the
-// denormalized columns on lives having been filled yet. Undo must still stop.
-const directBoletoId = id(60)
-await db.query('INSERT INTO boletos(id,tenant_id,live_id) VALUES ($1,$2,$3)', [directBoletoId, tenant, destinationId])
+// Um vínculo de faturamento (faturado_em) na live consolidada impede o undo.
+await db.query('UPDATE lives SET faturado_em=now() WHERE tenant_id=$1 AND id=$2', [tenant, destinationId])
 await assert.rejects(
   undoLiveMerge(db, {
-    tenantId: tenant, userId: manager, unionId, requestId: id(61), motivo: 'Tentativa após vínculo direto de boleto',
+    tenantId: tenant, userId: manager, unionId, requestId: id(61), motivo: 'Tentativa após vínculo de faturamento',
   }),
   (error) => error.code === 'UNION_FINANCE_CHANGED' && error.statusCode === 409,
 )
-await db.query('DELETE FROM boletos WHERE id=$1', [directBoletoId])
+await db.query('UPDATE lives SET faturado_em=NULL WHERE tenant_id=$1 AND id=$2', [tenant, destinationId])
 
 const undone = await undoLiveMerge(db, {
   tenantId: tenant, userId: manager, unionId, requestId: undoRequestId, motivo: 'Revisão operacional',
@@ -395,7 +392,7 @@ console.log(JSON.stringify({
     'original manager preserved',
     'idempotent retry', 'stale preview', 'atomic rollback after failure injection',
     'frozen source and destination history', 'history lookup', 'undo and exact restoration',
-    'management route permission', 'pending record excluded', 'direct billing link blocks undo',
+    'management route permission', 'pending record excluded', 'billing link blocks undo',
   ],
 }))
 

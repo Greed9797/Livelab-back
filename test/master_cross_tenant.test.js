@@ -166,7 +166,7 @@ describe('GET /v1/master/unidade/:tenantId/historico', () => {
 
 describe('GET /v1/master/alertas', () => {
   it('200 array (vazio quando nenhum alerta)', async () => {
-    // Todas as 4 queries retornam vazio
+    // Todas as 3 queries retornam vazio
     const queryMock = vi.fn().mockResolvedValue({ rows: [] })
     const { app } = buildApp({ queryImpl: queryMock })
     await app.register(franqueadoRoutes)
@@ -176,7 +176,7 @@ describe('GET /v1/master/alertas', () => {
     await app.close()
   })
 
-  it('agrega 4 tipos de alertas', async () => {
+  it('agrega 3 tipos de alertas', async () => {
     let call = 0
     const queryMock = vi.fn(async () => {
       call++
@@ -194,11 +194,6 @@ describe('GET /v1/master/alertas', () => {
       }
       if (call === 3) {
         return {
-          rows: [{ tenant_id: 't3', nome: 'C', total_vencidos: 2, valor_total: 500 }],
-        }
-      }
-      if (call === 4) {
-        return {
           rows: [{ tenant_id: 't4', nome: 'D', contrato_id: 'c1', cliente_nome: 'Cli', fim: '2026-06-01' }],
         }
       }
@@ -212,7 +207,7 @@ describe('GET /v1/master/alertas', () => {
     const tipos = body.map((a) => a.tipo_alerta)
     expect(tipos).toContain('gmv_queda_30pct')
     expect(tipos).toContain('sem_lives_7dias')
-    expect(tipos).toContain('boleto_vencido')
+    expect(tipos).not.toContain('boleto_vencido')
     expect(tipos).toContain('contrato_expirando_30dias')
     await app.close()
   })

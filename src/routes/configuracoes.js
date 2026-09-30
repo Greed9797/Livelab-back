@@ -21,7 +21,6 @@ const configSchema = z.object({
   // F1: flags de notificação por e-mail (Resend)
   notif_email_ativo:    z.boolean().optional(),
   notif_live_meta:      z.boolean().optional(),
-  notif_boleto_vencido: z.boolean().optional(),
   notif_lead_novo:      z.boolean().optional(),
   notif_contrato:       z.boolean().optional(),
 })
@@ -107,7 +106,7 @@ export async function configuracoesRoutes(app) {
                gateway_api_key, gateway_wallet_id,
                tiktok_access_token, tiktok_shop_id,
                meta_diaria_gmv,
-               notif_email_ativo, notif_live_meta, notif_boleto_vencido,
+               notif_email_ativo, notif_live_meta,
                notif_lead_novo, notif_contrato
         FROM tenants WHERE id = $1
       `, [tenant_id])
@@ -135,7 +134,7 @@ export async function configuracoesRoutes(app) {
         gateway_api_key_hidden: hideKey(conf.gateway_api_key),
         has_gateway:            !!conf.gateway_api_key,
         gateway_wallet_id:      conf.gateway_wallet_id,
-        gateway_provider:       'appmax',
+        gateway_provider:       null, // Appmax removido
         // LEGACY ASAAS — manter pra compat 6 meses (frontend antigo ainda referencia)
         asaas_api_key_hidden:   hideKey(conf.gateway_api_key),
         has_asaas:              !!conf.gateway_api_key,
@@ -146,7 +145,6 @@ export async function configuracoesRoutes(app) {
         meta_diaria_gmv:        conf.meta_diaria_gmv != null ? Number(conf.meta_diaria_gmv) : null,
         notif_email_ativo:      conf.notif_email_ativo ?? true,
         notif_live_meta:        conf.notif_live_meta ?? true,
-        notif_boleto_vencido:   conf.notif_boleto_vencido ?? true,
         notif_lead_novo:        conf.notif_lead_novo ?? true,
         notif_contrato:         conf.notif_contrato ?? true,
         contact_history:        histRows.rows,
@@ -243,7 +241,6 @@ export async function configuracoesRoutes(app) {
         // F1: flags de notificação
         if (data.notif_email_ativo !== undefined)    { updates.push(`notif_email_ativo = $${paramIdx++}`);    values.push(data.notif_email_ativo) }
         if (data.notif_live_meta !== undefined)      { updates.push(`notif_live_meta = $${paramIdx++}`);      values.push(data.notif_live_meta) }
-        if (data.notif_boleto_vencido !== undefined) { updates.push(`notif_boleto_vencido = $${paramIdx++}`); values.push(data.notif_boleto_vencido) }
         if (data.notif_lead_novo !== undefined)      { updates.push(`notif_lead_novo = $${paramIdx++}`);      values.push(data.notif_lead_novo) }
         if (data.notif_contrato !== undefined)       { updates.push(`notif_contrato = $${paramIdx++}`);       values.push(data.notif_contrato) }
 

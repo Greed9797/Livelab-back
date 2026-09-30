@@ -8,6 +8,7 @@
 //   PATCH  /v1/financeiro/custos/:id                 (aceita id virtual rec:<uuid>:<YYYY-MM>)
 //   PATCH  /v1/financeiro/custos/:id/pagar | /desfazer
 //   DELETE /v1/financeiro/custos/:id?escopo=um|grupo|futuras
+//   POST   /v1/financeiro/custos/importar            (carga em massa idempotente; dry_run)
 //   GET/POST /v1/financeiro/custos-recorrentes ; PATCH/DELETE .../:id
 
 import { z } from 'zod'
@@ -92,6 +93,40 @@ const recorrentePatchSchema = z.object({
 
 const UUID = z.string().uuid()
 
+// ─── Importação em massa ────────────────────────────────────────────────────
+export const IMPORTAR_MAX_ITENS = 200
+
+const importRecorrenteSchema = z.object({
+  nome: z.string().trim().min(1),
+  descricao: z.string().nullish(),
+  grupo: grupoSchema,
+  valor: moneySchema,
+  dia_vencimento: z.number().int().min(1).max(31),
+  mes_offset: z.number().int().min(0).max(1).default(0),
+  inicio: dataSchema,
+  fim: dataSchema.nullable(),
+}).refine((d) => !d.fim || d.fim >= d.inicio, { message: 'fim deve ser >= inicio' })
+
+const importPontualSchema = z.object({
+  descricao: z.string().trim().min(1),
+  grupo: grupoSchema,
+  valor: positivo,
+  data_vencimento: dataSchema,
+  competencia: competenciaSchema,
+  parcela_num: z.number().int().min(1).max(120).optional(),
+  parcelas_total: z.number().int().min(1).max(120).optional(),
+}).refine((d) => (d.parcela_num == null) === (d.parcelas_total == null), { message: 'Informe parcela_num e parcelas_total juntos' })
+  .refine((d) => d.parcela_num == null || d.parcela_num <= d.parcelas_total, { message: 'parcela_num deve ser <= parcelas_total' })
+
+export const importarSchema = z.object({
+  recorrentes: z.array(importRecorrenteSchema).max(IMPORTAR_MAX_ITENS, `Máximo de ${IMPORTAR_MAX_ITENS} recorrentes`).default([]),
+  pontuais: z.array(importPontualSchema).max(IMPORTAR_MAX_ITENS, `Máximo de ${IMPORTAR_MAX_ITENS} pontuais`).default([]),
+  dry_run: z.boolean().default(false),
+})
+
+// "2 iPhones — parcela 1/4" / "Notebook (2/10)" → base comum para agrupar parcelas.
+const baseParcela = (desc) => desc.replace(/\s*[—–-]?\s*(parcela\s*)?\(?\d+\/\d+\)?\s*$/i, '').trim().toLowerCase()
+
 function resolverPeriodoQuery(query, hoje) {
   const inicio = query.inicio ?? query.mes ?? hoje.slice(0, 7)
   const fim = query.fim ?? query.mes ?? inicio
@@ -175,6 +210,92 @@ export async function financeiroCustosRoutes(app) {
       }
       auditar(app, request, 'financeiro.custo_parcelado', 'custo', grupoId, { descricao: d.descricao, parcelas: d.parcelas })
       return reply.code(201).send({ parcela_grupo_id: grupoId, parcelas: itens })
+    })
+  })
+
+  // Idempotente: item já existente (pela chave natural) é ignorado, nunca alterado.
+  app.post('/v1/financeiro/custos/importar', WRITE, async (request, reply) => {
+    const parsed = importarSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id } = request.user
+    const { recorrentes, pontuais, dry_run: dryRun } = parsed.data
+    return app.withTenant(tenant_id, async (db) => {
+      const relRec = { criados: 0, ignorados: 0, itens: [] }
+      const relPon = { criados: 0, ignorados: 0, itens: [] }
+      const vistos = new Set()
+
+      for (const d of recorrentes) {
+        const chave = `r|${d.nome.toLowerCase()}|${d.grupo}|${d.dia_vencimento}`
+        let existe = vistos.has(chave)
+        if (!existe) {
+          const r = await db.query(
+            `SELECT id FROM custos_recorrentes
+              WHERE tenant_id = $1::uuid AND lower(nome) = lower($2) AND grupo = $3 AND dia_vencimento = $4
+              LIMIT 1`,
+            [tenant_id, d.nome, d.grupo, d.dia_vencimento],
+          )
+          existe = r.rows.length > 0
+        }
+        vistos.add(chave)
+        if (existe) { relRec.ignorados++; relRec.itens.push({ nome: d.nome, acao: 'ignorado' }); continue }
+        if (!dryRun) {
+          await db.query(
+            `INSERT INTO custos_recorrentes (tenant_id, nome, descricao, grupo, valor, dia_vencimento, mes_offset, inicio, fim, ativo)
+             VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8::date,$9::date,true)`,
+            [tenant_id, d.nome, d.descricao ?? null, d.grupo, r2(d.valor), d.dia_vencimento, d.mes_offset, d.inicio, d.fim ?? null],
+          )
+        }
+        relRec.criados++
+        relRec.itens.push({ nome: d.nome, acao: 'criado' })
+      }
+
+      const grupos = new Map()
+      for (const d of pontuais) {
+        const valor = r2(d.valor)
+        const chave = `p|${d.descricao}|${d.data_vencimento}|${valor}`
+        let existe = vistos.has(chave)
+        if (!existe) {
+          const r = await db.query(
+            `SELECT id FROM custos
+              WHERE tenant_id = $1::uuid AND descricao = $2 AND data_vencimento = $3::date AND valor = $4::numeric
+              LIMIT 1`,
+            [tenant_id, d.descricao, d.data_vencimento, valor],
+          )
+          existe = r.rows.length > 0
+        }
+        vistos.add(chave)
+        if (existe) { relPon.ignorados++; relPon.itens.push({ descricao: d.descricao, acao: 'ignorado' }); continue }
+        if (!dryRun) {
+          const competencia = normComp(d.competencia)
+          if (d.parcela_num != null) {
+            const gk = `${baseParcela(d.descricao)}|${d.grupo}|${d.parcelas_total}`
+            if (!grupos.has(gk)) grupos.set(gk, (await db.query('SELECT gen_random_uuid() AS id')).rows[0].id)
+            await db.query(
+              `INSERT INTO custos (tenant_id, descricao, valor, tipo, grupo, competencia, data_vencimento,
+                                   parcela_grupo_id, parcela_num, parcelas_total)
+               VALUES ($1::uuid,$2,$3,'parcela',$4,$5::date,$6::date,$7::uuid,$8,$9)`,
+              [tenant_id, d.descricao, valor, d.grupo, competencia, d.data_vencimento, grupos.get(gk), d.parcela_num, d.parcelas_total],
+            )
+          } else {
+            await db.query(
+              `INSERT INTO custos (tenant_id, descricao, valor, tipo, grupo, competencia, data_vencimento)
+               VALUES ($1::uuid,$2,$3,'outros',$4,$5::date,$6::date)`,
+              [tenant_id, d.descricao, valor, d.grupo, competencia, d.data_vencimento],
+            )
+          }
+        }
+        relPon.criados++
+        relPon.itens.push({ descricao: d.descricao, acao: 'criado' })
+      }
+
+      const res = { dry_run: dryRun, recorrentes: relRec, pontuais: relPon }
+      if (!dryRun) {
+        auditar(app, request, 'financeiro.custos_importar', 'custo', null, {
+          recorrentes: { criados: relRec.criados, ignorados: relRec.ignorados },
+          pontuais: { criados: relPon.criados, ignorados: relPon.ignorados },
+        })
+      }
+      return res
     })
   })
 

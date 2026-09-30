@@ -97,9 +97,24 @@ describe('candidatoDeLancamento', () => {
   })
 })
 
-describe('darBaixaConciliacao (ponto de extensão)', () => {
-  it('nesta onda não baixa nada', async () => {
-    await expect(darBaixaConciliacao({}, {})).resolves.toMatchObject({ aplicada: false })
+describe('darBaixaConciliacao (validação)', () => {
+  it('rejeita transação sem valor/data', async () => {
+    await expect(darBaixaConciliacao({}, {})).rejects.toMatchObject({ status: 400 })
+  })
+})
+
+describe('validarTipoConciliacao (apresentadora/imposto)', () => {
+  it('apresentadora e imposto só com saída', () => {
+    expect(validarTipoConciliacao('saida', 'apresentadora')).toBeNull()
+    expect(validarTipoConciliacao('saida', 'imposto')).toBeNull()
+    expect(validarTipoConciliacao('entrada', 'apresentadora')).toBeTruthy()
+    expect(validarTipoConciliacao('entrada', 'imposto')).toBeTruthy()
+  })
+  it('candidatoDeLancamento distingue apresentadora e imposto', () => {
+    const base = { natureza: 'custo', valor_previsto: 100, valor_pago: 0, data_vencimento: '2026-03-10' }
+    expect(candidatoDeLancamento({ ...base, id: 'a', origem: 'apresentadora' }).tipo).toBe('apresentadora')
+    expect(candidatoDeLancamento({ ...base, id: 'i', origem: 'imposto' }).tipo).toBe('imposto')
+    expect(candidatoDeLancamento({ ...base, id: 'c', origem: 'manual' }).tipo).toBe('custo')
   })
 })
 

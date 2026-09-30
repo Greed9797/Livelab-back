@@ -3,12 +3,14 @@
 //   GET    /v1/asaas/extrato?inicio&fim[&fonte=cache]  extrato (ao vivo por padrão; cache = gateway_transacoes)
 //   POST   /v1/asaas/sincronizar {inicio?, fim?}   baixa extrato + cobranças recebidas → gateway_transacoes
 //   GET    /v1/asaas/conciliacao?inicio&fim[&tipo=entrada|saida]  pendentes + sugestões de match
-//   POST   /v1/asaas/conciliar {transacao_id, tipo: receita|custo, id}
-//   DELETE /v1/asaas/conciliacao/:transacao_id     desfaz um vínculo
+//   POST   /v1/asaas/conciliar {transacao_id, tipo: receita|custo|apresentadora|imposto, id}
+//            id = uuid OU id virtual (calc:<marca>:<AAAA-MM>:<fixo|comissao>, rec:<uuid>:<AAAA-MM>,
+//            apresentadora:<id>:<AAAA-MM>, imposto:<AAAA-MM>). Vínculo + baixa na MESMA transação.
+//   DELETE /v1/asaas/conciliacao/:transacao_id     desfaz o vínculo (e a baixa, se gerada pela conciliação)
 //
 // Nada aqui cria/altera cobrança no Asaas (o cliente HTTP só expõe GET). A chave vem de
 // tenants.gateway_api_key. Conciliação: entradas × títulos de receita (receita_titulos/cálculo
-// comercial), saídas × custos. Nesta onda só grava o vínculo; a baixa é darBaixaConciliacao (onda 2).
+// comercial), saídas × custos. Conciliar também dá baixa no alvo (darBaixaConciliacao).
 // Toda query filtra tenant_id explicitamente além do RLS.
 
 import { z } from 'zod'
@@ -19,8 +21,11 @@ import {
   statusHttpParaErroAsaas,
 } from '../services/asaas.js'
 import {
+  ConciliacaoError,
   candidatoDeLancamento,
   darBaixaConciliacao,
+  desfazerBaixaConciliacao,
+  TIPOS_ALVO,
   dataNoMes,
   normalizarTransacaoAsaas,
   resolverPeriodo,
@@ -49,8 +54,9 @@ const uuidGenerico = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 
 const conciliarSchema = z.object({
   transacao_id: uuidGenerico,
-  tipo: z.enum(['receita', 'custo']),
-  id: uuidGenerico,
+  tipo: z.enum(TIPOS_ALVO),
+  // uuid ou id virtual (calc:/rec:/apresentadora:/imposto:) — resolvido em darBaixaConciliacao
+  id: z.string().trim().min(1).max(200),
 })
 
 // Tabela/coluna do módulo financeiro (migrations 164/165, outras frentes) ainda não aplicada.
@@ -88,6 +94,13 @@ async function carregarCandidatos(db, tenantId, tipo, periodo, avisos, log) {
     } else {
       const mod = await import('../services/custos-plano.js')
       itens = await mod.listarCustos(db, base)
+      try {
+        const ap = await import('../services/apresentadoras-pagamentos.js')
+        itens = [...itens, ...(await ap.listarPagamentosApresentadoras(db, base))]
+      } catch (err) {
+        if (!erroSchemaAusente(err) && !erroModuloAusente(err)) throw err
+        avisos.push('Pagamentos de apresentadoras indisponíveis — sugestões não geradas')
+      }
     }
     const abertos = (itens ?? []).filter((l) => l?.id && l.status !== 'pago')
     const clienteIds = [...new Set(abertos.map((l) => l.cliente_id).filter(Boolean))]
@@ -337,7 +350,8 @@ export async function asaasRoutes(app) {
       await db.query('BEGIN')
       try {
         const t = await db.query(
-          `SELECT id, tipo, valor::float AS valor, to_char(data, 'YYYY-MM-DD') AS data, conciliado_com_id FROM gateway_transacoes
+          `SELECT id, tipo, valor::float AS valor, to_char(data, 'YYYY-MM-DD') AS data, conciliado_com_id
+             FROM gateway_transacoes
             WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE`,
           [transacao_id, tenant_id],
         )
@@ -347,46 +361,26 @@ export async function asaasRoutes(app) {
         const erroTipo = validarTipoConciliacao(tx.tipo, tipo)
         if (erroTipo) return fim(db, 400, { error: erroTipo })
 
-        let alvo
+        // Baixa ANTES do vínculo (precisa do UUID real do alvo, materializado se virtual) — mesma transação.
+        let baixa
         try {
-          if (tipo === 'receita') {
-            if (!(await tabelaExiste(db, 'receita_titulos'))) {
-              return fim(db, 409, { error: 'Módulo de receitas ainda não migrado' })
-            }
-            alvo = await db.query(
-              'SELECT id FROM receita_titulos WHERE id = $1::uuid AND tenant_id = $2::uuid',
-              [id, tenant_id],
-            )
-          } else {
-            alvo = await db.query(
-              'SELECT id FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid',
-              [id, tenant_id],
-            )
-          }
+          baixa = await darBaixaConciliacao(db, {
+            tenantId: tenant_id, transacao: tx, tipo, alvoId: id, userId: userId ?? null,
+          })
         } catch (err) {
+          if (err instanceof ConciliacaoError) return fim(db, err.status, { error: err.message, codigo: err.codigo })
           if (!erroSchemaAusente(err)) throw err
           return fim(db, 409, { error: 'Módulo financeiro ainda não migrado' })
-        }
-        if (!alvo.rows[0]) {
-          return fim(db, 404, {
-            error: tipo === 'receita'
-              ? 'Título de receita não encontrado (gere os títulos do mês antes de conciliar)'
-              : 'Custo não encontrado',
-          })
         }
 
         const u = await db.query(
           `UPDATE gateway_transacoes
               SET conciliado_com_tipo = $3, conciliado_com_id = $4::uuid,
-                  conciliado_em = NOW(), conciliado_por = $5::uuid
+                  conciliado_em = NOW(), conciliado_por = $5::uuid, conciliado_baixa = $6::boolean
             WHERE id = $1::uuid AND tenant_id = $2::uuid
-            RETURNING id, conciliado_com_tipo, conciliado_com_id, conciliado_em`,
-          [transacao_id, tenant_id, tipo, id, userId ?? null],
+            RETURNING id, conciliado_com_tipo, conciliado_com_id, conciliado_em, conciliado_baixa`,
+          [transacao_id, tenant_id, tipo, baixa.alvo_id, userId ?? null, baixa.aplicada === true],
         )
-        // Ponto de extensão da onda 2 (hoje não baixa nada).
-        const baixa = await darBaixaConciliacao(db, {
-          tenantId: tenant_id, transacao: tx, tipo, alvoId: id, userId: userId ?? null,
-        })
         await db.query('COMMIT')
         return { status: 200, body: { ...u.rows[0], baixa } }
       } catch (err) {
@@ -400,7 +394,7 @@ export async function asaasRoutes(app) {
         action: 'asaas.conciliar',
         entity_type: 'gateway_transacoes',
         entity_id: transacao_id,
-        metadata: { tipo, alvo_id: id },
+        metadata: { tipo, alvo_ref: id, alvo_id: out.body.conciliado_com_id, baixa_aplicada: out.body.baixa?.aplicada === true },
       })
     }
     return reply.code(out.status).send(out.body)
@@ -415,20 +409,45 @@ export async function asaasRoutes(app) {
       return reply.code(400).send({ error: 'transacao_id inválido' })
     }
     const { tenant_id } = request.user
-    const r = await app.withTenant(tenant_id, (db) => db.query(
-      `UPDATE gateway_transacoes
-          SET conciliado_com_tipo = NULL, conciliado_com_id = NULL, conciliado_em = NULL, conciliado_por = NULL
-        WHERE id = $1::uuid AND tenant_id = $2::uuid
-        RETURNING id`,
-      [transacao_id, tenant_id],
-    ))
-    if (!r.rows[0]) return reply.code(404).send({ error: 'Transação não encontrada' })
+    const out = await app.withTenant(tenant_id, async (db) => {
+      await db.query('BEGIN')
+      try {
+        const t = await db.query(
+          `SELECT id, conciliado_com_tipo, conciliado_com_id, conciliado_baixa
+             FROM gateway_transacoes
+            WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE`,
+          [transacao_id, tenant_id],
+        )
+        const tx = t.rows[0]
+        if (!tx) return fim(db, 404, { error: 'Transação não encontrada' })
+        // Só desfaz a baixa se foi gerada pela conciliação (nunca uma baixa manual).
+        let baixa = { desfeita: false, motivo: 'baixa_nao_gerada_pela_conciliacao' }
+        if (tx.conciliado_com_id && tx.conciliado_baixa) {
+          baixa = await desfazerBaixaConciliacao(db, {
+            tenantId: tenant_id, tipo: tx.conciliado_com_tipo, alvoId: tx.conciliado_com_id,
+          })
+        }
+        await db.query(
+          `UPDATE gateway_transacoes
+              SET conciliado_com_tipo = NULL, conciliado_com_id = NULL, conciliado_em = NULL,
+                  conciliado_por = NULL, conciliado_baixa = FALSE
+            WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+          [transacao_id, tenant_id],
+        )
+        await db.query('COMMIT')
+        return { status: 200, body: { ok: true, baixa_desfeita: baixa.desfeita === true } }
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {})
+        throw err
+      }
+    })
+    if (out.status !== 200) return reply.code(out.status).send(out.body)
     await app.audit?.log(request, {
       action: 'asaas.desconciliar',
       entity_type: 'gateway_transacoes',
       entity_id: transacao_id,
     })
-    return { ok: true }
+    return out.body
   })
 }
 

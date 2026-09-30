@@ -119,7 +119,7 @@ describe('GET /v1/financeiro/operacional', () => {
     expect(franquia.memoria).toEqual({ marca_id: 'm1', marca_nome: 'Marca A', gmv: 10000, lives: 4, pct_medio: 2.5 })
 
     const fixoMarca = body.entradas.find((l) => l.categoria === 'fixo_marca')
-    expect(fixoMarca.memoria.criterio).toBe('mes_com_atividade')
+    expect(fixoMarca.memoria.criterio).toBe('vigencia')
 
     const comissaoAp = body.saidas.find((l) => l.categoria === 'comissao_apresentadora')
     expect(comissaoAp.memoria).toEqual({ apresentadora_id: 'ap1', nome: 'Ana', gmv_atribuido: 10000, pct_medio: 1 })
@@ -147,7 +147,7 @@ describe('GET /v1/financeiro/operacional', () => {
     await app.close()
   })
 
-  it('fixo de marca do /operacional usa a MESMA fonte do /resumo (marcaFixoMensalSql compartilhada)', async () => {
+  it('fixo de marca do /operacional usa a MESMA fonte do /resumo (fixo por vigência compartilhado)', async () => {
     const { app, query } = buildApp({ queryMock: operacionalQueryMock() })
     await app.register(financeiroRoutes)
 

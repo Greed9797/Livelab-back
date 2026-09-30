@@ -7,6 +7,9 @@ import { liveGmvSql } from '../lib/metric-sql.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql } from '../lib/live-count-sql.js'
 import { countWeekdaysInMonth, countWeekdaysUpTo } from '../lib/dias_uteis.js'
+import { listarCustos } from '../services/custos-plano.js'
+
+const hojeSaoPauloCustos = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date())
 
 // 45s (e não 30s) de propósito: o front faz refetch do dashboard a cada 30s
 // (DashboardPage.tsx:124). Com TTL igual ao intervalo de poll os dois empatam e
@@ -173,12 +176,12 @@ export async function homeRoutes(app) {
           AND l.iniciado_em >= ($1::date::timestamp AT TIME ZONE 'America/Sao_Paulo')
           AND l.iniciado_em < (($1::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'America/Sao_Paulo')
       `, [mesStart]),
-        db.query(`
-        SELECT COALESCE(SUM(valor), 0) AS valor
-        FROM custos
-        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND date_trunc('month', competencia) = date_trunc('month', $1::date)
-      `, [mesStart]),
+        // Custos do mês pela fonte única do financeiro (manuais, parcelas e recorrentes,
+        // inclusive virtuais), tenant explícito. Imposto materializado fica de fora.
+        listarCustos(db, { tenantId: tenant_id, inicio: effectiveMonth, fim: effectiveMonth, hoje: hojeSaoPauloCustos() })
+          .then((itens) => ({ rows: [{ valor: itens
+            .filter((c) => c.tipo !== 'imposto')
+            .reduce((s, c) => s + Number(c.valor_previsto || 0), 0) }] })),
         db.query(`
         SELECT
             c.id,

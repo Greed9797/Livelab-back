@@ -40,7 +40,8 @@ describe('financeiro — comissão de franquia calculada INLINE (não da coluna 
       gmv_videos: '0', pedidos_videos: 0, total_videos: 0,
       total_custos: '0', fixo_mensal_total: '0',
     }
-    const query = vi.fn().mockResolvedValue({ rows: [resumoRow] })
+    // Só a query agregada do /resumo devolve a linha; DRE (receitas/custos/apresentadoras) vazio.
+    const query = vi.fn().mockImplementation(async (sql) => (String(sql).includes('WITH live_periodo') ? { rows: [resumoRow] } : { rows: [] }))
     const { app } = buildApp({ queryMock: query })
     await app.register(financeiroRoutes)
 
@@ -74,7 +75,8 @@ describe('financeiro — comissão de franquia calculada INLINE (não da coluna 
       gmv_videos: '0', pedidos_videos: 0, total_videos: 0,
       total_custos: '0', fixo_mensal_total: '50', receita_combinada: '170',
     }
-    const query = vi.fn().mockResolvedValue({ rows: [resumoRow] })
+    // Só a query agregada do /resumo devolve a linha; DRE (receitas/custos/apresentadoras) vazio.
+    const query = vi.fn().mockImplementation(async (sql) => (String(sql).includes('WITH live_periodo') ? { rows: [resumoRow] } : { rows: [] }))
     const { app } = buildApp({ queryMock: query })
     await app.register(financeiroRoutes)
 

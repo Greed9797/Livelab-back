@@ -766,7 +766,7 @@ describe('LIVELAB operational routes', () => {
         receita_combinada: '114.20',
         fixo_mensal_total: '0',
       }],
-    })
+    }).mockResolvedValue({ rows: [] })
     const { app } = buildApp({ queryMock })
     await app.register(financeiroRoutes)
 
@@ -786,19 +786,22 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
-  it('GET /v1/financeiro/fluxo-caixa deriva entradas de lives + video_registros', async () => {
-    const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ dia: '2026-05-19', valor: '1142.00' }] })
-      .mockResolvedValueOnce({ rows: [{ dia: '2026-05-19', valor: '100.00' }] })
+  it('GET /v1/financeiro/fluxo-caixa agrupa lançamentos por dia de vencimento (onda 2) e mantém o formato legado', async () => {
+    // Sem lançamentos: 7 linhas (5..30 + cartão), série anual jan–dez e campos legados vazios.
+    const queryMock = vi.fn().mockResolvedValue({ rows: [] })
     const { app } = buildApp({ queryMock })
     await app.register(financeiroRoutes)
 
     const res = await app.inject({ method: 'GET', url: '/v1/financeiro/fluxo-caixa?inicio=2026-05-01&fim=2026-05-31' })
 
     expect(res.statusCode).toBe(200)
-    expect(res.json().items[0]).toMatchObject({ dia: '2026-05-19', entradas: 1142, saidas: 100 })
-    expect(queryMock.mock.calls[0][0]).toContain('FROM lives l')
-    expect(queryMock.mock.calls[0][0]).not.toContain('va.data_referencia')
+    const body = res.json()
+    expect(body.mes).toBe('2026-05')
+    expect(body.linhas.map((l) => l.chave)).toEqual(['5', '10', '15', '20', '25', '30', 'cartao'])
+    expect(body.serie_anual).toHaveLength(12)
+    expect(body).toMatchObject({ entradas: [], saidas: [], items: [], inicio: '2026-05-01', fim: '2026-05-31' })
+    // GMV não é mais "entrada de caixa": nada de lives no fluxo.
+    expect(queryMock.mock.calls.some(([sql]) => String(sql).includes('va.data_referencia'))).toBe(false)
     await app.close()
   })
 

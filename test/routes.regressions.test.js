@@ -44,8 +44,7 @@ afterEach(() => {
 describe('Route regressions: SQL and RBAC', () => {
   it('financeiro resumo uses CTE aggregation and keeps endpoint healthy', async () => {
     const app = Fastify()
-    const queryMock = vi.fn().mockResolvedValue({
-      rows: [{
+    const resumoRow = {
         gmv_lives: '1500',
         pedidos_lives: '15',
         total_lives: '2',
@@ -57,8 +56,9 @@ describe('Route regressions: SQL and RBAC', () => {
         pedidos_videos: '0',
         total_videos: '0',
         total_custos: '400',
-      }],
-    })
+      }
+    // Só a query agregada devolve a linha; DRE/custos (listarCustos etc.) vêm vazios.
+    const queryMock = vi.fn().mockImplementation(async (sql) => (String(sql).includes('WITH live_periodo') ? { rows: [resumoRow] } : { rows: [] }))
     const releaseMock = vi.fn()
 
     app.decorate('authenticate', async (request) => {
@@ -84,25 +84,28 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(response.statusCode).toBe(200)
     expect(payload).toMatchObject({
       fat_bruto: 1500,
-      fat_liquido: 0,
+      // total_custos vem do DRE (custos manuais via listarCustos), não mais do CTE custos_periodo
+      fat_liquido: 300,
       gmv_total: 1500,
       receita_liquida: 300,
-      total_custos: 400,
+      total_custos: 0,
       periodo: '2026-04-01',
     })
-    expect(queryMock).toHaveBeenCalledTimes(1)
+    expect(Array.isArray(payload.meses)).toBe(true)
+    expect(payload.meses[0].mes).toBe('2026-04')
 
     const sql = queryMock.mock.calls[0][0]
     expect(sql).toContain('WITH live_periodo')
     expect(sql).toContain('FROM lives l')
     expect(sql).toContain('video_periodo')
-    expect(sql).toContain('custos_periodo')
+    expect(sql).not.toContain('custos_periodo')
     // Vídeos usam o snapshot atribuído/condição temporal; a consulta deve limitar essa
     // fonte à origem de vídeo e excluir registros reprovados.
     expect(sql).toContain('FROM vendas_atribuidas va')
     expect(sql).toContain("va.origem = 'video'")
     expect(sql).toContain("<> 'reprovada'")
-    expect(releaseMock).toHaveBeenCalledTimes(1)
+    // 2 conexões: agregado legado (cacheado) + DRE (sempre fresco) — ambas liberadas.
+    expect(releaseMock).toHaveBeenCalledTimes(2)
 
     await app.close()
   })
@@ -1015,9 +1018,11 @@ describe('Route regressions: SQL and RBAC', () => {
   })
 
   it('POST /v1/financeiro/custos deve usar dbTenant (não app.db)', async () => {
+    // A rota mudou para financeiro_custos.js (onda 1); financeiro.js não registra mais custos.
+    const { financeiroCustosRoutes } = await import('../src/routes/financeiro_custos.js')
     const app = Fastify()
     const mockQuery = vi.fn().mockResolvedValue({
-      rows: [{ id: 'uuid-1', descricao: 'Aluguel', valor: 1500, tipo: 'aluguel', competencia: '2026-04' }]
+      rows: [{ id: 'uuid-1', descricao: 'Aluguel', valor: 1500, tipo: 'outros', grupo: 'estrutural', competencia: '2026-04-01' }]
     })
     const mockRelease = vi.fn()
 
@@ -1036,23 +1041,20 @@ describe('Route regressions: SQL and RBAC', () => {
     })
     app.decorate('db', { query: vi.fn() })
 
-    await app.register(financeiroRoutes)
+    await app.register(financeiroCustosRoutes)
     await app.ready()
 
     const res = await app.inject({
       method: 'POST',
       url: '/v1/financeiro/custos',
-      payload: { descricao: 'Aluguel', valor: 1500, tipo: 'aluguel', competencia: '2026-04' }
+      payload: { descricao: 'Aluguel', valor: 1500, grupo: 'estrutural', competencia: '2026-04' }
     })
 
     expect(res.statusCode).toBe(201)
     expect(app.dbTenant).toHaveBeenCalledWith('tenant-1')
     expect(mockRelease).toHaveBeenCalled()
     expect(app.db.query).not.toHaveBeenCalled()
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.stringContaining('INSERT INTO custos'),
-      ['tenant-1', 'Aluguel', 1500, 'aluguel', '2026-04']
-    )
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO custos'), expect.arrayContaining(['tenant-1']))
 
     await app.close()
   })
@@ -1327,7 +1329,9 @@ describe('Route regressions: SQL and RBAC', () => {
 
       // gerente deve acessar financeiro (mesmo acesso que franqueado)
       const appGerente = Fastify()
-      const queryMock = vi.fn().mockResolvedValue({ rows: [{ fat_bruto_fixo: '0', fat_bruto_comissao: '0', total_custos: '0' }] })
+      const queryMock = vi.fn().mockImplementation(async (sql) => (String(sql).includes('WITH live_periodo')
+        ? { rows: [{ fat_bruto_fixo: '0', fat_bruto_comissao: '0', total_custos: '0' }] }
+        : { rows: [] }))
       const releaseMock = vi.fn()
       appGerente.decorate('authenticate', async (req) => {
         req.user = { tenant_id: 'tenant-1', papel: 'gerente' }

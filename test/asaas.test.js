@@ -340,22 +340,82 @@ describe('rotas /v1/asaas', () => {
     expect(res.statusCode).toBe(409)
   })
 
-  it('POST /conciliar: sucesso grava vínculo com tenant_id', async () => {
+  const CUSTO_ID = '44444444-4444-4444-4444-444444444444'
+
+  it('POST /conciliar: custo — baixa + vínculo na mesma transação, com tenant_id', async () => {
     const { app, queries } = buildApp({
       onQuery: (sql) => {
-        if (/FOR UPDATE/.test(sql)) return { rows: [{ id: TX_ID, tipo: 'entrada', conciliado_com_id: null }] }
-        if (/FROM receita_titulos/.test(sql)) return { rows: [{ id: RECEITA_ID }] }
-        if (/UPDATE gateway_transacoes/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'receita', conciliado_com_id: RECEITA_ID }] }
+        if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
+          return { rows: [{ id: TX_ID, tipo: 'saida', valor: 250, data: '2026-03-20', conciliado_com_id: null }] }
+        }
+        if (/FROM custos/.test(sql)) return { rows: [{ id: CUSTO_ID, valor_pago: null, tipo: 'outros' }] }
+        if (/UPDATE gateway_transacoes/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'custo', conciliado_com_id: CUSTO_ID, conciliado_baixa: true }] }
         return { rows: [] }
       },
     })
-    const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'receita', id: RECEITA_ID } })
+    const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'custo', id: CUSTO_ID } })
     expect(res.statusCode).toBe(200)
-    expect(res.json().conciliado_com_id).toBe(RECEITA_ID)
-    expect(res.json().baixa).toMatchObject({ aplicada: false })
-    const upd = queries.find((q) => /UPDATE gateway_transacoes/.test(q.sql))
-    expect(upd.params.slice(0, 4)).toEqual([TX_ID, TENANT, 'receita', RECEITA_ID])
+    expect(res.json().conciliado_com_id).toBe(CUSTO_ID)
+    expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 250, data_pagamento: '2026-03-20' })
+    const sqls = queries.map((q) => q.sql)
+    const iBegin = sqls.indexOf('BEGIN')
+    const iBaixa = sqls.findIndex((x) => /UPDATE custos/.test(x))
+    const iVinculo = sqls.findIndex((x) => /UPDATE gateway_transacoes/.test(x))
+    const iCommit = sqls.indexOf('COMMIT')
+    expect(iBegin).toBeGreaterThanOrEqual(0)
+    expect(iBaixa).toBeGreaterThan(iBegin)
+    expect(iVinculo).toBeGreaterThan(iBaixa)
+    expect(iCommit).toBeGreaterThan(iVinculo)
+    expect(queries[iBaixa].params.slice(0, 2)).toEqual([CUSTO_ID, TENANT])
+    expect(queries[iVinculo].params).toEqual([TX_ID, TENANT, 'custo', CUSTO_ID, '33333333-3333-3333-3333-333333333333', true])
+  })
+
+  it('POST /conciliar: alvo inexistente → 404 e ROLLBACK (nada gravado)', async () => {
+    const { app, queries } = buildApp({
+      onQuery: (sql) => (/FOR UPDATE/.test(sql) && /gateway_transacoes/.test(sql)
+        ? { rows: [{ id: TX_ID, tipo: 'saida', valor: 10, data: '2026-03-20', conciliado_com_id: null }] } : { rows: [] }),
+    })
+    const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'custo', id: CUSTO_ID } })
+    expect(res.statusCode).toBe(404)
+    const sqls = queries.map((q) => q.sql)
+    expect(sqls).toContain('ROLLBACK')
+    expect(sqls).not.toContain('COMMIT')
+    expect(sqls.some((x) => /UPDATE gateway_transacoes/.test(x))).toBe(false)
+  })
+
+  it('POST /conciliar: tipo imposto aceita id virtual; entrada não concilia com imposto', async () => {
+    const { app } = buildApp({
+      onQuery: (sql) => (/FOR UPDATE/.test(sql) ? { rows: [{ id: TX_ID, tipo: 'entrada', valor: 10, data: '2026-03-20', conciliado_com_id: null }] } : { rows: [] }),
+    })
+    const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'imposto', id: 'imposto:2026-03' } })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('DELETE /conciliacao: desfaz baixa gerada pela conciliação', async () => {
+    const { app, queries } = buildApp({
+      onQuery: (sql) => {
+        if (/FOR UPDATE/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'custo', conciliado_com_id: CUSTO_ID, conciliado_baixa: true }] }
+        if (/UPDATE custos/.test(sql)) return { rows: [{ id: CUSTO_ID }] }
+        return { rows: [] }
+      },
+    })
+    const res = await app.inject({ method: 'DELETE', url: `/v1/asaas/conciliacao/${TX_ID}` })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ ok: true, baixa_desfeita: true })
+    expect(queries.some((q) => /UPDATE custos SET valor_pago = NULL/.test(q.sql) && q.params[1] === TENANT)).toBe(true)
     expect(queries.map((q) => q.sql)).toContain('COMMIT')
+  })
+
+  it('DELETE /conciliacao: baixa manual (conciliado_baixa=false) NÃO é desfeita', async () => {
+    const { app, queries } = buildApp({
+      onQuery: (sql) => (/FOR UPDATE/.test(sql)
+        ? { rows: [{ id: TX_ID, conciliado_com_tipo: 'custo', conciliado_com_id: CUSTO_ID, conciliado_baixa: false }] } : { rows: [] }),
+    })
+    const res = await app.inject({ method: 'DELETE', url: `/v1/asaas/conciliacao/${TX_ID}` })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().baixa_desfeita).toBe(false)
+    expect(queries.some((q) => /UPDATE custos/.test(q.sql))).toBe(false)
+    expect(queries.some((q) => /UPDATE gateway_transacoes/.test(q.sql))).toBe(true)
   })
 
   it('DELETE /conciliacao/:id → 404 quando não existe', async () => {

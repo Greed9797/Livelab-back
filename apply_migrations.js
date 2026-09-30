@@ -161,6 +161,8 @@ export const MIGRATIONS_LIST = [
   '164_custos_reset_recorrentes_parcelas.sql',
   '165_receita_titulos_vencimento_condicoes.sql',
   '166_apresentadora_pagamentos.sql',
+  '167_tenants_aliquota_imposto.sql',
+  '168_gateway_transacoes_baixa.sql',
 ]
 
 async function ensureMigrationsTable(client) {

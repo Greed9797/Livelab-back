@@ -8,18 +8,43 @@ import { resolveMonthRange } from '../lib/operacional.js'
 import { presenterFixedAtSql } from '../config/presenter_defaults.js'
 import { prorateFatorSql } from '../lib/financeiro-remuneracao.js'
 import { performance } from 'node:perf_hooks'
-import { withCache, buildCacheKey, setCacheControl } from '../lib/dashboard-cache.js'
-import { activeLiveJoinSql, activeLiveSql } from '../lib/live-merge-sql.js'
+import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
+import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
+import { marcaFixoVigenciaSql } from '../lib/receita-marca-sql.js'
+import { listarCustos } from '../services/custos-plano.js'
+import {
+  atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularDre, calcularFluxoCaixa,
+  consultarLancamentos, desfazerImposto, hojeSaoPaulo, pagarImposto, resolverPeriodoMeses,
+} from '../services/financeiro-agregador.js'
 
 const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
 
-const custoSchema = z.object({
-  descricao:   z.string().min(1),
-  valor:       moneySchema.refine((value) => value > 0, 'Valor deve ser positivo'),
-  tipo:        z.enum(['aluguel','salario','energia','internet','outros']),
-  competencia: z.string().regex(/^\d{4}-\d{2}(-\d{2})?$/, 'Formato: YYYY-MM ou YYYY-MM-DD'),
-})
+// Filtros de GET /lancamentos e payloads de baixa/config (onda 2).
+const lancamentosQuerySchema = z.object({
+  natureza: z.enum(['receita', 'custo']).optional(),
+  status: z.enum(['previsto', 'pendente', 'atrasado', 'parcial', 'pago']).optional(),
+  grupo: z.string().trim().min(1).max(40).optional(),
+  q: z.string().trim().max(120).optional(),
+}).passthrough()
+
+const baixaImpostoSchema = z.object({
+  valor_pago: moneySchema.refine((v) => v > 0, 'valor_pago deve ser positivo').optional(),
+  data_pagamento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato: YYYY-MM-DD').optional(),
+  observacao: z.string().trim().max(500).optional(),
+}).strict()
+
+const configSchema = z.object({
+  aliquota_imposto_pct: z.coerce.number().min(0).max(100),
+}).strict()
+
+const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
+
+// Erros de serviço (statusCode 4xx) viram resposta; o resto sobe para o error handler.
+function responderErro(reply, error) {
+  if (error?.statusCode && error.statusCode < 500) return reply.code(error.statusCode).send({ error: error.message })
+  throw error
+}
 
 const toNum = (v) => Number(v ?? 0)
 const roundMoney = (v) => Math.round(toNum(v) * 100) / 100
@@ -40,55 +65,13 @@ export function competenciaMesKey(mes) {
   return match ? match[1] : raw.slice(0, 10)
 }
 
-// Fração de um mês (`mesExpr` = timestamp no 1º dia do mês) coberta pelo contrato
-// [inicioCol, fimCol]. Datas NULL → 1.0 (mês cheio, comportamento pré-133). Clamp [0,1].
-// ponytail: rateio por dias (saiu dia 15 de 30 → 0.5; mês fora do contrato → 0). Exato quando
-// o range = 1 mês (o default dos painéis); em range multi-mês a marca soma fração por mês ativo
-// e a apresentadora usa só o mês de referência. Reusa o padrão EXTRACT(DAY) do home.js.
-// Fixo mensal das marcas tipo='cliente' (semântica migration 116): 1× por marca por mês
-// COM atividade (GMV/pedidos > 0 em lives ou vídeos). FONTE ÚNICA compartilhada entre
-// /resumo (soma agregada) e /operacional (1 lançamento por marca) — não duplicar.
-// `meses_ativos` = contagem inteira de meses (display); `fator_meses` = soma das frações
-// rateadas por data_inicio/data_fim da marca (migration 133) — o valor MONETÁRIO usa fator_meses.
+// Fixo mensal das marcas tipo='cliente': POR VIGÊNCIA (decisão do dono, SPEC v2) — todo
+// mês entre o início e data_fim do contrato, com ou sem atividade, rateado por dias no
+// mês de entrada/saída. FONTE ÚNICA em lib/receita-marca-sql.js (mesma das receitas):
+// /resumo (soma) e /operacional (1 lançamento por marca/mês) — não duplicar.
+// `meses_ativos` = contagem de meses (display); `fator_meses` = fração rateada (valor monetário).
 // Params posicionais fixos: $1=startDate, $2=endDate, $3=tenant_id.
-function marcaFixoMensalSql() {
-  return `
-    SELECT m.id AS marca_id, m.nome AS marca_nome,
-           COALESCE(mc.fixo_mensal, m.valor_fixo_minimo) AS valor_fixo_minimo,
-           COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca,
-           am2.mes::date AS mes,
-           1::int AS meses_ativos,
-           ${prorateFatorSql('am2.mes', 'm.data_inicio', 'm.data_fim')} AS fator_meses
-      FROM (
-        SELECT DISTINCT marca_id, mes FROM (
-          SELECT l.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes
-          FROM lives l
-          WHERE l.tenant_id = $3::uuid AND l.status = 'encerrada' AND l.marca_id IS NOT NULL
-            AND ${activeLiveSql('l')}
-            AND ${notArchivedSql('l')}
-            AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
-            AND (${liveGmvSql('l')} > 0 OR ${liveOrdersSql('l')} > 0)
-          UNION
-          SELECT vr.marca_id, date_trunc('month', vr.data::timestamp) AS mes
-          FROM video_registros vr
-          WHERE vr.tenant_id = $3::uuid
-            AND vr.data >= $1::date AND vr.data <= $2::date
-            AND (vr.gmv_atribuido > 0 OR vr.pedidos_atribuidos > 0)
-        ) u
-      ) am2
-      JOIN marcas m ON m.id = am2.marca_id AND m.tenant_id = $3::uuid
-      LEFT JOIN LATERAL (
-        SELECT c.fixo_mensal, c.tipo_cobranca
-          FROM marca_condicoes_comerciais c
-         WHERE c.tenant_id = $3::uuid
-           AND c.marca_id = m.id
-           AND c.inicio_vigencia <= am2.mes::date
-           AND c.cancelled_at IS NULL
-         ORDER BY c.inicio_vigencia DESC
-         LIMIT 1
-      ) mc ON true
-     WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente'`
-}
+const marcaFixoMensalSql = marcaFixoVigenciaSql
 
 // Vendas reprovadas NUNCA entram em soma financeira (mesmo predicado de lib/operacional.js).
 const VENDA_NAO_REPROVADA = `COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'`
@@ -97,7 +80,10 @@ const VENDA_NAO_REPROVADA = `COALESCE(va.status_aprovacao, 'pendente_aprovacao')
 //   despesas_fixas     = fixo_apresentadora + custos manuais tipo aluguel/salario/energia/internet
 //   despesas_variaveis = comissao_apresentadora + custos manuais tipo 'outros'
 // (comissao_franquia e fixo_marca são ENTRADAS — receita da operação)
+// Custos v2 (migration 164): também é fixo o recorrente e os grupos estrutural/prolabore.
 const CUSTO_TIPOS_FIXOS = new Set(['aluguel', 'salario', 'energia', 'internet'])
+const CUSTO_GRUPOS_FIXOS = new Set(['estrutural', 'prolabore'])
+const custoManualFixo = (m) => CUSTO_TIPOS_FIXOS.has(m.tipo) || m.origem === 'recorrente' || CUSTO_GRUPOS_FIXOS.has(m.grupo)
 
 /**
  * Resolve [inicio, fim] como datas YYYY-MM-DD a partir dos query params.
@@ -201,13 +187,6 @@ export async function financeiroRoutes(app) {
             AND vr.data >= $1::date
             AND vr.data <= $2::date
         ),
-        custos_periodo AS (
-          SELECT COALESCE(SUM(valor), 0) AS total_custos
-          FROM custos
-          WHERE tenant_id = $3::uuid
-            AND competencia >= $1::date
-            AND competencia <= $2::date
-        ),
         -- Comissão de franquia VARIÁVEL por marca (gmv × pct), mesma fonte do live_periodo mas
         -- agrupada por marca resolvida — pra combinar com o fixo POR marca conforme tipo_cobranca.
         comissao_marca_raw AS (
@@ -247,8 +226,8 @@ export async function financeiroRoutes(app) {
             FROM comissao_marca_raw
            GROUP BY marca_id, mes
         ),
-        -- Fixo mensal das marcas tipo='cliente': valor_fixo_minimo × meses ativos (migration 116).
-        -- Fonte compartilhada marcaFixoMensalSql() — mesma do /operacional e performance-rollups.js.
+        -- Fixo mensal das marcas tipo='cliente' por vigência (valor × fator de rateio).
+        -- Fonte compartilhada marcaFixoMensalSql() = marcaFixoVigenciaSql — mesma do /operacional e das receitas.
         fixo_marca AS (
           SELECT mf.marca_id, mf.mes, mf.tipo_cobranca,
                  (mf.valor_fixo_minimo * mf.fator_meses) AS fixo
@@ -291,26 +270,24 @@ export async function financeiroRoutes(app) {
                lp.comissao_franquia_lives, lp.comissao_configurada, lp.comissao_faltante_count,
                vp.gmv_videos, vp.pedidos_videos, vp.total_videos,
                vp.comissao_franquia_videos,
-               cu.total_custos, tm.fixo_mensal_total, tm.receita_combinada,
+               tm.fixo_mensal_total, tm.receita_combinada,
                COALESCE((SELECT json_agg(json_build_object(
                  'competencia', pc.mes::date,
                  'fixo', pc.fixo,
                  'comissao', pc.comissao,
                  'receita', pc.receita
                ) ORDER BY pc.mes) FROM parcelas_competencia pc), '[]'::json) AS parcelas_competencia
-        FROM live_periodo lp, video_periodo vp, custos_periodo cu, totais_marca tm
+        FROM live_periodo lp, video_periodo vp, totais_marca tm
       `, [startDate, endDate, tenant_id])
 
       const r = result.rows[0]
       const fat_bruto = toNum(r.gmv_lives) + toNum(r.gmv_videos)
-      // receita_liquida = combinação POR marca de (comissão variável, fixo mensal) conforme
-      // tipo_cobranca: fixo_mais_comissao soma; fixo_ou_comissao pega o maior. Ver combinarEntradaMarca.
+      // receita_liquida = combinação POR marca de (comissão variável, fixo mensal por vigência)
+      // conforme tipo_cobranca: fixo_mais_comissao soma; fixo_ou_comissao pega o maior.
       const receita_liquida = toNum(r.receita_combinada)
-      const fat_liquido = Math.max(0, receita_liquida - toNum(r.total_custos))
       return {
         visao,
         fat_bruto,
-        fat_liquido,
         gmv_total: fat_bruto,
         gmv_lives: toNum(r.gmv_lives),
         gmv_videos: toNum(r.gmv_videos),
@@ -323,7 +300,6 @@ export async function financeiroRoutes(app) {
         fixo_mensal: toNum(r.fixo_mensal_total),
         comissao_configurada: toNum(r.comissao_configurada),
         comissao_faltante_count: toNum(r.comissao_faltante_count),
-        total_custos: toNum(r.total_custos),
         periodo: startDate,
         inicio: startDate,
         fim: endDate,
@@ -331,61 +307,23 @@ export async function financeiroRoutes(app) {
       }
       }),
     })
-    setCacheControl(reply, state, startedAt)
-    return value
-  })
-
-  // GET /v1/financeiro/franqueadora — apenas franqueador_master
-  // Retorna visão consolidada: GMV, royalties e taxa de marketing por franqueado
-  // PR 13: schema real de tenants não tem coluna "tipo"; identifica franqueados
-  // pelo papel do usuário dono do tenant (papel = 'franqueado').
-  app.get('/v1/financeiro/franqueadora', {
-    preHandler: app.requirePapel(['franqueador_master']),
-  }, async (request, reply) => {
-    // Zerados por ora — o usuário vai configurar depois (devem vir de contrato/config da franqueadora).
-    const ROYALTY_PCT = 0
-    const MARKETING_PCT = 0
-    // Respeita o período informado (inicio/fim ou mes/ano); default = mês corrente.
-    const { startDate, endDate } = resolveRange(request.query)
-    // MASTER: visão consolidada cross-tenant do franqueador_master (agrega todos os tenants). Sem RLS por design.
-    const result = await app.db.query(`
-      SELECT
-        t.id                                                              AS tenant_id,
-        t.nome                                                            AS franqueado_nome,
-        t.cidade,
-        t.uf,
-        t.plano,
-        COALESCE(SUM(${liveGmvSql('l')}), 0)::float                       AS gmv_total,
-        COALESCE(COUNT(l.id), 0)::int                                     AS total_lives,
-        COALESCE(SUM(${liveGmvSql('l')}) * ${ROYALTY_PCT}, 0)::float      AS royalties_estimados,
-        COALESCE(SUM(${liveGmvSql('l')}) * ${MARKETING_PCT}, 0)::float    AS taxa_marketing_estimada
-      FROM tenants t
-      -- Filtra apenas tenants cujo dono tem papel 'franqueado' (não franqueador_master)
-      INNER JOIN users u ON u.tenant_id = t.id AND u.papel = 'franqueado'
-      LEFT JOIN lives l ON l.tenant_id = t.id
-        AND l.status = 'encerrada'
-        ${activeLiveJoinSql('l')}
-        AND ${notArchivedSql('l')}
-        AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
-      GROUP BY t.id, t.nome, t.cidade, t.uf, t.plano
-      ORDER BY gmv_total DESC
-    `, [startDate, endDate])
-
-    const franqueados = result.rows
-    // Agregados de topo que o frontend lê nos cards (antes inexistentes → cards zerados).
-    const total_gmv = franqueados.reduce((s, r) => s + toNum(r.gmv_total), 0)
-    const total_royalties = franqueados.reduce((s, r) => s + toNum(r.royalties_estimados), 0)
-    const total_marketing = franqueados.reduce((s, r) => s + toNum(r.taxa_marketing_estimada), 0)
-    return {
-      franqueados,
-      total_gmv,
-      total_royalties,
-      total_marketing,
-      total_franqueados: franqueados.length,
-      periodo: startDate,
-      inicio: startDate,
-      fim: endDate,
+    // DRE (previsto × realizado) fora do cache: baixas precisam aparecer na hora.
+    const dre = await app.withTenant(tenant_id, (db) => calcularDre(db, {
+      tenantId: tenant_id, inicio: startDate.slice(0, 7), fim: endDate.slice(0, 7), hoje: hojeSaoPaulo(),
+    }))
+    // Legado: total_custos = custos manuais previstos da competência (sem apresentadoras/imposto);
+    // fat_liquido = receita_liquida − total_custos (piso 0). O resultado completo está em dre.totais.
+    const total_custos = dre.totais.custos.previsto
+    const body = {
+      ...value,
+      total_custos,
+      fat_liquido: Math.max(0, roundMoney(value.receita_liquida - total_custos)),
+      aliquota_imposto_pct: dre.aliquota,
+      meses: dre.meses,
+      totais: dre.totais,
     }
+    setCacheControl(reply, state, startedAt)
+    return body
   })
 
   // GET /v1/financeiro/faturamento?periodo=YYYY-MM  OR  ?inicio=YYYY-MM&fim=YYYY-MM
@@ -482,65 +420,26 @@ export async function financeiroRoutes(app) {
     })
   })
 
-  // GET /v1/financeiro/fluxo-caixa?mes=&ano=  OR  ?inicio=YYYY-MM&fim=YYYY-MM
-  app.get('/v1/financeiro/fluxo-caixa', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
+  // GET /v1/financeiro/fluxo-caixa?mes=YYYY-MM[&saldo_inicial=]  (legado: inicio/fim ou mes+ano → 1º mês)
+  // Linhas por data de vencimento nas faixas 5/10/15/20/25/30 (+ 'cartao'), previsto × realizado,
+  // acumulado a partir de saldo_inicial, serie_anual jan–dez. Mantém entradas/saidas/items legados.
+  app.get('/v1/financeiro/fluxo-caixa', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const { startDate, endDate } = resolveRange(request.query)
-
-    return app.withTenant(tenant_id, async (db) => {
-      // Entradas = GMV real por dia (lives encerradas + vídeos), não mais vendas_atribuidas
-      // (que referenciava colunas inexistentes va.data_referencia/va.status → 500).
-      const entradas = await db.query(`
-        SELECT dia, SUM(valor)::numeric AS valor FROM (
-          SELECT (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia, ${liveGmvSql('l')} AS valor
-          FROM lives l
-          WHERE l.tenant_id = $3::uuid
-            AND l.status = 'encerrada'
-            AND ${activeLiveSql('l')}
-            AND ${notArchivedSql('l')}
-            AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
-          UNION ALL
-          SELECT vr.data AS dia, vr.gmv_atribuido AS valor
-          FROM video_registros vr
-          WHERE vr.tenant_id = $3::uuid
-            AND vr.data >= $1::date
-            AND vr.data <= $2::date
-        ) t
-        GROUP BY dia ORDER BY dia
-      `, [startDate, endDate, tenant_id])
-
-      const saidas = await db.query(`
-        SELECT competencia AS dia, SUM(valor) AS valor
-        FROM custos
-        WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-          AND competencia >= $1::date
-          AND competencia <  ($2::date + interval '1 day')
-        GROUP BY 1 ORDER BY 1
-      `, [startDate, endDate])
-
-      const entradasRows = entradas.rows.map(r => ({ ...r, valor: toNum(r.valor) }))
-      const saidasRows = saidas.rows.map(r => ({ ...r, valor: toNum(r.valor) }))
-      const days = new Map()
-      for (const row of entradasRows) {
-        const key = row.dia instanceof Date ? row.dia.toISOString().slice(0, 10) : String(row.dia).slice(0, 10)
-        days.set(key, { dia: key, entradas: row.valor, saidas: 0 })
-      }
-      for (const row of saidasRows) {
-        const key = row.dia instanceof Date ? row.dia.toISOString().slice(0, 10) : String(row.dia).slice(0, 10)
-        const current = days.get(key) ?? { dia: key, entradas: 0, saidas: 0 }
-        current.saidas = row.valor
-        days.set(key, current)
-      }
-
-      return {
-        periodo: startDate,
-        inicio: startDate,
-        fim: endDate,
-        entradas: entradasRows,
-        saidas: saidasRows,
-        items: [...days.values()].sort((a, b) => a.dia.localeCompare(b.dia)),
-      }
-    })
+    const hoje = hojeSaoPaulo()
+    let mes
+    try {
+      mes = resolverPeriodoMeses(request.query ?? {}, hoje).inicio
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+    const saldoRaw = request.query?.saldo_inicial
+    const saldoInicial = saldoRaw == null || saldoRaw === '' ? 0 : Number(saldoRaw)
+    if (!Number.isFinite(saldoInicial)) return reply.code(400).send({ error: 'saldo_inicial inválido' })
+    try {
+      return await app.withTenant(tenant_id, (db) => calcularFluxoCaixa(db, { tenantId: tenant_id, mes, saldoInicial, hoje }))
+    } catch (error) {
+      return responderErro(reply, error)
+    }
   })
 
   // GET /v1/financeiro/operacional?inicio=YYYY-MM&fim=YYYY-MM (default: mês corrente SP)
@@ -586,7 +485,7 @@ export async function financeiroRoutes(app) {
         ORDER BY valor DESC
       `, [startDate, endDate, tenant_id])
 
-      // ENTRADA: fixo mensal por marca tipo=cliente com atividade (mesma fonte do /resumo).
+      // ENTRADA: fixo mensal por marca tipo=cliente por vigência (mesma fonte do /resumo).
       // `mes` precisa sair no SELECT: sem ele a junção com comissão usa chave `marca_id:`
       // vazia e marcas fixo_ou_comissao geram duas linhas vencedoras no mesmo mês.
       const fixoMarcas = await db.query(`
@@ -635,14 +534,12 @@ export async function financeiroRoutes(app) {
         ORDER BY valor DESC, a.nome ASC
       `, [startDate, tenant_id, endDate])
 
-      // SAÍDA: custos manuais lançados na competência
-      const custosManuais = await db.query(`
-        SELECT id, descricao, valor, tipo, competencia
-        FROM custos
-        WHERE tenant_id = $3::uuid
-          AND competencia >= $1::date AND competencia <= $2::date
-        ORDER BY valor DESC
-      `, [startDate, endDate, tenant_id])
+      // SAÍDA: custos manuais da competência (pontuais, parcelas e recorrentes — inclusive os
+      // virtuais ainda não materializados) via listarCustos, fonte única do módulo de custos.
+      // Imposto materializado (tipo 'imposto') não é custo manual e fica fora deste contrato.
+      const custosManuais = (await listarCustos(db, {
+        tenantId: tenant_id, inicio: startDate.slice(0, 7), fim: endDate.slice(0, 7), hoje: hojeSaoPaulo(),
+      })).filter((c) => c.tipo !== 'imposto')
 
       // SAÍDA: adicionais de apresentadora lançados manualmente no fechamento. Não são
       // custos manuais e não entram em comissão: cada linha é descontada exatamente uma vez.
@@ -751,7 +648,7 @@ export async function financeiroRoutes(app) {
           }
         } else {
           if (m.comissao > 0) entradas.push(linhaComissao())
-          if (m.fixo > 0) entradas.push(linhaFixo('mes_com_atividade'))
+          if (m.fixo > 0) entradas.push(linhaFixo('vigencia'))
         }
       }
       entradas.sort((a, b) => b.valor - a.valor)
@@ -788,16 +685,19 @@ export async function financeiroRoutes(app) {
             data_referencia: r.data_referencia,
           },
         })),
-        ...custosManuais.rows.map((r) => ({
+        ...custosManuais.map((c) => ({
           categoria: 'custo_manual',
-          descricao: r.descricao,
-          valor: round2(r.valor),
-          memoria: { custo_id: r.id, tipo: r.tipo },
+          descricao: c.descricao,
+          valor: round2(c.valor_previsto),
+          memoria: {
+            custo_id: c.id, tipo: c.tipo, grupo: c.grupo ?? null, origem: c.origem,
+            competencia: c.competencia, data_vencimento: c.data_vencimento, status: c.status,
+          },
         })),
       ]
 
       const isFixa = (l) => l.categoria === 'fixo_apresentadora'
-        || (l.categoria === 'custo_manual' && CUSTO_TIPOS_FIXOS.has(l.memoria.tipo))
+        || (l.categoria === 'custo_manual' && custoManualFixo(l.memoria))
       const totalEntradas = round2(entradas.reduce((s, l) => s + l.valor, 0))
       const despesasFixas = round2(saidas.reduce((s, l) => s + (isFixa(l) ? l.valor : 0), 0))
       const despesasVariaveis = round2(saidas.reduce((s, l) => s + (isFixa(l) ? 0 : l.valor), 0))
@@ -820,62 +720,77 @@ export async function financeiroRoutes(app) {
     })
   })
 
-  // POST /v1/financeiro/custos
-  app.post('/v1/financeiro/custos', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
-    const parsed = custoSchema.safeParse(request.body)
+  // ─── Onda 2: lançamentos unificados, imposto e config ──────────────────────
+
+  // GET /v1/financeiro/lancamentos?inicio=YYYY-MM&fim=YYYY-MM&natureza=&status=&grupo=&q=
+  // Receitas (comercial) + custos + pagamentos de apresentadoras + imposto, status derivado.
+  app.get('/v1/financeiro/lancamentos', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const hoje = hojeSaoPaulo()
+    const parsed = lancamentosQuerySchema.safeParse(request.query ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
-
-    const { tenant_id } = request.user
-    const { descricao, valor, tipo, competencia } = parsed.data
-
-    return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `INSERT INTO custos (tenant_id, descricao, valor, tipo, competencia)
-         VALUES ($1,$2,$3,$4,$5) RETURNING id, descricao, valor, tipo, competencia`,
-        [tenant_id, descricao, valor, tipo, competencia]
-      )
-      const row = result.rows[0]
-      app.audit?.log?.(request, { action: 'financeiro.custo_create', entity_type: 'custo', entity_id: row.id, metadata: { descricao, tipo, valor } })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      return reply.code(201).send({ ...row, valor: toNum(row.valor) })
-    })
-  })
-
-  // GET /v1/financeiro/custos?mes=YYYY-MM  OR  ?inicio=YYYY-MM&fim=YYYY-MM
-  app.get('/v1/financeiro/custos', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
-    const { tenant_id } = request.user
-    const q = { ...request.query }
-    // Atalho: legado mandava 'mes=YYYY-MM' (string). Converte para inicio/fim iguais.
-    if (q.mes && !q.inicio && !q.fim && /^\d{4}-\d{2}$/.test(String(q.mes))) {
-      q.inicio = String(q.mes)
-      q.fim = String(q.mes)
+    try {
+      const { inicio, fim } = resolverPeriodoMeses(request.query ?? {}, hoje)
+      const { natureza, status, grupo, q } = parsed.data
+      return await app.withTenant(tenant_id, (db) => consultarLancamentos(db, {
+        tenantId: tenant_id, inicio, fim, hoje, filtros: { natureza, status, grupo, q },
+      }))
+    } catch (error) {
+      return responderErro(reply, error)
     }
-    const { startDate, endDate } = resolveRange(q)
-
-    return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `SELECT id, descricao, valor, tipo, competencia
-         FROM custos
-         WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
-           AND competencia >= $1::date
-           AND competencia <  ($2::date + interval '1 day')
-         ORDER BY competencia DESC`,
-        [startDate, endDate]
-      )
-      return result.rows.map(r => ({ ...r, valor: toNum(r.valor) }))
-    })
   })
 
-  // DELETE /v1/financeiro/custos/:id
-  app.delete('/v1/financeiro/custos/:id', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+  // PATCH /v1/financeiro/impostos/:mes/pagar {valor_pago?, data_pagamento?, observacao?}
+  app.patch('/v1/financeiro/impostos/:mes/pagar', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+    const { mes } = request.params
+    if (!MES_RE.test(mes)) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    const parsed = baixaImpostoSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const { tenant_id } = request.user
-    return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `DELETE FROM custos WHERE id = $1 AND tenant_id = $2::uuid RETURNING id`,
-        [request.params.id, tenant_id]
-      )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Custo não encontrado' })
-      app.audit?.log?.(request, { action: 'financeiro.custo_delete', entity_type: 'custo', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
-      return { ok: true }
-    })
+    try {
+      const item = await app.withTenant(tenant_id, (db) => pagarImposto(db, {
+        tenantId: tenant_id, mes, valorPago: parsed.data.valor_pago,
+        dataPagamento: parsed.data.data_pagamento, observacao: parsed.data.observacao, hoje: hojeSaoPaulo(),
+      }))
+      invalidateTenant(tenant_id)
+      app.audit?.log?.(request, { action: 'financeiro.imposto_pagar', entity_type: 'imposto', entity_id: item.custo_id, metadata: { mes, ...parsed.data } })
+        ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
+      return item
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // PATCH /v1/financeiro/impostos/:mes/desfazer
+  app.patch('/v1/financeiro/impostos/:mes/desfazer', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+    const { mes } = request.params
+    if (!MES_RE.test(mes)) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    const { tenant_id } = request.user
+    try {
+      const item = await app.withTenant(tenant_id, (db) => desfazerImposto(db, { tenantId: tenant_id, mes, hoje: hojeSaoPaulo() }))
+      invalidateTenant(tenant_id)
+      app.audit?.log?.(request, { action: 'financeiro.imposto_desfazer', entity_type: 'imposto', entity_id: null, metadata: { mes } })
+        ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
+      return item
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // GET/PATCH /v1/financeiro/config {aliquota_imposto_pct}
+  app.get('/v1/financeiro/config', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, (db) => buscarConfigFinanceiro(db, tenant_id))
+  })
+
+  app.patch('/v1/financeiro/config', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+    const parsed = configSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: 'aliquota_imposto_pct deve ser um número entre 0 e 100' })
+    const { tenant_id } = request.user
+    const config = await app.withTenant(tenant_id, (db) => atualizarConfigFinanceiro(db, tenant_id, parsed.data))
+    invalidateTenant(tenant_id)
+    app.audit?.log?.(request, { action: 'financeiro.config_update', entity_type: 'tenant', entity_id: tenant_id, metadata: parsed.data })
+      ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
+    return config
   })
 }

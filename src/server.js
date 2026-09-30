@@ -38,7 +38,6 @@ import { TikTokService } from './services/tiktok.js'
 import { cleanupOrphanContracts } from './jobs/cleanup_orphan_contracts.js'
 import { cleanupPasswordResetTokens } from './jobs/cleanup_password_reset_tokens.js'
 import * as connectorManager from './services/tiktok-connector-manager.js'
-import { startBillingEngine } from './jobs/billing_engine.js'
 import { startClienteMetricasSnapshotCron } from './jobs/cliente_metricas_snapshot.js'
 import { notifyBoletosVencidos } from './jobs/notify_boletos_vencidos.js'
 import { runMigrations } from '../apply_migrations.js'
@@ -59,9 +58,6 @@ await runMigrations(app.db.pool)
 
 // Initialize ConnectorManager with pool access and logger
 connectorManager.init({ db: app.db, log: app.log })
-
-// Initialize Billing Engine for Batch Billing
-startBillingEngine(app.db.pool)
 
 // Snapshot mensal de métricas por cliente (rolling)
 startClienteMetricasSnapshotCron(app)

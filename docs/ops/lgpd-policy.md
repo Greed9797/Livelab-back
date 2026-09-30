@@ -104,7 +104,6 @@ WHERE id = '<uuid>' AND deleted_at IS NOT NULL;
 |----------|-----------|-----------------|
 | `GET /v1/clientes/:id/exportar-dados` | Exportação LGPD de dados pessoais | franqueado, franqueador_master |
 | `DELETE /v1/clientes/:id` | Soft-delete do cliente | franqueado, gerente, franqueador_master |
-| `GET /v1/financeiro/franqueadora` | Visão financeira consolidada (royalties/marketing) | franqueador_master |
 | `GET /v1/financeiro/resumo?scope=franqueadora` | Resumo financeiro com visão franqueadora | franqueador_master |
 
 ## 7. Contato para Exercício de Direitos

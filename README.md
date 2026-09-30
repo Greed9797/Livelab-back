@@ -2,7 +2,7 @@
 
 Backend Node.js + Fastify para a plataforma multi-tenant LiveShop. Gerencia franquias de Live Shop (TikTok Live), pagamentos, contratos, analytics e integrações.
 
-**Stack**: Node.js 20 · Fastify 5 · PostgreSQL (Supabase) · JWT · Asaas/Appmax/TikTok Live · Vitest
+**Stack**: Node.js 20 · Fastify 5 · PostgreSQL (Supabase) · JWT · Asaas (leitura)/TikTok Live · Vitest
 
 ---
 
@@ -28,7 +28,6 @@ Health check: `GET http://localhost:3001/health`
 | `NODE_ENV` | `development` / `production` / `test` | `development` |
 | `PORT` | porta HTTP | `3001` |
 | `CORS_ORIGIN` | allowlist origins prod | `*` em dev |
-| `APPMAX_APP_ID` + `APPMAX_WEBHOOK_SECRET` | gateway pagamento atual | opcional |
 | `TIKTOK_CLIENT_KEY/SECRET/REDIRECT_URI` | OAuth TikTok | opcional |
 | `BIO_CRM_WEBHOOK_SECRET` | HMAC do webhook bio | opcional |
 | `WEBHOOK_REPLAY_PROTECTION` | `true` ativa anti-replay bio-crm | `false` |

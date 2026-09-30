@@ -114,7 +114,7 @@ export async function configuracoesRoutes(app) {
         gateway_api_key_hidden: hideKey(conf.gateway_api_key),
         has_gateway:            !!conf.gateway_api_key,
         gateway_wallet_id:      conf.gateway_wallet_id,
-        gateway_provider:       'appmax',
+        gateway_provider:       'asaas',
         // LEGACY ASAAS — manter pra compat 6 meses (frontend antigo ainda referencia)
         asaas_api_key_hidden:   hideKey(conf.gateway_api_key),
         has_asaas:              !!conf.gateway_api_key,

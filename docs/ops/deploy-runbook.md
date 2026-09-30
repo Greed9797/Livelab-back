@@ -31,7 +31,7 @@ npx knex migrate:status
 - [ ] Confirmar com DevOps que vars de produção estão atualizadas em Railway/Render
 - [ ] JWT_SECRET (novo ou rotacionado?)
 - [ ] DATABASE_URL aponta para DB correto
-- [ ] BIO_CRM_WEBHOOK_SECRET, APPMAX secrets preenchidos
+- [ ] BIO_CRM_WEBHOOK_SECRET
 - [ ] Certificados SSL/HTTPS válidos
 
 ### 5. Comunicação
@@ -268,7 +268,7 @@ open https://app.grupolivelab.com.br
 - [ ] Criar / editar recurso (ex: nova cabine)
 - [ ] Testar integração TikTok (se relevante)
 - [ ] Verificar e-mails (Resend)
-- [ ] Confirmar pagamentos (Appmax)
+- [ ] Confirmar pagamentos (Asaas, leitura)
 
 ### 3. Monitoramento (1h pós-deploy)
 ```bash

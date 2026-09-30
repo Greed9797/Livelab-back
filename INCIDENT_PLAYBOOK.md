@@ -226,7 +226,7 @@ node scripts/audit-rls.js
 
 ## 6. Webhook Replay Attack
 
-**Sintomas**: leads duplicados, eventos Asaas/Appmax processados múltiplas vezes.
+**Sintomas**: leads duplicados, eventos Asaas processados múltiplas vezes.
 
 ### Triagem
 
@@ -294,7 +294,7 @@ psql "$DATABASE_URL" -c "
 |---|---|
 | `DATABASE_URL` (senha PG) | Supabase Settings → DB |
 | `JWT_SECRET` | Railway Variables (gera novo 32+ chars) — força re-login todos users |
-| `ASAAS_API_KEY` / `APPMAX_API_KEY` | Painel respectivo |
+| `ASAAS_API_KEY` | Painel respectivo |
 | `BIO_CRM_WEBHOOK_SECRET` | Coordenar com Bio app team |
 | `SENTRY_DSN` | sentry.io → Project Settings → Client Keys |
 | Firebase service account | Console → IAM → revoke + new key |

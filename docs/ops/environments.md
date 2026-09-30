@@ -64,12 +64,6 @@
 - `BIO_CRM_WEBHOOK_SECRET`: Secret para validar HMAC (obrigatório em produção)
 - `BIO_WEBHOOK_DEFAULT_FRANQUEADORA_ID`: ID franqueadora padrão para leads via webhook
 
-#### Appmax (Gateway de Pagamento)
-- `APPMAX_APP_ID`: ID do aplicativo (painel Appmax → Desenvolvimento)
-- `APPMAX_API_KEY`: API key gerada após instalação
-- `APPMAX_WEBHOOK_SECRET`: Secret para validar webhooks Appmax
-- `APPMAX_BASE_URL`: https://admin.appmax.com.br/api/v3 (padrão)
-
 #### Supabase (Storage, opcional)
 - `SUPABASE_URL`: https://SEU_PROJETO.supabase.co
 - `SUPABASE_SERVICE_KEY`: Service role key para upload de arquivos
@@ -115,7 +109,7 @@
 | Banco PostgreSQL | Supabase | db.SEU_PROJETO.supabase.co:5432 |
 | Storage (arquivos) | Supabase Storage | Opcional, S-07 com criptografia |
 | E-mail | Resend | F1: opcional, hooks no-op se ausente |
-| Pagamentos | Appmax | Substituiu 100% Asaas (deprecado) |
+| Pagamentos | Asaas | Somente leitura (saldo, extrato, conciliação) |
 | Webhooks | Bio CRM | Leads, S-08 com HMAC |
 | Observability | Sentry | Opcional, recomendado produção |
 | Backups | AWS S3 / Cloudflare R2 | Opcional, retenção 30 dias |
@@ -130,7 +124,6 @@
 - [ ] CORS_ORIGIN inclui URL staging
 - [ ] FRONTEND_URL aponta para staging frontend
 - [ ] TikTok OAuth apps diferenciados (sandbox vs produção)
-- [ ] Appmax configurado com sandbox credentials
 - [ ] Sentry DSN dedicado (ou desativado)
 - [ ] Backups S3 apontando para bucket staging
 

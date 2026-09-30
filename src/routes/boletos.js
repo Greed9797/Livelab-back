@@ -245,10 +245,4 @@ export async function boletosRoutes(app) {
     }
     return { received: true }
   })
-
-  // POST /v1/webhooks/asaas — DEPRECATED. Asaas substituído por Appmax.
-  // Mantido pra responder 410 Gone caso webhook antigo ainda dispare.
-  app.post('/v1/webhooks/asaas', async (_, reply) => {
-    return reply.code(410).send({ error: 'Webhook Asaas removido. Use /v1/webhooks/appmax.' })
-  })
 }

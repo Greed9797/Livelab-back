@@ -59,34 +59,6 @@ test.describe('Roles e Permissões — acesso a endpoints financeiros', () => {
     expect(res.status()).toBe(403);
   });
 
-  // ─── franqueador_master acessa /v1/financeiro/franqueadora ────────────────
-  test('franqueador_master acessa /v1/financeiro/franqueadora com 200', async ({ request }) => {
-    const token = await loginAs(request, 'franqueador_master');
-
-    const res = await request.get(`${API}/v1/financeiro/franqueadora`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    expect(res.status()).toBe(200);
-    const body = await res.json();
-    // Resposta deve ter a estrutura definida na rota
-    expect(body).toHaveProperty('franqueados');
-    expect(body).toHaveProperty('periodo');
-    expect(Array.isArray(body.franqueados)).toBe(true);
-  });
-
-  // ─── franqueado não acessa /v1/financeiro/franqueadora ────────────────────
-  test('franqueado não acessa /v1/financeiro/franqueadora — espera 403', async ({ request }) => {
-    const token = await loginAs(request, 'franqueado');
-
-    // requirePapel(['franqueador_master']) — franqueado não está na lista
-    const res = await request.get(`${API}/v1/financeiro/franqueadora`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    expect(res.status()).toBe(403);
-  });
-
   // ─── apresentador não acessa /v1/financeiro/resumo ────────────────────────
   test('apresentador não acessa /v1/financeiro/resumo — espera 403', async ({ request }) => {
     const token = await loginAs(request, 'apresentador');
@@ -122,11 +94,6 @@ test.describe('Roles e Permissões — acesso a endpoints financeiros', () => {
   // ─── request sem token retorna 401 em rotas protegidas ────────────────────
   test('request sem token retorna 401 em /v1/financeiro/resumo', async ({ request }) => {
     const res = await request.get(`${API}/v1/financeiro/resumo`);
-    expect(res.status()).toBe(401);
-  });
-
-  test('request sem token retorna 401 em /v1/financeiro/franqueadora', async ({ request }) => {
-    const res = await request.get(`${API}/v1/financeiro/franqueadora`);
     expect(res.status()).toBe(401);
   });
 

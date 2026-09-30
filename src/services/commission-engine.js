@@ -3,7 +3,7 @@
  *
  * Regras:
  *  - comissao_franquia     = MAX(marca.valor_fixo_minimo, gmv × marca.comissao_franquia_pct / 100)
- *    Fonte única de verdade: marcas. contratos.valor_fixo é EXCLUSIVAMENTE mensalidade (billing_engine).
+ *    Fonte única de verdade: marcas. contratos.valor_fixo é EXCLUSIVAMENTE mensalidade.
  *  - comissao_franqueadora = MAX(marca.valor_fixo_minimo, gmv × marca.comissao_franqueadora_pct / 100)
  *  - comissao_apresentadora = gmv_live × faixa_pct / 100
  *    onde faixa_pct é determinada pelo GMV acumulado da apresentadora no mês
@@ -93,7 +93,7 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv }) {
 
   // 2. Comissão franquia = MAX(marca.valor_fixo_minimo, gmv * pct)
   // Fonte única de verdade: marcas.comissao_franquia_pct e marcas.valor_fixo_minimo.
-  // contratos.valor_fixo é usado exclusivamente pelo billing_engine para mensalidade fixa.
+  // contratos.valor_fixo é usado exclusivamente para a mensalidade fixa (receitas_previstas).
   const franquiaPct   = Number(live.comissao_franquia_pct ?? 0)
   const valorFixoMarca = Number(live.valor_fixo_minimo ?? 0)
   const comissao_franquia = Math.max(valorFixoMarca, gmvNum * (franquiaPct / 100))

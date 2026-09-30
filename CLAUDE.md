@@ -4,7 +4,7 @@
 - **Runtime:** Node.js + Fastify
 - **Banco:** PostgreSQL com Row Level Security (RLS) por `tenant_id`
 - **Auth:** JWT (access + refresh token), plugin em `src/plugins/auth.js`
-- **Migrations:** SQL numeradas em `migrations/` — próxima: `085_*`
+- **Migrations:** SQL numeradas em `migrations/` — próxima: `088_*`
 
 ## Modelo de negócio
 - Franqueados são tenants isolados — apresentadoras, clientes e cabines NÃO são compartilhados

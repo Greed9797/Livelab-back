@@ -79,6 +79,8 @@ const MIGRATIONS_LIST = [
   '083_vendas_atribuidas_aprovacao.sql',
   '084_performance_indexes.sql',
   '085_comissao_faixas_metas.sql',
+  '086_asaas_leitura.sql',
+  '087_financeiro_planilha.sql',
 ]
 
 async function ensureMigrationsTable(client) {

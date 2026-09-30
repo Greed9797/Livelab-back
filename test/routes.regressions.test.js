@@ -42,10 +42,20 @@ afterEach(() => {
 })
 
 describe('Route regressions: SQL and RBAC', () => {
-  it('financeiro resumo uses CTE aggregation and keeps endpoint healthy', async () => {
+  it('financeiro resumo calcula DRE por período com tenant explícito e keeps endpoint healthy', async () => {
     const app = Fastify()
-    const queryMock = vi.fn().mockResolvedValue({
-      rows: [{ fat_bruto_fixo: '1200', fat_bruto_comissao: '300', total_custos: '400' }],
+    const queryMock = vi.fn(async (sql) => {
+      if (sql.includes('FROM tenants')) return { rows: [{ aliquota_imposto_pct: '0' }] }
+      if (sql.includes('FROM contratos c')) {
+        return { rows: [{ id: 'c1', cliente_id: 'cli1', status: 'ativo', valor_fixo: '1200', dia_vencimento: 5, ativado_em: '2026-01-01', fim_em: null }] }
+      }
+      if (sql.includes('FROM vendas_atribuidas')) {
+        return { rows: [{ cliente_id: 'cli1', mes: '2026-03', comissao_franquia: '300', gmv: '10000', comissao_apresentadora: '0' }] }
+      }
+      if (sql.includes('FROM custos\n')) {
+        return { rows: [{ id: 'k1', grupo: 'estrutural', tipo: 'aluguel', valor: '400', competencia: '2026-04-01', status: 'pago' }] }
+      }
+      return { rows: [] }
     })
     const releaseMock = vi.fn()
 
@@ -76,13 +86,11 @@ describe('Route regressions: SQL and RBAC', () => {
       total_custos: 400,
       periodo: '2026-04-01',
     })
-    expect(queryMock).toHaveBeenCalledTimes(1)
-
-    const sql = queryMock.mock.calls[0][0]
-    expect(sql).toContain('WITH contratos_periodo')
-    expect(sql).toContain('custos_periodo')
-    expect(sql).toContain('CROSS JOIN custos_periodo')
-    expect(sql).not.toContain('COALESCE(cu.total_custos, 0)')
+    // Toda query (inclusive custos) filtra tenant_id explicitamente
+    for (const [sql, params] of queryMock.mock.calls) {
+      expect(params[0]).toBe('tenant-1')
+      expect(sql).toMatch(/tenant_id = \$1::uuid|FROM tenants WHERE id = \$1::uuid/)
+    }
     expect(releaseMock).toHaveBeenCalledTimes(1)
 
     await app.close()
@@ -951,7 +959,7 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(app.db.query).not.toHaveBeenCalled()
     expect(mockQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO custos'),
-      ['tenant-1', 'Aluguel', 1500, 'aluguel', '2026-04']
+      ['tenant-1', 'Aluguel', 1500, 'aluguel', '2026-04-01', 'estrutural', 'previsto', null, null, false, null]
     )
 
     await app.close()

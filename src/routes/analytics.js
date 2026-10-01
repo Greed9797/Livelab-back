@@ -2483,6 +2483,8 @@ export async function analyticsRoutes(app) {
             SELECT
               l.id AS live_id,
               (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date AS dia,
+              l.iniciado_em,
+              COALESCE(l.encerrado_em, l.previsto_fim) AS fim_em,
               l.marca_id,
               COALESCE(m.nome, 'Sem marca') AS marca_nome,
               ap_v2.apresentadora_id,
@@ -2543,7 +2545,9 @@ export async function analyticsRoutes(app) {
               COUNT(DISTINCT live_id)::int AS total_lives,
               COALESCE(SUM(gmv), 0) AS gmv_lives,
               COALESCE(SUM(pedidos), 0)::int AS pedidos_lives,
-              COALESCE(SUM(horas), 0) AS horas_live
+              COALESCE(SUM(horas), 0) AS horas_live,
+              to_char(MIN(iniciado_em) AT TIME ZONE '${ANALYTICS_TZ}', 'HH24:MI') AS hora_inicio,
+              to_char(MAX(fim_em) AT TIME ZONE '${ANALYTICS_TZ}', 'HH24:MI') AS hora_fim
             FROM live_base
             GROUP BY dia, marca_id, marca_nome, apresentadora_id, apresentadora_nome
           ),
@@ -2595,6 +2599,8 @@ export async function analyticsRoutes(app) {
             COALESCE(ld.apresentadora_id, vd.apresentadora_id) AS apresentadora_id,
             COALESCE(ld.apresentadora_nome, vd.apresentadora_nome, 'Sem apresentadora') AS apresentadora_nome,
             ld.live_ids,
+            ld.hora_inicio,
+            ld.hora_fim,
             COALESCE(ld.total_lives, 0)::int AS total_lives,
             COALESCE(vd.total_videos, 0)::int AS total_videos,
             COALESCE(ld.gmv_lives, 0) AS gmv_lives,
@@ -2679,6 +2685,8 @@ export async function analyticsRoutes(app) {
               apresentadora_id: row.apresentadora_id ?? null,
               apresentadora_nome: row.apresentadora_nome ?? 'Sem apresentadora',
               live_ids: Array.isArray(row.live_ids) ? row.live_ids : null,
+              hora_inicio: row.hora_inicio ?? null,
+              hora_fim: row.hora_fim ?? null,
               gmv_total: gmvTotal,
               gmv_lives: gmvLives,
               gmv_videos: gmvVideos,

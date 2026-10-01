@@ -72,6 +72,8 @@ describe('analytics diario', () => {
       expect(sql).toContain('($4::uuid IS NULL OR ap_v2.apresentadora_id = $4::uuid)')
       expect(sql).not.toContain('LIMIT 1')
       expect(sql).toContain('array_agg(DISTINCT live_id)')
+      expect(sql).toContain("to_char(MIN(iniciado_em) AT TIME ZONE 'America/Sao_Paulo', 'HH24:MI') AS hora_inicio")
+      expect(sql).toContain("to_char(MAX(fim_em) AT TIME ZONE 'America/Sao_Paulo', 'HH24:MI') AS hora_fim")
       expect(sql).toContain("va.origem = 'video'")
       expect(sql).toContain('FULL OUTER JOIN video_daily')
       expect(sql).toContain('COALESCE(ld.marca_nome, vd.marca_nome')
@@ -92,6 +94,8 @@ describe('analytics diario', () => {
           gmv_videos: '200.25',
           horas_live: '5.5',
           pedidos: 12,
+          hora_inicio: '19:00',
+          hora_fim: '23:30',
         }],
       }
     })
@@ -126,6 +130,8 @@ describe('analytics diario', () => {
         gmv_por_hora: 181.91,
         pedidos: 12,
         ticket_medio: 100.06,
+        hora_inicio: '19:00',
+        hora_fim: '23:30',
       }],
     })
     await app.close()

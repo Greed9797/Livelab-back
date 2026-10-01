@@ -26,8 +26,9 @@ import { hojeSaoPaulo, listarTitulosReceita } from './receitas-comercial.js'
 import { addMeses, diasNoMes, listarCustos, mesesEntre, ultimoDia } from './custos-plano.js'
 import { listarPagamentosApresentadoras } from './apresentadoras-pagamentos.js'
 import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
+import { CLASSES_CUSTO, classeDoItem } from '../lib/custo-classe.js'
 
-export { hojeSaoPaulo }
+export { CLASSES_CUSTO, classeDoItem, hojeSaoPaulo }
 
 export const ALIQUOTA_IMPOSTO_PADRAO = 10
 export const IMPOSTO_DIA_VENCIMENTO = 20
@@ -101,7 +102,7 @@ export function resolverPeriodoMeses(query = {}, hoje = hojeSaoPaulo()) {
 const BASE_ITEM = {
   grupo: null, componente: null, marca_id: null, marca_nome: null, cliente_id: null,
   cliente_nome: null, apresentadora_id: null, recorrente_id: null, parcela_grupo_id: null,
-  parcela_num: null, parcelas_total: null, observacao: null, virtual: false,
+  parcela_num: null, parcelas_total: null, observacao: null, virtual: false, classe: null,
 }
 
 /** Título de receita (listarTitulosReceita) → item comum (origem marca_fixo|marca_comissao). */
@@ -123,11 +124,16 @@ export function normalizarReceita(t, hoje) {
 /** Custo (listarCustos) → item comum (valor_pago numérico). */
 export function normalizarCusto(c, hoje) {
   const item = { ...BASE_ITEM, ...c, natureza: 'custo', valor_previsto: r2(c.valor_previsto), valor_pago: r2(c.valor_pago) }
+  item.classe = classeDoItem(item)
   item.status = statusLancamento(item, hoje)
   return item
 }
 
-/** Pagamento de apresentadora → item comum (grupo 'apresentadoras'). */
+/**
+ * Pagamento de apresentadora → item comum (grupo 'apresentadoras'). Contrato v3: um item
+ * por pessoa × mês × `componente` ('fixo' | 'variavel'); item sem componente (contrato
+ * antigo, total único) é tratado como 'variavel'.
+ */
 export function normalizarApresentadora(p, hoje) {
   const item = {
     ...BASE_ITEM,
@@ -135,10 +141,12 @@ export function normalizarApresentadora(p, hoje) {
     natureza: 'custo',
     origem: 'apresentadora',
     grupo: 'apresentadoras',
+    componente: p.componente === 'fixo' || p.componente === 'variavel' ? p.componente : null,
     valor_previsto: r2(p.valor_previsto),
     valor_pago: r2(p.valor_pago),
     virtual: !(Number(p.valor_pago) > 0),
   }
+  item.classe = classeDoItem(item)
   item.status = statusLancamento(item, hoje)
   return item
 }
@@ -202,6 +210,7 @@ export function montarItemImposto({ calculo, materializado = null, hoje }) {
     base_tipo: calculo.base_tipo,
     mes_base: calculo.mes_base,
     valor_calculado: calculo.valor,
+    classe: 'variavel',
   }
   item.status = statusLancamento(item, hoje)
   return item
@@ -242,12 +251,14 @@ export const aplicarCorte = (itens, dataCorte) => (dataCorte ? itens.filter((i) 
 
 const normTxt = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 
-export function filtrarLancamentos(itens, { natureza, status, grupo, q } = {}) {
+export function filtrarLancamentos(itens, { natureza, status, grupo, classe, origem, q } = {}) {
   const busca = q ? normTxt(q).trim() : ''
   return itens.filter((i) => (
     (!natureza || i.natureza === natureza)
     && (!status || i.status === status)
     && (!grupo || i.grupo === grupo)
+    && (!classe || i.classe === classe)
+    && (!origem || i.origem === origem)
     && (!busca || normTxt([i.descricao, i.marca_nome, i.cliente_nome, i.observacao, i.grupo].join(' ')).includes(busca))
   ))
 }
@@ -303,8 +314,10 @@ const roundPr = (o) => ({ previsto: r2(o.previsto), realizado: r2(o.realizado) }
 
 /**
  * DRE mensal por COMPETÊNCIA: previsto = Σ valor_previsto; realizado = Σ valor_pago.
- * custos exclui apresentadoras e imposto (linhas próprias). resultado = receita −
- * custos − apresentadoras − imposto. `impostos` = Map mes → { aliquota, base }.
+ * Visão por CLASSE (v3): custos_fixos / custos_variaveis (classeDoItem; imposto e
+ * apresentadora-variável dentro de variáveis) e resultado = receita − custos_fixos −
+ * custos_variaveis. Chaves legadas mantidas (mesmo resultado): custos (exclui
+ * apresentadoras e imposto), apresentadoras, imposto. `impostos` = Map mes → { aliquota, base }.
  * Aportes (receita avulsa grupo 'aporte') NÃO são receita operacional: linha
  * `aportes` informativa, fora do resultado.
  */
@@ -312,22 +325,26 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
   const porMes = new Map(meses.map((m) => [m, {
     mes: m, receita: pr(), aportes: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
     imposto: { ...pr(), aliquota: impostos.get(m)?.aliquota ?? Number(aliquota), base: impostos.get(m)?.base ?? 0 },
+    custos_fixos: pr(), custos_variaveis: pr(),
   }]))
   for (const i of itens) {
     const linha = porMes.get(mesDe(i.competencia))
     if (!linha) continue
     if (ehAporte(i)) addPr(linha.aportes, i)
     else if (i.natureza === 'receita') addPr(linha.receita, i)
-    else if (i.origem === 'apresentadora') addPr(linha.apresentadoras, i)
-    else if (i.origem === 'imposto') addPr(linha.imposto, i)
     else {
-      addPr(linha.custos, i)
-      const g = i.grupo || 'outros'
-      linha.custos.por_grupo[g] ??= pr()
-      addPr(linha.custos.por_grupo[g], i)
+      addPr((i.classe ?? classeDoItem(i)) === 'fixo' ? linha.custos_fixos : linha.custos_variaveis, i)
+      if (i.origem === 'apresentadora') addPr(linha.apresentadoras, i)
+      else if (i.origem === 'imposto') addPr(linha.imposto, i)
+      else {
+        addPr(linha.custos, i)
+        const g = i.grupo || 'outros'
+        linha.custos.por_grupo[g] ??= pr()
+        addPr(linha.custos.por_grupo[g], i)
+      }
     }
   }
-  const resultado = (l, k) => r2(l.receita[k] - l.custos[k] - l.apresentadoras[k] - l.imposto[k])
+  const resultado = (l, k) => r2(l.receita[k] - l.custos_fixos[k] - l.custos_variaveis[k])
   const fechar = (l) => {
     const porGrupo = Object.fromEntries(Object.entries(l.custos.por_grupo).map(([g, v]) => [g, roundPr(v)]))
     const out = {
@@ -336,6 +353,8 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
       custos: { ...roundPr(l.custos), por_grupo: porGrupo },
       apresentadoras: roundPr(l.apresentadoras),
       imposto: { ...roundPr(l.imposto), aliquota: l.imposto.aliquota, base: r2(l.imposto.base) },
+      custos_fixos: roundPr(l.custos_fixos),
+      custos_variaveis: roundPr(l.custos_variaveis),
     }
     out.resultado = { previsto: resultado(out, 'previsto'), realizado: resultado(out, 'realizado') }
     return out
@@ -343,7 +362,7 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
   const linhas = meses.map((m) => ({ mes: m, ...fechar(porMes.get(m)) }))
   const tot = {
     receita: pr(), aportes: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
-    imposto: { ...pr(), aliquota: Number(aliquota), base: 0 },
+    imposto: { ...pr(), aliquota: Number(aliquota), base: 0 }, custos_fixos: pr(), custos_variaveis: pr(),
   }
   for (const l of linhas) {
     for (const k of ['previsto', 'realizado']) {
@@ -352,6 +371,8 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
       tot.custos[k] += l.custos[k]
       tot.apresentadoras[k] += l.apresentadoras[k]
       tot.imposto[k] += l.imposto[k]
+      tot.custos_fixos[k] += l.custos_fixos[k]
+      tot.custos_variaveis[k] += l.custos_variaveis[k]
     }
     tot.imposto.base += l.imposto.base
     for (const [g, v] of Object.entries(l.custos.por_grupo)) {
@@ -361,6 +382,194 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
     }
   }
   return { meses: linhas, totais: fechar(tot) }
+}
+
+// ─── DRE do mês (detalhe) ─────────────────────────────────────────────────
+
+const pctDe = (parte, total) => (Number(total) > 0 ? r2((Number(parte) / Number(total)) * 100) : null)
+const deltaPr = (a, b) => ({ previsto: r2(a.previsto - b.previsto), realizado: r2(a.realizado - b.realizado) })
+
+/** Nome da apresentadora: campo do item ou extraído de "Pagamento <nome> - MM/AAAA". */
+function nomeApresentadora(i) {
+  if (i.apresentadora_nome || i.nome) return i.apresentadora_nome ?? i.nome
+  const m = /^Pagamento\s+(.+?)(?:\s+\((?:fixo|vari[aá]vel|comiss[aã]o)[^)]*\))?\s+-\s+\d{2}\/\d{4}$/i.exec(String(i.descricao ?? ''))
+  return m ? m[1] : (i.descricao ?? 'Apresentadora')
+}
+
+/** % de comissão da marca: campo do título, memória do cálculo ou comissão bruta ÷ GMV. */
+function pctComissao(t) {
+  const mem = t.memoria ?? {}
+  const direto = t.pct ?? t.comissao_pct ?? mem.pct ?? mem.comissao_pct ?? null
+  if (direto != null && Number.isFinite(Number(direto))) return r2(direto)
+  return mem.gmv > 0 && mem.comissao_bruta != null ? pctDe(mem.comissao_bruta, mem.gmv) : null
+}
+
+const itemResumo = (i) => ({
+  id: i.id,
+  descricao: i.descricao,
+  origem: i.origem,
+  grupo: i.grupo,
+  classe: i.classe,
+  componente: i.componente ?? null,
+  previsto: r2(i.valor_previsto),
+  realizado: r2(i.valor_pago),
+  status: i.status,
+  data_vencimento: i.data_vencimento ?? null,
+  virtual: Boolean(i.virtual),
+})
+
+/** Custos (exceto apresentadoras e imposto) agrupados por `grupo`, maior previsto primeiro. */
+function custosPorGrupo(itens) {
+  const grupos = new Map()
+  for (const i of itens) {
+    const g = i.grupo || 'outros'
+    if (!grupos.has(g)) grupos.set(g, { grupo: g, total: pr(), itens: [] })
+    const alvo = grupos.get(g)
+    addPr(alvo.total, i)
+    alvo.itens.push(itemResumo(i))
+  }
+  return [...grupos.values()]
+    .map((g) => ({ ...g, total: roundPr(g.total) }))
+    .sort((a, b) => b.total.previsto - a.total.previsto || a.grupo.localeCompare(b.grupo))
+}
+
+/** Apresentadoras de um componente agregadas por pessoa. */
+function apresentadorasPorPessoa(itens, componente) {
+  const porId = new Map()
+  for (const i of itens) {
+    const id = i.apresentadora_id ?? i.id
+    if (!porId.has(id)) {
+      porId.set(id, {
+        apresentadora_id: i.apresentadora_id ?? null,
+        nome: nomeApresentadora(i),
+        ...(componente === 'variavel' ? { comissao: 0, adicionais: 0 } : {}),
+        previsto: 0,
+        realizado: 0,
+      })
+    }
+    const a = porId.get(id)
+    a.previsto += Number(i.valor_previsto) || 0
+    a.realizado += Number(i.valor_pago) || 0
+    if (componente === 'variavel') {
+      // contrato v3: comissao/adicionais do componente; legado (sem componente): idem do total
+      a.comissao += Number(i.comissao) || 0
+      a.adicionais += Number(i.adicionais) || 0
+    }
+  }
+  return [...porId.values()]
+    .map((a) => ({
+      ...a,
+      ...(componente === 'variavel' ? { comissao: r2(a.comissao), adicionais: r2(a.adicionais) } : {}),
+      previsto: r2(a.previsto),
+      realizado: r2(a.realizado),
+    }))
+    .sort((x, y) => y.previsto - x.previsto || String(x.nome).localeCompare(String(y.nome), 'pt-BR'))
+}
+
+/** Receita do mês por cliente → marca (fixo e comissão previstos × realizados + GMV/%). */
+function receitaPorCliente(titulos) {
+  const clientes = new Map()
+  for (const t of titulos) {
+    const cid = t.cliente_id ?? null
+    const ck = cid ?? '__sem_cliente__'
+    if (!clientes.has(ck)) clientes.set(ck, { cliente_id: cid, cliente_nome: t.cliente_nome ?? null, marcas: new Map(), total: pr() })
+    const c = clientes.get(ck)
+    if (!c.marcas.has(t.marca_id)) {
+      c.marcas.set(t.marca_id, { marca_id: t.marca_id, marca_nome: t.marca_nome ?? null, fixo: pr(), comissao: pr(), gmv: null, pct: null })
+    }
+    const m = c.marcas.get(t.marca_id)
+    const comp = t.origem === 'marca_fixo' ? 'fixo' : 'comissao'
+    addPr(m[comp], t)
+    addPr(c.total, t)
+    if (comp === 'comissao') {
+      const gmv = t.gmv ?? t.memoria?.gmv
+      if (gmv != null) m.gmv = r2((m.gmv ?? 0) + Number(gmv))
+      m.pct ??= pctComissao(t)
+    }
+  }
+  return [...clientes.values()]
+    .map((c) => ({
+      cliente_id: c.cliente_id,
+      cliente_nome: c.cliente_nome,
+      total: roundPr(c.total),
+      marcas: [...c.marcas.values()]
+        .map((m) => ({ ...m, fixo: roundPr(m.fixo), comissao: roundPr(m.comissao) }))
+        .sort((a, b) => String(a.marca_nome ?? '').localeCompare(String(b.marca_nome ?? ''), 'pt-BR')),
+    }))
+    .sort((a, b) => b.total.previsto - a.total.previsto || String(a.cliente_nome ?? '').localeCompare(String(b.cliente_nome ?? ''), 'pt-BR'))
+}
+
+/**
+ * Detalhe do DRE de `mes` (GET /dre/mes). Pura: `itens` = lançamentos (já com corte)
+ * das competências [mes−1, mes]. Invariantes:
+ *   receita.total            = atual.receita
+ *   custos_fixos.total       = Σ por_grupo + Σ apresentadoras_fixo
+ *   custos_variaveis.total   = Σ por_grupo + Σ apresentadoras_variavel + imposto
+ *   atual.resultado          = receita − custos_fixos − custos_variaveis (aportes fora)
+ */
+export function montarDreDetalhe({ mes, itens, aliquota = ALIQUOTA_IMPOSTO_PADRAO, hoje = null }) {
+  const anteriorMes = addMeses(mes, -1)
+  const impostos = new Map(itens.filter((i) => i.origem === 'imposto')
+    .map((i) => [mesDe(i.competencia), { aliquota: i.aliquota, base: i.base }]))
+  const { meses: [anterior, atual] } = montarDre({ meses: [anteriorMes, mes], itens, impostos, aliquota })
+  const doMes = itens.filter((i) => mesDe(i.competencia) === mes)
+
+  const titulos = doMes.filter((i) => i.origem === 'marca_fixo' || i.origem === 'marca_comissao')
+  const avulsas = doMes.filter((i) => i.natureza === 'receita' && i.origem === 'avulsa' && !ehAporte(i))
+  const custos = doMes.filter((i) => i.natureza === 'custo')
+  const classe = (i) => i.classe ?? classeDoItem(i)
+  const comuns = (c) => custos.filter((i) => classe(i) === c && i.origem !== 'apresentadora' && i.origem !== 'imposto')
+  const aps = (c) => custos.filter((i) => i.origem === 'apresentadora' && classe(i) === c)
+  const calcImp = custos.find((i) => i.origem === 'imposto') ?? null
+
+  const contribuicao = {
+    previsto: r2(atual.receita.previsto - atual.custos_variaveis.previsto),
+    realizado: r2(atual.receita.realizado - atual.custos_variaveis.realizado),
+  }
+  return {
+    mes,
+    mes_anterior: anteriorMes,
+    atual,
+    anterior,
+    delta: {
+      receita: deltaPr(atual.receita, anterior.receita),
+      custos_fixos: deltaPr(atual.custos_fixos, anterior.custos_fixos),
+      custos_variaveis: deltaPr(atual.custos_variaveis, anterior.custos_variaveis),
+      resultado: deltaPr(atual.resultado, anterior.resultado),
+    },
+    receita: {
+      por_cliente: receitaPorCliente(titulos),
+      avulsas: avulsas.map(itemResumo),
+      total: atual.receita,
+    },
+    custos_fixos: {
+      total: atual.custos_fixos,
+      por_grupo: custosPorGrupo(comuns('fixo')),
+      apresentadoras_fixo: apresentadorasPorPessoa(aps('fixo'), 'fixo'),
+    },
+    custos_variaveis: {
+      total: atual.custos_variaveis,
+      por_grupo: custosPorGrupo(comuns('variavel')),
+      apresentadoras_variavel: apresentadorasPorPessoa(aps('variavel'), 'variavel'),
+      imposto: {
+        id: calcImp?.id ?? idImposto(mes),
+        previsto: atual.imposto.previsto,
+        realizado: atual.imposto.realizado,
+        aliquota: calcImp?.aliquota ?? atual.imposto.aliquota,
+        base: r2(calcImp?.base ?? atual.imposto.base),
+        // imposto zerado não gera lançamento: base_tipo pela mesma regra de calcularImpostoMes
+        base_tipo: calcImp?.base_tipo ?? (hoje ? (anteriorMes < String(hoje).slice(0, 7) ? 'realizado' : 'projetado') : null),
+        mes_base: calcImp?.mes_base ?? anteriorMes,
+        status: calcImp?.status ?? null,
+        data_vencimento: calcImp?.data_vencimento ?? vencimentoImposto(mes),
+      },
+    },
+    aportes: doMes.filter(ehAporte).map(itemResumo),
+    margem: {
+      contribuicao,
+      pct: { previsto: pctDe(contribuicao.previsto, atual.receita.previsto), realizado: pctDe(contribuicao.realizado, atual.receita.realizado) },
+    },
+  }
 }
 
 // ─── Fluxo de caixa ───────────────────────────────────────────────────────
@@ -692,6 +901,18 @@ export async function calcularDre(db, { tenantId, inicio, fim, hoje = hojeSaoPau
   const impostos = new Map(itens.filter((i) => i.origem === 'imposto')
     .map((i) => [mesDe(i.competencia), { aliquota: i.aliquota, base: i.base }]))
   return { inicio, fim, aliquota, data_corte: dataCorte, ...montarDre({ meses: mesesEntre(inicio, fim), itens, impostos, aliquota }) }
+}
+
+/**
+ * GET /dre/mes: detalhe do DRE de `mes` + comparativo com mes−1. Uma única chamada a
+ * listarLancamentos cobre [mes−1, mes] (sem consulta por item/mês). Corte aplicado.
+ */
+export async function calcularDreMes(db, { tenantId, mes, hoje = hojeSaoPaulo() } = {}) {
+  if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
+  if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
+  const { aliquota_imposto_pct: aliquota, data_corte: dataCorte } = await buscarConfigFinanceiro(db, tenantId)
+  const itens = await listarLancamentos(db, { tenantId, inicio: addMeses(mes, -1), fim: mes, hoje, aliquota, dataCorte })
+  return { hoje, aliquota, data_corte: dataCorte, ...montarDreDetalhe({ mes, itens, aliquota, hoje }) }
 }
 
 /**

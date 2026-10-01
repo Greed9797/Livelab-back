@@ -94,7 +94,7 @@ export function marcaFixoMensalAtividadeSql() {
  *   data_inicio da marca → 1ª condição comercial real (não o baseline técnico
  *   1900-01-01 da migration 151) → mês de cadastro da marca.
  */
-function inicioContratoSql(marca = 'm') {
+export function inicioContratoSql(marca = 'm') {
   return `COALESCE(
       ${marca}.data_inicio,
       (SELECT MIN(c0.inicio_vigencia) FROM marca_condicoes_comerciais c0
@@ -206,6 +206,7 @@ export function receitaMarcaMensalSql({ fixo = 'vigencia' } = {}) {
            m.nome AS marca_nome, m.tipo AS marca_tipo, m.cliente_id, cl.nome AS cliente_nome,
            mc.id AS condicao_id,
            COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca,
+           COALESCE(mc.comissao_franquia_pct, 0) AS comissao_franquia_pct,
            COALESCE(mc.fixo_vencimento_dia, 5) AS fixo_vencimento_dia,
            COALESCE(mc.fixo_vencimento_mes_offset, 1) AS fixo_vencimento_mes_offset,
            COALESCE(mc.comissao_vencimento_dia, 5) AS comissao_vencimento_dia,
@@ -216,4 +217,29 @@ export function receitaMarcaMensalSql({ fixo = 'vigencia' } = {}) {
       ${condicaoVigenteLateralSql({ alias: 'mc', marcaExpr: 'b.marca_id', mesExpr: 'b.mes' })}
      WHERE b.marca_id IS NOT NULL
      ORDER BY b.mes, m.nome`
+}
+
+/**
+ * Marcas tipo='cliente' (não sistema) com condição comercial vigente no mês $1
+ * (1º dia) e contrato ativo no mês (início efetivo <= $2 e data_fim >= $1).
+ * Usado pela visão de Receita para mostrar marcas cuja comissão ainda não gerou
+ * título ("em apuração"). Params: $1 = 1º dia do mês, $2 = último dia, $3 = tenant_id.
+ */
+export function marcasCondicaoVigenteMesSql() {
+  return `
+    SELECT m.id AS marca_id, m.nome AS marca_nome, m.cliente_id, cl.nome AS cliente_nome,
+           mc.id AS condicao_id,
+           COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao') AS tipo_cobranca,
+           COALESCE(mc.comissao_franquia_pct, 0) AS comissao_franquia_pct,
+           COALESCE(mc.fixo_mensal, 0) AS fixo_mensal,
+           COALESCE(mc.comissao_vencimento_dia, 5) AS comissao_vencimento_dia,
+           COALESCE(mc.comissao_vencimento_mes_offset, 1) AS comissao_vencimento_mes_offset
+      FROM marcas m
+      LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = m.tenant_id
+      ${condicaoVigenteLateralSql({ alias: 'mc', marcaExpr: 'm.id', mesExpr: '$1::date' })}
+     WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente' AND COALESCE(m.sistema, false) = false
+       AND mc.id IS NOT NULL
+       AND ${inicioContratoSql('m')} <= $2::date
+       AND (m.data_fim IS NULL OR m.data_fim >= $1::date)
+     ORDER BY m.nome`
 }

@@ -14,7 +14,7 @@ import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql
 import { marcaFixoVigenciaSql } from '../lib/receita-marca-sql.js'
 import { listarCustos } from '../services/custos-plano.js'
 import {
-  atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularFluxoCaixa,
+  atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularDreMes, calcularFluxoCaixa,
   consultarLancamentos, dataValida, desfazerImposto, hojeSaoPaulo, pagarImposto, resolverPeriodoMeses,
 } from '../services/financeiro-agregador.js'
 
@@ -25,6 +25,10 @@ const lancamentosQuerySchema = z.object({
   natureza: z.enum(['receita', 'custo']).optional(),
   status: z.enum(['previsto', 'pendente', 'atrasado', 'parcial', 'pago']).optional(),
   grupo: z.string().trim().min(1).max(40).optional(),
+  classe: z.enum(['fixo', 'variavel']).optional(),
+  origem: z.enum([
+    'marca_fixo', 'marca_comissao', 'avulsa', 'manual', 'recorrente', 'parcela', 'apresentadora', 'imposto',
+  ]).optional(),
   q: z.string().trim().max(120).optional(),
 }).passthrough()
 
@@ -734,7 +738,7 @@ export async function financeiroRoutes(app) {
 
   // ─── Onda 2: lançamentos unificados, imposto e config ──────────────────────
 
-  // GET /v1/financeiro/lancamentos?inicio=YYYY-MM&fim=YYYY-MM&natureza=&status=&grupo=&q=
+  // GET /v1/financeiro/lancamentos?inicio=YYYY-MM&fim=YYYY-MM&natureza=&status=&grupo=&classe=&origem=&q=
   // Receitas (comercial) + custos + pagamentos de apresentadoras + imposto, status derivado.
   app.get('/v1/financeiro/lancamentos', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
     const { tenant_id } = request.user
@@ -743,10 +747,25 @@ export async function financeiroRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     try {
       const { inicio, fim } = resolverPeriodoMeses(request.query ?? {}, hoje)
-      const { natureza, status, grupo, q } = parsed.data
+      const { natureza, status, grupo, classe, origem, q } = parsed.data
       return await app.withTenant(tenant_id, (db) => consultarLancamentos(db, {
-        tenantId: tenant_id, inicio, fim, hoje, filtros: { natureza, status, grupo, q },
+        tenantId: tenant_id, inicio, fim, hoje, filtros: { natureza, status, grupo, classe, origem, q },
       }))
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // GET /v1/financeiro/dre/mes?mes=YYYY-MM (default: mês corrente SP)
+  // Detalhe do DRE do mês: linhas atual/anterior/delta, receita por cliente→marca,
+  // custos fixos e variáveis por grupo (+ apresentadoras por pessoa, imposto), aportes, margem.
+  app.get('/v1/financeiro/dre/mes', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const hoje = hojeSaoPaulo()
+    const mes = request.query?.mes ?? hoje.slice(0, 7)
+    if (!MES_RE.test(String(mes))) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    try {
+      return await app.withTenant(tenant_id, (db) => calcularDreMes(db, { tenantId: tenant_id, mes, hoje }))
     } catch (error) {
       return responderErro(reply, error)
     }

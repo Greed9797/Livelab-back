@@ -370,6 +370,60 @@ describe('rotas /v1/asaas', () => {
     expect(queries[iVinculo].params).toEqual([TX_ID, TENANT, 'custo', CUSTO_ID, '33333333-3333-3333-3333-333333333333', true])
   })
 
+  const AVULSA_ID = '55555555-5555-5555-5555-555555555555'
+
+  it('POST /conciliar: avulsa — baixa a receita avulsa e vincula na mesma transação', async () => {
+    const { app, queries } = buildApp({
+      onQuery: (sql) => {
+        if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
+          return { rows: [{ id: TX_ID, tipo: 'entrada', valor: 800, data: '2026-03-21', conciliado_com_id: null }] }
+        }
+        if (/SELECT id, valor_pago FROM receitas_avulsas/.test(sql)) return { rows: [{ id: AVULSA_ID, valor_pago: '0.00' }] }
+        if (/UPDATE receitas_avulsas/.test(sql)) {
+          return { rows: [{ id: AVULSA_ID, descricao: 'Serviço', grupo: 'servico', valor_previsto: '800.00', valor_pago: '800.00',
+            data_vencimento: '2026-03-20', data_pagamento: '2026-03-21', competencia: '2026-03-01' }] }
+        }
+        if (/UPDATE gateway_transacoes/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'avulsa', conciliado_com_id: AVULSA_ID, conciliado_baixa: true }] }
+        return { rows: [] }
+      },
+    })
+    const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'avulsa', id: AVULSA_ID } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 800, data_pagamento: '2026-03-21' })
+    const sqls = queries.map((q) => q.sql)
+    const iBaixa = sqls.findIndex((x) => /UPDATE receitas_avulsas/.test(x))
+    const iVinculo = sqls.findIndex((x) => /UPDATE gateway_transacoes/.test(x))
+    expect(iBaixa).toBeGreaterThan(sqls.indexOf('BEGIN'))
+    expect(iVinculo).toBeGreaterThan(iBaixa)
+    expect(sqls.indexOf('COMMIT')).toBeGreaterThan(iVinculo)
+    expect(queries[iBaixa].params[1]).toBe(TENANT)
+    expect(queries[iVinculo].params.slice(2, 4)).toEqual(['avulsa', AVULSA_ID])
+  })
+
+  it('POST /conciliar: avulsa não aceita saída', async () => {
+    const { app } = buildApp({
+      onQuery: (sql) => (/FOR UPDATE/.test(sql) ? { rows: [{ id: TX_ID, tipo: 'saida', valor: 10, data: '2026-03-20', conciliado_com_id: null }] } : { rows: [] }),
+    })
+    const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'avulsa', id: AVULSA_ID } })
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('GET /conciliacao (entrada): sugere receita avulsa em aberto', async () => {
+    const { app } = buildApp({
+      onQuery: (sql) => {
+        if (/FROM gateway_transacoes g/.test(sql)) return { rows: [{ id: TX_ID, tipo: 'entrada', valor: 800, data: '2026-03-20', customer_id: null }] }
+        if (/FROM receitas_avulsas/.test(sql)) {
+          return { rows: [{ id: AVULSA_ID, descricao: 'Serviço', grupo: 'servico', valor_previsto: '800.00', valor_pago: '0.00',
+            data_vencimento: '2026-03-20', data_pagamento: null, competencia: '2026-03-01' }] }
+        }
+        return { rows: [] }
+      },
+    })
+    const res = await app.inject({ method: 'GET', url: '/v1/asaas/conciliacao?inicio=2026-03-01&fim=2026-03-31' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().itens[0].sugestoes[0]).toMatchObject({ tipo: 'avulsa', id: AVULSA_ID, valor_casado: 800 })
+  })
+
   it('POST /conciliar: alvo inexistente → 404 e ROLLBACK (nada gravado)', async () => {
     const { app, queries } = buildApp({
       onQuery: (sql) => (/FOR UPDATE/.test(sql) && /gateway_transacoes/.test(sql)

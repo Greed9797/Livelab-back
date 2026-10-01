@@ -172,6 +172,9 @@ describe('DRE', () => {
       },
       apresentadoras: { previsto: 250, realizado: 0 },
       imposto: { previsto: 50, realizado: 0, aliquota: 10, base: 500 },
+      // v3: manuais pontuais + apresentadora sem componente (legado) + imposto = variáveis
+      custos_fixos: { previsto: 0, realizado: 0 },
+      custos_variaveis: { previsto: 700, realizado: 100 },
       resultado: { previsto: 300, realizado: 900 },
     })
     expect(totais.resultado).toEqual({ previsto: 300, realizado: 900 })

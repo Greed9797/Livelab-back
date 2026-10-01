@@ -2,13 +2,18 @@ import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
 
 import { financeiroApresentadorasPagamentosRoutes } from '../src/routes/financeiro_apresentadoras_pagamentos.js'
-import { listarPagamentosApresentadoras, mesesDoPeriodo, vencimentoApresentadora } from '../src/services/apresentadoras-pagamentos.js'
+import {
+  buscarConfigVencimento, desfazerPagamentoApresentadora, listarPagamentosApresentadoras, mesesDoPeriodo,
+  registrarPagamentoApresentadora, vencimentoApresentadora,
+} from '../src/services/apresentadoras-pagamentos.js'
 
 const tenantId = '11111111-1111-4111-8111-111111111111'
 const apId = '22222222-2222-4222-8222-222222222222'
 
+const CFG = { fixo_dia: 10, fixo_offset: 0, variavel_dia: 15, variavel_offset: 1 }
+
 // Roteia as queries do serviço por trecho de SQL.
-function fakeDb({ pagos = [], config = { dia: 10, mes_offset: 1 }, fixo = '2700.00', comissao = '160.00' } = {}) {
+function fakeDb({ pagos = [], config = CFG, fixo = '2700.00', comissao = '160.00', adicionais = [] } = {}) {
   const calls = []
   const query = vi.fn(async (sql, params) => {
     calls.push({ sql: String(sql), params })
@@ -16,11 +21,12 @@ function fakeDb({ pagos = [], config = { dia: 10, mes_offset: 1 }, fixo = '2700.
     if (s.includes('DELETE FROM apresentadora_pagamentos')) return { rowCount: 1, rows: [{ id: 'x' }] }
     if (s.includes('FROM tenants')) return { rows: [config] }
     if (s.includes('FROM apresentadora_pagamentos')) return { rows: pagos }
-    if (s.includes('apresentadora_remuneracao_adicionais')) return { rows: [] }
+    if (s.includes('apresentadora_remuneracao_adicionais')) return { rows: adicionais }
     if (s.includes('FROM vendas_atribuidas')) return { rows: [{ apresentadora_id: apId, nome: 'Ana', valor: comissao }] }
     if (s.includes('FROM apresentadoras a') && s.includes('prorate') === false && s.includes('a.ativo')) return { rows: [{ apresentadora_id: apId, nome: 'Ana', valor: fixo }] }
     if (s.includes('SELECT id FROM apresentadoras')) return { rows: [{ id: apId }] }
-    if (s.includes('INSERT INTO apresentadora_pagamentos')) return { rows: [{ apresentadora_id: apId, valor_pago: params[3] }] }
+    if (s.includes('INSERT INTO apresentadora_pagamentos')) return { rows: [{ apresentadora_id: apId, componente: params[3], valor_pago: params[4] }] }
+    if (s.startsWith('UPDATE tenants')) return { rows: [] }
     return { rows: [] }
   })
   return { query, calls }
@@ -45,35 +51,67 @@ describe('vencimento', () => {
 
 describe('listarPagamentosApresentadoras', () => {
   const base = { tenantId, inicio: '2026-09-01', fim: '2026-09-30' }
+  const pg = (componente, valor, data = '2026-10-05') => ({ apresentadora_id: apId, competencia: '2026-09-01', componente, valor_pago: valor, data_pagamento: data })
+  const por = (itens, c) => itens.find((i) => i.componente === c)
 
-  it('usa o total do fechamento e devolve o formato da spec', async () => {
-    const db = fakeDb()
-    const [item] = await listarPagamentosApresentadoras(db, { ...base, hoje: '2026-10-05' })
-    expect(item).toMatchObject({
-      id: `apresentadora:${apId}:2026-09`, natureza: 'custo', origem: 'apresentadora',
-      competencia: '2026-09-01', data_vencimento: '2026-10-10', valor_previsto: 2860, valor_pago: 0,
-      data_pagamento: null, status: 'pendente',
+  it('devolve DOIS itens por pessoa/mês: fixo e variável (comissão + adicionais)', async () => {
+    const db = fakeDb({ adicionais: [{ id: 'e1', apresentadora_id: apId, nome: 'Ana', tipo: 'bonus', descricao: 'b', data_referencia: '2026-09-10', valor: '40.00' }] })
+    const itens = await listarPagamentosApresentadoras(db, { ...base, hoje: '2026-09-05' })
+    expect(itens).toHaveLength(2)
+    expect(por(itens, 'fixo')).toMatchObject({
+      id: `apresentadora:${apId}:2026-09:fixo`, natureza: 'custo', origem: 'apresentadora', componente: 'fixo',
+      competencia: '2026-09-01', data_vencimento: '2026-09-10', valor_previsto: 2700, valor_pago: 0,
+      data_pagamento: null, status: 'pendente', fixo: 2700, comissao: 160, adicionais: 40,
+    })
+    expect(por(itens, 'variavel')).toMatchObject({
+      id: `apresentadora:${apId}:2026-09:variavel`, origem: 'apresentadora', componente: 'variavel',
+      data_vencimento: '2026-10-15', valor_previsto: 200, status: 'previsto', fixo: 2700, comissao: 160, adicionais: 40,
     })
   })
 
-  it('deriva status: atrasado, parcial e pago', async () => {
-    const atrasado = await listarPagamentosApresentadoras(fakeDb(), { ...base, hoje: '2026-10-11' })
-    expect(atrasado[0].status).toBe('atrasado')
-    const parcial = await listarPagamentosApresentadoras(
-      fakeDb({ pagos: [{ apresentadora_id: apId, competencia: '2026-09-01', valor_pago: '1000.00', data_pagamento: '2026-10-05' }] }),
-      { ...base, hoje: '2026-10-06' })
-    expect(parcial[0]).toMatchObject({ status: 'parcial', valor_pago: 1000, data_pagamento: '2026-10-05' })
-    const pago = await listarPagamentosApresentadoras(
-      fakeDb({ pagos: [{ apresentadora_id: apId, competencia: '2026-09-01', valor_pago: '2860.00', data_pagamento: '2026-10-05' }] }),
-      { ...base, hoje: '2026-11-20' })
-    expect(pago[0].status).toBe('pago')
+  it('omite componente sem valor e sem baixa', async () => {
+    const itens = await listarPagamentosApresentadoras(fakeDb({ comissao: '0.00' }), { ...base, hoje: '2026-09-05' })
+    expect(itens.map((i) => i.componente)).toEqual(['fixo'])
+    const soVar = await listarPagamentosApresentadoras(fakeDb({ fixo: '0.00' }), { ...base, hoje: '2026-09-05' })
+    expect(soVar.map((i) => i.componente)).toEqual(['variavel'])
   })
 
-  it('mês futuro fica previsto e respeita config do tenant', async () => {
-    const db = fakeDb({ config: { dia: 31, mes_offset: 1 } })
-    const [item] = await listarPagamentosApresentadoras(db, { tenantId, inicio: '2026-12-01', fim: '2026-12-31', hoje: '2026-09-30' })
-    expect(item.status).toBe('previsto')
-    expect(item.data_vencimento).toBe('2027-01-31')
+  it('deriva status por componente, com baixa independente', async () => {
+    const atrasado = await listarPagamentosApresentadoras(fakeDb(), { ...base, hoje: '2026-10-11' })
+    expect(por(atrasado, 'fixo').status).toBe('atrasado')
+    expect(por(atrasado, 'variavel').status).toBe('pendente')
+    const tarde = await listarPagamentosApresentadoras(fakeDb(), { ...base, hoje: '2026-10-16' })
+    expect(por(tarde, 'variavel').status).toBe('atrasado')
+
+    const itens = await listarPagamentosApresentadoras(
+      fakeDb({ pagos: [pg('fixo', '2700.00', '2026-09-09'), pg('variavel', '50.00')] }), { ...base, hoje: '2026-10-06' })
+    expect(por(itens, 'fixo')).toMatchObject({ status: 'pago', valor_pago: 2700, data_pagamento: '2026-09-09' })
+    expect(por(itens, 'variavel')).toMatchObject({ status: 'parcial', valor_pago: 50, data_pagamento: '2026-10-05' })
+  })
+
+  it('baixa legada (pré-172, total no fixo) fica como fixo e é sinalizada como divergente', async () => {
+    const itens = await listarPagamentosApresentadoras(fakeDb({ pagos: [pg('fixo', '2860.00')] }), { ...base, hoje: '2026-10-20' })
+    expect(por(itens, 'fixo')).toMatchObject({ status: 'pago', valor_pago: 2860, divergente: true })
+    expect(por(itens, 'variavel')).toMatchObject({ valor_pago: 0, divergente: false })
+  })
+
+  it('apresentadora fora do fechamento com baixa mantém só o componente baixado', async () => {
+    const outra = '33333333-3333-4333-8333-333333333333'
+    const db = fakeDb({ pagos: [{ apresentadora_id: outra, competencia: '2026-09-01', componente: 'variavel', valor_pago: '10.00', data_pagamento: '2026-10-01' }] })
+    const itens = (await listarPagamentosApresentadoras(db, { ...base, hoje: '2026-10-06' })).filter((i) => i.apresentadora_id === outra)
+    expect(itens.map((i) => i.componente)).toEqual(['variavel'])
+  })
+
+  it('respeita config do tenant por componente (e virada de ano)', async () => {
+    const db = fakeDb({ config: { fixo_dia: 31, fixo_offset: 1, variavel_dia: 5, variavel_offset: 0 } })
+    const itens = await listarPagamentosApresentadoras(db, { tenantId, inicio: '2026-12-01', fim: '2026-12-31', hoje: '2026-09-30' })
+    expect(por(itens, 'fixo')).toMatchObject({ status: 'previsto', data_vencimento: '2027-01-31' })
+    expect(por(itens, 'variavel').data_vencimento).toBe('2026-12-05')
+  })
+
+  it('config ausente cai nos defaults (fixo 10/0, variável 15/1)', async () => {
+    const cfg = await buscarConfigVencimento(fakeDb({ config: {} }), tenantId)
+    expect(cfg).toEqual({ fixo: { dia: 10, mes_offset: 0 }, variavel: { dia: 15, mes_offset: 1 } })
   })
 
   it('passa tenant_id explícito em todas as queries', async () => {
@@ -81,6 +119,23 @@ describe('listarPagamentosApresentadoras', () => {
     await listarPagamentosApresentadoras(db, { ...base, hoje: '2026-09-30' })
     for (const c of db.calls) expect(c.params[0]).toBe(tenantId)
     for (const c of db.calls) expect(c.sql).toMatch(/tenant_id|id = \$1/)
+  })
+})
+
+describe('registrar/desfazer por componente', () => {
+  it('default = previsto do componente (variável = comissão + adicionais)', async () => {
+    const db = fakeDb()
+    await registrarPagamentoApresentadora(db, { tenantId, apresentadoraId: apId, mes: '2026-09', componente: 'variavel' })
+    await registrarPagamentoApresentadora(db, { tenantId, apresentadoraId: apId, mes: '2026-09', componente: 'fixo' })
+    const ins = db.calls.filter((c) => c.sql.includes('INSERT INTO apresentadora_pagamentos'))
+    expect(ins.map((c) => [c.params[3], c.params[4]])).toEqual([['variavel', 160], ['fixo', 2700]])
+    expect(ins[0].sql).toContain('ON CONFLICT (tenant_id, apresentadora_id, competencia, componente)')
+  })
+  it('componente inválido lança TypeError; desfazer filtra por componente', async () => {
+    await expect(registrarPagamentoApresentadora(fakeDb(), { tenantId, apresentadoraId: apId, mes: '2026-09', componente: 'x' })).rejects.toThrow(TypeError)
+    const db = fakeDb()
+    await desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId: apId, mes: '2026-09', componente: 'variavel' })
+    expect(db.calls[0].params).toEqual([tenantId, apId, '2026-09-01', 'variavel'])
   })
 })
 
@@ -94,38 +149,68 @@ describe('rotas', () => {
     app.register(financeiroApresentadorasPagamentosRoutes)
     return app
   }
-  const url = `/v1/financeiro/apresentadoras-pagamentos/${apId}/2026-09`
+  const B = `/v1/financeiro/apresentadoras-pagamentos/${apId}/2026-09`
+  const ins = (db) => db.calls.find((c) => c.sql.includes('INSERT INTO apresentadora_pagamentos'))
 
-  it('pagar sem corpo paga o total do fechamento', async () => {
+  it('pagar fixo sem corpo paga o previsto do fixo', async () => {
     const db = fakeDb()
-    const res = await buildApp(db).inject({ method: 'PATCH', url: `${url}/pagar`, payload: {} })
+    const res = await buildApp(db).inject({ method: 'PATCH', url: `${B}/fixo/pagar`, payload: {} })
     expect(res.statusCode).toBe(200)
-    const ins = db.calls.find((c) => c.sql.includes('INSERT INTO apresentadora_pagamentos'))
-    expect(ins.params[0]).toBe(tenantId)
-    expect(ins.params[3]).toBe(2860)
+    expect(ins(db).params.slice(0, 5)).toEqual([tenantId, apId, '2026-09-01', 'fixo', 2700])
+    expect(res.headers.deprecation).toBeUndefined()
   })
 
-  it('pagar parcial grava o valor informado', async () => {
+  it('pagar variável sem corpo paga comissão + adicionais; parcial grava o informado', async () => {
     const db = fakeDb()
-    const res = await buildApp(db).inject({ method: 'PATCH', url: `${url}/pagar`, payload: { valor_pago: '1000,50', data_pagamento: '2026-10-05' } })
-    expect(res.statusCode).toBe(200)
-    const ins = db.calls.find((c) => c.sql.includes('INSERT INTO apresentadora_pagamentos'))
-    expect(ins.params[3]).toBe(1000.5)
-    expect(ins.params[4]).toBe('2026-10-05')
+    expect((await buildApp(db).inject({ method: 'PATCH', url: `${B}/variavel/pagar`, payload: {} })).statusCode).toBe(200)
+    expect(ins(db).params[3]).toBe('variavel')
+    expect(ins(db).params[4]).toBe(160)
+    const db2 = fakeDb()
+    await buildApp(db2).inject({ method: 'PATCH', url: `${B}/variavel/pagar`, payload: { valor_pago: '100,50', data_pagamento: '2026-10-15' } })
+    expect(ins(db2).params[4]).toBe(100.5)
+    expect(ins(db2).params[5]).toBe('2026-10-15')
   })
 
-  it('rejeita valor inválido, mês inválido e data inexistente', async () => {
+  it('rota legada (sem componente) = fixo com valor do FIXO (não o total) + header Deprecation', async () => {
+    const db = fakeDb()
+    const res = await buildApp(db).inject({ method: 'PATCH', url: `${B}/pagar`, payload: {} })
+    expect(res.statusCode).toBe(200)
+    expect(ins(db).params[3]).toBe('fixo')
+    expect(ins(db).params[4]).toBe(2700)
+    expect(res.headers.deprecation).toBe('true')
+  })
+
+  it('rejeita valor inválido, mês inválido, componente inválido e data inexistente', async () => {
     const app = buildApp(fakeDb())
-    expect((await app.inject({ method: 'PATCH', url: `${url}/pagar`, payload: { valor_pago: '-5' } })).statusCode).toBe(400)
-    expect((await app.inject({ method: 'PATCH', url: `${url}/pagar`, payload: { data_pagamento: '2026-02-31' } })).statusCode).toBe(400)
-    expect((await app.inject({ method: 'PATCH', url: `/v1/financeiro/apresentadoras-pagamentos/${apId}/2026-13/pagar`, payload: {} })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url: `${B}/fixo/pagar`, payload: { valor_pago: '-5' } })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url: `${B}/fixo/pagar`, payload: { data_pagamento: '2026-02-31' } })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url: `/v1/financeiro/apresentadoras-pagamentos/${apId}/2026-13/fixo/pagar`, payload: {} })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url: `${B}/total/pagar`, payload: {} })).statusCode).toBe(400)
   })
 
-  it('desfazer remove a baixa; config valida dia', async () => {
+  it('desfazer remove só o componente pedido (e a legada desfaz o fixo)', async () => {
     const db = fakeDb()
     const app = buildApp(db)
-    expect((await app.inject({ method: 'PATCH', url: `${url}/desfazer` })).statusCode).toBe(200)
-    expect((await app.inject({ method: 'PATCH', url: '/v1/financeiro/apresentadoras-pagamentos/config', payload: { dia: 32 } })).statusCode).toBe(400)
-    expect((await app.inject({ method: 'PATCH', url: '/v1/financeiro/apresentadoras-pagamentos/config', payload: { dia: 15 } })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'PATCH', url: `${B}/variavel/desfazer` })).statusCode).toBe(200)
+    expect((await app.inject({ method: 'PATCH', url: `${B}/desfazer` })).statusCode).toBe(200)
+    const dels = db.calls.filter((c) => c.sql.includes('DELETE FROM apresentadora_pagamentos'))
+    expect(dels.map((c) => c.params[3])).toEqual(['variavel', 'fixo'])
+  })
+
+  it('GET/PATCH config devolvem {fixo, variavel}; valida limites; plano legado vai para o fixo', async () => {
+    const db = fakeDb()
+    const app = buildApp(db)
+    const C = '/v1/financeiro/apresentadoras-pagamentos/config'
+    const get = await app.inject({ method: 'GET', url: C })
+    expect(get.json()).toEqual({ fixo: { dia: 10, mes_offset: 0 }, variavel: { dia: 15, mes_offset: 1 } })
+    expect((await app.inject({ method: 'PATCH', url: C, payload: { variavel: { dia: 32 } } })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url: C, payload: { fixo: { mes_offset: 2 } } })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url: C, payload: {} })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url: C, payload: { variavel: { dia: 20, mes_offset: 0 } } })).statusCode).toBe(200)
+    const up = db.calls.filter((c) => c.sql.startsWith('UPDATE tenants'))
+    expect(up[0].params).toEqual([tenantId, null, null, 20, 0])
+    await app.inject({ method: 'PATCH', url: C, payload: { dia: 7 } })
+    expect(up.length + 1).toBe(db.calls.filter((c) => c.sql.startsWith('UPDATE tenants')).length)
+    expect(db.calls.filter((c) => c.sql.startsWith('UPDATE tenants')).at(-1).params).toEqual([tenantId, 7, null, null, null])
   })
 })

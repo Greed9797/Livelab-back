@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { DATA_RE, dataEhValida, MES_RE } from '../services/remuneracao-apresentadoras.js'
 import {
-  buscarConfigVencimento, desfazerPagamentoApresentadora, listarPagamentosApresentadoras,
+  atualizarConfigVencimento, buscarConfigVencimento, ehComponente, desfazerPagamentoApresentadora, listarPagamentosApresentadoras,
   registrarPagamentoApresentadora,
 } from '../services/apresentadoras-pagamentos.js'
 
@@ -12,7 +12,16 @@ const pagarSchema = z.object({
   observacao: z.string().trim().max(500).optional(),
 }).strict()
 
+const componenteCfg = z.object({
+  dia: z.number().int().min(1).max(31).optional(),
+  mes_offset: z.number().int().min(0).max(1).optional(),
+}).strict()
+
+// PATCH config: { fixo:{dia?,mes_offset?}, variavel:{dia?,mes_offset?} }.
+// Compat (deprecado): { dia?, mes_offset? } plano = aplica ao FIXO.
 const configSchema = z.object({
+  fixo: componenteCfg.optional(),
+  variavel: componenteCfg.optional(),
   dia: z.number().int().min(1).max(31).optional(),
   mes_offset: z.number().int().min(0).max(1).optional(),
 }).strict()
@@ -44,35 +53,41 @@ export async function financeiroApresentadorasPagamentosRoutes(app) {
 
   app.patch(`${BASE}/config`, { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
     const parsed = configSchema.safeParse(request.body ?? {})
-    if (!parsed.success || (parsed.data.dia === undefined && parsed.data.mes_offset === undefined)) {
-      return reply.code(400).send({ error: 'Informe dia (1-31) e/ou mes_offset (0 ou 1)' })
+    if (!parsed.success) return reply.code(400).send({ error: 'Config inválida: dia (1-31) e mes_offset (0 ou 1) por componente' })
+    const { fixo = {}, variavel = {}, dia, mes_offset: offset } = parsed.data
+    const novo = {
+      fixo: { dia: fixo.dia ?? dia, mes_offset: fixo.mes_offset ?? offset },
+      variavel,
     }
+    const algum = [novo.fixo.dia, novo.fixo.mes_offset, novo.variavel.dia, novo.variavel.mes_offset].some((v) => v !== undefined)
+    if (!algum) return reply.code(400).send({ error: 'Informe fixo e/ou variavel com dia (1-31) e/ou mes_offset (0 ou 1)' })
     const tenantId = request.user.tenant_id
-    return app.withTenant(tenantId, async (db) => {
-      await db.query(
-        `UPDATE tenants SET apresentadoras_vencimento_dia = COALESCE($2::smallint, apresentadoras_vencimento_dia),
-                            apresentadoras_vencimento_mes_offset = COALESCE($3::smallint, apresentadoras_vencimento_mes_offset)
-          WHERE id = $1::uuid`,
-        [tenantId, parsed.data.dia ?? null, parsed.data.mes_offset ?? null])
-      return buscarConfigVencimento(db, tenantId)
-    })
+    return app.withTenant(tenantId, (db) => atualizarConfigVencimento(db, tenantId, {
+      fixo: { dia: novo.fixo.dia ?? null, mes_offset: novo.fixo.mes_offset ?? null },
+      variavel: { dia: novo.variavel.dia ?? null, mes_offset: novo.variavel.mes_offset ?? null },
+    }))
   })
 
+  // `componente` ausente = rota LEGADA (/:id/:mes/pagar). Decisão de compat: equivale a 'fixo' com
+  // default = previsto do FIXO (nunca o total), para que a rota antiga não cubra o variável por engano
+  // nem gere baixa dupla (a baixa é upsert por (tenant, apresentadora, competência, componente)).
   function validarParams(request, reply) {
-    const { apresentadora_id: id, mes } = request.params
+    const { apresentadora_id: id, mes, componente = 'fixo' } = request.params
     if (!uuid.safeParse(id).success) { reply.code(400).send({ error: 'apresentadora_id inválido' }); return null }
     if (!MES_RE.test(mes)) { reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' }); return null }
-    return { id, mes }
+    if (!ehComponente(componente)) { reply.code(400).send({ error: "componente deve ser 'fixo' ou 'variavel'" }); return null }
+    if (request.params.componente === undefined) reply.header('Deprecation', 'true')
+    return { id, mes, componente }
   }
 
-  app.patch(`${BASE}/:apresentadora_id/:mes/pagar`, { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+  async function pagar(request, reply) {
     const p = validarParams(request, reply); if (!p) return
     const parsed = pagarSchema.safeParse(request.body ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const tenantId = request.user.tenant_id
     try {
       const pg = await app.withTenant(tenantId, (db) => registrarPagamentoApresentadora(db, {
-        tenantId, apresentadoraId: p.id, mes: p.mes, valorPago: parsed.data.valor_pago,
+        tenantId, apresentadoraId: p.id, mes: p.mes, componente: p.componente, valorPago: parsed.data.valor_pago,
         dataPagamento: parsed.data.data_pagamento, observacao: parsed.data.observacao, userId: request.user.sub,
       }))
       if (!pg) return reply.code(404).send({ error: 'Apresentadora não encontrada nesta unidade.' })
@@ -81,13 +96,20 @@ export async function financeiroApresentadorasPagamentosRoutes(app) {
       if (err instanceof TypeError) return reply.code(400).send({ error: 'valor_pago deve ser positivo com até duas casas decimais' })
       throw err
     }
-  })
+  }
 
-  app.patch(`${BASE}/:apresentadora_id/:mes/desfazer`, { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+  async function desfazer(request, reply) {
     const p = validarParams(request, reply); if (!p) return
     const tenantId = request.user.tenant_id
-    const ok = await app.withTenant(tenantId, (db) => desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId: p.id, mes: p.mes }))
+    const ok = await app.withTenant(tenantId, (db) => desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId: p.id, mes: p.mes, componente: p.componente }))
     if (!ok) return reply.code(404).send({ error: 'Nenhum pagamento registrado para esta competência.' })
     return { ok: true }
-  })
+  }
+
+  const escrita = { preHandler: app.requirePapel(WRITE_FINANCEIRO) }
+  app.patch(`${BASE}/:apresentadora_id/:mes/:componente/pagar`, escrita, pagar)
+  app.patch(`${BASE}/:apresentadora_id/:mes/:componente/desfazer`, escrita, desfazer)
+  // Legadas (deprecadas): sem componente = 'fixo'.
+  app.patch(`${BASE}/:apresentadora_id/:mes/pagar`, escrita, pagar)
+  app.patch(`${BASE}/:apresentadora_id/:mes/desfazer`, escrita, desfazer)
 }

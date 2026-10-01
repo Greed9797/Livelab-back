@@ -3,9 +3,13 @@
 // O financeiro só consome: títulos virtuais (calculados) + `receita_titulos`
 // (materializados/baixados). Status é sempre derivado (lib/lancamento-status.js).
 import '../lib/pg-date-string.js'
-import { receitaMarcaMensalSql } from '../lib/receita-marca-sql.js'
+import { marcasCondicaoVigenteMesSql, receitaMarcaMensalSql } from '../lib/receita-marca-sql.js'
 import { statusLancamento } from '../lib/lancamento-status.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
+import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
+// Ciclo estático intencional (o agregador importa este módulo): só usado em tempo de
+// chamada, nunca no topo do módulo.
+import { aplicarCorte, buscarConfigFinanceiro, dentroDoCorte, vencimentoEfetivo } from './financeiro-agregador.js'
 
 const MONTH_RE = /^(\d{4})-(0[1-9]|1[0-2])$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -132,6 +136,7 @@ export async function calcularReceitasComerciais(db, { tenantId, inicio, fim, fi
           criterio: 'vigencia',
           fixo_mensal: round2(r.fixo_cheio),
           fator_rateio: Number(toNum(r.fator_meses).toFixed(6)),
+          pct: toNum(r.comissao_franquia_pct),
         },
       })
     }
@@ -144,6 +149,7 @@ export async function calcularReceitasComerciais(db, { tenantId, inicio, fim, fi
         memoria: {
           criterio: comp.criterio_comissao,
           gmv: round2(r.gmv),
+          pct: toNum(r.comissao_franquia_pct),
           comissao_bruta: round2(r.comissao),
           ...(tipo === 'fixo_ou_comissao' ? { fixo_comparado: round2(r.fixo) } : {}),
         },
@@ -410,4 +416,182 @@ export async function desfazerRecebimento(db, { tenantId, id, hoje = hojeSaoPaul
   )
   if (!rows[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
   return tituloAtualizado(db, { tenantId, id: ref.id, hoje })
+}
+
+// ─── Receita mensal (aba Receita do Financeiro) ───────────────────────────
+//
+// GET /v1/financeiro/receita?mes=AAAA-MM. Duas visões do MESMO conjunto de itens:
+//   competencia → o ganho do mês (títulos de marca + avulsas com competência no mês).
+//                 total.previsto == DRE.receita.previsto do mês (aporte fica fora,
+//                 em bloco próprio, como no DRE).
+//   vencimento  → o que cai no caixa no mês (títulos/avulsas, aportes inclusive, com
+//                 vencimento no mês). total.previsto == fluxo.totais.entradas.previsto.
+// a_receber_mes = em aberto (previsto − pago) da visão vencimento (mesma regra do
+// a_receber do /caixa). Corte: aplicarCorte/dentroDoCorte do agregador.
+
+const addMes = (mes, n) => {
+  const [y, m] = mes.split('-').map(Number)
+  const total = y * 12 + (m - 1) + n
+  return `${String(Math.floor(total / 12)).padStart(4, '0')}-${String((total % 12) + 1).padStart(2, '0')}`
+}
+const mesDeData = (d) => (d ? String(d).slice(0, 7) : null)
+const somaPrevistoPago = (itens) => {
+  let previsto = 0
+  let pago = 0
+  let aberto = 0
+  for (const i of itens) {
+    previsto += toNum(i.valor_previsto)
+    pago += toNum(i.valor_pago)
+    aberto += Math.max(0, round2(i.valor_previsto) - round2(i.valor_pago))
+  }
+  return { previsto: round2(previsto), pago: round2(pago), aberto: round2(aberto) }
+}
+
+/** Título do comercial (listarTitulosReceita) → Titulo do contrato da aba Receita. */
+function tituloContrato(t) {
+  return { ...t, virtual: !t.materializado }
+}
+
+/**
+ * Pura. Monta o contrato de GET /receita a partir de:
+ *   titulos  — listarTitulosReceita das competências [mes-1, mes] (vencimento offset ≤ 1)
+ *   avulsas  — listarReceitasAvulsas (item comum), qualquer competência que cubra vencimentos do mês
+ *   linhasMarca — linhas de receitaMarcaMensalSql da competência `mes` (gmv, comissão bruta, pct)
+ *   marcasVigentes — linhas de marcasCondicaoVigenteMesSql (marcas cliente com condição vigente)
+ * Marca com condição vigente, pct > 0 e SEM título de comissão na competência aparece
+ * com comissao:null e em_apuracao:true (se o vencimento que a comissão teria não for
+ * anterior ao corte). Em fixo_ou_comissao o título de comissão é só o excedente sobre o
+ * fixo; `comissao_bruta` = GMV × % do mês.
+ */
+export function montarReceitaMensal({
+  mes, hoje = hojeSaoPaulo(), dataCorte = null,
+  titulos = [], avulsas = [], linhasMarca = [], marcasVigentes = [],
+}) {
+  if (!MONTH_RE.test(String(mes ?? ''))) throw serviceError('mes deve estar no formato AAAA-MM', 'INVALID_PERIOD')
+  const corte = dataCorte ? String(dataCorte).slice(0, 10) : null
+  const titulosMes = titulos.map(tituloContrato)
+
+  // ── competência ──
+  const titulosCompTodos = titulosMes.filter((t) => mesDeData(t.competencia) === mes)
+  const titulosComp = aplicarCorte(titulosCompTodos, corte)
+  const avulsasComp = aplicarCorte(avulsas.filter((a) => mesDeData(a.competencia) === mes), corte)
+  const avulsasOper = avulsasComp.filter((a) => !ehAporte(a))
+  const aportes = avulsasComp.filter((a) => ehAporte(a))
+
+  const linhaPorMarca = new Map(linhasMarca
+    .filter((l) => mesDeData(dateKey(l.competencia)) === mes)
+    .map((l) => [l.marca_id, l]))
+  const vigentePorMarca = new Map(marcasVigentes.map((v) => [v.marca_id, v]))
+  // em apuração é decidido ANTES do corte: título cortado não é "em apuração".
+  const temComissao = new Set(titulosCompTodos.filter((t) => t.componente === 'comissao').map((t) => t.marca_id))
+
+  const marcas = new Map()
+  const marcaDe = (id, base) => {
+    if (!marcas.has(id)) {
+      const linha = linhaPorMarca.get(id)
+      const vig = vigentePorMarca.get(id)
+      const tipo = linha?.tipo_cobranca ?? vig?.tipo_cobranca ?? base.tipo_cobranca ?? 'fixo_mais_comissao'
+      const pct = toNum(linha?.comissao_franquia_pct ?? vig?.comissao_franquia_pct ?? base.memoria?.pct ?? 0)
+      marcas.set(id, {
+        cliente_id: base.cliente_id ?? linha?.cliente_id ?? vig?.cliente_id ?? null,
+        cliente_nome: base.cliente_nome ?? linha?.cliente_nome ?? vig?.cliente_nome ?? null,
+        marca_id: id,
+        marca_nome: base.marca_nome ?? linha?.marca_nome ?? vig?.marca_nome ?? null,
+        tipo_cobranca: tipo,
+        pct,
+        gmv: round2(linha?.gmv ?? 0),
+        comissao_bruta: round2(linha?.comissao ?? 0),
+        em_apuracao: false,
+        fixo: null,
+        comissao: null,
+      })
+    }
+    return marcas.get(id)
+  }
+  for (const t of titulosComp) marcaDe(t.marca_id, t)[t.componente] = t
+  for (const v of marcasVigentes) {
+    if (temComissao.has(v.marca_id) || !(toNum(v.comissao_franquia_pct) > 0)) continue
+    const vencimento = calcularVencimento(mes, v.comissao_vencimento_dia, v.comissao_vencimento_mes_offset)
+    const jaListada = marcas.has(v.marca_id)
+    if (!jaListada && !dentroDoCorte({ valor_pago: 0, data_vencimento: vencimento, competencia: `${mes}-01` }, corte)) continue
+    marcaDe(v.marca_id, v)
+  }
+  for (const m of marcas.values()) {
+    m.em_apuracao = m.comissao == null && !temComissao.has(m.marca_id) && m.pct > 0
+    const t = somaPrevistoPago([m.fixo, m.comissao].filter(Boolean))
+    m.total = { previsto: t.previsto, pago: t.pago }
+  }
+
+  const clientes = new Map()
+  for (const m of marcas.values()) {
+    const key = m.cliente_id ?? `sem-cliente:${m.marca_id}`
+    if (!clientes.has(key)) {
+      clientes.set(key, { cliente_id: m.cliente_id, cliente_nome: m.cliente_nome ?? m.marca_nome, total: { previsto: 0, pago: 0 }, marcas: [] })
+    }
+    const c = clientes.get(key)
+    const { cliente_id: _cid, cliente_nome: _cn, ...marca } = m
+    c.marcas.push(marca)
+    c.total.previsto = round2(c.total.previsto + m.total.previsto)
+    c.total.pago = round2(c.total.pago + m.total.pago)
+  }
+  const porNome = (a, b) => String(a ?? '').localeCompare(String(b ?? ''), 'pt-BR')
+  const listaClientes = [...clientes.values()].sort((a, b) => porNome(a.cliente_nome, b.cliente_nome))
+  for (const c of listaClientes) c.marcas.sort((a, b) => porNome(a.marca_nome, b.marca_nome))
+
+  // ── vencimento ──
+  const itensVenc = aplicarCorte([
+    ...titulosMes,
+    ...avulsas,
+  ].filter((i) => mesDeData(vencimentoEfetivo(i)) === mes), corte)
+    .map((i) => ({
+      ...i,
+      tipo: i.origem === 'avulsa' ? (ehAporte(i) ? 'aporte' : 'avulsa') : 'titulo',
+      cliente_nome: i.cliente_nome ?? null,
+      marca_nome: i.marca_nome ?? null,
+      descricao: i.descricao ?? null,
+    }))
+    .sort((a, b) => (
+      String(vencimentoEfetivo(a)).localeCompare(String(vencimentoEfetivo(b)))
+      || porNome(a.cliente_nome ?? a.descricao, b.cliente_nome ?? b.descricao)
+      || String(a.componente ?? '').localeCompare(String(b.componente ?? ''))
+    ))
+  const totalVenc = somaPrevistoPago(itensVenc)
+
+  return {
+    mes,
+    hoje,
+    corte: { data_corte: corte },
+    competencia: {
+      total: somaPrevistoPago([...titulosComp, ...avulsasOper]),
+      clientes: listaClientes,
+      avulsas: avulsasOper,
+      aportes,
+    },
+    vencimento: { total: totalVenc, itens: itensVenc },
+    a_receber_mes: totalVenc.aberto,
+  }
+}
+
+/**
+ * GET /receita: carrega as fontes (tenant explícito) e monta o contrato.
+ * `dataCorte` undefined → lida da config do tenant.
+ */
+export async function consultarReceitaMensal(db, { tenantId, mes, hoje = hojeSaoPaulo(), dataCorte } = {}) {
+  if (!tenantId) throw serviceError('tenantId é obrigatório', 'INVALID_SCOPE')
+  if (!MONTH_RE.test(String(mes ?? ''))) throw serviceError('mes deve estar no formato AAAA-MM', 'INVALID_PERIOD')
+  let corte = dataCorte
+  if (corte === undefined) corte = (await buscarConfigFinanceiro(db, tenantId)).data_corte
+  const { startDate, endDate } = resolverPeriodoCompetencia(mes, mes)
+  const [titulos, avulsas, linhas, vigentes] = await Promise.all([
+    // vencimento = competência + offset (0|1) → competências mes-1 e mes
+    listarTitulosReceita(db, { tenantId, inicio: addMes(mes, -1), fim: mes, hoje }),
+    // avulsa pode ter competência ≠ mês do vencimento: janela larga
+    listarReceitasAvulsas(db, { tenantId, inicio: addMes(mes, -12), fim: addMes(mes, 12), hoje }),
+    db.query(receitaMarcaMensalSql(), [startDate, endDate, tenantId]),
+    db.query(marcasCondicaoVigenteMesSql(), [startDate, endDate, tenantId]),
+  ])
+  return montarReceitaMensal({
+    mes, hoje, dataCorte: corte ?? null,
+    titulos, avulsas, linhasMarca: linhas.rows, marcasVigentes: vigentes.rows,
+  })
 }

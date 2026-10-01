@@ -9,6 +9,7 @@
 // Datas trafegam como 'YYYY-MM-DD' / 'YYYY-MM' (sem Date) para evitar bugs de fuso.
 
 import { statusLancamento } from '../lib/lancamento-status.js'
+import { classeDoItem } from '../lib/custo-classe.js'
 
 export const GRUPOS_CUSTO = [
   'operacional', 'estrutural', 'diversos', 'investimento', 'prolabore',
@@ -151,8 +152,12 @@ export function custoParaItem(row, hoje) {
     parcela_grupo_id: row.parcela_grupo_id ?? null,
     parcela_num: row.parcela_num ?? null,
     parcelas_total: row.parcelas_total ?? null,
+    // override da classe (migration 171): do lançamento e, se houver, do recorrente de origem
+    classe_custo: row.classe_custo ?? null,
+    classe_custo_recorrente: row.classe_custo_recorrente ?? null,
     virtual: false,
   }
+  item.classe = classeDoItem(item)
   item.status = statusLancamento(item, hoje)
   return item
 }
@@ -175,8 +180,11 @@ export function recorrenteParaItemVirtual(rec, mes, hoje) {
     parcela_grupo_id: null,
     parcela_num: null,
     parcelas_total: null,
+    classe_custo: null,
+    classe_custo_recorrente: rec.classe_custo ?? null,
     virtual: true,
   }
+  item.classe = classeDoItem(item)
   item.status = statusLancamento(item, hoje)
   return item
 }
@@ -185,11 +193,11 @@ export const CUSTO_COLS = `
   id, descricao, valor, tipo, grupo, to_char(competencia,'YYYY-MM-DD') AS competencia,
   to_char(data_vencimento,'YYYY-MM-DD') AS data_vencimento, valor_pago,
   to_char(data_pagamento,'YYYY-MM-DD') AS data_pagamento,
-  parcela_grupo_id, parcela_num, parcelas_total, recorrente_id, observacao`
+  parcela_grupo_id, parcela_num, parcelas_total, recorrente_id, observacao, classe_custo`
 
 export const RECORRENTE_COLS = `
   id, nome, descricao, grupo, valor, dia_vencimento, mes_offset,
-  to_char(inicio,'YYYY-MM-DD') AS inicio, to_char(fim,'YYYY-MM-DD') AS fim, ativo`
+  to_char(inicio,'YYYY-MM-DD') AS inicio, to_char(fim,'YYYY-MM-DD') AS fim, ativo, classe_custo`
 
 /**
  * Custos do período (meses 'YYYY-MM' ou datas; usa os 7 primeiros chars):
@@ -218,7 +226,18 @@ export async function listarCustos(db, { tenantId, inicio, fim, hoje }) {
     ),
   ])
 
-  const itens = custos.rows.map((r) => custoParaItem(r, hoje))
+  // Override de classe herdado do recorrente de origem (1 consulta extra, só para
+  // recorrentes fora da lista vigente — ex.: inativados — nunca por item).
+  const classeRec = new Map(recs.rows.map((r) => [r.id, r.classe_custo ?? null]))
+  const faltam = [...new Set(custos.rows.map((r) => r.recorrente_id).filter((id) => id && !classeRec.has(id)))]
+  if (faltam.length) {
+    const extra = await db.query(
+      'SELECT id, classe_custo FROM custos_recorrentes WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])',
+      [tenantId, faltam],
+    )
+    for (const r of extra.rows) classeRec.set(r.id, r.classe_custo ?? null)
+  }
+  const itens = custos.rows.map((r) => custoParaItem({ ...r, classe_custo_recorrente: classeRec.get(r.recorrente_id) ?? null }, hoje))
   const materializados = new Set(
     custos.rows.filter((r) => r.recorrente_id).map((r) => `${r.recorrente_id}:${mesDe(r.competencia)}`),
   )

@@ -163,6 +163,10 @@ export const MIGRATIONS_LIST = [
   '166_apresentadora_pagamentos.sql',
   '167_tenants_aliquota_imposto.sql',
   '168_gateway_transacoes_baixa.sql',
+  '169_financeiro_saldo_abertura.sql',
+  '170_receitas_avulsas.sql',
+  '171_custos_classe.sql',
+  '172_apresentadora_pagamentos_componente.sql',
 ]
 
 async function ensureMigrationsTable(client) {

@@ -116,15 +116,16 @@ export function normalizarTransacaoAsaas(ft, pagamento = null) {
   }
 }
 
-// Tipos de alvo aceitos: receita ↔ entrada; custo/apresentadora/imposto ↔ saída.
-export const TIPOS_ALVO = Object.freeze(['receita', 'custo', 'apresentadora', 'imposto'])
+// Tipos de alvo aceitos: receita/avulsa ↔ entrada; custo/apresentadora/imposto ↔ saída.
+export const TIPOS_ALVO = Object.freeze(['receita', 'avulsa', 'custo', 'apresentadora', 'imposto'])
+const TIPOS_ENTRADA = ['receita', 'avulsa']
 
 export function validarTipoConciliacao(tipoTransacao, tipoAlvo) {
-  if (!TIPOS_ALVO.includes(tipoAlvo)) return 'tipo deve ser receita, custo, apresentadora ou imposto'
-  if (tipoAlvo === 'receita' && tipoTransacao !== 'entrada') {
-    return 'Só entradas podem ser conciliadas com receitas'
+  if (!TIPOS_ALVO.includes(tipoAlvo)) return 'tipo deve ser receita, avulsa, custo, apresentadora ou imposto'
+  if (TIPOS_ENTRADA.includes(tipoAlvo) && tipoTransacao !== 'entrada') {
+    return tipoAlvo === 'avulsa' ? 'Só entradas podem ser conciliadas com receitas avulsas' : 'Só entradas podem ser conciliadas com receitas'
   }
-  if (tipoAlvo !== 'receita' && tipoTransacao !== 'saida') {
+  if (!TIPOS_ENTRADA.includes(tipoAlvo) && tipoTransacao !== 'saida') {
     return `Só saídas podem ser conciliadas com ${tipoAlvo === 'custo' ? 'custos' : tipoAlvo === 'imposto' ? 'imposto' : 'pagamentos de apresentadoras'}`
   }
   return null
@@ -232,7 +233,7 @@ export function sugerirMatches(transacoes, candidatos, { limite = 3, scoreMinimo
 // `gatewayCustomerPorCliente` = Map(cliente_id → cus_* do Asaas).
 export function candidatoDeLancamento(l, gatewayCustomerPorCliente = new Map()) {
   const natureza = l?.natureza === 'custo' ? 'custo' : 'receita'
-  const tipoAlvo = natureza === 'receita' ? 'receita'
+  const tipoAlvo = natureza === 'receita' ? (l?.origem === 'avulsa' ? 'avulsa' : 'receita')
     : l?.origem === 'apresentadora' ? 'apresentadora'
     : l?.origem === 'imposto' || l?.tipo === 'imposto' ? 'imposto'
     : 'custo'
@@ -270,7 +271,8 @@ export class ConciliacaoError extends Error {
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const RE_APRES = /^apresentadora:([0-9a-f-]{36}):(\d{4}-(?:0[1-9]|1[0-2]))$/i
+// apresentadora:<uuid>:<AAAA-MM>[:fixo|variavel]. Sem componente (id LEGADO) = 'fixo'.
+const RE_APRES = /^apresentadora:([0-9a-f-]{36}):(\d{4}-(?:0[1-9]|1[0-2]))(?::(fixo|variavel))?$/i
 const RE_IMPOSTO = /^imposto:(\d{4}-(?:0[1-9]|1[0-2]))$/
 
 const naoEncontrado = (msg) => new ConciliacaoError(msg, 404, 'ALVO_NAO_ENCONTRADO')
@@ -374,28 +376,45 @@ async function baixarCusto(db, { tenantId, tx, alvoId }) {
 
 async function baixarApresentadora(db, { tenantId, tx, alvoId, userId }) {
   const m = RE_APRES.exec(alvoId)
-  if (!m) throw naoEncontrado('Pagamento de apresentadora não encontrado (use apresentadora:<id>:<AAAA-MM>)')
+  if (!m) throw naoEncontrado('Pagamento de apresentadora não encontrado (use apresentadora:<id>:<AAAA-MM>:<fixo|variavel>)')
   const [, apresentadoraId, mes] = m
+  const componente = (m[3] ?? 'fixo').toLowerCase()
   const ex = await db.query(
     `SELECT id, valor_pago FROM apresentadora_pagamentos
-      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date FOR UPDATE`,
-    [tenantId, apresentadoraId, `${mes}-01`],
+      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date AND componente = $4::text FOR UPDATE`,
+    [tenantId, apresentadoraId, `${mes}-01`, componente],
   )
   if (ex.rows[0] && jaPago(ex.rows[0].valor_pago)) {
     return { aplicada: false, motivo: 'ja_baixado', alvo_id: ex.rows[0].id }
   }
   const pg = await import('./apresentadoras-pagamentos.js')
   const reg = await pg.registrarPagamentoApresentadora(db, {
-    tenantId, apresentadoraId, mes, valorPago: tx.valor, dataPagamento: tx.data,
+    tenantId, apresentadoraId, mes, componente, valorPago: tx.valor, dataPagamento: tx.data,
     observacao: 'Baixa via conciliação Asaas', userId: userId ?? null,
   })
   if (!reg) throw naoEncontrado('Apresentadora não encontrada')
   const r = await db.query(
     `SELECT id FROM apresentadora_pagamentos
-      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date`,
-    [tenantId, apresentadoraId, `${mes}-01`],
+      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date AND componente = $4::text`,
+    [tenantId, apresentadoraId, `${mes}-01`, componente],
   )
   return { aplicada: true, alvo_id: r.rows[0].id, valor_pago: Number(reg.valor_pago), data_pagamento: reg.data_pagamento }
+}
+
+// Receita avulsa: alvo = receitas_avulsas.id (UUID). Baixa via serviço receitas-avulsas.js.
+async function baixarAvulsa(db, { tenantId, tx, alvoId }) {
+  if (!UUID_RE.test(alvoId)) throw naoEncontrado('Receita avulsa não encontrada')
+  const ex = await db.query(
+    'SELECT id, valor_pago FROM receitas_avulsas WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
+    [alvoId, tenantId],
+  )
+  const row = ex.rows[0]
+  if (!row) throw naoEncontrado('Receita avulsa não encontrada')
+  if (jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
+  const avulsas = await import('./receitas-avulsas.js')
+  const item = await avulsas.receberReceitaAvulsa(db, { tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data })
+  if (!item) throw naoEncontrado('Receita avulsa não encontrada')
+  return { aplicada: true, alvo_id: item.id, valor_pago: item.valor_pago, data_pagamento: item.data_pagamento }
 }
 
 // Imposto: custos tipo 'imposto' materializado na baixa; id virtual `imposto:<AAAA-MM>`.
@@ -446,10 +465,11 @@ export async function darBaixaConciliacao(db, { tenantId, transacao, tipo, alvoI
   let r
   try {
     if (tipo === 'receita') r = await baixarReceita(db, args)
+    else if (tipo === 'avulsa') r = await baixarAvulsa(db, args)
     else if (tipo === 'custo') r = await baixarCusto(db, args)
     else if (tipo === 'apresentadora') r = await baixarApresentadora(db, args)
     else if (tipo === 'imposto') r = await baixarImposto(db, args)
-    else throw new ConciliacaoError('tipo deve ser receita, custo, apresentadora ou imposto')
+    else throw new ConciliacaoError('tipo deve ser receita, avulsa, custo, apresentadora ou imposto')
   } catch (err) {
     if (err?.code === '42P01' || err?.code === '42703') throw indisponivel('Módulo financeiro ainda não migrado')
     throw err
@@ -471,6 +491,11 @@ export async function desfazerBaixaConciliacao(db, { tenantId, tipo, alvoId } = 
       throw err
     }
     return { desfeita: true }
+  }
+  if (tipo === 'avulsa') {
+    const avulsas = await import('./receitas-avulsas.js')
+    const item = await avulsas.desfazerReceitaAvulsa(db, { tenantId, id: alvoId })
+    return item ? { desfeita: true } : { desfeita: false, motivo: 'alvo_inexistente' }
   }
   if (tipo === 'custo' || tipo === 'imposto') {
     const r = await db.query(

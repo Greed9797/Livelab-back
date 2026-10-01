@@ -3,9 +3,10 @@
 //   GET    /v1/asaas/extrato?inicio&fim[&fonte=cache]  extrato (ao vivo por padrão; cache = gateway_transacoes)
 //   POST   /v1/asaas/sincronizar {inicio?, fim?}   baixa extrato + cobranças recebidas → gateway_transacoes
 //   GET    /v1/asaas/conciliacao?inicio&fim[&tipo=entrada|saida]  pendentes + sugestões de match
-//   POST   /v1/asaas/conciliar {transacao_id, tipo: receita|custo|apresentadora|imposto, id}
+//   POST   /v1/asaas/conciliar {transacao_id, tipo: receita|avulsa|custo|apresentadora|imposto, id}
 //            id = uuid OU id virtual (calc:<marca>:<AAAA-MM>:<fixo|comissao>, rec:<uuid>:<AAAA-MM>,
-//            apresentadora:<id>:<AAAA-MM>, imposto:<AAAA-MM>). Vínculo + baixa na MESMA transação.
+//            apresentadora:<id>:<AAAA-MM>:<fixo|variavel> (sem componente = fixo, legado),
+//            imposto:<AAAA-MM>; avulsa = uuid de receitas_avulsas). Vínculo + baixa na MESMA transação.
 //   DELETE /v1/asaas/conciliacao/:transacao_id     desfaz o vínculo (e a baixa, se gerada pela conciliação)
 //
 // Nada aqui cria/altera cobrança no Asaas (o cliente HTTP só expõe GET). A chave vem de
@@ -91,6 +92,13 @@ async function carregarCandidatos(db, tenantId, tipo, periodo, avisos, log) {
       }
       const mod = await import('../services/receitas-comercial.js')
       itens = await mod.listarTitulosReceita(db, base)
+      try {
+        const av = await import('../services/receitas-avulsas.js')
+        itens = [...itens, ...(await av.listarReceitasAvulsas(db, base))]
+      } catch (err) {
+        if (!erroSchemaAusente(err) && !erroModuloAusente(err)) throw err
+        avisos.push('Receitas avulsas indisponíveis — sugestões não geradas')
+      }
     } else {
       const mod = await import('../services/custos-plano.js')
       itens = await mod.listarCustos(db, base)

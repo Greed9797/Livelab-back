@@ -1,4 +1,6 @@
 // Receitas (títulos a receber) derivadas do COMERCIAL — ver services/receitas-comercial.js.
+//   GET   /v1/financeiro/receita?mes=AAAA-MM   (aba Receita: competência × vencimento,
+//         a_receber_mes; ver montarReceitaMensal)
 //   GET   /v1/financeiro/receitas?inicio=AAAA-MM&fim=AAAA-MM | ?mes=AAAA-MM
 //         [&status=previsto|pendente|atrasado|parcial|pago&marca_id=&cliente_id=&componente=fixo|comissao]
 //   POST  /v1/financeiro/receitas/gerar?mes=AAAA-MM
@@ -12,6 +14,7 @@ import { moneySchema } from '../lib/money.js'
 import { STATUS_LANCAMENTO } from '../lib/lancamento-status.js'
 import {
   COMPONENTES_RECEITA,
+  consultarReceitaMensal,
   desfazerRecebimento,
   gerarTitulosReceita,
   hojeSaoPaulo,
@@ -30,6 +33,10 @@ const listarQuerySchema = z.object({
   componente: z.enum(COMPONENTES_RECEITA).optional(),
   marca_id: z.string().uuid('marca_id inválido').optional(),
   cliente_id: z.string().uuid('cliente_id inválido').optional(),
+})
+
+const receitaMensalQuerySchema = z.object({
+  mes: z.string().regex(mesRegex, 'mes deve estar no formato AAAA-MM').optional(),
 })
 
 const gerarSchema = z.object({
@@ -52,6 +59,21 @@ function erro(reply, error) {
 export async function financeiroReceitasRoutes(app) {
   const read = [app.authenticate, app.requirePapel(READ_FINANCEIRO)]
   const write = [app.authenticate, app.requirePapel(WRITE_FINANCEIRO)]
+
+  app.get('/v1/financeiro/receita', { preHandler: read }, async (request, reply) => {
+    const parsed = receitaMensalQuerySchema.safeParse(request.query ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const hoje = hojeSaoPaulo()
+    const mes = parsed.data.mes ?? hoje.slice(0, 7)
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        return await consultarReceitaMensal(db, { tenantId: tenant_id, mes, hoje })
+      } catch (error) {
+        return erro(reply, error)
+      }
+    })
+  })
 
   app.get('/v1/financeiro/receitas', { preHandler: read }, async (request, reply) => {
     const parsed = listarQuerySchema.safeParse(request.query ?? {})

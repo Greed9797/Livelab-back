@@ -14,8 +14,8 @@ import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql
 import { marcaFixoVigenciaSql } from '../lib/receita-marca-sql.js'
 import { listarCustos } from '../services/custos-plano.js'
 import {
-  atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularDre, calcularFluxoCaixa,
-  consultarLancamentos, desfazerImposto, hojeSaoPaulo, pagarImposto, resolverPeriodoMeses,
+  atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularDreMes, calcularFluxoCaixa,
+  consultarLancamentos, dataValida, desfazerImposto, hojeSaoPaulo, pagarImposto, resolverPeriodoMeses,
 } from '../services/financeiro-agregador.js'
 
 const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
@@ -25,6 +25,10 @@ const lancamentosQuerySchema = z.object({
   natureza: z.enum(['receita', 'custo']).optional(),
   status: z.enum(['previsto', 'pendente', 'atrasado', 'parcial', 'pago']).optional(),
   grupo: z.string().trim().min(1).max(40).optional(),
+  classe: z.enum(['fixo', 'variavel']).optional(),
+  origem: z.enum([
+    'marca_fixo', 'marca_comissao', 'avulsa', 'manual', 'recorrente', 'parcela', 'apresentadora', 'imposto',
+  ]).optional(),
   q: z.string().trim().max(120).optional(),
 }).passthrough()
 
@@ -34,9 +38,19 @@ const baixaImpostoSchema = z.object({
   observacao: z.string().trim().max(500).optional(),
 }).strict()
 
+// PATCH /config aceita qualquer subconjunto (ao menos um campo).
 const configSchema = z.object({
-  aliquota_imposto_pct: z.coerce.number().min(0).max(100),
-}).strict()
+  aliquota_imposto_pct: z.coerce.number({ error: 'aliquota_imposto_pct deve ser um número entre 0 e 100' })
+    .min(0, 'aliquota_imposto_pct deve ser um número entre 0 e 100')
+    .max(100, 'aliquota_imposto_pct deve ser um número entre 0 e 100'),
+  data_corte: z.string().refine(dataValida, 'data_corte deve ser uma data AAAA-MM-DD válida').nullable(),
+  saldo_abertura: z.coerce.number({ error: 'saldo_abertura deve ser um número' })
+    .refine((v) => Math.abs(v) < 1e13, 'saldo_abertura fora do limite'),
+}).partial().strict().refine((d) => Object.keys(d).length > 0, { message: 'Informe aliquota_imposto_pct, data_corte e/ou saldo_abertura' })
+
+const caixaQuerySchema = z.object({
+  ate: z.string().refine(dataValida, 'ate deve ser uma data AAAA-MM-DD válida').optional(),
+}).passthrough()
 
 const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 
@@ -432,9 +446,11 @@ export async function financeiroRoutes(app) {
     } catch (error) {
       return responderErro(reply, error)
     }
+    // Sem saldo_inicial: com data de corte configurada, usa o saldo de caixa no início
+    // do mês (abertura + realizado desde o corte; mês anterior ao corte → 0); sem corte, 0.
     const saldoRaw = request.query?.saldo_inicial
-    const saldoInicial = saldoRaw == null || saldoRaw === '' ? 0 : Number(saldoRaw)
-    if (!Number.isFinite(saldoInicial)) return reply.code(400).send({ error: 'saldo_inicial inválido' })
+    const saldoInicial = saldoRaw == null || saldoRaw === '' ? undefined : Number(saldoRaw)
+    if (saldoInicial !== undefined && !Number.isFinite(saldoInicial)) return reply.code(400).send({ error: 'saldo_inicial inválido' })
     try {
       return await app.withTenant(tenant_id, (db) => calcularFluxoCaixa(db, { tenantId: tenant_id, mes, saldoInicial, hoje }))
     } catch (error) {
@@ -722,7 +738,7 @@ export async function financeiroRoutes(app) {
 
   // ─── Onda 2: lançamentos unificados, imposto e config ──────────────────────
 
-  // GET /v1/financeiro/lancamentos?inicio=YYYY-MM&fim=YYYY-MM&natureza=&status=&grupo=&q=
+  // GET /v1/financeiro/lancamentos?inicio=YYYY-MM&fim=YYYY-MM&natureza=&status=&grupo=&classe=&origem=&q=
   // Receitas (comercial) + custos + pagamentos de apresentadoras + imposto, status derivado.
   app.get('/v1/financeiro/lancamentos', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
     const { tenant_id } = request.user
@@ -731,10 +747,25 @@ export async function financeiroRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     try {
       const { inicio, fim } = resolverPeriodoMeses(request.query ?? {}, hoje)
-      const { natureza, status, grupo, q } = parsed.data
+      const { natureza, status, grupo, classe, origem, q } = parsed.data
       return await app.withTenant(tenant_id, (db) => consultarLancamentos(db, {
-        tenantId: tenant_id, inicio, fim, hoje, filtros: { natureza, status, grupo, q },
+        tenantId: tenant_id, inicio, fim, hoje, filtros: { natureza, status, grupo, classe, origem, q },
       }))
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // GET /v1/financeiro/dre/mes?mes=YYYY-MM (default: mês corrente SP)
+  // Detalhe do DRE do mês: linhas atual/anterior/delta, receita por cliente→marca,
+  // custos fixos e variáveis por grupo (+ apresentadoras por pessoa, imposto), aportes, margem.
+  app.get('/v1/financeiro/dre/mes', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const hoje = hojeSaoPaulo()
+    const mes = request.query?.mes ?? hoje.slice(0, 7)
+    if (!MES_RE.test(String(mes))) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    try {
+      return await app.withTenant(tenant_id, (db) => calcularDreMes(db, { tenantId: tenant_id, mes, hoje }))
     } catch (error) {
       return responderErro(reply, error)
     }
@@ -777,15 +808,29 @@ export async function financeiroRoutes(app) {
     }
   })
 
-  // GET/PATCH /v1/financeiro/config {aliquota_imposto_pct}
+  // GET/PATCH /v1/financeiro/config {aliquota_imposto_pct, data_corte, saldo_abertura}
   app.get('/v1/financeiro/config', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, (db) => buscarConfigFinanceiro(db, tenant_id))
   })
 
+  // GET /v1/financeiro/caixa?ate=YYYY-MM-DD (default hoje SP)
+  // saldo_atual = saldo_abertura + entradas − saídas realizadas desde a data de corte.
+  app.get('/v1/financeiro/caixa', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
+    const parsed = caixaQuerySchema.safeParse(request.query ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id } = request.user
+    const hoje = hojeSaoPaulo()
+    try {
+      return await app.withTenant(tenant_id, (db) => calcularCaixa(db, { tenantId: tenant_id, ate: parsed.data.ate ?? hoje, hoje }))
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
   app.patch('/v1/financeiro/config', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
     const parsed = configSchema.safeParse(request.body ?? {})
-    if (!parsed.success) return reply.code(400).send({ error: 'aliquota_imposto_pct deve ser um número entre 0 e 100' })
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const { tenant_id } = request.user
     const config = await app.withTenant(tenant_id, (db) => atualizarConfigFinanceiro(db, tenant_id, parsed.data))
     invalidateTenant(tenant_id)

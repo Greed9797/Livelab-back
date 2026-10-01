@@ -10,10 +10,14 @@
 //   DELETE /v1/financeiro/custos/:id?escopo=um|grupo|futuras
 //   POST   /v1/financeiro/custos/importar            (carga em massa idempotente; dry_run)
 //   GET/POST /v1/financeiro/custos-recorrentes ; PATCH/DELETE .../:id
+//
+// classe_custo ('fixo' | 'variavel' | null) é OVERRIDE opcional da classe derivada
+// (src/lib/custo-classe.js; migration 171). null = volta à regra derivada.
 
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
+import { CLASSES_CUSTO } from '../lib/custo-classe.js'
 import {
   CUSTO_COLS, GRUPOS_CUSTO, RECORRENTE_COLS, custoParaItem, gerarCustosDoMes,
   listarCustos, materializarVirtual, mesValido, parseIdVirtual, planejarParcelas,
@@ -27,6 +31,7 @@ export function hojeSaoPaulo(now = new Date()) {
 const dataSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato: YYYY-MM-DD')
 const competenciaSchema = z.string().regex(/^\d{4}-(0[1-9]|1[0-2])(-\d{2})?$/, 'Formato: YYYY-MM ou YYYY-MM-DD')
 const grupoSchema = z.enum(GRUPOS_CUSTO)
+const classeSchema = z.enum(CLASSES_CUSTO, { error: "classe_custo deve ser 'fixo', 'variavel' ou null" })
 const positivo = moneySchema.refine((v) => v > 0, 'Valor deve ser positivo')
 const normComp = (c) => primeiroDia(String(c).slice(0, 7))
 
@@ -39,6 +44,7 @@ const custoSchema = z.object({
   observacao: z.string().nullish(),
   valor_pago: moneySchema.nullish(),
   data_pagamento: dataSchema.nullish(),
+  classe_custo: classeSchema.nullish(),
 }).refine((d) => d.competencia || d.data_vencimento, { message: 'Informe competencia ou data_vencimento' })
 
 const custoPatchSchema = z.object({
@@ -48,6 +54,7 @@ const custoPatchSchema = z.object({
   competencia: competenciaSchema,
   data_vencimento: dataSchema.nullable(),
   observacao: z.string().nullable(),
+  classe_custo: classeSchema.nullable(),
 }).partial().refine((d) => Object.keys(d).length > 0, { message: 'Nada para atualizar' })
 
 const parceladoSchema = z.object({
@@ -59,6 +66,7 @@ const parceladoSchema = z.object({
   competencia: competenciaSchema.optional(),
   data_vencimento: dataSchema.optional(),
   observacao: z.string().nullish(),
+  classe_custo: classeSchema.nullish(),
 }).refine((d) => (d.valor_total != null) !== (d.valor_parcela != null), { message: 'Informe valor_total OU valor_parcela' })
   .refine((d) => d.competencia || d.data_vencimento, { message: 'Informe competencia ou data_vencimento' })
 
@@ -77,6 +85,7 @@ const recorrenteSchema = z.object({
   inicio: dataSchema,
   fim: dataSchema.nullish(),
   ativo: z.boolean().default(true),
+  classe_custo: classeSchema.nullish(),
 }).refine((d) => !d.fim || d.fim >= d.inicio, { message: 'fim deve ser >= inicio' })
 
 const recorrentePatchSchema = z.object({
@@ -89,6 +98,7 @@ const recorrentePatchSchema = z.object({
   inicio: dataSchema,
   fim: dataSchema.nullable(),
   ativo: z.boolean(),
+  classe_custo: classeSchema.nullable(),
 }).partial().refine((d) => Object.keys(d).length > 0, { message: 'Nada para atualizar' })
 
 const UUID = z.string().uuid()
@@ -175,12 +185,12 @@ export async function financeiroCustosRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const r = await db.query(
         `INSERT INTO custos (tenant_id, descricao, valor, tipo, grupo, competencia, data_vencimento,
-                             valor_pago, data_pagamento, observacao)
-         VALUES ($1::uuid,$2,$3,'outros',$4,$5::date,$6::date,$7,$8::date,$9)
+                             valor_pago, data_pagamento, observacao, classe_custo)
+         VALUES ($1::uuid,$2,$3,'outros',$4,$5::date,$6::date,$7,$8::date,$9,$10)
          RETURNING ${CUSTO_COLS}`,
-        [tenant_id, d.descricao, r2(d.valor), d.grupo, competencia, venc, pago, dataPag, d.observacao ?? null],
+        [tenant_id, d.descricao, r2(d.valor), d.grupo, competencia, venc, pago, dataPag, d.observacao ?? null, d.classe_custo ?? null],
       )
-      auditar(app, request, 'financeiro.custo_create', 'custo', r.rows[0].id, { descricao: d.descricao, grupo: d.grupo, valor: d.valor })
+      auditar(app, request, 'financeiro.custo_create', 'custo', r.rows[0].id, { descricao: d.descricao, grupo: d.grupo, valor: d.valor, classe_custo: d.classe_custo ?? null })
       return reply.code(201).send(custoParaItem(r.rows[0], hojeSaoPaulo()))
     })
   })
@@ -200,11 +210,11 @@ export async function financeiroCustosRoutes(app) {
       for (const p of plano) {
         const r = await db.query(
           `INSERT INTO custos (tenant_id, descricao, valor, tipo, grupo, competencia, data_vencimento,
-                               parcela_grupo_id, parcela_num, parcelas_total, observacao)
-           VALUES ($1::uuid,$2,$3,'parcela',$4,$5::date,$6::date,$7::uuid,$8,$9,$10)
+                               parcela_grupo_id, parcela_num, parcelas_total, observacao, classe_custo)
+           VALUES ($1::uuid,$2,$3,'parcela',$4,$5::date,$6::date,$7::uuid,$8,$9,$10,$11)
            RETURNING ${CUSTO_COLS}`,
           [tenant_id, `${d.descricao} (${p.parcela_num}/${p.parcelas_total})`, p.valor, d.grupo,
-            p.competencia, p.data_vencimento, grupoId, p.parcela_num, p.parcelas_total, d.observacao ?? null],
+            p.competencia, p.data_vencimento, grupoId, p.parcela_num, p.parcelas_total, d.observacao ?? null, d.classe_custo ?? null],
         )
         itens.push(custoParaItem(r.rows[0], hojeSaoPaulo()))
       }
@@ -327,6 +337,7 @@ export async function financeiroCustosRoutes(app) {
       if (d.competencia !== undefined) add('competencia', normComp(d.competencia), '::date')
       if (d.data_vencimento !== undefined) add('data_vencimento', d.data_vencimento, '::date')
       if (d.observacao !== undefined) add('observacao', d.observacao)
+      if (d.classe_custo !== undefined) add('classe_custo', d.classe_custo)
       const r = await db.query(
         `UPDATE custos SET ${sets.join(', ')}, atualizado_em = NOW()
           WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING ${CUSTO_COLS}`,
@@ -426,10 +437,10 @@ export async function financeiroCustosRoutes(app) {
     const d = parsed.data
     return app.withTenant(tenant_id, async (db) => {
       const r = await db.query(
-        `INSERT INTO custos_recorrentes (tenant_id, nome, descricao, grupo, valor, dia_vencimento, mes_offset, inicio, fim, ativo)
-         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8::date,$9::date,$10)
+        `INSERT INTO custos_recorrentes (tenant_id, nome, descricao, grupo, valor, dia_vencimento, mes_offset, inicio, fim, ativo, classe_custo)
+         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8::date,$9::date,$10,$11)
          RETURNING ${RECORRENTE_COLS}`,
-        [tenant_id, d.nome, d.descricao ?? null, d.grupo, r2(d.valor), d.dia_vencimento, d.mes_offset, d.inicio, d.fim ?? null, d.ativo],
+        [tenant_id, d.nome, d.descricao ?? null, d.grupo, r2(d.valor), d.dia_vencimento, d.mes_offset, d.inicio, d.fim ?? null, d.ativo, d.classe_custo ?? null],
       )
       auditar(app, request, 'financeiro.custo_recorrente_create', 'custo_recorrente', r.rows[0].id, { nome: d.nome })
       return reply.code(201).send(fmtRec(r.rows[0]))
@@ -446,7 +457,7 @@ export async function financeiroCustosRoutes(app) {
       const sets = []
       const params = [request.params.id, tenant_id]
       for (const [col, cast] of [['nome', ''], ['descricao', ''], ['grupo', ''], ['valor', ''], ['dia_vencimento', ''],
-        ['mes_offset', ''], ['inicio', '::date'], ['fim', '::date'], ['ativo', '']]) {
+        ['mes_offset', ''], ['inicio', '::date'], ['fim', '::date'], ['ativo', ''], ['classe_custo', '']]) {
         if (d[col] === undefined) continue
         params.push(col === 'valor' ? r2(d[col]) : d[col])
         sets.push(`${col} = $${params.length}${cast}`)

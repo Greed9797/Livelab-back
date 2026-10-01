@@ -4,8 +4,17 @@
 import { statusLancamento } from '../lib/lancamento-status.js'
 import { buscarFechamentoApresentadoras, dinheiroEmCentavos, ultimoDiaDoMes } from './remuneracao-apresentadoras.js'
 
+export const COMPONENTES = Object.freeze(['fixo', 'variavel'])
+// Padrões por componente: fixo vence dia 10 do próprio mês; variável (comissão + adicionais) dia 15 do mês seguinte.
+export const VENCIMENTO_PADRAO = Object.freeze({
+  fixo: Object.freeze({ dia: 10, mes_offset: 0 }),
+  variavel: Object.freeze({ dia: 15, mes_offset: 1 }),
+})
+// Compat (valores do modelo antigo, pagamento único) — mantidos só para quem ainda importa.
 export const VENCIMENTO_DIA_PADRAO = 10
 export const VENCIMENTO_OFFSET_PADRAO = 1
+
+export const ehComponente = (c) => COMPONENTES.includes(c)
 
 // Competências (YYYY-MM) cujo mês intersecta [inicio, fim] (strings YYYY-MM-DD).
 export function mesesDoPeriodo(inicio, fim) {
@@ -30,15 +39,32 @@ export function vencimentoApresentadora(mes, dia = VENCIMENTO_DIA_PADRAO, offset
   return `${ym}-${String(d).padStart(2, '0')}`
 }
 
+// Config de vencimento por componente: { fixo:{dia,mes_offset}, variavel:{dia,mes_offset} }.
 export async function buscarConfigVencimento(db, tenantId) {
   const r = await db.query(
-    `SELECT apresentadoras_vencimento_dia AS dia, apresentadoras_vencimento_mes_offset AS mes_offset
+    `SELECT apresentadoras_fixo_vencimento_dia AS fixo_dia,
+            apresentadoras_fixo_vencimento_mes_offset AS fixo_offset,
+            apresentadoras_variavel_vencimento_dia AS variavel_dia,
+            apresentadoras_variavel_vencimento_mes_offset AS variavel_offset
        FROM tenants WHERE id = $1::uuid`, [tenantId])
-  const row = r.rows[0]
+  const row = r.rows[0] ?? {}
+  const num = (v, d) => (v == null ? d : Number(v))
   return {
-    dia: Number(row?.dia ?? VENCIMENTO_DIA_PADRAO),
-    mes_offset: Number(row?.mes_offset ?? VENCIMENTO_OFFSET_PADRAO),
+    fixo: { dia: num(row.fixo_dia, VENCIMENTO_PADRAO.fixo.dia), mes_offset: num(row.fixo_offset, VENCIMENTO_PADRAO.fixo.mes_offset) },
+    variavel: { dia: num(row.variavel_dia, VENCIMENTO_PADRAO.variavel.dia), mes_offset: num(row.variavel_offset, VENCIMENTO_PADRAO.variavel.mes_offset) },
   }
+}
+
+export async function atualizarConfigVencimento(db, tenantId, { fixo = {}, variavel = {} } = {}) {
+  await db.query(
+    `UPDATE tenants SET
+        apresentadoras_fixo_vencimento_dia = COALESCE($2::smallint, apresentadoras_fixo_vencimento_dia),
+        apresentadoras_fixo_vencimento_mes_offset = COALESCE($3::smallint, apresentadoras_fixo_vencimento_mes_offset),
+        apresentadoras_variavel_vencimento_dia = COALESCE($4::smallint, apresentadoras_variavel_vencimento_dia),
+        apresentadoras_variavel_vencimento_mes_offset = COALESCE($5::smallint, apresentadoras_variavel_vencimento_mes_offset)
+      WHERE id = $1::uuid`,
+    [tenantId, fixo.dia ?? null, fixo.mes_offset ?? null, variavel.dia ?? null, variavel.mes_offset ?? null])
+  return buscarConfigVencimento(db, tenantId)
 }
 
 function hojeSaoPaulo() {
@@ -47,84 +73,110 @@ function hojeSaoPaulo() {
 
 const dinheiro = (v) => Number(v ?? 0)
 
+const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100
+const chavePg = (apId, mes, comp) => `${apId}|${mes}|${comp}`
+const NOME_COMPONENTE = { fixo: 'fixo', variavel: 'variável' }
+
+// Previsto do componente a partir de uma linha do fechamento. variável = comissão + adicionais.
+export function previstoDoComponente(ap, componente) {
+  if (componente === 'fixo') return r2(ap?.fixo)
+  return r2(Number(ap?.comissao ?? 0) + Number(ap?.adicionais ?? 0))
+}
+
+/**
+ * Dois lançamentos por pessoa/mês (quando houver valor ou baixa): componente 'fixo' e 'variavel'.
+ * id = apresentadora:<uuid>:<YYYY-MM>:<componente>. Mantém fixo/comissao/adicionais do fechamento.
+ */
 export async function listarPagamentosApresentadoras(db, { tenantId, inicio, fim, hoje }) {
   hoje = hoje ?? hojeSaoPaulo()
   const config = await buscarConfigVencimento(db, tenantId)
   const meses = mesesDoPeriodo(inicio, fim)
   const pagos = await db.query(`
-    SELECT apresentadora_id, competencia::text AS competencia, valor_pago, data_pagamento::text AS data_pagamento, observacao
+    SELECT apresentadora_id, competencia::text AS competencia, componente, valor_pago, data_pagamento::text AS data_pagamento, observacao
       FROM apresentadora_pagamentos
      WHERE tenant_id = $1::uuid AND competencia >= $2::date AND competencia <= $3::date`,
   [tenantId, `${meses[0]}-01`, `${meses[meses.length - 1]}-01`])
-  const pagoPor = new Map(pagos.rows.map((p) => [`${p.apresentadora_id}|${p.competencia.slice(0, 7)}`, p]))
+  const pagoPor = new Map(pagos.rows.map((p) => [chavePg(p.apresentadora_id, p.competencia.slice(0, 7), p.componente ?? 'fixo'), p]))
 
   const itens = []
   for (const mes of meses) {
     const fechamento = await buscarFechamentoApresentadoras(db, { tenantId, mes })
     const vistos = new Set()
-    const vencimento = vencimentoApresentadora(mes, config.dia, config.mes_offset)
-    const montar = (apresentadoraId, nome, total, detalhe) => {
-      const pg = pagoPor.get(`${apresentadoraId}|${mes}`)
+    const montar = (apresentadoraId, nome, componente, previsto, detalhe) => {
+      const pg = pagoPor.get(chavePg(apresentadoraId, mes, componente))
+      if (previsto <= 0 && !pg) return
+      const cfg = config[componente]
       const item = {
-        id: `apresentadora:${apresentadoraId}:${mes}`,
+        id: `apresentadora:${apresentadoraId}:${mes}:${componente}`,
         natureza: 'custo',
         origem: 'apresentadora',
+        componente,
         apresentadora_id: apresentadoraId,
-        descricao: `Pagamento ${nome} - ${mes.slice(5)}/${mes.slice(0, 4)}`,
+        descricao: `Pagamento ${nome} (${NOME_COMPONENTE[componente]}) - ${mes.slice(5)}/${mes.slice(0, 4)}`,
         competencia: `${mes}-01`,
-        data_vencimento: vencimento,
-        valor_previsto: total,
+        data_vencimento: vencimentoApresentadora(mes, cfg.dia, cfg.mes_offset),
+        valor_previsto: previsto,
         valor_pago: pg ? dinheiro(pg.valor_pago) : 0,
         data_pagamento: pg?.data_pagamento ?? null,
         observacao: pg?.observacao ?? null,
+        virtual: false,
         ...detalhe,
       }
+      // Baixa legada (pré-172) registrava o TOTAL como 'fixo': sinaliza em vez de esconder.
+      item.divergente = item.valor_pago > 0 && r2(item.valor_pago) > r2(item.valor_previsto)
       item.status = statusLancamento(item, hoje)
       itens.push(item)
     }
     for (const ap of fechamento.apresentadoras) {
       vistos.add(ap.apresentadora_id)
-      if (ap.total <= 0 && !pagoPor.has(`${ap.apresentadora_id}|${mes}`)) continue
-      montar(ap.apresentadora_id, ap.nome, ap.total, { fixo: ap.fixo, comissao: ap.comissao, adicionais: ap.adicionais })
+      const detalhe = { fixo: ap.fixo, comissao: ap.comissao, adicionais: ap.adicionais }
+      for (const comp of COMPONENTES) montar(ap.apresentadora_id, ap.nome, comp, previstoDoComponente(ap, comp), detalhe)
     }
     // Pagamento registrado para apresentadora que saiu do fechamento (inativada/arquivada).
-    for (const [chave, pg] of pagoPor) {
+    const orfas = new Set()
+    for (const chave of pagoPor.keys()) {
       const [apId, m] = chave.split('|')
-      if (m !== mes || vistos.has(apId)) continue
+      if (m === mes && !vistos.has(apId)) orfas.add(apId)
+    }
+    for (const apId of orfas) {
       const n = await db.query('SELECT nome FROM apresentadoras WHERE id = $1::uuid AND tenant_id = $2::uuid', [apId, tenantId])
-      montar(apId, n.rows[0]?.nome ?? 'Apresentadora', 0, { fixo: 0, comissao: 0, adicionais: 0 })
+      for (const comp of COMPONENTES) montar(apId, n.rows[0]?.nome ?? 'Apresentadora', comp, 0, { fixo: 0, comissao: 0, adicionais: 0 })
     }
   }
-  return itens.sort((a, b) => a.competencia.localeCompare(b.competencia) || a.descricao.localeCompare(b.descricao, 'pt-BR'))
+  return itens.sort((a, b) => a.competencia.localeCompare(b.competencia)
+    || a.descricao.localeCompare(b.descricao, 'pt-BR') || a.componente.localeCompare(b.componente))
 }
 
-// Baixa: default = total do fechamento. Retorna null se a apresentadora não existe no tenant.
-export async function registrarPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, valorPago, dataPagamento, observacao, userId }) {
+// Baixa de UM componente: default = previsto do componente. Retorna null se a apresentadora não existe no tenant.
+// Upsert pela UNIQUE (tenant, apresentadora, competência, componente): repetir não gera baixa dupla.
+export async function registrarPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, componente = 'fixo', valorPago, dataPagamento, observacao, userId }) {
+  if (!ehComponente(componente)) throw new TypeError('componente inválido')
   const ap = await db.query('SELECT id FROM apresentadoras WHERE id = $1::uuid AND tenant_id = $2::uuid', [apresentadoraId, tenantId])
   if (!ap.rows[0]) return null
   let valor = valorPago
   if (valor == null) {
     const f = await buscarFechamentoApresentadoras(db, { tenantId, mes, apresentadoraId })
-    valor = f.apresentadoras[0]?.total ?? 0
+    valor = previstoDoComponente(f.apresentadoras[0], componente)
   } else {
     const cents = dinheiroEmCentavos(valor)
     if (cents == null) throw new TypeError('valor_pago inválido')
     valor = cents / 100
   }
   const r = await db.query(`
-    INSERT INTO apresentadora_pagamentos (tenant_id, apresentadora_id, competencia, valor_pago, data_pagamento, observacao, criado_por)
-    VALUES ($1::uuid, $2::uuid, $3::date, $4::numeric, COALESCE($5::date, (now() AT TIME ZONE 'America/Sao_Paulo')::date), $6, $7::uuid)
-    ON CONFLICT (tenant_id, apresentadora_id, competencia)
+    INSERT INTO apresentadora_pagamentos (tenant_id, apresentadora_id, competencia, componente, valor_pago, data_pagamento, observacao, criado_por)
+    VALUES ($1::uuid, $2::uuid, $3::date, $4::text, $5::numeric, COALESCE($6::date, (now() AT TIME ZONE 'America/Sao_Paulo')::date), $7, $8::uuid)
+    ON CONFLICT (tenant_id, apresentadora_id, competencia, componente)
     DO UPDATE SET valor_pago = EXCLUDED.valor_pago, data_pagamento = EXCLUDED.data_pagamento,
                   observacao = EXCLUDED.observacao, atualizado_em = now()
-    RETURNING apresentadora_id, competencia::text AS competencia, valor_pago, data_pagamento::text AS data_pagamento, observacao`,
-  [tenantId, apresentadoraId, `${mes}-01`, valor, dataPagamento ?? null, observacao ?? null, userId ?? null])
+    RETURNING id, apresentadora_id, competencia::text AS competencia, componente, valor_pago, data_pagamento::text AS data_pagamento, observacao`,
+  [tenantId, apresentadoraId, `${mes}-01`, componente, valor, dataPagamento ?? null, observacao ?? null, userId ?? null])
   return r.rows[0]
 }
 
-export async function desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId, mes }) {
+export async function desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, componente = 'fixo' }) {
   const r = await db.query(
-    `DELETE FROM apresentadora_pagamentos WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date RETURNING id`,
-    [tenantId, apresentadoraId, `${mes}-01`])
+    `DELETE FROM apresentadora_pagamentos
+      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date AND componente = $4::text RETURNING id`,
+    [tenantId, apresentadoraId, `${mes}-01`, componente])
   return r.rowCount > 0
 }

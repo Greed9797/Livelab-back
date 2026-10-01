@@ -70,7 +70,7 @@ describe.skipIf(!url)('financeiro-agregador (Postgres real)', () => {
   })
 
   it('alíquota default 10 (migration 167)', async () => {
-    expect(await buscarConfigFinanceiro(pool, t)).toEqual({ aliquota_imposto_pct: 10 })
+    expect(await buscarConfigFinanceiro(pool, t)).toEqual({ aliquota_imposto_pct: 10, data_corte: null, saldo_abertura: 0 })
   })
 
   it('lançamentos de setembro: fixo por vigência, custos, apresentadora e imposto sobre o recebido de agosto', async () => {

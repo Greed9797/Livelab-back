@@ -110,6 +110,22 @@ describe('validarTipoConciliacao (apresentadora/imposto)', () => {
     expect(validarTipoConciliacao('entrada', 'apresentadora')).toBeTruthy()
     expect(validarTipoConciliacao('entrada', 'imposto')).toBeTruthy()
   })
+  it('avulsa só com entrada; custo/apresentadora/imposto não aceitam entrada', () => {
+    expect(validarTipoConciliacao('entrada', 'avulsa')).toBeNull()
+    expect(validarTipoConciliacao('saida', 'avulsa')).toBeTruthy()
+    expect(validarTipoConciliacao('entrada', 'custo')).toBeTruthy()
+  })
+  it('entrada sugere receita avulsa; saída sugere apresentadora por componente', () => {
+    const avulsa = candidatoDeLancamento({ id: 'av1', natureza: 'receita', origem: 'avulsa', valor_previsto: 500, valor_pago: 0, data_vencimento: '2026-03-10' })
+    expect(avulsa).toMatchObject({ tipo: 'avulsa', id: 'av1', valores: [500] })
+    const fixo = candidatoDeLancamento({ id: 'apresentadora:u:2026-03:fixo', natureza: 'custo', origem: 'apresentadora', valor_previsto: 2700, valor_pago: 0, data_vencimento: '2026-03-10' })
+    const vari = candidatoDeLancamento({ id: 'apresentadora:u:2026-03:variavel', natureza: 'custo', origem: 'apresentadora', valor_previsto: 200, valor_pago: 0, data_vencimento: '2026-04-15' })
+    const [ent] = sugerirMatches([{ id: 't1', tipo: 'entrada', valor: 500, data: '2026-03-10' }], [avulsa, fixo, vari])
+    expect(ent.sugestoes.map((x) => [x.tipo, x.id])).toEqual([['avulsa', 'av1']])
+    const [sai] = sugerirMatches([{ id: 't2', tipo: 'saida', valor: 200, data: '2026-04-15' }], [avulsa, fixo, vari])
+    expect(sai.sugestoes[0]).toMatchObject({ tipo: 'apresentadora', id: 'apresentadora:u:2026-03:variavel' })
+    expect(sai.sugestoes.some((x) => x.tipo === 'avulsa')).toBe(false)
+  })
   it('candidatoDeLancamento distingue apresentadora e imposto', () => {
     const base = { natureza: 'custo', valor_previsto: 100, valor_pago: 0, data_vencimento: '2026-03-10' }
     expect(candidatoDeLancamento({ ...base, id: 'a', origem: 'apresentadora' }).tipo).toBe('apresentadora')

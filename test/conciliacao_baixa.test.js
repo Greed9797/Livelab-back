@@ -12,6 +12,10 @@ vi.mock('../src/services/financeiro-agregador.js', async (orig) => {
   const real = await orig()
   return { ...real, pagarImposto: vi.fn() }
 })
+vi.mock('../src/services/receitas-avulsas.js', async (orig) => {
+  const real = await orig()
+  return { ...real, receberReceitaAvulsa: vi.fn(), desfazerReceitaAvulsa: vi.fn() }
+})
 vi.mock('../src/services/apresentadoras-pagamentos.js', async (orig) => {
   const real = await orig()
   return { ...real, registrarPagamentoApresentadora: vi.fn() }
@@ -19,6 +23,7 @@ vi.mock('../src/services/apresentadoras-pagamentos.js', async (orig) => {
 
 import * as receitas from '../src/services/receitas-comercial.js'
 import * as agregador from '../src/services/financeiro-agregador.js'
+import * as avulsas from '../src/services/receitas-avulsas.js'
 import * as apres from '../src/services/apresentadoras-pagamentos.js'
 import {
   comSavepoints,
@@ -169,8 +174,39 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'apresentadora', alvoId: `apresentadora:${APRES}:2026-02`, userId: 'u1' })
     expect(r).toMatchObject({ aplicada: true, alvo_id: PG, valor_pago: 300 })
     expect(apres.registrarPagamentoApresentadora.mock.calls[0][1]).toMatchObject({
-      tenantId: T, apresentadoraId: APRES, mes: '2026-02', valorPago: 300, dataPagamento: '2026-03-20',
+      tenantId: T, apresentadoraId: APRES, mes: '2026-02', componente: 'fixo', valorPago: 300, dataPagamento: '2026-03-20',
     })
+  })
+
+  it('apresentadora: id com componente baixa SÓ aquele componente (consulta e registro)', async () => {
+    apres.registrarPagamentoApresentadora.mockResolvedValue({ valor_pago: '300.00', data_pagamento: '2026-03-20' })
+    let n = 0
+    const db = fakeDb((sql) => {
+      if (/FROM apresentadora_pagamentos/.test(sql)) return ++n === 1 ? { rows: [] } : { rows: [{ id: PG }] }
+      return null
+    })
+    const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'apresentadora', alvoId: `apresentadora:${APRES}:2026-02:variavel` })
+    expect(r).toMatchObject({ aplicada: true, alvo_id: PG })
+    expect(apres.registrarPagamentoApresentadora.mock.calls[0][1]).toMatchObject({ componente: 'variavel' })
+    for (const q of db.queries.filter((x) => /FROM apresentadora_pagamentos/.test(x.sql))) {
+      expect(q.params).toEqual([T, APRES, '2026-02-01', 'variavel'])
+    }
+  })
+
+  it('apresentadora: componente fixo já baixado não bloqueia o variável (e vice-versa)', async () => {
+    apres.registrarPagamentoApresentadora.mockResolvedValue({ valor_pago: '300.00', data_pagamento: '2026-03-20' })
+    let n = 0
+    const db = fakeDb((sql, params) => {
+      if (/FROM apresentadora_pagamentos/.test(sql)) {
+        if (params[3] === 'fixo') return { rows: [{ id: PG, valor_pago: '2700' }] }
+        return ++n === 1 ? { rows: [] } : { rows: [{ id: PG }] }
+      }
+      return null
+    })
+    const fixo = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'apresentadora', alvoId: `apresentadora:${APRES}:2026-02:fixo` })
+    expect(fixo).toMatchObject({ aplicada: false, motivo: 'ja_baixado' })
+    const variavel = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'apresentadora', alvoId: `apresentadora:${APRES}:2026-02:variavel` })
+    expect(variavel.aplicada).toBe(true)
   })
 
   it('apresentadora já paga: só vincula', async () => {
@@ -181,7 +217,35 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
   })
 })
 
+describe('darBaixaConciliacao — avulsa', () => {
+  const AV = '66666666-6666-6666-6666-666666666666'
+
+  it('baixa a receita avulsa com valor/data da transação', async () => {
+    avulsas.receberReceitaAvulsa.mockResolvedValue({ id: AV, valor_pago: 1500.5, data_pagamento: '2026-03-12' })
+    const db = fakeDb((sql) => (/FROM receitas_avulsas/.test(sql) ? { rows: [{ id: AV, valor_pago: '0.00' }] } : null))
+    const r = await darBaixaConciliacao(db, { tenantId: T, transacao: TX, tipo: 'avulsa', alvoId: AV })
+    expect(r).toMatchObject({ aplicada: true, alvo_tipo: 'avulsa', alvo_id: AV, valor_pago: 1500.5, data_pagamento: '2026-03-12' })
+    expect(avulsas.receberReceitaAvulsa.mock.calls[0][1]).toEqual({ tenantId: T, id: AV, valorPago: 1500.5, dataPagamento: '2026-03-12' })
+    expect(db.queries[0].sql).toMatch(/FOR UPDATE/)
+    expect(db.queries[0].params).toEqual([AV, T])
+  })
+  it('já recebida: só vincula; inexistente/ id inválido → 404', async () => {
+    const pago = fakeDb((sql) => (/FROM receitas_avulsas/.test(sql) ? { rows: [{ id: AV, valor_pago: '10' }] } : null))
+    expect(await darBaixaConciliacao(pago, { tenantId: T, transacao: TX, tipo: 'avulsa', alvoId: AV }))
+      .toMatchObject({ aplicada: false, motivo: 'ja_baixado', alvo_id: AV })
+    expect(avulsas.receberReceitaAvulsa).not.toHaveBeenCalled()
+    await expect(darBaixaConciliacao(fakeDb(), { tenantId: T, transacao: TX, tipo: 'avulsa', alvoId: AV })).rejects.toMatchObject({ status: 404 })
+    await expect(darBaixaConciliacao(fakeDb(), { tenantId: T, transacao: TX, tipo: 'avulsa', alvoId: 'rec:x' })).rejects.toMatchObject({ status: 404 })
+  })
+})
+
 describe('desfazerBaixaConciliacao', () => {
+  it('avulsa → desfazerReceitaAvulsa', async () => {
+    avulsas.desfazerReceitaAvulsa.mockResolvedValueOnce({ id: 'x' }).mockResolvedValueOnce(null)
+    expect(await desfazerBaixaConciliacao(fakeDb(), { tenantId: T, tipo: 'avulsa', alvoId: TITULO })).toEqual({ desfeita: true })
+    expect(avulsas.desfazerReceitaAvulsa.mock.calls[0][1]).toEqual({ tenantId: T, id: TITULO })
+    expect(await desfazerBaixaConciliacao(fakeDb(), { tenantId: T, tipo: 'avulsa', alvoId: TITULO })).toMatchObject({ desfeita: false })
+  })
   it('receita → desfazerRecebimento', async () => {
     receitas.desfazerRecebimento.mockResolvedValue({})
     expect(await desfazerBaixaConciliacao(fakeDb(), { tenantId: T, tipo: 'receita', alvoId: TITULO })).toEqual({ desfeita: true })

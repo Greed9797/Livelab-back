@@ -31,6 +31,11 @@ const uuid = z.string().uuid()
 export async function financeiroApresentadorasPagamentosRoutes(app) {
   const BASE = '/v1/financeiro/apresentadoras-pagamentos'
 
+  function auditar(request, action, entityId, metadata) {
+    app.audit?.log?.(request, { action, entity_type: 'apresentadora_pagamento', entity_id: entityId, metadata })
+      ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
+  }
+
   app.get(BASE, { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
     const { mes, inicio, fim } = request.query ?? {}
     let de = inicio, ate = fim
@@ -91,6 +96,12 @@ export async function financeiroApresentadorasPagamentosRoutes(app) {
         dataPagamento: parsed.data.data_pagamento, observacao: parsed.data.observacao, userId: request.user.sub,
       }))
       if (!pg) return reply.code(404).send({ error: 'Apresentadora não encontrada nesta unidade.' })
+      // Trilha da baixa — inclusive quando quem paga é a chave de API financeira
+      // (o plugin de audit marca via='api_key' e o nome da chave).
+      auditar(request, 'financeiro.apresentadora_pagar', pg.id, {
+        apresentadora_id: p.id, mes: p.mes, componente: p.componente,
+        valor_pago: pg.valor_pago, data_pagamento: pg.data_pagamento,
+      })
       return pg
     } catch (err) {
       if (err instanceof TypeError) return reply.code(400).send({ error: 'valor_pago deve ser positivo com até duas casas decimais' })
@@ -103,6 +114,7 @@ export async function financeiroApresentadorasPagamentosRoutes(app) {
     const tenantId = request.user.tenant_id
     const ok = await app.withTenant(tenantId, (db) => desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId: p.id, mes: p.mes, componente: p.componente }))
     if (!ok) return reply.code(404).send({ error: 'Nenhum pagamento registrado para esta competência.' })
+    auditar(request, 'financeiro.apresentadora_desfazer', null, { apresentadora_id: p.id, mes: p.mes, componente: p.componente })
     return { ok: true }
   }
 

@@ -13,18 +13,32 @@
 // ─── Papéis administrativos base ─────────────────────────────────────
 const ADMIN = ['franqueador_master', 'franqueado', 'gerente']
 
-// Papel das chaves de API (migration 138). Não pertence a ninguém na tabela
-// `users`: vive na coluna `papel` de `api_keys` e chega ao request pelo plugin
-// de auth. Entra só em lives, marcas, apresentadoras e nas leituras
-// correspondentes — nunca em financeiro, usuários ou configurações.
-// O POST /v1/usuarios/convidar da chave é exceção da rota (só papel de
-// apresentadora), não deste grupo.
-const AUTOMACAO = 'automacao'
+// Papéis das chaves de API (migration 138). Não pertencem a ninguém na tabela
+// `users`: vivem na coluna `papel` de `api_keys` e chegam ao request pelo
+// plugin de auth. São dois escopos que não se misturam — cada um tem a sua
+// allowlist em src/plugins/auth.js e entra só nos grupos abaixo:
+//
+// - AUTOMACAO (escopo 'operacional', o bot de lives): lives, marcas,
+//   apresentadoras e as leituras correspondentes. Nunca financeiro, usuários
+//   ou configurações. O POST /v1/usuarios/convidar da chave é exceção da rota
+//   (só papel de apresentadora), não deste grupo.
+// - AUTOMACAO_FINANCEIRO (escopo 'financeiro'): SÓ READ_FINANCEIRO e
+//   WRITE_FINANCEIRO. Nada de lives, marcas, apresentadoras, usuários,
+//   contratos ou configurações. Quem limita as rotas financeiras que ela de
+//   fato alcança (sem DELETE, sem /config, sem Asaas) é a allowlist do plugin.
+export const AUTOMACAO = 'automacao'
+export const AUTOMACAO_FINANCEIRO = 'automacao_financeiro'
 const ADMIN_COMERCIAL = [...ADMIN, 'gerente_comercial']
 
 // ─── FINANCEIRO ──────────────────────────────────────────────────────
-export const READ_FINANCEIRO = [...ADMIN, 'financeiro', 'financeiro_readonly', 'auditor']
-export const WRITE_FINANCEIRO = [...ADMIN, 'financeiro']
+// AUTOMACAO_FINANCEIRO entra nos dois. Por papel, isso também alcançaria as
+// outras rotas guardadas por estes grupos (/v1/asaas/*, /v1/financeiro/config,
+// /operacional, /faturamento, fechamento/adicionais de apresentadoras,
+// /v1/relatorios/financeiro/csv, POST /v1/comissoes/recalcular-mes e os DELETE
+// do financeiro) — quem as fecha para a chave é a allowlist
+// ROTAS_API_KEY_FINANCEIRO. Allowlist e papel precisam concordar.
+export const READ_FINANCEIRO = [...ADMIN, 'financeiro', 'financeiro_readonly', 'auditor', AUTOMACAO_FINANCEIRO]
+export const WRITE_FINANCEIRO = [...ADMIN, 'financeiro', AUTOMACAO_FINANCEIRO]
 
 // ─── CONTRATOS ───────────────────────────────────────────────────────
 export const READ_CONTRATOS = [

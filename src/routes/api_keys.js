@@ -5,18 +5,37 @@
 // pudesse se revogar transformaria um bot confuso em porta fechada. Por isso
 // estas rotas ficam fora da allowlist do plugin de auth — quem administra chave
 // é gente logada.
+//
+// Escopo (opcional na criação, imutável depois): decide o papel da chave e,
+// com ele, a allowlist que ela alcança no plugin de auth.
+//   'operacional' (padrão) → papel 'automacao': bot de lives, marcas, apresentadoras
+//   'financeiro'           → papel 'automacao_financeiro': lançamentos financeiros
+// Um escopo não enxerga as rotas do outro. Quem precisa dos dois cria duas chaves.
 
 import { z } from 'zod'
 import { randomBytes } from 'node:crypto'
 import { hashDaChave } from '../plugins/auth.js'
+import { AUTOMACAO, AUTOMACAO_FINANCEIRO } from '../config/role_groups.js'
 
 const ADMIN = ['franqueador_master', 'franqueado', 'gerente']
+
+export const PAPEL_POR_ESCOPO = Object.freeze({
+  operacional: AUTOMACAO,
+  financeiro: AUTOMACAO_FINANCEIRO,
+})
+const escopoDoPapel = (papel) =>
+  Object.keys(PAPEL_POR_ESCOPO).find((escopo) => PAPEL_POR_ESCOPO[escopo] === papel) ?? null
 
 const criarSchema = z.object({
   nome: z.string().min(1).max(120),
   // Sem data = chave sem vencimento. É o caso do bot que roda todo dia; quem
   // quiser uma chave temporária passa a data.
   expira_em: z.string().datetime().nullable().optional(),
+  // Sem escopo = chave operacional, como sempre foi. O papel em si nunca vem do
+  // body: só um destes dois escopos, mapeados aqui.
+  escopo: z.enum(['operacional', 'financeiro'], {
+    error: "escopo deve ser 'operacional' ou 'financeiro'",
+  }).default('operacional'),
 })
 
 // 32 bytes de aleatoriedade em base64url. O prefixo `llk_` serve para a chave
@@ -41,7 +60,7 @@ export async function apiKeysRoutes(app) {
           ORDER BY criado_em DESC`,
         [tenant_id],
       )
-      return reply.send({ items: rows })
+      return reply.send({ items: rows.map((r) => ({ ...r, escopo: escopoDoPapel(r.papel) })) })
     } finally {
       db.release()
     }
@@ -54,12 +73,14 @@ export async function apiKeysRoutes(app) {
     }
     const { tenant_id } = request.user
     const { bruta, prefixo } = gerarChave()
+    const { escopo } = parsed.data
+    const papel = PAPEL_POR_ESCOPO[escopo]
 
     const db = await app.dbTenant(tenant_id)
     try {
       const { rows } = await db.query(
-        `INSERT INTO api_keys (tenant_id, nome, prefixo, key_hash, criado_por, expira_em)
-         VALUES ($1::uuid, $2, $3, $4, $5, $6)
+        `INSERT INTO api_keys (tenant_id, nome, prefixo, key_hash, criado_por, expira_em, papel)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
          RETURNING id, nome, prefixo, papel, criado_em, expira_em`,
         [
           tenant_id,
@@ -68,15 +89,16 @@ export async function apiKeysRoutes(app) {
           hashDaChave(bruta),
           request.user.sub,
           parsed.data.expira_em ?? null,
+          papel,
         ],
       )
-      const chave = rows[0]
+      const chave = { ...rows[0], escopo }
 
       app.audit?.log?.(request, {
         action: 'api_key.create',
         entity_type: 'api_key',
         entity_id: chave.id,
-        metadata: { nome: chave.nome, prefixo },
+        metadata: { nome: chave.nome, prefixo, papel: chave.papel, escopo },
       })?.catch?.((err) => app.log.error({ err }, 'audit api_key.create falhou'))
 
       // `chave` sai aqui e não volta nunca: o banco só tem o hash. Perdeu, cria

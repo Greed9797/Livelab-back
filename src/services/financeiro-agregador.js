@@ -6,8 +6,15 @@
 //   receitas       → listarTitulosReceita         (services/receitas-comercial.js)
 //   custos         → listarCustos                 (services/custos-plano.js)
 //   apresentadoras → listarPagamentosApresentadoras (services/apresentadoras-pagamentos.js)
+//   receitas avulsas → listarReceitasAvulsas      (services/receitas-avulsas.js; 'aporte'
+//                    é entrada de caixa fora da receita operacional e da base do imposto)
 //   imposto        → calculado aqui (base = recebido em M-1) + baixa materializada em
 //                    `custos` (tipo 'imposto', 1 por tenant × competência, migration 167)
+//
+// Corte (migration 169): tenants.financeiro_data_corte. Item com data efetiva
+// (data_pagamento se valor_pago > 0, senão vencimento) anterior ao corte fica fora de
+// lançamentos, DRE, fluxo, totais e imposto (dentroDoCorte). Sem corte, nada muda.
+// Saldo de caixa = financeiro_saldo_abertura + realizado desde o corte (calcularCaixa).
 //
 // Status é SEMPRE derivado (lib/lancamento-status.js). Datas trafegam como strings
 // 'YYYY-MM-DD' / 'YYYY-MM' — sem Date, para não haver bug de fuso.
@@ -18,6 +25,7 @@ import { statusLancamento } from '../lib/lancamento-status.js'
 import { hojeSaoPaulo, listarTitulosReceita } from './receitas-comercial.js'
 import { addMeses, diasNoMes, listarCustos, mesesEntre, ultimoDia } from './custos-plano.js'
 import { listarPagamentosApresentadoras } from './apresentadoras-pagamentos.js'
+import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
 
 export { hojeSaoPaulo }
 
@@ -30,6 +38,20 @@ export const MAX_MESES_AGREGADOR = 36
 const RE_MES = /^(\d{4})-(0[1-9]|1[0-2])$/
 const RE_MES_OU_DATA = /^(\d{4}-(?:0[1-9]|1[0-2]))(?:-\d{2})?$/
 const RE_DATA = /^\d{4}-\d{2}-\d{2}$/
+
+/** 'YYYY-MM-DD' válida no calendário (rejeita 2026-02-30). */
+export function dataValida(d) {
+  if (!RE_DATA.test(String(d ?? ''))) return false
+  const [y, m, dia] = String(d).split('-').map(Number)
+  if (m < 1 || m > 12 || dia < 1) return false
+  return dia <= new Date(Date.UTC(y, m, 0)).getUTCDate()
+}
+
+/** Dia anterior de 'YYYY-MM-DD' (aritmética UTC pura, sem fuso). */
+export function diaAnterior(d) {
+  const [y, m, dia] = String(d).split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, dia - 1)).toISOString().slice(0, 10)
+}
 
 export const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100
 const mesDe = (d) => (d ? String(d).slice(0, 7) : null)
@@ -195,6 +217,27 @@ export function previstoReceitaPorVencimento(receitas) {
   return out
 }
 
+// ─── Corte (início do financeiro) ─────────────────────────────────────────
+
+/**
+ * Data efetiva do item para a regra de corte: data_pagamento quando há pagamento
+ * (valor_pago > 0), senão data_vencimento (sem vencimento → último dia da competência).
+ */
+export function dataEfetiva(item) {
+  if (Number(item?.valor_pago) > 0 && item?.data_pagamento) return String(item.data_pagamento).slice(0, 10)
+  const v = vencimentoEfetivo(item ?? {})
+  return v ? String(v).slice(0, 10) : null
+}
+
+/** true se o item vale a partir do corte (data efetiva >= data_corte). Sem corte → sempre true. */
+export function dentroDoCorte(item, dataCorte) {
+  if (!dataCorte) return true
+  const d = dataEfetiva(item)
+  return !d || d >= String(dataCorte).slice(0, 10)
+}
+
+export const aplicarCorte = (itens, dataCorte) => (dataCorte ? itens.filter((i) => dentroDoCorte(i, dataCorte)) : itens)
+
 // ─── Filtros e totais ─────────────────────────────────────────────────────
 
 const normTxt = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
@@ -218,9 +261,14 @@ const emAberto = (i) => Math.max(0, r2(i.valor_previsto) - r2(i.valor_pago))
 export function totalizarLancamentos(itens) {
   const zero = () => ({ previsto: 0, pago: 0, atrasado: 0, pendente: 0 })
   const t = { receita: zero(), custo: zero() }
+  const aportes = { previsto: 0, pago: 0 }
   for (const i of itens) {
     const n = t[i.natureza]
     if (!n) continue
+    if (ehAporte(i)) {
+      aportes.previsto += Number(i.valor_previsto) || 0
+      aportes.pago += Number(i.valor_pago) || 0
+    }
     n.previsto += Number(i.valor_previsto) || 0
     n.pago += Number(i.valor_pago) || 0
     if (i.status === 'atrasado') n.atrasado += emAberto(i)
@@ -229,6 +277,8 @@ export function totalizarLancamentos(itens) {
   for (const n of [t.receita, t.custo]) for (const k of Object.keys(n)) n[k] = r2(n[k])
   return {
     ...t,
+    // aportes (receitas avulsas do grupo 'aporte') já estão em receita; aqui à parte.
+    aportes: { previsto: r2(aportes.previsto), pago: r2(aportes.pago) },
     saldo_previsto: r2(t.receita.previsto - t.custo.previsto),
     saldo_realizado: r2(t.receita.pago - t.custo.pago),
   }
@@ -255,16 +305,19 @@ const roundPr = (o) => ({ previsto: r2(o.previsto), realizado: r2(o.realizado) }
  * DRE mensal por COMPETÊNCIA: previsto = Σ valor_previsto; realizado = Σ valor_pago.
  * custos exclui apresentadoras e imposto (linhas próprias). resultado = receita −
  * custos − apresentadoras − imposto. `impostos` = Map mes → { aliquota, base }.
+ * Aportes (receita avulsa grupo 'aporte') NÃO são receita operacional: linha
+ * `aportes` informativa, fora do resultado.
  */
 export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQUOTA_IMPOSTO_PADRAO }) {
   const porMes = new Map(meses.map((m) => [m, {
-    mes: m, receita: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
+    mes: m, receita: pr(), aportes: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
     imposto: { ...pr(), aliquota: impostos.get(m)?.aliquota ?? Number(aliquota), base: impostos.get(m)?.base ?? 0 },
   }]))
   for (const i of itens) {
     const linha = porMes.get(mesDe(i.competencia))
     if (!linha) continue
-    if (i.natureza === 'receita') addPr(linha.receita, i)
+    if (ehAporte(i)) addPr(linha.aportes, i)
+    else if (i.natureza === 'receita') addPr(linha.receita, i)
     else if (i.origem === 'apresentadora') addPr(linha.apresentadoras, i)
     else if (i.origem === 'imposto') addPr(linha.imposto, i)
     else {
@@ -279,6 +332,7 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
     const porGrupo = Object.fromEntries(Object.entries(l.custos.por_grupo).map(([g, v]) => [g, roundPr(v)]))
     const out = {
       receita: roundPr(l.receita),
+      aportes: roundPr(l.aportes),
       custos: { ...roundPr(l.custos), por_grupo: porGrupo },
       apresentadoras: roundPr(l.apresentadoras),
       imposto: { ...roundPr(l.imposto), aliquota: l.imposto.aliquota, base: r2(l.imposto.base) },
@@ -288,12 +342,13 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
   }
   const linhas = meses.map((m) => ({ mes: m, ...fechar(porMes.get(m)) }))
   const tot = {
-    receita: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
+    receita: pr(), aportes: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
     imposto: { ...pr(), aliquota: Number(aliquota), base: 0 },
   }
   for (const l of linhas) {
     for (const k of ['previsto', 'realizado']) {
       tot.receita[k] += l.receita[k]
+      tot.aportes[k] += l.aportes[k]
       tot.custos[k] += l.custos[k]
       tot.apresentadoras[k] += l.apresentadoras[k]
       tot.imposto[k] += l.imposto[k]
@@ -335,7 +390,7 @@ const labelFluxo = (k) => (k === 'cartao' ? 'Cartão' : `Dia ${k}`)
  * saldo_inicial). serie_anual jan–dez do ano de `mes`, mesma regra.
  * Formato legado (`entradas`/`saidas`/`items` por dia, previsto) mantido para o front atual.
  */
-export function montarFluxoCaixa({ mes, itens, saldoInicial = 0 }) {
+export function montarFluxoCaixa({ mes, itens, saldoInicial = 0, saldoInicialOrigem = 'informado' }) {
   const ano = mes.slice(0, 4)
   const linhas = new Map(FLUXO_CHAVES.map((k) => [k, { chave: k, label: labelFluxo(k), entradas: pr(), saidas: pr() }]))
   const serie = new Map(Array.from({ length: 12 }, (_, i) => {
@@ -399,6 +454,7 @@ export function montarFluxoCaixa({ mes, itens, saldoInicial = 0 }) {
   return {
     mes,
     saldo_inicial: saldoIni,
+    saldo_inicial_origem: saldoInicialOrigem,
     linhas: outLinhas,
     totais,
     serie_anual: serieAnual,
@@ -414,16 +470,45 @@ export function montarFluxoCaixa({ mes, itens, saldoInicial = 0 }) {
 
 // ─── Banco: config ────────────────────────────────────────────────────────
 
+/** { aliquota_imposto_pct, data_corte: 'YYYY-MM-DD'|null, saldo_abertura } do tenant. */
 export async function buscarConfigFinanceiro(db, tenantId) {
-  const r = await db.query('SELECT aliquota_imposto_pct FROM tenants WHERE id = $1::uuid', [tenantId])
-  const v = r.rows[0]?.aliquota_imposto_pct
-  return { aliquota_imposto_pct: v == null ? ALIQUOTA_IMPOSTO_PADRAO : Number(v) }
+  const r = await db.query(
+    `SELECT aliquota_imposto_pct,
+            to_char(financeiro_data_corte, 'YYYY-MM-DD') AS data_corte,
+            financeiro_saldo_abertura AS saldo_abertura
+       FROM tenants WHERE id = $1::uuid`,
+    [tenantId],
+  )
+  const row = r.rows[0] ?? {}
+  return {
+    aliquota_imposto_pct: row.aliquota_imposto_pct == null ? ALIQUOTA_IMPOSTO_PADRAO : Number(row.aliquota_imposto_pct),
+    data_corte: row.data_corte ?? null,
+    saldo_abertura: r2(row.saldo_abertura),
+  }
 }
 
-export async function atualizarConfigFinanceiro(db, tenantId, { aliquota_imposto_pct: aliquota }) {
-  const n = Number(aliquota)
-  if (!Number.isFinite(n) || n < 0 || n > 100) throw erro('aliquota_imposto_pct deve estar entre 0 e 100', 400, 'INVALID_CONFIG')
-  await db.query('UPDATE tenants SET aliquota_imposto_pct = $2 WHERE id = $1::uuid', [tenantId, r2(n)])
+/** PATCH parcial: qualquer subconjunto de { aliquota_imposto_pct, data_corte, saldo_abertura }. */
+export async function atualizarConfigFinanceiro(db, tenantId, patch = {}) {
+  const sets = []
+  const params = [tenantId]
+  if (patch.aliquota_imposto_pct !== undefined) {
+    const n = Number(patch.aliquota_imposto_pct)
+    if (!Number.isFinite(n) || n < 0 || n > 100) throw erro('aliquota_imposto_pct deve estar entre 0 e 100', 400, 'INVALID_CONFIG')
+    params.push(r2(n))
+    sets.push(`aliquota_imposto_pct = $${params.length}`)
+  }
+  if (patch.data_corte !== undefined) {
+    if (patch.data_corte !== null && !dataValida(patch.data_corte)) throw erro('data_corte deve ser uma data AAAA-MM-DD válida', 400, 'INVALID_CONFIG')
+    params.push(patch.data_corte)
+    sets.push(`financeiro_data_corte = $${params.length}::date`)
+  }
+  if (patch.saldo_abertura !== undefined) {
+    const n = Number(patch.saldo_abertura)
+    if (!Number.isFinite(n) || Math.abs(n) >= 1e13) throw erro('saldo_abertura inválido', 400, 'INVALID_CONFIG')
+    params.push(r2(n))
+    sets.push(`financeiro_saldo_abertura = $${params.length}`)
+  }
+  if (sets.length) await db.query(`UPDATE tenants SET ${sets.join(', ')} WHERE id = $1::uuid`, params)
   return buscarConfigFinanceiro(db, tenantId)
 }
 
@@ -434,15 +519,26 @@ const IMPOSTO_COLS = `id, valor, valor_pago, observacao,
   to_char(data_vencimento,'YYYY-MM-DD') AS data_vencimento,
   to_char(data_pagamento,'YYYY-MM-DD') AS data_pagamento`
 
-/** Σ valor_pago das receitas (receita_titulos) por mês de DATA DE PAGAMENTO. */
-async function recebidoPorMes(db, { tenantId, mesInicio, mesFim }) {
+/**
+ * Σ valor_pago das receitas operacionais (receita_titulos + receitas avulsas exceto
+ * 'aporte') por mês de DATA DE PAGAMENTO. Com corte, só pagamentos >= data_corte.
+ */
+async function recebidoPorMes(db, { tenantId, mesInicio, mesFim, dataCorte = null }) {
   const { rows } = await db.query(
     `SELECT to_char(date_trunc('month', data_pagamento), 'YYYY-MM') AS mes, COALESCE(SUM(valor_pago), 0) AS total
-       FROM receita_titulos
-      WHERE tenant_id = $1::uuid AND valor_pago > 0 AND data_pagamento IS NOT NULL
-        AND data_pagamento >= $2::date AND data_pagamento <= $3::date
+       FROM (
+         SELECT data_pagamento, valor_pago FROM receita_titulos
+          WHERE tenant_id = $1::uuid AND valor_pago > 0 AND data_pagamento IS NOT NULL
+            AND data_pagamento >= $2::date AND data_pagamento <= $3::date
+            AND ($4::date IS NULL OR data_pagamento >= $4::date)
+         UNION ALL
+         SELECT data_pagamento, valor_pago FROM receitas_avulsas
+          WHERE tenant_id = $1::uuid AND grupo <> 'aporte' AND valor_pago > 0 AND data_pagamento IS NOT NULL
+            AND data_pagamento >= $2::date AND data_pagamento <= $3::date
+            AND ($4::date IS NULL OR data_pagamento >= $4::date)
+       ) rec
       GROUP BY 1`,
-    [tenantId, `${mesInicio}-01`, ultimoDia(mesFim)],
+    [tenantId, `${mesInicio}-01`, ultimoDia(mesFim), dataCorte],
   )
   return new Map(rows.map((r) => [r.mes, r2(r.total)]))
 }
@@ -462,20 +558,30 @@ async function impostosMaterializados(db, { tenantId, inicio, fim }) {
  * `receitas` (opcional): itens de receita já carregados — usados na projeção
  * quando cobrem os meses de vencimento necessários.
  */
-export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota } = {}) {
+export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   const mesAtual = hoje.slice(0, 7)
-  const pct = aliquota ?? (await buscarConfigFinanceiro(db, tenantId)).aliquota_imposto_pct
+  let pct = aliquota
+  let corte = dataCorte
+  if (pct === undefined || corte === undefined) {
+    const cfg = await buscarConfigFinanceiro(db, tenantId)
+    pct ??= cfg.aliquota_imposto_pct
+    if (corte === undefined) corte = cfg.data_corte
+  }
   const baseIni = addMeses(inicio, -1)
   const baseFim = addMeses(fim, -1)
-  const recebido = await recebidoPorMes(db, { tenantId, mesInicio: baseIni, mesFim: baseFim })
+  const recebido = await recebidoPorMes(db, { tenantId, mesInicio: baseIni, mesFim: baseFim, dataCorte: corte })
   // Projeção só é necessária para meses-base não fechados (>= mês corrente).
   let previsto = new Map()
   if (baseFim >= mesAtual) {
     const projIni = baseIni > mesAtual ? baseIni : mesAtual
     // Vencimento = competência + offset (0|1) → competências a partir de projIni-1.
-    const titulos = await listarTitulosReceita(db, { tenantId, inicio: addMeses(projIni, -1), fim: baseFim, hoje })
-    previsto = previstoReceitaPorVencimento(titulos)
+    const [titulos, avulsas] = await Promise.all([
+      listarTitulosReceita(db, { tenantId, inicio: addMeses(projIni, -1), fim: baseFim, hoje }),
+      listarReceitasAvulsas(db, { tenantId, inicio: addMeses(projIni, -1), fim: baseFim, hoje }),
+    ])
+    // Aporte não é base de imposto; corte vale também para a projeção.
+    previsto = previstoReceitaPorVencimento(aplicarCorte([...titulos, ...avulsas.filter((a) => !ehAporte(a))], corte))
   }
   return mesesEntre(inicio, fim).map((mes) => calcularImpostoMes({
     mes,
@@ -487,9 +593,9 @@ export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeS
 }
 
 /** Lançamentos de imposto do período (omitidos quando valor 0 e sem baixa). */
-export async function listarImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota } = {}) {
+export async function listarImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte } = {}) {
   const [calculos, mats] = await Promise.all([
-    calcularImpostos(db, { tenantId, inicio, fim, hoje, aliquota }),
+    calcularImpostos(db, { tenantId, inicio, fim, hoje, aliquota, dataCorte }),
     impostosMaterializados(db, { tenantId, inicio, fim }),
   ])
   return calculos
@@ -544,23 +650,33 @@ export async function desfazerImposto(db, { tenantId, mes, hoje = hojeSaoPaulo()
 
 /**
  * Todos os lançamentos das competências [inicio, fim] (YYYY-MM), já normalizados
- * e ordenados por vencimento: receitas + custos + apresentadoras + imposto.
+ * e ordenados por vencimento: receitas (marcas + avulsas) + custos + apresentadoras
+ * + imposto, com a regra de corte aplicada (dataCorte undefined → lida da config).
  */
-export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota } = {}) {
+export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
-  const [receitas, custos, apresentadoras, impostos] = await Promise.all([
+  let pct = aliquota
+  let corte = dataCorte
+  if (pct === undefined || corte === undefined) {
+    const cfg = await buscarConfigFinanceiro(db, tenantId)
+    pct ??= cfg.aliquota_imposto_pct
+    if (corte === undefined) corte = cfg.data_corte
+  }
+  const [receitas, avulsas, custos, apresentadoras, impostos] = await Promise.all([
     listarTitulosReceita(db, { tenantId, inicio, fim, hoje }),
+    listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje }),
     listarCustos(db, { tenantId, inicio, fim, hoje }),
     listarPagamentosApresentadoras(db, { tenantId, inicio: `${inicio}-01`, fim: `${fim}-01`, hoje }),
-    listarImpostos(db, { tenantId, inicio, fim, hoje, aliquota }),
+    listarImpostos(db, { tenantId, inicio, fim, hoje, aliquota: pct, dataCorte: corte }),
   ])
-  return ordenarLancamentos([
+  return ordenarLancamentos(aplicarCorte([
     ...receitas.map((t) => normalizarReceita(t, hoje)),
+    ...avulsas.map((a) => ({ ...BASE_ITEM, ...a })),
     // imposto materializado em `custos` sai daqui e entra como lançamento próprio
     ...custos.filter((c) => c.tipo !== 'imposto').map((c) => normalizarCusto(c, hoje)),
     ...apresentadoras.map((p) => normalizarApresentadora(p, hoje)),
     ...impostos,
-  ])
+  ], corte))
 }
 
 /** GET /lancamentos: itens filtrados + totais (dos itens filtrados). */
@@ -571,20 +687,154 @@ export async function consultarLancamentos(db, { tenantId, inicio, fim, hoje = h
 
 /** DRE mensal previsto × realizado para [inicio, fim]. */
 export async function calcularDre(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo() } = {}) {
-  const { aliquota_imposto_pct: aliquota } = await buscarConfigFinanceiro(db, tenantId)
-  const itens = await listarLancamentos(db, { tenantId, inicio, fim, hoje, aliquota })
+  const { aliquota_imposto_pct: aliquota, data_corte: dataCorte } = await buscarConfigFinanceiro(db, tenantId)
+  const itens = await listarLancamentos(db, { tenantId, inicio, fim, hoje, aliquota, dataCorte })
   const impostos = new Map(itens.filter((i) => i.origem === 'imposto')
     .map((i) => [mesDe(i.competencia), { aliquota: i.aliquota, base: i.base }]))
-  return { inicio, fim, aliquota, ...montarDre({ meses: mesesEntre(inicio, fim), itens, impostos, aliquota }) }
+  return { inicio, fim, aliquota, data_corte: dataCorte, ...montarDre({ meses: mesesEntre(inicio, fim), itens, impostos, aliquota }) }
 }
 
 /**
  * Fluxo de caixa do mês + série anual. Carrega as competências de nov/(ano-1)
  * a dez/ano (vencimentos com offset de até 1 mês caem dentro do ano).
  */
-export async function calcularFluxoCaixa(db, { tenantId, mes, saldoInicial = 0, hoje = hojeSaoPaulo() } = {}) {
+export async function calcularFluxoCaixa(db, { tenantId, mes, saldoInicial, hoje = hojeSaoPaulo() } = {}) {
   if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
   const ano = mes.slice(0, 4)
-  const itens = await listarLancamentos(db, { tenantId, inicio: addMeses(`${ano}-01`, -2), fim: `${ano}-12`, hoje })
-  return montarFluxoCaixa({ mes, itens, saldoInicial })
+  const cfg = await buscarConfigFinanceiro(db, tenantId)
+  const itens = await listarLancamentos(db, {
+    tenantId, inicio: addMeses(`${ano}-01`, -2), fim: `${ano}-12`, hoje,
+    aliquota: cfg.aliquota_imposto_pct, dataCorte: cfg.data_corte,
+  })
+  let saldo = saldoInicial
+  let origem = 'informado'
+  if (saldo == null) {
+    if (!cfg.data_corte) {
+      saldo = 0
+      origem = 'padrao'
+    } else {
+      saldo = await saldoCaixaInicioMes(db, { tenantId, mes, config: cfg })
+      origem = 'caixa'
+    }
+  }
+  return { ...montarFluxoCaixa({ mes, itens, saldoInicial: saldo, saldoInicialOrigem: origem }), data_corte: cfg.data_corte }
+}
+
+// ─── Caixa (saldo de abertura + realizado desde o corte) ──────────────────
+
+/**
+ * Realizado (Σ valor_pago) com data_pagamento em [de, ate] (inclusive), direto das
+ * tabelas de baixa — itens virtuais nunca têm pagamento. Tenant explícito.
+ */
+export async function realizadoEntre(db, { tenantId, de, ate }) {
+  const zero = { receitas: 0, avulsas: 0, aportes: 0, custos: 0, apresentadoras: 0, imposto: 0, entradas: 0, saidas: 0 }
+  if (!de || !ate || ate < de) return zero
+  const { rows } = await db.query(
+    `SELECT
+       (SELECT COALESCE(SUM(valor_pago), 0) FROM receita_titulos
+         WHERE tenant_id = $1::uuid AND valor_pago > 0 AND data_pagamento BETWEEN $2::date AND $3::date) AS receitas,
+       (SELECT COALESCE(SUM(valor_pago) FILTER (WHERE grupo <> 'aporte'), 0) FROM receitas_avulsas
+         WHERE tenant_id = $1::uuid AND valor_pago > 0 AND data_pagamento BETWEEN $2::date AND $3::date) AS avulsas,
+       (SELECT COALESCE(SUM(valor_pago) FILTER (WHERE grupo = 'aporte'), 0) FROM receitas_avulsas
+         WHERE tenant_id = $1::uuid AND valor_pago > 0 AND data_pagamento BETWEEN $2::date AND $3::date) AS aportes,
+       (SELECT COALESCE(SUM(valor_pago) FILTER (WHERE tipo IS DISTINCT FROM 'imposto'), 0) FROM custos
+         WHERE tenant_id = $1::uuid AND valor_pago > 0 AND data_pagamento BETWEEN $2::date AND $3::date) AS custos,
+       (SELECT COALESCE(SUM(valor_pago) FILTER (WHERE tipo = 'imposto'), 0) FROM custos
+         WHERE tenant_id = $1::uuid AND valor_pago > 0 AND data_pagamento BETWEEN $2::date AND $3::date) AS imposto,
+       (SELECT COALESCE(SUM(valor_pago), 0) FROM apresentadora_pagamentos
+         WHERE tenant_id = $1::uuid AND valor_pago > 0 AND data_pagamento BETWEEN $2::date AND $3::date) AS apresentadoras`,
+    [tenantId, de, ate],
+  )
+  const r = rows[0] ?? {}
+  const out = Object.fromEntries(Object.keys(zero).map((k) => [k, r2(r[k])]))
+  out.entradas = r2(out.receitas + out.avulsas + out.aportes)
+  out.saidas = r2(out.custos + out.apresentadoras + out.imposto)
+  return out
+}
+
+/** Saldo de caixa no INÍCIO de `mes` (antes do dia 1): abertura + realizado [corte, dia anterior]. Mês < corte → 0. */
+export async function saldoCaixaInicioMes(db, { tenantId, mes, config }) {
+  const cfg = config ?? await buscarConfigFinanceiro(db, tenantId)
+  if (!cfg.data_corte) return 0
+  if (mes < mesDe(cfg.data_corte)) return 0
+  const real = await realizadoEntre(db, { tenantId, de: cfg.data_corte, ate: diaAnterior(`${mes}-01`) })
+  return r2(cfg.saldo_abertura + real.entradas - real.saidas)
+}
+
+/**
+ * Pura: em aberto (previsto − pago) de receitas e custos com vencimento em
+ * [dataCorte, fimMes]. Itens já passaram pela regra de corte.
+ */
+export function abertosAte(itens, { dataCorte, fimMes }) {
+  const out = { a_receber: 0, a_pagar: 0 }
+  for (const i of itens) {
+    const venc = vencimentoEfetivo(i)
+    if (!venc || venc < dataCorte || venc > fimMes) continue
+    const aberto = emAberto(i)
+    if (!(aberto > 0)) continue
+    if (i.natureza === 'receita') out.a_receber += aberto
+    else out.a_pagar += aberto
+  }
+  return { a_receber: r2(out.a_receber), a_pagar: r2(out.a_pagar) }
+}
+
+/** Pura: monta o contrato de GET /caixa a partir dos agregados. */
+export function montarCaixa({ config, ate, fimMes, realizado, realizadoPosAte, abertos }) {
+  if (!config?.data_corte) {
+    return {
+      configurado: false, data_corte: null, saldo_abertura: 0, ate, fim_mes: fimMes,
+      entradas_realizadas: 0, saidas_realizadas: 0, saldo_atual: 0, a_receber: 0, a_pagar: 0, saldo_projetado_fim_mes: 0,
+      detalhe: { entradas: { receitas: 0, avulsas: 0, aportes: 0 }, saidas: { custos: 0, apresentadoras: 0, imposto: 0 } },
+    }
+  }
+  const abertura = r2(config.saldo_abertura)
+  const saldoAtual = r2(abertura + realizado.entradas - realizado.saidas)
+  const pos = realizadoPosAte ?? { entradas: 0, saidas: 0 }
+  return {
+    configurado: true,
+    data_corte: config.data_corte,
+    saldo_abertura: abertura,
+    ate,
+    fim_mes: fimMes,
+    entradas_realizadas: r2(realizado.entradas),
+    saidas_realizadas: r2(realizado.saidas),
+    saldo_atual: saldoAtual,
+    a_receber: abertos.a_receber,
+    a_pagar: abertos.a_pagar,
+    saldo_projetado_fim_mes: r2(saldoAtual + pos.entradas - pos.saidas + abertos.a_receber - abertos.a_pagar),
+    detalhe: {
+      entradas: { receitas: realizado.receitas, avulsas: realizado.avulsas, aportes: realizado.aportes },
+      saidas: { custos: realizado.custos, apresentadoras: realizado.apresentadoras, imposto: realizado.imposto },
+    },
+  }
+}
+
+/**
+ * GET /caixa: saldo_atual = abertura + entradas − saídas realizadas em [corte, ate];
+ * a_receber/a_pagar = em aberto com vencimento em [corte, fim do mês de `ate`];
+ * saldo_projetado_fim_mes = saldo_atual + realizado (ate, fim do mês] + a_receber − a_pagar.
+ */
+export async function calcularCaixa(db, { tenantId, ate, hoje = hojeSaoPaulo() } = {}) {
+  if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
+  const dataAte = ate ?? hoje
+  if (!dataValida(dataAte)) throw erro('ate deve ser uma data AAAA-MM-DD válida')
+  const fimMes = ultimoDia(mesDe(dataAte))
+  const config = await buscarConfigFinanceiro(db, tenantId)
+  if (!config.data_corte) return montarCaixa({ config, ate: dataAte, fimMes })
+  const corte = config.data_corte
+  const mesIni = addMeses(mesDe(corte), -2) // vencimento = competência + até 1 mês (+ folga)
+  const mesFim = mesDe(fimMes)
+  const [realizado, realizadoPosAte, itens] = await Promise.all([
+    realizadoEntre(db, { tenantId, de: corte, ate: dataAte }),
+    realizadoEntre(db, { tenantId, de: dataAte >= corte ? diaSeguinte(dataAte) : corte, ate: fimMes }),
+    mesFim >= mesIni
+      ? listarLancamentos(db, { tenantId, inicio: mesIni, fim: mesFim, hoje, aliquota: config.aliquota_imposto_pct, dataCorte: corte })
+      : [],
+  ])
+  return montarCaixa({ config, ate: dataAte, fimMes, realizado, realizadoPosAte, abertos: abertosAte(itens, { dataCorte: corte, fimMes }) })
+}
+
+function diaSeguinte(d) {
+  const [y, m, dia] = String(d).split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, dia + 1)).toISOString().slice(0, 10)
 }

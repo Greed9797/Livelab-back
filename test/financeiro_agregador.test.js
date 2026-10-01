@@ -83,6 +83,7 @@ describe('status derivado e normalização', () => {
     expect(totalizarLancamentos(itens)).toEqual({
       receita: { previsto: 1500, pago: 200, atrasado: 300, pendente: 1000 },
       custo: { previsto: 400, pago: 100, atrasado: 300, pendente: 0 },
+      aportes: { previsto: 0, pago: 0 },
       saldo_previsto: 1100,
       saldo_realizado: 100,
     })
@@ -164,6 +165,7 @@ describe('DRE', () => {
     expect(meses[0]).toEqual({
       mes: '2026-09',
       receita: { previsto: 1000, realizado: 1000 },
+      aportes: { previsto: 0, realizado: 0 },
       custos: {
         previsto: 400, realizado: 100,
         por_grupo: { estrutural: { previsto: 300, realizado: 0 }, ferramentas: { previsto: 100, realizado: 100 } },
@@ -260,7 +262,7 @@ describe('rotas onda 2', () => {
     await app.register(financeiroRoutes)
     expect((await app.inject({ method: 'PATCH', url: '/v1/financeiro/config', payload: { aliquota_imposto_pct: 150 } })).statusCode).toBe(400)
     const res = await app.inject({ method: 'PATCH', url: '/v1/financeiro/config', payload: { aliquota_imposto_pct: 6 } })
-    expect(res.json()).toEqual({ aliquota_imposto_pct: 6 })
+    expect(res.json()).toEqual({ aliquota_imposto_pct: 6, data_corte: null, saldo_abertura: 0 })
     const upd = query.mock.calls.find(([sql]) => String(sql).startsWith('UPDATE tenants'))
     expect(upd[1]).toEqual([TENANT, 6])
     await app.close()

@@ -21,6 +21,7 @@ import { contratosRoutes } from './routes/contratos.js'
 import { financeiroRoutes } from './routes/financeiro.js'
 import { remuneracaoApresentadorasRoutes } from './routes/remuneracao_apresentadoras.js'
 import { financeiroReceitasRoutes } from './routes/financeiro_receitas.js'
+import { financeiroReceitasAvulsasRoutes } from './routes/financeiro_receitas_avulsas.js'
 import { financeiroCustosRoutes } from './routes/financeiro_custos.js'
 import { financeiroApresentadorasPagamentosRoutes } from './routes/financeiro_apresentadoras_pagamentos.js'
 import { asaasRoutes } from './routes/asaas.js'
@@ -346,6 +347,7 @@ export async function buildApp(opts = {}) {
   await app.register(financeiroRoutes)
   await app.register(remuneracaoApresentadorasRoutes)
   await app.register(financeiroReceitasRoutes)
+  await app.register(financeiroReceitasAvulsasRoutes)
   await app.register(financeiroCustosRoutes)
   await app.register(financeiroApresentadorasPagamentosRoutes)
   await app.register(asaasRoutes)

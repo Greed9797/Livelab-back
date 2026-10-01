@@ -4,7 +4,15 @@ import { createHash } from 'node:crypto'
 import * as Sentry from '@sentry/node'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const UUID_BODY = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const UUID_BODY = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+const MES_BODY = '[0-9]{4}-(?:0[1-9]|1[0-2])'
+
+// Papéis de chave de API (coluna api_keys.papel). Cada um tem a SUA allowlist:
+// a chave do bot de lives não alcança rota financeira nem pela lista, e a chave
+// financeira não alcança lives/marcas/usuários. O papel (requirePapel) é a
+// segunda trava, independente desta.
+const PAPEL_AUTOMACAO = 'automacao'
+const PAPEL_AUTOMACAO_FINANCEIRO = 'automacao_financeiro'
 
 // Rotas que uma chave de API alcança. Tudo que não está aqui responde 403 para
 // a chave, mesmo que o papel dela permitisse.
@@ -13,16 +21,24 @@ const UUID_BODY = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 // `app.authenticate` sem `requirePapel` nasceria aberta para a automação, e
 // ninguém ia lembrar de conferir. Aqui o padrão é o contrário — nasce fechada.
 //
-// Não há DELETE nenhum. Financeiro, contratos e configurações
-// (esta última guarda as chaves do gateway de pagamento) ficam de fora.
+// Esta é a lista do escopo 'operacional' (papel `automacao`, o bot de lives).
+// Não há DELETE nenhum. Financeiro, contratos e configurações (esta última
+// guarda as chaves do gateway de pagamento) ficam de fora — o financeiro tem
+// chave própria, de outro escopo (ROTAS_API_KEY_FINANCEIRO, abaixo).
 // De usuários, a chave só alcança os POST exatos /v1/usuarios e
 // /v1/usuarios/convidar, e o POST exato /v1/apresentadoras. As três só criam
 // apresentadora. Lista, PATCH, DELETE e reset de senha continuam fechados.
 // Regra de casamento (GET incluso — sem prefixo solto):
-// - Sem barra final e sem `:id` casa EXATO
+// - Sem barra final e sem placeholder casa EXATO
 // - PATCH com barra final casa só `<prefixo><uuid>` — nunca sub-rota (encerrar,
 //   publicar, faixas-comissao, apresentadoras do vínculo)
-// - Entradas com `:id` casam exatamente aquele caminho (uuid no lugar do :id)
+// - Placeholders tipados ocupam um segmento inteiro e casam só o formato dele;
+//   o resto do caminho casa exato (sem sub-rota, sem prefixo solto):
+//     :id          uuid
+//     :vid         uuid | calc:<uuid>:<AAAA-MM>:(fixo|comissao) | rec:<uuid>:<AAAA-MM>
+//     :mes         AAAA-MM, mês 01–12
+//     :componente  fixo | variavel
+//   Placeholder desconhecido faz a entrada nunca casar (falha fechada).
 export const ROTAS_API_KEY = [
   ['POST', '/v1/analytics/imports/preview'],
   ['POST', '/v1/analytics/imports/ingest'],
@@ -57,20 +73,111 @@ export const ROTAS_API_KEY = [
   ['GET', '/v1/comissoes/marcas'],
 ]
 
+// Escopo 'financeiro' (papel `automacao_financeiro`): ler lançamentos e
+// registrar/baixar custos e receitas. Mesmas regras de casamento.
+//
+// De fora, de propósito:
+// - DELETE de qualquer coisa: apagar lançamento some com a trilha do dinheiro.
+//   A automação corrige com PATCH ou desfaz a baixa; apagar é de gente.
+// - /v1/financeiro/config: saldo de abertura, data de corte e alíquota de
+//   imposto mudam o caixa e o DRE de todos os meses de uma vez.
+// - /v1/financeiro/apresentadoras-pagamentos/config (vencimento das
+//   apresentadoras) e as rotas legadas sem :componente.
+// - /v1/asaas/*: gateway de pagamento e conciliação bancária.
+// - /v1/financeiro/operacional, /faturamento e a visão franqueadora.
+// - /v1/api-keys*, contratos, configurações, usuários, lives, marcas.
+export const ROTAS_API_KEY_FINANCEIRO = [
+  // Leitura
+  ['GET', '/v1/financeiro/lancamentos'],
+  ['GET', '/v1/financeiro/caixa'],
+  ['GET', '/v1/financeiro/receita'],
+  ['GET', '/v1/financeiro/dre/mes'],
+  ['GET', '/v1/financeiro/resumo'],
+  ['GET', '/v1/financeiro/fluxo-caixa'],
+  ['GET', '/v1/financeiro/receitas'],
+  ['GET', '/v1/financeiro/receitas-avulsas'],
+  ['GET', '/v1/financeiro/custos'],
+  ['GET', '/v1/financeiro/custos-recorrentes'],
+  ['GET', '/v1/financeiro/apresentadoras-pagamentos'],
+  // Criação
+  ['POST', '/v1/financeiro/custos'],
+  ['POST', '/v1/financeiro/custos/parcelado'],
+  ['POST', '/v1/financeiro/custos/gerar'],
+  ['POST', '/v1/financeiro/custos/importar'],
+  ['POST', '/v1/financeiro/custos-recorrentes'],
+  ['POST', '/v1/financeiro/receitas/gerar'],
+  ['POST', '/v1/financeiro/receitas-avulsas'],
+  // Edição e baixa (pagar/receber/desfazer)
+  ['PATCH', '/v1/financeiro/custos/:vid'],
+  ['PATCH', '/v1/financeiro/custos/:vid/pagar'],
+  ['PATCH', '/v1/financeiro/custos/:vid/desfazer'],
+  ['PATCH', '/v1/financeiro/custos-recorrentes/:id'],
+  ['PATCH', '/v1/financeiro/receitas/:vid/receber'],
+  ['PATCH', '/v1/financeiro/receitas/:vid/desfazer'],
+  ['PATCH', '/v1/financeiro/receitas-avulsas/:id'],
+  ['PATCH', '/v1/financeiro/receitas-avulsas/:id/receber'],
+  ['PATCH', '/v1/financeiro/receitas-avulsas/:id/desfazer'],
+  ['PATCH', '/v1/financeiro/apresentadoras-pagamentos/:id/:mes/:componente/pagar'],
+  ['PATCH', '/v1/financeiro/apresentadoras-pagamentos/:id/:mes/:componente/desfazer'],
+  ['PATCH', '/v1/financeiro/impostos/:mes/pagar'],
+  ['PATCH', '/v1/financeiro/impostos/:mes/desfazer'],
+]
+
+// Papel da chave → allowlist. Papel fora daqui (linha mexida à mão no banco,
+// papel de gente) não alcança rota nenhuma.
+export const ROTAS_API_KEY_POR_PAPEL = Object.freeze({
+  [PAPEL_AUTOMACAO]: ROTAS_API_KEY,
+  [PAPEL_AUTOMACAO_FINANCEIRO]: ROTAS_API_KEY_FINANCEIRO,
+})
+
+const PLACEHOLDERS = Object.freeze({
+  id: UUID_BODY,
+  vid: `(?:${UUID_BODY}|calc:${UUID_BODY}:${MES_BODY}:(?:fixo|comissao)|rec:${UUID_BODY}:${MES_BODY})`,
+  mes: MES_BODY,
+  componente: '(?:fixo|variavel)',
+})
+
 function escapeRegex(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-/** Compila padrão da allowlist (com no máximo um `:id`) para o caminho limpo. */
-export function chaveAlcancaRota(metodo, caminho) {
-  const limpo = String(caminho ?? '').split('?')[0]
-  return ROTAS_API_KEY.some(([m, rota]) => {
+const rotasCompiladas = new Map()
+
+/** Padrão com placeholders → RegExp ancorada; null se o padrão for inválido. */
+function compilarRota(rota) {
+  if (rotasCompiladas.has(rota)) return rotasCompiladas.get(rota)
+  let fonte = '^'
+  let ultimo = 0
+  let valido = true
+  for (const m of rota.matchAll(/:([A-Za-z_]+)/g)) {
+    const tipo = Object.hasOwn(PLACEHOLDERS, m[1]) ? PLACEHOLDERS[m[1]] : null
+    const antes = rota[m.index - 1]
+    const depois = rota[m.index + m[0].length]
+    // O placeholder ocupa o segmento inteiro: `/x/:id/y`, nunca `/x-:id`.
+    if (!tipo || antes !== '/' || (depois !== undefined && depois !== '/')) { valido = false; break }
+    fonte += escapeRegex(rota.slice(ultimo, m.index)) + tipo
+    ultimo = m.index + m[0].length
+  }
+  const re = valido ? new RegExp(`${fonte}${escapeRegex(rota.slice(ultimo))}$`) : null
+  rotasCompiladas.set(rota, re)
+  return re
+}
+
+/**
+ * A chave de papel `papel` alcança `metodo caminho`? Sem papel, vale a lista do
+ * escopo operacional (o comportamento de antes da chave financeira).
+ */
+export function chaveAlcancaRota(metodo, caminho, papel = PAPEL_AUTOMACAO) {
+  const rotas = Object.hasOwn(ROTAS_API_KEY_POR_PAPEL, papel) ? ROTAS_API_KEY_POR_PAPEL[papel] : []
+  // `:` codificado (`calc%3A...`) chega decodificado ao handler; aqui também,
+  // senão o id virtual levaria 403. Só o `:` — nenhum outro escape é desfeito,
+  // então `%2F` e afins continuam não casando com nada.
+  const limpo = String(caminho ?? '').split('?')[0].replace(/%3a/gi, ':')
+  return rotas.some(([m, rota]) => {
     if (m !== metodo) return false
-    if (rota.includes(':id')) {
-      const [prefixo, ...resto] = rota.split(':id')
-      if (resto.length !== 1) return false
-      const re = new RegExp(`^${escapeRegex(prefixo)}${UUID_BODY}${escapeRegex(resto[0])}$`, 'i')
-      return re.test(limpo)
+    if (rota.includes(':')) {
+      const re = compilarRota(rota)
+      return re ? re.test(limpo) : false
     }
     if (!rota.endsWith('/')) return limpo === rota
     return limpo.startsWith(rota) && UUID_RE.test(limpo.slice(rota.length))
@@ -214,9 +321,10 @@ async function authPlugin(app) {
       app.log.warn({ rota: request.url }, 'chave de API inválida, revogada ou expirada')
       return reply.code(401).send({ error: 'Chave de API inválida' })
     }
-    if (!chaveAlcancaRota(request.method, request.url)) {
+    // `?? null`: papel ausente não pode cair no default do escopo operacional.
+    if (!chaveAlcancaRota(request.method, request.url, chave.papel ?? null)) {
       app.log.warn(
-        { api_key_id: chave.id, metodo: request.method, rota: request.url },
+        { api_key_id: chave.id, papel: chave.papel, metodo: request.method, rota: request.url },
         'chave de API tentou rota fora da allowlist',
       )
       return reply.code(403).send({ error: 'Esta chave não tem acesso a esta rota' })

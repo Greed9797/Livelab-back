@@ -6,7 +6,9 @@
 //   POST   /v1/financeiro/custos/parcelado           (N parcelas)
 //   POST   /v1/financeiro/custos/gerar?mes=YYYY-MM   (materializa recorrentes, idempotente)
 //   PATCH  /v1/financeiro/custos/:id                 (aceita id virtual rec:<uuid>:<YYYY-MM>)
-//   PATCH  /v1/financeiro/custos/:id/pagar | /desfazer
+//   PATCH  /v1/financeiro/custos/:id/pagar | /desfazer   (custo cancelado → 409 no pagar)
+//   PATCH  /v1/financeiro/custos/:id/cancelar { motivo? } | /reativar
+//          (aceita rec:<uuid>:<YYYY-MM>: materializa e cancela só aquele mês; migration 173)
 //   DELETE /v1/financeiro/custos/:id?escopo=um|grupo|futuras
 //   POST   /v1/financeiro/custos/importar            (carga em massa idempotente; dry_run)
 //   GET/POST /v1/financeiro/custos-recorrentes ; PATCH/DELETE .../:id
@@ -19,10 +21,11 @@ import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
 import { CLASSES_CUSTO } from '../lib/custo-classe.js'
 import {
-  CUSTO_COLS, GRUPOS_CUSTO, RECORRENTE_COLS, custoParaItem, gerarCustosDoMes,
-  listarCustos, materializarVirtual, mesValido, parseIdVirtual, planejarParcelas,
-  primeiroDia, r2,
+  CUSTO_COLS, GRUPOS_CUSTO, RECORRENTE_COLS, cancelarCusto, custoParaItem, erroCustoCancelado,
+  gerarCustosDoMes, listarCustos, materializarVirtual, mesValido, parseIdVirtual, planejarParcelas,
+  primeiroDia, r2, reativarCusto,
 } from '../services/custos-plano.js'
+import { MOTIVO_MAX } from '../lib/lancamento-status.js'
 
 export function hojeSaoPaulo(now = new Date()) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(now)
@@ -102,6 +105,15 @@ const recorrentePatchSchema = z.object({
 }).partial().refine((d) => Object.keys(d).length > 0, { message: 'Nada para atualizar' })
 
 const UUID = z.string().uuid()
+
+const motivoSchema = z.object({
+  motivo: z.string().max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
+}).strict()
+
+function responderErro(reply, error) {
+  if (error?.statusCode && error.statusCode < 500) return reply.code(error.statusCode).send({ code: error.code, error: error.message })
+  throw error
+}
 
 // ─── Importação em massa ────────────────────────────────────────────────────
 export const IMPORTAR_MAX_ITENS = 200
@@ -362,11 +374,14 @@ export async function financeiroCustosRoutes(app) {
             SET valor_pago = COALESCE($3::numeric, valor),
                 data_pagamento = COALESCE($4::date, $5::date),
                 atualizado_em = NOW()
-          WHERE id = $1::uuid AND tenant_id = $2::uuid
+          WHERE id = $1::uuid AND tenant_id = $2::uuid AND cancelado_em IS NULL
           RETURNING ${CUSTO_COLS}`,
         [id, tenant_id, parsed.data.valor_pago ?? null, parsed.data.data_pagamento ?? null, hoje],
       )
-      if (!r.rows[0]) return reply.code(404).send({ error: 'Custo não encontrado' })
+      if (!r.rows[0]) {
+        if (await carregar(db, tenant_id, id)) return responderErro(reply, erroCustoCancelado())
+        return reply.code(404).send({ error: 'Custo não encontrado' })
+      }
       auditar(app, request, 'financeiro.custo_pagar', 'custo', id, parsed.data)
       return custoParaItem(r.rows[0], hoje)
     })
@@ -385,6 +400,61 @@ export async function financeiroCustosRoutes(app) {
       if (!r.rows[0]) return reply.code(404).send({ error: 'Custo não encontrado' })
       auditar(app, request, 'financeiro.custo_desfazer', 'custo', id)
       return custoParaItem(r.rows[0], hojeSaoPaulo())
+    })
+  })
+
+  // Cancelar: sai do a pagar e do previsto; linha preservada. rec:<uuid>:<YYYY-MM> materializa só o mês.
+  app.patch('/v1/financeiro/custos/:id/cancelar', WRITE, async (request, reply) => {
+    const parsed = motivoSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id, sub } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        const id = await resolverId(db, tenant_id, request.params.id)
+        if (!id) return reply.code(404).send({ error: 'Custo não encontrado' })
+        const res = await cancelarCusto(db, { tenantId: tenant_id, id, motivo: parsed.data.motivo, actorUserId: sub ?? null })
+        if (!res) return reply.code(404).send({ error: 'Custo não encontrado' })
+        const item = custoParaItem(res.row, hojeSaoPaulo())
+        auditar(app, request, 'financeiro.custo_cancelar', 'custo', id, {
+          id_informado: request.params.id, motivo: item.cancelado_motivo, ja_cancelado: res.ja_cancelado,
+          valor_previsto: item.valor_previsto, valor_pago: item.valor_pago,
+        })
+        return item
+      } catch (error) {
+        return responderErro(reply, error)
+      }
+    })
+  })
+
+  app.patch('/v1/financeiro/custos/:id/reativar', WRITE, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        // Reativar nunca materializa: rec: sem linha gerada nunca foi cancelado → devolve o virtual.
+        const v = parseIdVirtual(request.params.id)
+        let id = UUID.safeParse(request.params.id).success ? request.params.id : null
+        if (v) {
+          const got = await db.query(
+            'SELECT id FROM custos WHERE tenant_id = $1::uuid AND recorrente_id = $2::uuid AND competencia = $3::date',
+            [tenant_id, v.recorrente_id, primeiroDia(v.mes)],
+          )
+          id = got.rows[0]?.id ?? null
+          if (!id) {
+            const itens = await listarCustos(db, { tenantId: tenant_id, inicio: v.mes, fim: v.mes, hoje: hojeSaoPaulo() })
+            const virtual = itens.find((i) => i.id === request.params.id)
+            return virtual ?? reply.code(404).send({ error: 'Custo não encontrado' })
+          }
+        }
+        if (!id) return reply.code(404).send({ error: 'Custo não encontrado' })
+        const res = await reativarCusto(db, { tenantId: tenant_id, id })
+        if (!res) return reply.code(404).send({ error: 'Custo não encontrado' })
+        auditar(app, request, 'financeiro.custo_reativar', 'custo', id, {
+          id_informado: request.params.id, estava_cancelado: res.estava_cancelado,
+        })
+        return custoParaItem(res.row, hojeSaoPaulo())
+      } catch (error) {
+        return responderErro(reply, error)
+      }
     })
   })
 

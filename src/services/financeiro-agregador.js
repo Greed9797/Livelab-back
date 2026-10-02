@@ -16,6 +16,13 @@
 // lançamentos, DRE, fluxo, totais e imposto (dentroDoCorte). Sem corte, nada muda.
 // Saldo de caixa = financeiro_saldo_abertura + realizado desde o corte (calcularCaixa).
 //
+// Perdas/cancelamentos (migration 173): receita PERDIDA (perdido_em) e custo CANCELADO
+// (cancelado_em) encerram o SALDO em aberto (previsto − pago); valor_pago fica preservado.
+// Encerrado sai de pendente/atrasado/a receber/a pagar, do previsto do fluxo, da projeção
+// do imposto e dos candidatos da conciliação. DRE: receita.previsto NÃO muda (linha
+// `perdas.receita` à parte, descontada do resultado previsto); custos previstos excluem o
+// saldo cancelado. Realizado nunca muda. Ver encerrado()/valorEncerrado()/previstoEfetivo().
+//
 // Status é SEMPRE derivado (lib/lancamento-status.js). Datas trafegam como strings
 // 'YYYY-MM-DD' / 'YYYY-MM' — sem Date, para não haver bug de fuso.
 // Funções puras exportadas para teste; as que tocam o banco recebem `db` e
@@ -103,6 +110,37 @@ const BASE_ITEM = {
   grupo: null, componente: null, marca_id: null, marca_nome: null, cliente_id: null,
   cliente_nome: null, apresentadora_id: null, recorrente_id: null, parcela_grupo_id: null,
   parcela_num: null, parcelas_total: null, observacao: null, virtual: false, classe: null,
+  perdido_em: null, perdido_motivo: null, cancelado_em: null, cancelado_motivo: null,
+}
+
+// ─── Perdas e cancelamentos (encerramento do saldo) ───────────────────────
+
+const quitado = (i) => Number(i?.valor_pago) > 0 && Number(i.valor_pago) >= Number(i.valor_previsto)
+
+/**
+ * true se o item é receita PERDIDA ou custo CANCELADO (status derivado 'perdido'|'cancelado'
+ * OU perdido_em/cancelado_em preenchido). Item quitado nunca é encerrado (pago tem precedência).
+ */
+export function encerrado(i) {
+  if (!i || quitado(i)) return false
+  return i.status === 'perdido' || i.status === 'cancelado' || Boolean(i.perdido_em) || Boolean(i.cancelado_em)
+}
+
+/** Saldo encerrado pela perda/cancelamento: previsto − pago (0 se não encerrado). */
+export function valorEncerrado(i) {
+  return encerrado(i) ? Math.max(0, r2(r2(i.valor_previsto) - r2(i.valor_pago))) : 0
+}
+
+/** Previsto que ainda conta: valor_previsto − saldo encerrado (= valor_pago se encerrado). */
+export function previstoEfetivo(i) {
+  return r2(r2(i?.valor_previsto) - valorEncerrado(i))
+}
+
+/** Garante os campos de perda/cancelamento e o status derivado 'perdido'|'cancelado'. */
+export function marcarEncerramento(item) {
+  for (const k of ['perdido_em', 'perdido_motivo', 'cancelado_em', 'cancelado_motivo']) item[k] ??= null
+  if (encerrado(item)) item.status = item.natureza === 'custo' ? 'cancelado' : 'perdido'
+  return item
 }
 
 /** Título de receita (listarTitulosReceita) → item comum (origem marca_fixo|marca_comissao). */
@@ -118,7 +156,7 @@ export function normalizarReceita(t, hoje) {
     virtual: !t.materializado,
   }
   item.status = statusLancamento(item, hoje)
-  return item
+  return marcarEncerramento(item)
 }
 
 /** Custo (listarCustos) → item comum (valor_pago numérico). */
@@ -126,7 +164,7 @@ export function normalizarCusto(c, hoje) {
   const item = { ...BASE_ITEM, ...c, natureza: 'custo', valor_previsto: r2(c.valor_previsto), valor_pago: r2(c.valor_pago) }
   item.classe = classeDoItem(item)
   item.status = statusLancamento(item, hoje)
-  return item
+  return marcarEncerramento(item)
 }
 
 /**
@@ -216,12 +254,12 @@ export function montarItemImposto({ calculo, materializado = null, hoje }) {
   return item
 }
 
-/** Σ valor_previsto das receitas por mês de VENCIMENTO. */
+/** Σ previsto das receitas por mês de VENCIMENTO (perdidas contam só o que foi pago). */
 export function previstoReceitaPorVencimento(receitas) {
   const out = new Map()
   for (const r of receitas) {
     const m = mesDe(r.data_vencimento)
-    if (m) out.set(m, r2((out.get(m) ?? 0) + Number(r.valor_previsto || 0)))
+    if (m) out.set(m, r2((out.get(m) ?? 0) + previstoEfetivo(r)))
   }
   return out
 }
@@ -263,15 +301,18 @@ export function filtrarLancamentos(itens, { natureza, status, grupo, classe, ori
   ))
 }
 
-const emAberto = (i) => Math.max(0, r2(i.valor_previsto) - r2(i.valor_pago))
+/** Em aberto (previsto − pago); item perdido/cancelado não tem saldo em aberto. */
+const emAberto = (i) => (encerrado(i) ? 0 : Math.max(0, r2(i.valor_previsto) - r2(i.valor_pago)))
 
 /**
  * Totais por natureza: previsto (Σ valor_previsto), pago (Σ valor_pago),
  * atrasado (em aberto dos atrasados), pendente (em aberto dos demais não pagos).
+ * receita.perdido / custo.cancelado = saldo encerrado (previsto − pago) dos itens
+ * perdidos/cancelados — fora de pendente/atrasado. saldo_previsto desconta ambos.
  */
 export function totalizarLancamentos(itens) {
   const zero = () => ({ previsto: 0, pago: 0, atrasado: 0, pendente: 0 })
-  const t = { receita: zero(), custo: zero() }
+  const t = { receita: { ...zero(), perdido: 0 }, custo: { ...zero(), cancelado: 0 } }
   const aportes = { previsto: 0, pago: 0 }
   for (const i of itens) {
     const n = t[i.natureza]
@@ -282,7 +323,8 @@ export function totalizarLancamentos(itens) {
     }
     n.previsto += Number(i.valor_previsto) || 0
     n.pago += Number(i.valor_pago) || 0
-    if (i.status === 'atrasado') n.atrasado += emAberto(i)
+    if (encerrado(i)) n[i.natureza === 'receita' ? 'perdido' : 'cancelado'] += valorEncerrado(i)
+    else if (i.status === 'atrasado') n.atrasado += emAberto(i)
     else if (i.status !== 'pago') n.pendente += emAberto(i)
   }
   for (const n of [t.receita, t.custo]) for (const k of Object.keys(n)) n[k] = r2(n[k])
@@ -290,7 +332,7 @@ export function totalizarLancamentos(itens) {
     ...t,
     // aportes (receitas avulsas do grupo 'aporte') já estão em receita; aqui à parte.
     aportes: { previsto: r2(aportes.previsto), pago: r2(aportes.pago) },
-    saldo_previsto: r2(t.receita.previsto - t.custo.previsto),
+    saldo_previsto: r2((t.receita.previsto - t.receita.perdido) - (t.custo.previsto - t.custo.cancelado)),
     saldo_realizado: r2(t.receita.pago - t.custo.pago),
   }
 }
@@ -310,6 +352,11 @@ const addPr = (alvo, i) => {
   alvo.previsto += Number(i.valor_previsto) || 0
   alvo.realizado += Number(i.valor_pago) || 0
 }
+// Custo: previsto sem o saldo cancelado (cancelado sem pagamento sai do previsto).
+const addPrCusto = (alvo, i) => {
+  alvo.previsto += previstoEfetivo(i)
+  alvo.realizado += Number(i.valor_pago) || 0
+}
 const roundPr = (o) => ({ previsto: r2(o.previsto), realizado: r2(o.realizado) })
 
 /**
@@ -320,31 +367,38 @@ const roundPr = (o) => ({ previsto: r2(o.previsto), realizado: r2(o.realizado) }
  * apresentadoras e imposto), apresentadoras, imposto. `impostos` = Map mes → { aliquota, base }.
  * Aportes (receita avulsa grupo 'aporte') NÃO são receita operacional: linha
  * `aportes` informativa, fora do resultado.
+ * Perdas: receita.previsto inalterado (inclui perdidas); `perdas.receita.valor` = saldo
+ * encerrado das receitas perdidas da competência; custos (todas as visões) excluem o saldo
+ * cancelado do previsto. resultado.previsto = receita − perdas − custos_fixos −
+ * custos_variaveis; resultado.realizado inalterado.
  */
 export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQUOTA_IMPOSTO_PADRAO }) {
   const porMes = new Map(meses.map((m) => [m, {
     mes: m, receita: pr(), aportes: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
     imposto: { ...pr(), aliquota: impostos.get(m)?.aliquota ?? Number(aliquota), base: impostos.get(m)?.base ?? 0 },
-    custos_fixos: pr(), custos_variaveis: pr(),
+    custos_fixos: pr(), custos_variaveis: pr(), perdas: { receita: { valor: 0 } },
   }]))
   for (const i of itens) {
     const linha = porMes.get(mesDe(i.competencia))
     if (!linha) continue
     if (ehAporte(i)) addPr(linha.aportes, i)
-    else if (i.natureza === 'receita') addPr(linha.receita, i)
-    else {
-      addPr((i.classe ?? classeDoItem(i)) === 'fixo' ? linha.custos_fixos : linha.custos_variaveis, i)
-      if (i.origem === 'apresentadora') addPr(linha.apresentadoras, i)
-      else if (i.origem === 'imposto') addPr(linha.imposto, i)
+    else if (i.natureza === 'receita') {
+      addPr(linha.receita, i)
+      linha.perdas.receita.valor += valorEncerrado(i)
+    } else {
+      addPrCusto((i.classe ?? classeDoItem(i)) === 'fixo' ? linha.custos_fixos : linha.custos_variaveis, i)
+      if (i.origem === 'apresentadora') addPrCusto(linha.apresentadoras, i)
+      else if (i.origem === 'imposto') addPrCusto(linha.imposto, i)
       else {
-        addPr(linha.custos, i)
+        addPrCusto(linha.custos, i)
         const g = i.grupo || 'outros'
         linha.custos.por_grupo[g] ??= pr()
-        addPr(linha.custos.por_grupo[g], i)
+        addPrCusto(linha.custos.por_grupo[g], i)
       }
     }
   }
-  const resultado = (l, k) => r2(l.receita[k] - l.custos_fixos[k] - l.custos_variaveis[k])
+  const resultado = (l, k) => r2(l.receita[k] - (k === 'previsto' ? l.perdas.receita.valor : 0)
+    - l.custos_fixos[k] - l.custos_variaveis[k])
   const fechar = (l) => {
     const porGrupo = Object.fromEntries(Object.entries(l.custos.por_grupo).map(([g, v]) => [g, roundPr(v)]))
     const out = {
@@ -355,6 +409,7 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
       imposto: { ...roundPr(l.imposto), aliquota: l.imposto.aliquota, base: r2(l.imposto.base) },
       custos_fixos: roundPr(l.custos_fixos),
       custos_variaveis: roundPr(l.custos_variaveis),
+      perdas: { receita: { valor: r2(l.perdas.receita.valor) } },
     }
     out.resultado = { previsto: resultado(out, 'previsto'), realizado: resultado(out, 'realizado') }
     return out
@@ -363,8 +418,10 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
   const tot = {
     receita: pr(), aportes: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
     imposto: { ...pr(), aliquota: Number(aliquota), base: 0 }, custos_fixos: pr(), custos_variaveis: pr(),
+    perdas: { receita: { valor: 0 } },
   }
   for (const l of linhas) {
+    tot.perdas.receita.valor += l.perdas.receita.valor
     for (const k of ['previsto', 'realizado']) {
       tot.receita[k] += l.receita[k]
       tot.aportes[k] += l.aportes[k]
@@ -404,6 +461,9 @@ function pctComissao(t) {
   return mem.gmv > 0 && mem.comissao_bruta != null ? pctDe(mem.comissao_bruta, mem.gmv) : null
 }
 
+// `previsto` = quanto o item conta no previsto da linha do DRE: receita perdida conta
+// cheia (a perda vai para `perdas.receita`); custo cancelado conta só o que foi pago.
+// `valor_encerrado` = saldo perdido/cancelado (0 se não encerrado).
 const itemResumo = (i) => ({
   id: i.id,
   descricao: i.descricao,
@@ -411,11 +471,17 @@ const itemResumo = (i) => ({
   grupo: i.grupo,
   classe: i.classe,
   componente: i.componente ?? null,
-  previsto: r2(i.valor_previsto),
+  previsto: i.natureza === 'custo' ? previstoEfetivo(i) : r2(i.valor_previsto),
   realizado: r2(i.valor_pago),
   status: i.status,
   data_vencimento: i.data_vencimento ?? null,
   virtual: Boolean(i.virtual),
+  valor_previsto: r2(i.valor_previsto),
+  valor_encerrado: valorEncerrado(i),
+  perdido_em: i.perdido_em ?? null,
+  perdido_motivo: i.perdido_motivo ?? null,
+  cancelado_em: i.cancelado_em ?? null,
+  cancelado_motivo: i.cancelado_motivo ?? null,
 })
 
 /** Custos (exceto apresentadoras e imposto) agrupados por `grupo`, maior previsto primeiro. */
@@ -425,7 +491,7 @@ function custosPorGrupo(itens) {
     const g = i.grupo || 'outros'
     if (!grupos.has(g)) grupos.set(g, { grupo: g, total: pr(), itens: [] })
     const alvo = grupos.get(g)
-    addPr(alvo.total, i)
+    addPrCusto(alvo.total, i)
     alvo.itens.push(itemResumo(i))
   }
   return [...grupos.values()]
@@ -472,15 +538,17 @@ function receitaPorCliente(titulos) {
   for (const t of titulos) {
     const cid = t.cliente_id ?? null
     const ck = cid ?? '__sem_cliente__'
-    if (!clientes.has(ck)) clientes.set(ck, { cliente_id: cid, cliente_nome: t.cliente_nome ?? null, marcas: new Map(), total: pr() })
+    if (!clientes.has(ck)) clientes.set(ck, { cliente_id: cid, cliente_nome: t.cliente_nome ?? null, marcas: new Map(), total: pr(), perdido: 0 })
     const c = clientes.get(ck)
     if (!c.marcas.has(t.marca_id)) {
-      c.marcas.set(t.marca_id, { marca_id: t.marca_id, marca_nome: t.marca_nome ?? null, fixo: pr(), comissao: pr(), gmv: null, pct: null })
+      c.marcas.set(t.marca_id, { marca_id: t.marca_id, marca_nome: t.marca_nome ?? null, fixo: pr(), comissao: pr(), gmv: null, pct: null, perdido: 0 })
     }
     const m = c.marcas.get(t.marca_id)
     const comp = t.origem === 'marca_fixo' ? 'fixo' : 'comissao'
     addPr(m[comp], t)
     addPr(c.total, t)
+    m.perdido += valorEncerrado(t)
+    c.perdido += valorEncerrado(t)
     if (comp === 'comissao') {
       const gmv = t.gmv ?? t.memoria?.gmv
       if (gmv != null) m.gmv = r2((m.gmv ?? 0) + Number(gmv))
@@ -492,8 +560,9 @@ function receitaPorCliente(titulos) {
       cliente_id: c.cliente_id,
       cliente_nome: c.cliente_nome,
       total: roundPr(c.total),
+      perdido: r2(c.perdido),
       marcas: [...c.marcas.values()]
-        .map((m) => ({ ...m, fixo: roundPr(m.fixo), comissao: roundPr(m.comissao) }))
+        .map((m) => ({ ...m, fixo: roundPr(m.fixo), comissao: roundPr(m.comissao), perdido: r2(m.perdido) }))
         .sort((a, b) => String(a.marca_nome ?? '').localeCompare(String(b.marca_nome ?? ''), 'pt-BR')),
     }))
     .sort((a, b) => b.total.previsto - a.total.previsto || String(a.cliente_nome ?? '').localeCompare(String(b.cliente_nome ?? ''), 'pt-BR'))
@@ -505,7 +574,9 @@ function receitaPorCliente(titulos) {
  *   receita.total            = atual.receita
  *   custos_fixos.total       = Σ por_grupo + Σ apresentadoras_fixo
  *   custos_variaveis.total   = Σ por_grupo + Σ apresentadoras_variavel + imposto
- *   atual.resultado          = receita − custos_fixos − custos_variaveis (aportes fora)
+ *   atual.resultado.previsto = receita − perdas.receita − custos_fixos − custos_variaveis (aportes fora)
+ *   receita.perdas.valor     = atual.perdas.receita.valor = Σ receita.perdidos[].valor_encerrado
+ * Itens perdidos/cancelados aparecem no detalhe (status + motivo + valor_encerrado).
  */
 export function montarDreDetalhe({ mes, itens, aliquota = ALIQUOTA_IMPOSTO_PADRAO, hoje = null }) {
   const anteriorMes = addMeses(mes, -1)
@@ -536,11 +607,17 @@ export function montarDreDetalhe({ mes, itens, aliquota = ALIQUOTA_IMPOSTO_PADRA
       custos_fixos: deltaPr(atual.custos_fixos, anterior.custos_fixos),
       custos_variaveis: deltaPr(atual.custos_variaveis, anterior.custos_variaveis),
       resultado: deltaPr(atual.resultado, anterior.resultado),
+      perdas: { receita: { valor: r2(atual.perdas.receita.valor - anterior.perdas.receita.valor) } },
     },
     receita: {
       por_cliente: receitaPorCliente(titulos),
       avulsas: avulsas.map(itemResumo),
       total: atual.receita,
+      perdas: atual.perdas.receita,
+      perdidos: [...titulos, ...avulsas].filter(encerrado).map((i) => ({
+        ...itemResumo(i), marca_id: i.marca_id ?? null, marca_nome: i.marca_nome ?? null,
+        cliente_id: i.cliente_id ?? null, cliente_nome: i.cliente_nome ?? null,
+      })),
     },
     custos_fixos: {
       total: atual.custos_fixos,
@@ -593,7 +670,7 @@ const labelFluxo = (k) => (k === 'cartao' ? 'Cartão' : `Dia ${k}`)
 
 /**
  * Fluxo de caixa do mês `mes`:
- *   previsto  = Σ valor_previsto por DATA DE VENCIMENTO no mês;
+ *   previsto  = Σ valor_previsto por DATA DE VENCIMENTO no mês (sem o saldo perdido/cancelado);
  *   realizado = Σ valor_pago por DATA DE PAGAMENTO no mês.
  * Linhas nas faixas 5/10/15/20/25/30 (+ 'cartao'), saldo e acumulado (a partir de
  * saldo_inicial). serie_anual jan–dez do ano de `mes`, mesma regra.
@@ -611,7 +688,8 @@ export function montarFluxoCaixa({ mes, itens, saldoInicial = 0, saldoInicialOri
 
   for (const i of itens) {
     const venc = vencimentoEfetivo(i)
-    const previsto = Number(i.valor_previsto) || 0
+    // perdido/cancelado: o saldo encerrado sai do previsto (o que foi pago continua)
+    const previsto = previstoEfetivo(i)
     const pago = Number(i.valor_pago) || 0
     if (venc) {
       const mv = mesDe(venc)
@@ -764,10 +842,12 @@ async function impostosMaterializados(db, { tenantId, inicio, fim }) {
 
 /**
  * Cálculos de imposto para as competências [inicio, fim] (YYYY-MM).
- * `receitas` (opcional): itens de receita já carregados — usados na projeção
- * quando cobrem os meses de vencimento necessários.
+ * `receitas` (opcional; objeto ou Promise de): { titulos, avulsas, inicio, fim } já carregados
+ * por listarTitulosReceita/listarReceitasAvulsas (mesmo `hoje`) — usados na projeção quando
+ * cobrem as competências necessárias [projIni−1, baseFim]; senão consulta o banco como antes.
+ * O resultado é idêntico ao da consulta (só as competências necessárias são consideradas).
  */
-export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte } = {}) {
+export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, receitas } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   const mesAtual = hoje.slice(0, 7)
   let pct = aliquota
@@ -785,10 +865,20 @@ export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeS
   if (baseFim >= mesAtual) {
     const projIni = baseIni > mesAtual ? baseIni : mesAtual
     // Vencimento = competência + offset (0|1) → competências a partir de projIni-1.
-    const [titulos, avulsas] = await Promise.all([
-      listarTitulosReceita(db, { tenantId, inicio: addMeses(projIni, -1), fim: baseFim, hoje }),
-      listarReceitasAvulsas(db, { tenantId, inicio: addMeses(projIni, -1), fim: baseFim, hoje }),
-    ])
+    const de = addMeses(projIni, -1)
+    const carregadas = receitas ? await receitas : null
+    let titulos
+    let avulsas
+    if (carregadas && carregadas.inicio <= de && carregadas.fim >= baseFim) {
+      const naFaixa = (x) => { const m = String(x.competencia ?? '').slice(0, 7); return m >= de && m <= baseFim }
+      titulos = carregadas.titulos.filter(naFaixa)
+      avulsas = carregadas.avulsas.filter(naFaixa)
+    } else {
+      ;[titulos, avulsas] = await Promise.all([
+        listarTitulosReceita(db, { tenantId, inicio: de, fim: baseFim, hoje }),
+        listarReceitasAvulsas(db, { tenantId, inicio: de, fim: baseFim, hoje }),
+      ])
+    }
     // Aporte não é base de imposto; corte vale também para a projeção.
     previsto = previstoReceitaPorVencimento(aplicarCorte([...titulos, ...avulsas.filter((a) => !ehAporte(a))], corte))
   }
@@ -802,9 +892,9 @@ export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeS
 }
 
 /** Lançamentos de imposto do período (omitidos quando valor 0 e sem baixa). */
-export async function listarImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte } = {}) {
+export async function listarImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, receitas } = {}) {
   const [calculos, mats] = await Promise.all([
-    calcularImpostos(db, { tenantId, inicio, fim, hoje, aliquota, dataCorte }),
+    calcularImpostos(db, { tenantId, inicio, fim, hoje, aliquota, dataCorte, receitas }),
     impostosMaterializados(db, { tenantId, inicio, fim }),
   ])
   return calculos
@@ -871,16 +961,22 @@ export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hoje
     pct ??= cfg.aliquota_imposto_pct
     if (corte === undefined) corte = cfg.data_corte
   }
+  // Receitas/avulsas são carregadas UMA vez e reaproveitadas pela projeção do imposto
+  // (antes calcularImpostos refazia as mesmas duas listagens).
+  const pTitulos = listarTitulosReceita(db, { tenantId, inicio, fim, hoje })
+  const pAvulsas = listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje })
+  const pReceitas = Promise.all([pTitulos, pAvulsas]).then(([titulos, avulsas]) => ({ titulos, avulsas, inicio, fim }))
+  pReceitas.catch(() => {}) // se o imposto não precisar dela, a rejeição já é tratada no Promise.all abaixo
   const [receitas, avulsas, custos, apresentadoras, impostos] = await Promise.all([
-    listarTitulosReceita(db, { tenantId, inicio, fim, hoje }),
-    listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje }),
+    pTitulos,
+    pAvulsas,
     listarCustos(db, { tenantId, inicio, fim, hoje }),
     listarPagamentosApresentadoras(db, { tenantId, inicio: `${inicio}-01`, fim: `${fim}-01`, hoje }),
-    listarImpostos(db, { tenantId, inicio, fim, hoje, aliquota: pct, dataCorte: corte }),
+    listarImpostos(db, { tenantId, inicio, fim, hoje, aliquota: pct, dataCorte: corte, receitas: pReceitas }),
   ])
   return ordenarLancamentos(aplicarCorte([
     ...receitas.map((t) => normalizarReceita(t, hoje)),
-    ...avulsas.map((a) => ({ ...BASE_ITEM, ...a })),
+    ...avulsas.map((a) => marcarEncerramento({ ...BASE_ITEM, ...a })),
     // imposto materializado em `custos` sai daqui e entra como lançamento próprio
     ...custos.filter((c) => c.tipo !== 'imposto').map((c) => normalizarCusto(c, hoje)),
     ...apresentadoras.map((p) => normalizarApresentadora(p, hoje)),
@@ -984,7 +1080,8 @@ export async function saldoCaixaInicioMes(db, { tenantId, mes, config }) {
 
 /**
  * Pura: em aberto (previsto − pago) de receitas e custos com vencimento em
- * [dataCorte, fimMes]. Itens já passaram pela regra de corte.
+ * [dataCorte, fimMes]. Itens já passaram pela regra de corte. Perdidos/cancelados
+ * não têm saldo em aberto (emAberto = 0).
  */
 export function abertosAte(itens, { dataCorte, fimMes }) {
   const out = { a_receber: 0, a_pagar: 0 }
@@ -1058,4 +1155,158 @@ export async function calcularCaixa(db, { tenantId, ate, hoje = hojeSaoPaulo() }
 function diaSeguinte(d) {
   const [y, m, dia] = String(d).split('-').map(Number)
   return new Date(Date.UTC(y, m - 1, dia + 1)).toISOString().slice(0, 10)
+}
+
+// ─── Painel do mês (GET /painel) ──────────────────────────────────────────
+
+const ZERO_REALIZADO = { receitas: 0, avulsas: 0, aportes: 0, custos: 0, apresentadoras: 0, imposto: 0, entradas: 0, saidas: 0 }
+
+/**
+ * Pura: em aberto de UMA natureza com vencimento efetivo em [dataCorte, fimMes] (sem corte:
+ * sem limite inferior). `no_mes` = vence dentro do mês; `atrasado_anterior` = vence antes do
+ * 1º dia do mês; `atrasados` = vence antes de `hoje` (qualquer um dos dois) — para o chip.
+ * Perdido/cancelado não tem saldo (emAberto = 0). Mesma regra de abertosAte.
+ */
+export function resumirAbertos(itens, { natureza, dataCorte = null, mes, hoje }) {
+  const inicioMes = `${mes}-01`
+  const fimMes = ultimoDia(mes)
+  const piso = dataCorte ? String(dataCorte).slice(0, 10) : '0000-00-00'
+  const acc = { no_mes: 0, atrasado_anterior: 0, qtd: 0, atr_qtd: 0, atr_valor: 0 }
+  for (const i of itens) {
+    if (i.natureza !== natureza) continue
+    const venc = vencimentoEfetivo(i)
+    if (!venc || venc < piso || venc > fimMes) continue
+    const aberto = emAberto(i)
+    if (!(aberto > 0)) continue
+    if (venc < inicioMes) acc.atrasado_anterior += aberto
+    else acc.no_mes += aberto
+    acc.qtd += 1
+    if (venc < hoje) { acc.atr_qtd += 1; acc.atr_valor += aberto }
+  }
+  return {
+    no_mes: r2(acc.no_mes),
+    atrasado_anterior: r2(acc.atrasado_anterior),
+    total: r2(acc.no_mes + acc.atrasado_anterior),
+    qtd: acc.qtd,
+    atrasados: { qtd: acc.atr_qtd, valor: r2(acc.atr_valor) },
+  }
+}
+
+/**
+ * Pura: projeção de comissão do mês corrente (competência = mês de `hoje`). Considera itens
+ * `marca_comissao` não encerrados e sem pagamento; projetado = previsto_atual ÷ dias_decorridos
+ * × dias_mes (dia do mês ≥ dias_mes → projetado = previsto_atual). `vence_em` = MAIOR vencimento
+ * dos itens (conservador: só "entra no painel" se todos vencem até o fim do mês do painel).
+ * Nunca entra nos totais reais. Sem itens → null.
+ */
+export function projetarComissao({ itens, hoje, fimMes }) {
+  const competencia = hoje.slice(0, 7)
+  const alvo = itens.filter((i) => i.origem === 'marca_comissao' && mesDe(i.competencia) === competencia
+    && !encerrado(i) && !(Number(i.valor_pago) > 0))
+  if (!alvo.length) return null
+  const previstoAtual = r2(alvo.reduce((s, i) => s + (Number(i.valor_previsto) || 0), 0))
+  const diasMes = diasNoMes(competencia)
+  const diasDecorridos = Math.max(1, Number(hoje.slice(8, 10)) || 1)
+  const projetado = diasDecorridos >= diasMes ? previstoAtual : r2((previstoAtual / diasDecorridos) * diasMes)
+  const vencs = alvo.map(vencimentoEfetivo).filter(Boolean).sort()
+  const venceEm = vencs.length ? vencs[vencs.length - 1] : null
+  return {
+    competencia,
+    previsto_atual: previstoAtual,
+    projetado,
+    ajuste: r2(projetado - previstoAtual),
+    dias_decorridos: diasDecorridos,
+    dias_mes: diasMes,
+    qtd: alvo.length,
+    vence_em: venceEm,
+    entra_no_painel: Boolean(venceEm && venceEm <= fimMes),
+  }
+}
+
+/**
+ * Pura: contrato de GET /painel. `itens` = lançamentos (com corte) que cobrem [corte−2m, mes];
+ * `realizadoAte` = realizado [corte, ate]; `realizadoPos` = (ate, fim_mes]; `realizadoMes` =
+ * [max(1º do mês, corte), fim_mes] por data de pagamento. `competencia` é só referência (DRE).
+ */
+export function montarPainel({
+  mes, hoje, config, itens, realizadoAte = ZERO_REALIZADO, realizadoPos = ZERO_REALIZADO,
+  realizadoMes = ZERO_REALIZADO, aliquota = ALIQUOTA_IMPOSTO_PADRAO,
+}) {
+  const fimMes = ultimoDia(mes)
+  const mesAtual = hoje.slice(0, 7)
+  const configurado = Boolean(config?.data_corte)
+  const corte = configurado ? String(config.data_corte).slice(0, 10) : null
+  const abertura = configurado ? r2(config.saldo_abertura) : 0
+  const ate = hoje < fimMes ? hoje : fimMes
+
+  const saldoAtual = configurado ? r2(abertura + realizadoAte.entradas - realizadoAte.saidas) : 0
+  const aReceber = resumirAbertos(itens, { natureza: 'receita', dataCorte: corte, mes, hoje })
+  const aPagar = resumirAbertos(itens, { natureza: 'custo', dataCorte: corte, mes, hoje })
+  const projetado = configurado
+    ? r2(saldoAtual + realizadoPos.entradas - realizadoPos.saidas + aReceber.total - aPagar.total)
+    : 0
+
+  // Mês passado: a comissão em andamento é de competência posterior ao painel — sem projeção.
+  const projecao = mes < mesAtual ? null : projetarComissao({ itens, hoje, fimMes })
+  const ritmo = configurado && projecao?.entra_no_painel && projecao.ajuste > 0 ? r2(projetado + projecao.ajuste) : null
+
+  const impostos = new Map(itens.filter((i) => i.origem === 'imposto')
+    .map((i) => [mesDe(i.competencia), { aliquota: i.aliquota, base: i.base }]))
+  const [dre] = montarDre({ meses: [mes], itens, impostos, aliquota }).meses
+  const custos = {
+    previsto: r2(dre.custos_fixos.previsto + dre.custos_variaveis.previsto),
+    realizado: r2(dre.custos_fixos.realizado + dre.custos_variaveis.realizado),
+  }
+
+  return {
+    mes,
+    hoje,
+    fim_mes: fimMes,
+    mes_relativo: mes < mesAtual ? 'passado' : mes > mesAtual ? 'futuro' : 'corrente',
+    configurado,
+    data_corte: corte,
+    saldo_abertura: abertura,
+    caixa: { saldo_atual: saldoAtual, ate },
+    recebido_mes: {
+      total: r2(realizadoMes.entradas),
+      receitas: r2(realizadoMes.receitas + realizadoMes.avulsas),
+      aportes: r2(realizadoMes.aportes),
+    },
+    pago_mes: { total: r2(realizadoMes.saidas) },
+    a_receber: aReceber,
+    a_pagar: aPagar,
+    projetado_fim_mes: projetado,
+    projecao_comissao: projecao,
+    projetado_fim_mes_ritmo: ritmo,
+    competencia: {
+      receita: dre.receita,
+      custos,
+      resultado: dre.resultado,
+    },
+  }
+}
+
+/**
+ * GET /painel?mes=: carrega os lançamentos UMA vez na janela [mesDe(corte)−2m, mes] (sem corte:
+ * [mes−2m, mes]) e 3 agregados de realizado em paralelo, e delega a montarPainel.
+ */
+export async function calcularPainelMes(db, { tenantId, mes, hoje = hojeSaoPaulo() } = {}) {
+  if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
+  if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
+  const config = await buscarConfigFinanceiro(db, tenantId)
+  const corte = config.data_corte
+  const fimMes = ultimoDia(mes)
+  const ate = hoje < fimMes ? hoje : fimMes
+  const janelaIni = addMeses(corte ? mesDe(corte) : mes, -2)
+  const inicio = janelaIni > mes ? mes : janelaIni
+  const deMes = corte && corte > `${mes}-01` ? corte : `${mes}-01`
+  const [itens, realizadoAte, realizadoPos, realizadoMes] = await Promise.all([
+    listarLancamentos(db, { tenantId, inicio, fim: mes, hoje, aliquota: config.aliquota_imposto_pct, dataCorte: corte }),
+    corte ? realizadoEntre(db, { tenantId, de: corte, ate }) : ZERO_REALIZADO,
+    corte ? realizadoEntre(db, { tenantId, de: ate >= corte ? diaSeguinte(ate) : corte, ate: fimMes }) : ZERO_REALIZADO,
+    realizadoEntre(db, { tenantId, de: deMes, ate: fimMes }),
+  ])
+  return montarPainel({
+    mes, hoje, config, itens, realizadoAte, realizadoPos, realizadoMes, aliquota: config.aliquota_imposto_pct,
+  })
 }

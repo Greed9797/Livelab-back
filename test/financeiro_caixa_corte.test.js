@@ -273,22 +273,29 @@ describe('rotas', () => {
   })
 
   it('receitas-avulsas: POST 201, validação, 404 e 204', async () => {
-    const row = { id: ID, descricao: 'Aporte', grupo: 'aporte', valor_previsto: '5000', valor_pago: '0', data_vencimento: '2026-10-01', data_pagamento: null, competencia: '2026-10-01', observacao: null }
+    // Vencimento = hoje (SP): fica 'pendente' em qualquer dia do calendário; com data fixa o teste
+    // passava a ser 'atrasado' assim que o dia fixado ficava para trás.
+    const hoje = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })
+    const row = { id: ID, descricao: 'Aporte', grupo: 'aporte', valor_previsto: '5000', valor_pago: '0', data_vencimento: hoje, data_pagamento: null, competencia: `${hoje.slice(0, 7)}-01`, observacao: null }
+    let existe = true
     const db = mockDb({
       INSERT: () => ({ rows: [row] }),
       DELETE: () => ({ rows: [], rowCount: 0 }),
       UPDATE: () => ({ rows: [] }),
-      'SELECT id, descricao': () => ({ rows: [row] }),
+      // `existe` simula o item sumir: o receber, ao não achar linha no UPDATE, consulta o item para
+      // distinguir "não existe" (404) de "está perdida" (409).
+      'SELECT id, descricao': () => ({ rows: existe ? [row] : [] }),
     })
     const app = buildApp(db)
     await app.register(financeiroReceitasAvulsasRoutes)
-    const criado = await app.inject({ method: 'POST', url: '/v1/financeiro/receitas-avulsas', payload: { descricao: 'Aporte', grupo: 'aporte', valor_previsto: 5000, data_vencimento: '2026-10-01' } })
+    const criado = await app.inject({ method: 'POST', url: '/v1/financeiro/receitas-avulsas', payload: { descricao: 'Aporte', grupo: 'aporte', valor_previsto: 5000, data_vencimento: hoje } })
     expect(criado.statusCode).toBe(201)
     expect(criado.json()).toMatchObject({ id: ID, natureza: 'receita', origem: 'avulsa', aporte: true, status: 'pendente' })
     expect((await app.inject({ method: 'POST', url: '/v1/financeiro/receitas-avulsas', payload: { descricao: 'x', grupo: 'venda', valor_previsto: 1, data_vencimento: '2026-10-01' } })).statusCode).toBe(400)
     expect((await app.inject({ method: 'POST', url: '/v1/financeiro/receitas-avulsas', payload: { descricao: 'x', valor_previsto: 0, data_vencimento: '2026-10-01' } })).statusCode).toBe(400)
     const lista = await app.inject({ method: 'GET', url: '/v1/financeiro/receitas-avulsas?mes=2026-10' })
     expect(lista.json()).toMatchObject({ inicio: '2026-10', fim: '2026-10', totais: { previsto: 5000, pago: 0, aportes: { previsto: 5000, pago: 0 } } })
+    existe = false
     expect((await app.inject({ method: 'DELETE', url: `/v1/financeiro/receitas-avulsas/${ID}` })).statusCode).toBe(404)
     expect((await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${ID}/receber`, payload: {} })).statusCode).toBe(404)
     expect((await app.inject({ method: 'PATCH', url: '/v1/financeiro/receitas-avulsas/abc/desfazer' })).statusCode).toBe(400)

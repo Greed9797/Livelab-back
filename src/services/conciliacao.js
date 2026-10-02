@@ -230,8 +230,14 @@ export function sugerirMatches(transacoes, candidatos, { limite = 3, scoreMinimo
 // (listarTitulosReceita / listarCustos): { id, natureza, descricao, data_vencimento,
 // valor_previsto, valor_pago, cliente_id? }. O valor aceito é o saldo pendente
 // (previsto − pago); títulos já quitados ou sem saldo não viram candidatos.
+// Receita PERDIDA / custo CANCELADO (status derivado ou perdido_em/cancelado_em) também não.
 // `gatewayCustomerPorCliente` = Map(cliente_id → cus_* do Asaas).
+export function lancamentoEncerrado(l) {
+  return l?.status === 'perdido' || l?.status === 'cancelado' || Boolean(l?.perdido_em) || Boolean(l?.cancelado_em)
+}
+
 export function candidatoDeLancamento(l, gatewayCustomerPorCliente = new Map()) {
+  if (lancamentoEncerrado(l)) return null
   const natureza = l?.natureza === 'custo' ? 'custo' : 'receita'
   const tipoAlvo = natureza === 'receita' ? (l?.origem === 'avulsa' ? 'avulsa' : 'receita')
     : l?.origem === 'apresentadora' ? 'apresentadora'
@@ -276,6 +282,11 @@ const RE_APRES = /^apresentadora:([0-9a-f-]{36}):(\d{4}-(?:0[1-9]|1[0-2]))(?::(f
 const RE_IMPOSTO = /^imposto:(\d{4}-(?:0[1-9]|1[0-2]))$/
 
 const naoEncontrado = (msg) => new ConciliacaoError(msg, 404, 'ALVO_NAO_ENCONTRADO')
+// Perdido/cancelado não aceita baixa (nem vínculo): o usuário desfaz a perda antes.
+const encerradoErro = (tipo) => new ConciliacaoError(
+  'Desfaça a perda/cancelamento antes',
+  409, tipo === 'custo' ? 'ALVO_CANCELADO' : 'ALVO_PERDIDO',
+)
 const indisponivel = (msg) => new ConciliacaoError(msg, 409, 'MODULO_INDISPONIVEL')
 
 // Serviços como receberTitulo abrem BEGIN/COMMIT próprios; dentro de uma transação já aberta
@@ -314,19 +325,20 @@ async function baixarReceita(db, { tenantId, tx, alvoId, userId }) {
   let existente
   if (ref.tipo === 'materializado') {
     existente = await db.query(
-      'SELECT id, valor_pago FROM receita_titulos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
+      'SELECT id, valor_pago, perdido_em FROM receita_titulos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
       [ref.id, tenantId],
     )
     if (!existente.rows[0]) throw naoEncontrado('Título de receita não encontrado')
   } else {
     existente = await db.query(
-      `SELECT id, valor_pago FROM receita_titulos
+      `SELECT id, valor_pago, perdido_em FROM receita_titulos
         WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND competencia = $3::date AND componente = $4
         FOR UPDATE`,
       [tenantId, ref.marca_id, `${ref.mes}-01`, ref.componente],
     )
   }
   const row = existente.rows[0]
+  if (row?.perdido_em) throw encerradoErro('receita')
   if (row && jaPago(row.valor_pago)) {
     return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
   }
@@ -352,13 +364,14 @@ async function resolverCustoId(db, tenantId, alvoId) {
 
 async function baixarCustoPorId(db, { tenantId, tx, id, tipoEsperado }) {
   const r = await db.query(
-    'SELECT id, valor_pago, tipo FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
+    'SELECT id, valor_pago, tipo, cancelado_em FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
     [id, tenantId],
   )
   const row = r.rows[0]
   if (!row || (tipoEsperado && row.tipo !== tipoEsperado)) {
     throw naoEncontrado(tipoEsperado === 'imposto' ? 'Imposto não encontrado' : 'Custo não encontrado')
   }
+  if (row.cancelado_em) throw encerradoErro('custo')
   if (jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
   await db.query(
     `UPDATE custos SET valor_pago = $3::numeric, data_pagamento = $4::date, atualizado_em = NOW()
@@ -405,11 +418,12 @@ async function baixarApresentadora(db, { tenantId, tx, alvoId, userId }) {
 async function baixarAvulsa(db, { tenantId, tx, alvoId }) {
   if (!UUID_RE.test(alvoId)) throw naoEncontrado('Receita avulsa não encontrada')
   const ex = await db.query(
-    'SELECT id, valor_pago FROM receitas_avulsas WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
+    'SELECT id, valor_pago, perdido_em FROM receitas_avulsas WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
     [alvoId, tenantId],
   )
   const row = ex.rows[0]
   if (!row) throw naoEncontrado('Receita avulsa não encontrada')
+  if (row.perdido_em) throw encerradoErro('receita')
   if (jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
   const avulsas = await import('./receitas-avulsas.js')
   const item = await avulsas.receberReceitaAvulsa(db, { tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data })

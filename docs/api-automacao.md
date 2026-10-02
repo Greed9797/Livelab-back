@@ -241,6 +241,7 @@ rota:
 | `GET` | `/v1/financeiro/caixa` | Saldo de caixa. Query: `ate` (AAAA-MM-DD) |
 | `GET` | `/v1/financeiro/receita` | Receita do mês (competência × vencimento). Query: `mes` |
 | `GET` | `/v1/financeiro/dre/mes` | DRE do mês. Query: `mes` |
+| `GET` | `/v1/financeiro/painel` | Painel do mês: caixa, recebido/pago, a receber/a pagar com atrasados, projetado de fim de mês. Query: `mes` |
 | `GET` | `/v1/financeiro/resumo` | Resumo da unidade. Query: `inicio`/`fim` (AAAA-MM) ou `mes`+`ano` |
 | `GET` | `/v1/financeiro/fluxo-caixa` | Fluxo de caixa do mês. Query: `mes`, `saldo_inicial` |
 | `GET` | `/v1/financeiro/receitas` | Títulos a receber das marcas. Query: `mes` ou `inicio`/`fim`, `status`, `componente`, `marca_id`, `cliente_id` |
@@ -436,6 +437,7 @@ Serve para rodar no terminal de uma VM.
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/Greed9797/Livelab-back/codex/blumenau-operational-fase1/cli/livelab.py
 export LIVELAB_API_KEY=llk_...          # obrigatória; nunca vai para arquivo
+# ou: python3 livelab.py --api-key llk_... <comando>
 # LIVELAB_API_URL=...                  # opcional; padrão é a produção
 python3 livelab.py rotas                # o que a chave alcança
 python3 livelab.py --help
@@ -453,7 +455,13 @@ python3 livelab.py marcas list|get <id>|criar|editar <id>
 python3 livelab.py apresentadoras list|get <id>|editar <id>
 python3 livelab.py comissoes list -q mes=2026-09
 python3 livelab.py imports list|get <id>
+python3 livelab.py lancamentos [--mes AAAA-MM] [--tenant ...] [--status previsto|pendente|atrasado|parcial|pago]
+python3 livelab.py caixa [--ate AAAA-MM-DD]
 ```
+
+`lancamentos` e `caixa` são somente leitura (`GET /v1/financeiro/lancamentos` e
+`GET /v1/financeiro/caixa`). Pedem chave de escopo `financeiro`. A chave vai em
+`LIVELAB_API_KEY` ou `--api-key`; a CLI não grava chave em arquivo.
 
 `api` aceita a rota com ou sem `/v1` na frente. Os comandos nomeados só escolhem
 método e rota e aceitam os mesmos `-q`, `-d` e `-f`; `python3 livelab.py marcas --help`

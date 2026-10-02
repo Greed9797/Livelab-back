@@ -1,14 +1,15 @@
 // Receitas avulsas (não vinculadas a marcas): aporte | servico | reembolso | outros.
 //
 // Modelo (migration 170): grava só valor_previsto, valor_pago, data_vencimento,
-// data_pagamento e competencia (dia 1). Status é SEMPRE derivado
+// data_pagamento e competencia (dia 1) — e, desde a 173, perdido_em/motivo/por
+// (receita dada como perdida). Status é SEMPRE derivado
 // (lib/lancamento-status.js). Datas trafegam como 'YYYY-MM-DD' (sem Date).
 // Toda query leva tenant_id explícito (além do RLS).
 //
 // Grupo 'aporte' é entrada de caixa separada: fica fora da receita operacional do
 // DRE e da base do imposto (ver financeiro-agregador.js).
 
-import { statusLancamento } from '../lib/lancamento-status.js'
+import { normalizarMotivo, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
 
 export const GRUPOS_RECEITA_AVULSA = Object.freeze(['aporte', 'servico', 'reembolso', 'outros'])
 
@@ -33,7 +34,8 @@ export const ehAporte = (item) => item?.origem === 'avulsa' && item?.grupo === '
 export const RECEITA_AVULSA_COLS = `id, descricao, grupo, valor_previsto, valor_pago, observacao,
   to_char(data_vencimento,'YYYY-MM-DD') AS data_vencimento,
   to_char(data_pagamento,'YYYY-MM-DD') AS data_pagamento,
-  to_char(competencia,'YYYY-MM-DD') AS competencia`
+  to_char(competencia,'YYYY-MM-DD') AS competencia,
+  perdido_em, perdido_motivo, perdido_por`
 
 /** Linha de receitas_avulsas → item do contrato comum (natureza 'receita', origem 'avulsa'). */
 export function receitaAvulsaParaItem(row, hoje = hojeSaoPaulo()) {
@@ -51,6 +53,9 @@ export function receitaAvulsaParaItem(row, hoje = hojeSaoPaulo()) {
     observacao: row.observacao ?? null,
     aporte: row.grupo === 'aporte',
     virtual: false,
+    perdido_em: timestampIso(row.perdido_em),
+    perdido_motivo: row.perdido_motivo ?? null,
+    perdido_por: row.perdido_por ?? null,
   }
   item.status = statusLancamento(item, hoje)
   return item
@@ -154,7 +159,11 @@ export async function excluirReceitaAvulsa(db, { tenantId, id }) {
   return (r.rowCount ?? r.rows.length) > 0
 }
 
-/** Baixa: valor_pago default = valor_previsto; data_pagamento default = hoje. */
+const erroPerdida = () => erro(
+  'Receita dada como perdida. Desfaça a perda/cancelamento antes de receber.', 409, 'RECEITA_PERDIDA',
+)
+
+/** Baixa: valor_pago default = valor_previsto; data_pagamento default = hoje. Perdida → 409. */
 export async function receberReceitaAvulsa(db, { tenantId, id, valorPago, dataPagamento, hoje = hojeSaoPaulo() }) {
   if (!RE_UUID.test(String(id ?? ''))) return null
   if (valorPago != null && !(r2(valorPago) > 0)) throw erro('valor_pago deve ser maior que zero')
@@ -164,11 +173,59 @@ export async function receberReceitaAvulsa(db, { tenantId, id, valorPago, dataPa
         SET valor_pago = COALESCE($3::numeric, valor_previsto),
             data_pagamento = COALESCE($4::date, $5::date),
             atualizado_em = NOW()
-      WHERE id = $1::uuid AND tenant_id = $2::uuid
+      WHERE id = $1::uuid AND tenant_id = $2::uuid AND perdido_em IS NULL
       RETURNING ${RECEITA_AVULSA_COLS}`,
     [id, tenantId, valorPago == null ? null : r2(valorPago), dataPagamento ?? null, hoje],
   )
-  return rows[0] ? receitaAvulsaParaItem(rows[0], hoje) : null
+  if (rows[0]) return receitaAvulsaParaItem(rows[0], hoje)
+  // Nada atualizado: não existe no tenant (null → 404) ou está perdida (409).
+  if (await buscarReceitaAvulsa(db, { tenantId, id, hoje })) throw erroPerdida()
+  return null
+}
+
+/**
+ * Dá a receita avulsa como perdida (cliente não vai pagar): encerra o saldo
+ * previsto − pago; valor_pago é preservado. 100% recebida → 409. Idempotente:
+ * já perdida mantém perdido_em/perdido_por; `motivo` informado substitui o anterior.
+ * Retorna { item, ja_perdido } ou null se não existir no tenant.
+ */
+export async function perderReceitaAvulsa(db, { tenantId, id, motivo, actorUserId = null, hoje = hojeSaoPaulo() }) {
+  if (!RE_UUID.test(String(id ?? ''))) return null
+  const motivoNorm = normalizarMotivo(motivo)
+  const atual = await buscarReceitaAvulsa(db, { tenantId, id, hoje })
+  if (!atual) return null
+  if (atual.valor_pago > 0 && atual.valor_pago >= atual.valor_previsto) {
+    throw erro('Receita já recebida integralmente não pode ser dada como perdida', 409, 'RECEITA_PAGA')
+  }
+  const { rows } = await db.query(
+    `UPDATE receitas_avulsas
+        SET perdido_em = COALESCE(perdido_em, NOW()),
+            perdido_por = CASE WHEN perdido_em IS NULL THEN $3::uuid ELSE perdido_por END,
+            perdido_motivo = CASE WHEN perdido_em IS NULL THEN $4::text ELSE COALESCE($4::text, perdido_motivo) END,
+            atualizado_em = NOW()
+      WHERE id = $1::uuid AND tenant_id = $2::uuid
+        AND NOT (valor_pago > 0 AND valor_pago >= valor_previsto)
+      RETURNING ${RECEITA_AVULSA_COLS}`,
+    [id, tenantId, actorUserId ?? null, motivoNorm],
+  )
+  if (!rows[0]) throw erro('Receita já recebida integralmente não pode ser dada como perdida', 409, 'RECEITA_PAGA')
+  return { item: receitaAvulsaParaItem(rows[0], hoje), ja_perdido: Boolean(atual.perdido_em) }
+}
+
+/** Desfaz a perda (perdido_* → NULL). Idempotente. Retorna { item, estava_perdido } ou null. */
+export async function desperderReceitaAvulsa(db, { tenantId, id, hoje = hojeSaoPaulo() }) {
+  if (!RE_UUID.test(String(id ?? ''))) return null
+  const atual = await buscarReceitaAvulsa(db, { tenantId, id, hoje })
+  if (!atual) return null
+  if (!atual.perdido_em) return { item: atual, estava_perdido: false }
+  const { rows } = await db.query(
+    `UPDATE receitas_avulsas
+        SET perdido_em = NULL, perdido_motivo = NULL, perdido_por = NULL, atualizado_em = NOW()
+      WHERE id = $1::uuid AND tenant_id = $2::uuid
+      RETURNING ${RECEITA_AVULSA_COLS}`,
+    [id, tenantId],
+  )
+  return rows[0] ? { item: receitaAvulsaParaItem(rows[0], hoje), estava_perdido: true } : null
 }
 
 export async function desfazerReceitaAvulsa(db, { tenantId, id, hoje = hojeSaoPaulo() }) {

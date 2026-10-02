@@ -21,7 +21,9 @@ const namespaces = new Map()
 function getNamespace(name) {
   let ns = namespaces.get(name)
   if (!ns) {
-    ns = { cache: new Map(), inFlight: new Map() }
+    // gen: contador de geração por tenant (incrementado em invalidateTenant). Um compute
+    // que começou numa geração anterior à atual NÃO grava no cache (ver withCache).
+    ns = { cache: new Map(), inFlight: new Map(), gen: new Map() }
     namespaces.set(name, ns)
   }
   return ns
@@ -32,6 +34,13 @@ function getNamespace(name) {
  * Ordena as chaves para que a ordem dos query params não gere chaves distintas;
  * ignora valores null/undefined (filtro ausente).
  */
+// tenant_id é o prefixo da chave (`${tenantId}::...`), ver buildCacheKey.
+const tenantDaChave = (key) => {
+  const i = String(key).indexOf('::')
+  return i < 0 ? '' : String(key).slice(0, i)
+}
+const geracaoAtual = (ns, tenantId) => ns.gen.get(tenantId) ?? 0
+
 export function buildCacheKey(tenantId, params = {}) {
   const parts = Object.keys(params)
     .sort()
@@ -87,15 +96,23 @@ export async function withCache({ namespace, key, ttlMs, computeFn }) {
     return { value: cached.value, state: 'HIT' }
   }
 
-  let payloadPromise = ns.inFlight.get(key)
-  if (!payloadPromise) {
-    payloadPromise = Promise.resolve().then(computeFn)
-    ns.inFlight.set(key, payloadPromise)
-    payloadPromise.finally(() => ns.inFlight.delete(key)).catch(() => {})
+  const tenantId = tenantDaChave(key)
+  let flight = ns.inFlight.get(key)
+  if (!flight) {
+    // A geração é lida ANTES de iniciar o compute: se um invalidateTenant rodar enquanto
+    // ele executa, o resultado (possivelmente anterior à escrita) não pode ir para o cache.
+    const entry = { gen: geracaoAtual(ns, tenantId), promise: null }
+    entry.promise = Promise.resolve().then(computeFn)
+    flight = entry
+    ns.inFlight.set(key, entry)
+    // Só remove a própria entrada: após uma invalidação outra pode ter ocupado a chave.
+    entry.promise.finally(() => { if (ns.inFlight.get(key) === entry) ns.inFlight.delete(key) }).catch(() => {})
   }
 
-  const value = await payloadPromise
-  ns.cache.set(key, { expiresAt: Date.now() + ttlMs, value })
+  const value = await flight.promise
+  if (flight.gen === geracaoAtual(ns, tenantId)) {
+    ns.cache.set(key, { expiresAt: Date.now() + ttlMs, value })
+  }
   return { value, state: 'MISS' }
 }
 
@@ -117,8 +134,14 @@ export function invalidateTenant(tenantId, namespaceNames) {
   for (const name of targets) {
     const ns = namespaces.get(name)
     if (!ns) continue
+    // Nova geração: computes em andamento deixam de poder gravar; e quem chegar agora
+    // não pode se juntar a um in-flight antigo (receberia o payload pré-invalidação).
+    ns.gen.set(tenantId, geracaoAtual(ns, tenantId) + 1)
     for (const key of ns.cache.keys()) {
       if (key.startsWith(prefix)) ns.cache.delete(key)
+    }
+    for (const key of ns.inFlight.keys()) {
+      if (key.startsWith(prefix)) ns.inFlight.delete(key)
     }
   }
 }

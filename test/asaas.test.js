@@ -378,7 +378,7 @@ describe('rotas /v1/asaas', () => {
         if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
           return { rows: [{ id: TX_ID, tipo: 'entrada', valor: 800, data: '2026-03-21', conciliado_com_id: null }] }
         }
-        if (/SELECT id, valor_pago FROM receitas_avulsas/.test(sql)) return { rows: [{ id: AVULSA_ID, valor_pago: '0.00' }] }
+        if (/SELECT id, valor_pago(, perdido_em)? FROM receitas_avulsas/.test(sql)) return { rows: [{ id: AVULSA_ID, valor_pago: '0.00' }] }
         if (/UPDATE receitas_avulsas/.test(sql)) {
           return { rows: [{ id: AVULSA_ID, descricao: 'Serviço', grupo: 'servico', valor_previsto: '800.00', valor_pago: '800.00',
             data_vencimento: '2026-03-20', data_pagamento: '2026-03-21', competencia: '2026-03-01' }] }

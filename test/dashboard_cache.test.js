@@ -50,3 +50,60 @@ describe('dashboard-cache', () => {
     expect((await call('tenant-b')).state).toBe('HIT')
   })
 })
+
+describe('dashboard-cache: geração por tenant', () => {
+  const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r }); return { promise, resolve } }
+
+  it('compute iniciado antes da invalidação não grava no cache', async () => {
+    _clearDashboardCache()
+    const gate = deferred()
+    let n = 0
+    const key = buildCacheKey('tenant-g', { a: 1 })
+    const call = () => withCache({
+      namespace: 'gen:test', key, ttlMs: 300_000,
+      computeFn: async () => { const v = ++n; if (v === 1) await gate.promise; return { v } },
+    })
+    const lenta = call() // começa na geração 0 e fica pendurada
+    await Promise.resolve()
+    invalidateTenant('tenant-g') // escrita aconteceu enquanto o compute rodava
+    gate.resolve()
+    expect((await lenta).value).toEqual({ v: 1 }) // quem pediu antes recebe o que computou…
+
+    const depois = await call() // …mas nada foi gravado: recomputa
+    expect(depois.state).toBe('MISS')
+    expect(depois.value).toEqual({ v: 2 })
+    expect((await call()).state).toBe('HIT') // o compute pós-invalidação grava normalmente
+  })
+
+  it('quem chega depois da invalidação não se junta ao in-flight antigo', async () => {
+    _clearDashboardCache()
+    const gate = deferred()
+    let n = 0
+    const key = buildCacheKey('tenant-h', {})
+    const call = () => withCache({
+      namespace: 'gen:test', key, ttlMs: 300_000,
+      computeFn: async () => { const v = ++n; if (v === 1) await gate.promise; return { v } },
+    })
+    const velha = call()
+    await Promise.resolve()
+    invalidateTenant('tenant-h')
+    const nova = await call()
+    expect(nova.value).toEqual({ v: 2 })
+    gate.resolve()
+    await velha
+    // a resposta velha terminou depois e não sobrescreve a nova no cache
+    expect((await call()).value).toEqual({ v: 2 })
+  })
+
+  it('invalidar um tenant não impede o outro de gravar', async () => {
+    _clearDashboardCache()
+    const gate = deferred()
+    const key = buildCacheKey('tenant-i', {})
+    const p = withCache({ namespace: 'gen:test', key, ttlMs: 300_000, computeFn: async () => { await gate.promise; return 1 } })
+    await Promise.resolve()
+    invalidateTenant('tenant-j')
+    gate.resolve()
+    await p
+    expect((await withCache({ namespace: 'gen:test', key, ttlMs: 300_000, computeFn: async () => 2 })).state).toBe('HIT')
+  })
+})

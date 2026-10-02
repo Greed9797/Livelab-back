@@ -149,6 +149,7 @@ describe('montarDreDetalhe (GET /dre/mes)', () => {
       custos_fixos: { previsto: 2250, realizado: 0 },
       custos_variaveis: { previsto: 680, realizado: 0 },
       resultado: { previsto: -1430, realizado: -200 },
+      perdas: { receita: { valor: 0 } },
     })
   })
 
@@ -156,7 +157,8 @@ describe('montarDreDetalhe (GET /dre/mes)', () => {
     expect(d.receita.total).toEqual(d.atual.receita)
     expect(d.receita.por_cliente[0]).toEqual({
       cliente_id: 'cl1', cliente_nome: 'Cliente A', total: { previsto: 1500, realizado: 500 },
-      marcas: [{ marca_id: 'm1', marca_nome: 'Marca A', fixo: { previsto: 1000, realizado: 0 }, comissao: { previsto: 500, realizado: 500 }, gmv: 5000, pct: 10 }],
+      perdido: 0,
+      marcas: [{ marca_id: 'm1', marca_nome: 'Marca A', fixo: { previsto: 1000, realizado: 0 }, comissao: { previsto: 500, realizado: 500 }, gmv: 5000, pct: 10, perdido: 0 }],
     })
     expect(d.receita.por_cliente[1].marcas[0]).toMatchObject({ marca_nome: 'Marca B', comissao: { previsto: 0, realizado: 0 }, gmv: null, pct: null })
     expect(d.receita.avulsas.map((a) => a.id)).toEqual(['av1'])

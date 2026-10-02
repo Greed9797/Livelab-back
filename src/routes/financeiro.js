@@ -15,15 +15,20 @@ import { marcaFixoVigenciaSql } from '../lib/receita-marca-sql.js'
 import { listarCustos } from '../services/custos-plano.js'
 import {
   atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularDreMes, calcularFluxoCaixa,
-  consultarLancamentos, dataValida, desfazerImposto, hojeSaoPaulo, pagarImposto, resolverPeriodoMeses,
+  calcularPainelMes, consultarLancamentos, dataValida, desfazerImposto, encerrado, hojeSaoPaulo, pagarImposto, previstoEfetivo,
+  resolverPeriodoMeses,
 } from '../services/financeiro-agregador.js'
 
 const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
+// Cache das rotas do agregador (painel, dre, dre/mes, caixa, lancamentos, fluxo-caixa). Curto de
+// propósito: a invalidação por evento (hook global de app.js + jobs) mantém correto; o TTL é rede.
+const FINANCEIRO_AGREGADOR_CACHE_TTL_MS = Number(process.env.FINANCEIRO_AGREGADOR_CACHE_TTL_MS ?? 30_000)
+const AGREGADOR_NAMESPACE = 'financeiro:agregador'
 
 // Filtros de GET /lancamentos e payloads de baixa/config (onda 2).
 const lancamentosQuerySchema = z.object({
   natureza: z.enum(['receita', 'custo']).optional(),
-  status: z.enum(['previsto', 'pendente', 'atrasado', 'parcial', 'pago']).optional(),
+  status: z.enum(['previsto', 'pendente', 'atrasado', 'parcial', 'pago', 'perdido', 'cancelado']).optional(),
   grupo: z.string().trim().min(1).max(40).optional(),
   classe: z.enum(['fixo', 'variavel']).optional(),
   origem: z.enum([
@@ -132,6 +137,34 @@ function resolveRange({ inicio, fim, mes, ano }) {
 }
 
 export async function financeiroRoutes(app) {
+  // Leitura do agregador: cada query numa conexão própria (tenantParallel faz set_config do tenant
+  // em CADA conexão, então RLS vale) — o agregador dispara ~15 queries em Promise.all que, num
+  // único client, viram round-trips sequenciais. Só leituras passam por aqui. Sem tenantParallel
+  // (testes com db mockado), cai no withTenant de uma conexão.
+  const lerAgregador = (tenantId, fn) => (typeof app.tenantParallel === 'function'
+    ? fn(app.tenantParallel(tenantId))
+    : app.withTenant(tenantId, fn))
+
+  // Cache + headers. `params` entra na chave junto com `hoje` (status derivado muda na virada do
+  // dia) e `rota` (as rotas compartilham o namespace); mesmo payload com ou sem cache.
+  async function agregadorCache(reply, tenantId, params, computeFn) {
+    const startedAt = performance.now()
+    const { value, state } = await withCache({
+      namespace: AGREGADOR_NAMESPACE,
+      key: buildCacheKey(tenantId, params),
+      ttlMs: FINANCEIRO_AGREGADOR_CACHE_TTL_MS,
+      computeFn: () => lerAgregador(tenantId, computeFn),
+    })
+    setCacheControl(reply, state, startedAt)
+    return value
+  }
+
+  // DRE por período (calcularDre) — compartilhado por /resumo e /dre (mesma chave de cache).
+  const dreCacheado = (reply, tenantId, inicio, fim, hoje) => agregadorCache(
+    reply, tenantId, { rota: 'dre', hoje, inicio, fim },
+    (db) => calcularDre(db, { tenantId, inicio, fim, hoje }),
+  )
+
   // GET /v1/financeiro/resumo?mes=&ano=  OR  ?inicio=YYYY-MM&fim=YYYY-MM
   // Query param opcional: ?scope=unidade|franqueadora  (só franqueador_master pode usar franqueadora)
   app.get('/v1/financeiro/resumo', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
@@ -321,10 +354,9 @@ export async function financeiroRoutes(app) {
       }
       }),
     })
-    // DRE (previsto × realizado) fora do cache: baixas precisam aparecer na hora.
-    const dre = await app.withTenant(tenant_id, (db) => calcularDre(db, {
-      tenantId: tenant_id, inicio: startDate.slice(0, 7), fim: endDate.slice(0, 7), hoje: hojeSaoPaulo(),
-    }))
+    // DRE (previsto × realizado): cache curto do agregador (30s) — baixas aparecem na hora porque
+    // qualquer escrita invalida o tenant. Os headers de cache desta rota seguem os do bloco legado.
+    const dre = await dreCacheado({ header: () => {} }, tenant_id, startDate.slice(0, 7), endDate.slice(0, 7), hojeSaoPaulo())
     // Legado: total_custos = custos manuais previstos da competência (sem apresentadoras/imposto);
     // fat_liquido = receita_liquida − total_custos (piso 0). O resultado completo está em dre.totais.
     const total_custos = dre.totais.custos.previsto
@@ -452,7 +484,8 @@ export async function financeiroRoutes(app) {
     const saldoInicial = saldoRaw == null || saldoRaw === '' ? undefined : Number(saldoRaw)
     if (saldoInicial !== undefined && !Number.isFinite(saldoInicial)) return reply.code(400).send({ error: 'saldo_inicial inválido' })
     try {
-      return await app.withTenant(tenant_id, (db) => calcularFluxoCaixa(db, { tenantId: tenant_id, mes, saldoInicial, hoje }))
+      return await agregadorCache(reply, tenant_id, { rota: 'fluxo-caixa', hoje, mes, saldo_inicial: saldoInicial },
+        (db) => calcularFluxoCaixa(db, { tenantId: tenant_id, mes, saldoInicial, hoje }))
     } catch (error) {
       return responderErro(reply, error)
     }
@@ -553,9 +586,10 @@ export async function financeiroRoutes(app) {
       // SAÍDA: custos manuais da competência (pontuais, parcelas e recorrentes — inclusive os
       // virtuais ainda não materializados) via listarCustos, fonte única do módulo de custos.
       // Imposto materializado (tipo 'imposto') não é custo manual e fica fora deste contrato.
+      // Custo CANCELADO sai do previsto (conta só o que já foi pago dele; sem pagamento, fora).
       const custosManuais = (await listarCustos(db, {
         tenantId: tenant_id, inicio: startDate.slice(0, 7), fim: endDate.slice(0, 7), hoje: hojeSaoPaulo(),
-      })).filter((c) => c.tipo !== 'imposto')
+      })).filter((c) => c.tipo !== 'imposto' && !(encerrado(c) && previstoEfetivo(c) === 0))
 
       // SAÍDA: adicionais de apresentadora lançados manualmente no fechamento. Não são
       // custos manuais e não entram em comissão: cada linha é descontada exatamente uma vez.
@@ -704,7 +738,7 @@ export async function financeiroRoutes(app) {
         ...custosManuais.map((c) => ({
           categoria: 'custo_manual',
           descricao: c.descricao,
-          valor: round2(c.valor_previsto),
+          valor: round2(previstoEfetivo(c)),
           memoria: {
             custo_id: c.id, tipo: c.tipo, grupo: c.grupo ?? null, origem: c.origem,
             competencia: c.competencia, data_vencimento: c.data_vencimento, status: c.status,
@@ -748,9 +782,10 @@ export async function financeiroRoutes(app) {
     try {
       const { inicio, fim } = resolverPeriodoMeses(request.query ?? {}, hoje)
       const { natureza, status, grupo, classe, origem, q } = parsed.data
-      return await app.withTenant(tenant_id, (db) => consultarLancamentos(db, {
-        tenantId: tenant_id, inicio, fim, hoje, filtros: { natureza, status, grupo, classe, origem, q },
-      }))
+      return await agregadorCache(reply, tenant_id, { rota: 'lancamentos', hoje, inicio, fim, natureza, status, grupo, classe, origem, q },
+        (db) => consultarLancamentos(db, {
+          tenantId: tenant_id, inicio, fim, hoje, filtros: { natureza, status, grupo, classe, origem, q },
+        }))
     } catch (error) {
       return responderErro(reply, error)
     }
@@ -765,7 +800,37 @@ export async function financeiroRoutes(app) {
     const mes = request.query?.mes ?? hoje.slice(0, 7)
     if (!MES_RE.test(String(mes))) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
     try {
-      return await app.withTenant(tenant_id, (db) => calcularDreMes(db, { tenantId: tenant_id, mes, hoje }))
+      return await agregadorCache(reply, tenant_id, { rota: 'dre-mes', hoje, mes },
+        (db) => calcularDreMes(db, { tenantId: tenant_id, mes, hoje }))
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // GET /v1/financeiro/dre?inicio=YYYY-MM&fim=YYYY-MM (default: mês corrente SP)
+  // Só o DRE por período (calcularDre) — sem o bloco legado (lives/vídeos/fixo) do /resumo.
+  app.get('/v1/financeiro/dre', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const hoje = hojeSaoPaulo()
+    try {
+      const { inicio, fim } = resolverPeriodoMeses(request.query ?? {}, hoje)
+      return await dreCacheado(reply, tenant_id, inicio, fim, hoje)
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // GET /v1/financeiro/painel?mes=YYYY-MM (default: mês corrente SP)
+  // Painel do mês: caixa, recebido/pago no mês, a receber/a pagar (com atrasados), projetado de fim
+  // de mês, projeção de comissão (separada dos totais reais) e DRE por competência como referência.
+  app.get('/v1/financeiro/painel', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const hoje = hojeSaoPaulo()
+    const mes = request.query?.mes ?? hoje.slice(0, 7)
+    if (!MES_RE.test(String(mes))) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    try {
+      return await agregadorCache(reply, tenant_id, { rota: 'painel', hoje, mes },
+        (db) => calcularPainelMes(db, { tenantId: tenant_id, mes, hoje }))
     } catch (error) {
       return responderErro(reply, error)
     }
@@ -822,7 +887,9 @@ export async function financeiroRoutes(app) {
     const { tenant_id } = request.user
     const hoje = hojeSaoPaulo()
     try {
-      return await app.withTenant(tenant_id, (db) => calcularCaixa(db, { tenantId: tenant_id, ate: parsed.data.ate ?? hoje, hoje }))
+      const ate = parsed.data.ate ?? hoje
+      return await agregadorCache(reply, tenant_id, { rota: 'caixa', hoje, ate },
+        (db) => calcularCaixa(db, { tenantId: tenant_id, ate, hoje }))
     } catch (error) {
       return responderErro(reply, error)
     }

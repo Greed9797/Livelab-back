@@ -842,10 +842,12 @@ async function impostosMaterializados(db, { tenantId, inicio, fim }) {
 
 /**
  * Cálculos de imposto para as competências [inicio, fim] (YYYY-MM).
- * `receitas` (opcional): itens de receita já carregados — usados na projeção
- * quando cobrem os meses de vencimento necessários.
+ * `receitas` (opcional; objeto ou Promise de): { titulos, avulsas, inicio, fim } já carregados
+ * por listarTitulosReceita/listarReceitasAvulsas (mesmo `hoje`) — usados na projeção quando
+ * cobrem as competências necessárias [projIni−1, baseFim]; senão consulta o banco como antes.
+ * O resultado é idêntico ao da consulta (só as competências necessárias são consideradas).
  */
-export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte } = {}) {
+export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, receitas } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   const mesAtual = hoje.slice(0, 7)
   let pct = aliquota
@@ -863,10 +865,20 @@ export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeS
   if (baseFim >= mesAtual) {
     const projIni = baseIni > mesAtual ? baseIni : mesAtual
     // Vencimento = competência + offset (0|1) → competências a partir de projIni-1.
-    const [titulos, avulsas] = await Promise.all([
-      listarTitulosReceita(db, { tenantId, inicio: addMeses(projIni, -1), fim: baseFim, hoje }),
-      listarReceitasAvulsas(db, { tenantId, inicio: addMeses(projIni, -1), fim: baseFim, hoje }),
-    ])
+    const de = addMeses(projIni, -1)
+    const carregadas = receitas ? await receitas : null
+    let titulos
+    let avulsas
+    if (carregadas && carregadas.inicio <= de && carregadas.fim >= baseFim) {
+      const naFaixa = (x) => { const m = String(x.competencia ?? '').slice(0, 7); return m >= de && m <= baseFim }
+      titulos = carregadas.titulos.filter(naFaixa)
+      avulsas = carregadas.avulsas.filter(naFaixa)
+    } else {
+      ;[titulos, avulsas] = await Promise.all([
+        listarTitulosReceita(db, { tenantId, inicio: de, fim: baseFim, hoje }),
+        listarReceitasAvulsas(db, { tenantId, inicio: de, fim: baseFim, hoje }),
+      ])
+    }
     // Aporte não é base de imposto; corte vale também para a projeção.
     previsto = previstoReceitaPorVencimento(aplicarCorte([...titulos, ...avulsas.filter((a) => !ehAporte(a))], corte))
   }
@@ -880,9 +892,9 @@ export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeS
 }
 
 /** Lançamentos de imposto do período (omitidos quando valor 0 e sem baixa). */
-export async function listarImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte } = {}) {
+export async function listarImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, receitas } = {}) {
   const [calculos, mats] = await Promise.all([
-    calcularImpostos(db, { tenantId, inicio, fim, hoje, aliquota, dataCorte }),
+    calcularImpostos(db, { tenantId, inicio, fim, hoje, aliquota, dataCorte, receitas }),
     impostosMaterializados(db, { tenantId, inicio, fim }),
   ])
   return calculos
@@ -949,12 +961,18 @@ export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hoje
     pct ??= cfg.aliquota_imposto_pct
     if (corte === undefined) corte = cfg.data_corte
   }
+  // Receitas/avulsas são carregadas UMA vez e reaproveitadas pela projeção do imposto
+  // (antes calcularImpostos refazia as mesmas duas listagens).
+  const pTitulos = listarTitulosReceita(db, { tenantId, inicio, fim, hoje })
+  const pAvulsas = listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje })
+  const pReceitas = Promise.all([pTitulos, pAvulsas]).then(([titulos, avulsas]) => ({ titulos, avulsas, inicio, fim }))
+  pReceitas.catch(() => {}) // se o imposto não precisar dela, a rejeição já é tratada no Promise.all abaixo
   const [receitas, avulsas, custos, apresentadoras, impostos] = await Promise.all([
-    listarTitulosReceita(db, { tenantId, inicio, fim, hoje }),
-    listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje }),
+    pTitulos,
+    pAvulsas,
     listarCustos(db, { tenantId, inicio, fim, hoje }),
     listarPagamentosApresentadoras(db, { tenantId, inicio: `${inicio}-01`, fim: `${fim}-01`, hoje }),
-    listarImpostos(db, { tenantId, inicio, fim, hoje, aliquota: pct, dataCorte: corte }),
+    listarImpostos(db, { tenantId, inicio, fim, hoje, aliquota: pct, dataCorte: corte, receitas: pReceitas }),
   ])
   return ordenarLancamentos(aplicarCorte([
     ...receitas.map((t) => normalizarReceita(t, hoje)),
@@ -1137,4 +1155,158 @@ export async function calcularCaixa(db, { tenantId, ate, hoje = hojeSaoPaulo() }
 function diaSeguinte(d) {
   const [y, m, dia] = String(d).split('-').map(Number)
   return new Date(Date.UTC(y, m - 1, dia + 1)).toISOString().slice(0, 10)
+}
+
+// ─── Painel do mês (GET /painel) ──────────────────────────────────────────
+
+const ZERO_REALIZADO = { receitas: 0, avulsas: 0, aportes: 0, custos: 0, apresentadoras: 0, imposto: 0, entradas: 0, saidas: 0 }
+
+/**
+ * Pura: em aberto de UMA natureza com vencimento efetivo em [dataCorte, fimMes] (sem corte:
+ * sem limite inferior). `no_mes` = vence dentro do mês; `atrasado_anterior` = vence antes do
+ * 1º dia do mês; `atrasados` = vence antes de `hoje` (qualquer um dos dois) — para o chip.
+ * Perdido/cancelado não tem saldo (emAberto = 0). Mesma regra de abertosAte.
+ */
+export function resumirAbertos(itens, { natureza, dataCorte = null, mes, hoje }) {
+  const inicioMes = `${mes}-01`
+  const fimMes = ultimoDia(mes)
+  const piso = dataCorte ? String(dataCorte).slice(0, 10) : '0000-00-00'
+  const acc = { no_mes: 0, atrasado_anterior: 0, qtd: 0, atr_qtd: 0, atr_valor: 0 }
+  for (const i of itens) {
+    if (i.natureza !== natureza) continue
+    const venc = vencimentoEfetivo(i)
+    if (!venc || venc < piso || venc > fimMes) continue
+    const aberto = emAberto(i)
+    if (!(aberto > 0)) continue
+    if (venc < inicioMes) acc.atrasado_anterior += aberto
+    else acc.no_mes += aberto
+    acc.qtd += 1
+    if (venc < hoje) { acc.atr_qtd += 1; acc.atr_valor += aberto }
+  }
+  return {
+    no_mes: r2(acc.no_mes),
+    atrasado_anterior: r2(acc.atrasado_anterior),
+    total: r2(acc.no_mes + acc.atrasado_anterior),
+    qtd: acc.qtd,
+    atrasados: { qtd: acc.atr_qtd, valor: r2(acc.atr_valor) },
+  }
+}
+
+/**
+ * Pura: projeção de comissão do mês corrente (competência = mês de `hoje`). Considera itens
+ * `marca_comissao` não encerrados e sem pagamento; projetado = previsto_atual ÷ dias_decorridos
+ * × dias_mes (dia do mês ≥ dias_mes → projetado = previsto_atual). `vence_em` = MAIOR vencimento
+ * dos itens (conservador: só "entra no painel" se todos vencem até o fim do mês do painel).
+ * Nunca entra nos totais reais. Sem itens → null.
+ */
+export function projetarComissao({ itens, hoje, fimMes }) {
+  const competencia = hoje.slice(0, 7)
+  const alvo = itens.filter((i) => i.origem === 'marca_comissao' && mesDe(i.competencia) === competencia
+    && !encerrado(i) && !(Number(i.valor_pago) > 0))
+  if (!alvo.length) return null
+  const previstoAtual = r2(alvo.reduce((s, i) => s + (Number(i.valor_previsto) || 0), 0))
+  const diasMes = diasNoMes(competencia)
+  const diasDecorridos = Math.max(1, Number(hoje.slice(8, 10)) || 1)
+  const projetado = diasDecorridos >= diasMes ? previstoAtual : r2((previstoAtual / diasDecorridos) * diasMes)
+  const vencs = alvo.map(vencimentoEfetivo).filter(Boolean).sort()
+  const venceEm = vencs.length ? vencs[vencs.length - 1] : null
+  return {
+    competencia,
+    previsto_atual: previstoAtual,
+    projetado,
+    ajuste: r2(projetado - previstoAtual),
+    dias_decorridos: diasDecorridos,
+    dias_mes: diasMes,
+    qtd: alvo.length,
+    vence_em: venceEm,
+    entra_no_painel: Boolean(venceEm && venceEm <= fimMes),
+  }
+}
+
+/**
+ * Pura: contrato de GET /painel. `itens` = lançamentos (com corte) que cobrem [corte−2m, mes];
+ * `realizadoAte` = realizado [corte, ate]; `realizadoPos` = (ate, fim_mes]; `realizadoMes` =
+ * [max(1º do mês, corte), fim_mes] por data de pagamento. `competencia` é só referência (DRE).
+ */
+export function montarPainel({
+  mes, hoje, config, itens, realizadoAte = ZERO_REALIZADO, realizadoPos = ZERO_REALIZADO,
+  realizadoMes = ZERO_REALIZADO, aliquota = ALIQUOTA_IMPOSTO_PADRAO,
+}) {
+  const fimMes = ultimoDia(mes)
+  const mesAtual = hoje.slice(0, 7)
+  const configurado = Boolean(config?.data_corte)
+  const corte = configurado ? String(config.data_corte).slice(0, 10) : null
+  const abertura = configurado ? r2(config.saldo_abertura) : 0
+  const ate = hoje < fimMes ? hoje : fimMes
+
+  const saldoAtual = configurado ? r2(abertura + realizadoAte.entradas - realizadoAte.saidas) : 0
+  const aReceber = resumirAbertos(itens, { natureza: 'receita', dataCorte: corte, mes, hoje })
+  const aPagar = resumirAbertos(itens, { natureza: 'custo', dataCorte: corte, mes, hoje })
+  const projetado = configurado
+    ? r2(saldoAtual + realizadoPos.entradas - realizadoPos.saidas + aReceber.total - aPagar.total)
+    : 0
+
+  // Mês passado: a comissão em andamento é de competência posterior ao painel — sem projeção.
+  const projecao = mes < mesAtual ? null : projetarComissao({ itens, hoje, fimMes })
+  const ritmo = configurado && projecao?.entra_no_painel && projecao.ajuste > 0 ? r2(projetado + projecao.ajuste) : null
+
+  const impostos = new Map(itens.filter((i) => i.origem === 'imposto')
+    .map((i) => [mesDe(i.competencia), { aliquota: i.aliquota, base: i.base }]))
+  const [dre] = montarDre({ meses: [mes], itens, impostos, aliquota }).meses
+  const custos = {
+    previsto: r2(dre.custos_fixos.previsto + dre.custos_variaveis.previsto),
+    realizado: r2(dre.custos_fixos.realizado + dre.custos_variaveis.realizado),
+  }
+
+  return {
+    mes,
+    hoje,
+    fim_mes: fimMes,
+    mes_relativo: mes < mesAtual ? 'passado' : mes > mesAtual ? 'futuro' : 'corrente',
+    configurado,
+    data_corte: corte,
+    saldo_abertura: abertura,
+    caixa: { saldo_atual: saldoAtual, ate },
+    recebido_mes: {
+      total: r2(realizadoMes.entradas),
+      receitas: r2(realizadoMes.receitas + realizadoMes.avulsas),
+      aportes: r2(realizadoMes.aportes),
+    },
+    pago_mes: { total: r2(realizadoMes.saidas) },
+    a_receber: aReceber,
+    a_pagar: aPagar,
+    projetado_fim_mes: projetado,
+    projecao_comissao: projecao,
+    projetado_fim_mes_ritmo: ritmo,
+    competencia: {
+      receita: dre.receita,
+      custos,
+      resultado: dre.resultado,
+    },
+  }
+}
+
+/**
+ * GET /painel?mes=: carrega os lançamentos UMA vez na janela [mesDe(corte)−2m, mes] (sem corte:
+ * [mes−2m, mes]) e 3 agregados de realizado em paralelo, e delega a montarPainel.
+ */
+export async function calcularPainelMes(db, { tenantId, mes, hoje = hojeSaoPaulo() } = {}) {
+  if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
+  if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
+  const config = await buscarConfigFinanceiro(db, tenantId)
+  const corte = config.data_corte
+  const fimMes = ultimoDia(mes)
+  const ate = hoje < fimMes ? hoje : fimMes
+  const janelaIni = addMeses(corte ? mesDe(corte) : mes, -2)
+  const inicio = janelaIni > mes ? mes : janelaIni
+  const deMes = corte && corte > `${mes}-01` ? corte : `${mes}-01`
+  const [itens, realizadoAte, realizadoPos, realizadoMes] = await Promise.all([
+    listarLancamentos(db, { tenantId, inicio, fim: mes, hoje, aliquota: config.aliquota_imposto_pct, dataCorte: corte }),
+    corte ? realizadoEntre(db, { tenantId, de: corte, ate }) : ZERO_REALIZADO,
+    corte ? realizadoEntre(db, { tenantId, de: ate >= corte ? diaSeguinte(ate) : corte, ate: fimMes }) : ZERO_REALIZADO,
+    realizadoEntre(db, { tenantId, de: deMes, ate: fimMes }),
+  ])
+  return montarPainel({
+    mes, hoje, config, itens, realizadoAte, realizadoPos, realizadoMes, aliquota: config.aliquota_imposto_pct,
+  })
 }

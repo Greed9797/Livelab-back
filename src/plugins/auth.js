@@ -92,6 +92,7 @@ export const ROTAS_API_KEY_FINANCEIRO = [
   ['GET', '/v1/financeiro/caixa'],
   ['GET', '/v1/financeiro/receita'],
   ['GET', '/v1/financeiro/dre/mes'],
+  ['GET', '/v1/financeiro/painel'],
   ['GET', '/v1/financeiro/resumo'],
   ['GET', '/v1/financeiro/fluxo-caixa'],
   ['GET', '/v1/financeiro/receitas'],

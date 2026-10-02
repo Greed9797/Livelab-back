@@ -48,6 +48,7 @@ const LIBERADAS = [
   ['GET', '/v1/financeiro/caixa?ate=2026-09-30'],
   ['GET', '/v1/financeiro/receita?mes=2026-09'],
   ['GET', '/v1/financeiro/dre/mes?mes=2026-09'],
+  ['GET', '/v1/financeiro/painel?mes=2026-09'],
   ['GET', '/v1/financeiro/resumo?inicio=2026-09&fim=2026-09'],
   ['GET', '/v1/financeiro/fluxo-caixa?mes=2026-09'],
   ['GET', '/v1/financeiro/receitas?mes=2026-09'],

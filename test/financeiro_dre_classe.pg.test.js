@@ -9,6 +9,7 @@ import '../src/lib/pg-date-string.js'
 import { atualizarConfigFinanceiro, calcularDre, calcularDreMes, listarLancamentos } from '../src/services/financeiro-agregador.js'
 import { listarCustos, materializarVirtual } from '../src/services/custos-plano.js'
 import { receberTitulo } from '../src/services/receitas-comercial.js'
+import { invalidateTenant } from '../src/lib/dashboard-cache.js'
 import { financeiroRoutes } from '../src/routes/financeiro.js'
 import { financeiroCustosRoutes } from '../src/routes/financeiro_custos.js'
 
@@ -108,6 +109,10 @@ describe.skipIf(!url)('financeiro: classe do custo e DRE do mês (Postgres real)
     app.decorate('requirePapel', () => async (request) => { request.user = { tenant_id: tenantDaReq, papel: 'franqueado' } })
     app.decorate('withTenant', async (_tenant, fn) => fn(pool))
     app.decorate('audit', { log: async () => {} })
+    // mesmo hook global de src/app.js: escrita bem-sucedida invalida o cache do tenant
+    app.addHook('onResponse', async (request, reply) => {
+      if (request.method !== 'GET' && reply.statusCode < 400) invalidateTenant(request.user?.tenant_id)
+    })
     await app.register(financeiroRoutes)
     await app.register(financeiroCustosRoutes)
 

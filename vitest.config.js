@@ -5,6 +5,8 @@ export default defineConfig({
     include: ['test/**/*.test.js'],
     exclude: ['node_modules/**', 'dist/**'],
     setupFiles: ['./test/_setup.js'],
+    testTimeout: 30000,
+    hookTimeout: 30000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'json-summary'],

@@ -11,6 +11,7 @@ import { saoPauloDateInput } from '../lib/timezone.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { withAdvisoryLock } from './advisory_lock.js'
 import { scanPorTenant } from './tenant_scan.js'
+import { invalidateTenant } from '../lib/dashboard-cache.js'
 
 const TICK_CRON = '*/10 * * * *' // a cada 10 minutos
 const LOCK_KEY = 7421900119911236n
@@ -81,6 +82,9 @@ export async function runRecalcularComissoesTick(app) {
         await client.query('COMMIT')
         const updated = res?.updated ?? 0
         if (updated > 0) {
+          // Job não passa pelo hook onResponse: sem isto o financeiro (receita de comissão) e
+          // os dashboards ficariam até o TTL com o valor anterior ao recálculo.
+          invalidateTenant(tenant_id)
           results.vendas += updated
           results.apresentadoras += 1
           seenTenants.add(tenant_id)
@@ -135,6 +139,7 @@ export async function runRecalcularComissoesTick(app) {
           })
           await lc.query('COMMIT')
           if (Array.isArray(r) && r.length > 0) {
+            invalidateTenant(live.tenant_id)
             results.livesOrfasProcessadas = (results.livesOrfasProcessadas ?? 0) + 1
             results.vendas += r.length
           }
@@ -191,6 +196,7 @@ export async function runRecalcularComissoesTick(app) {
             [live.id, live.tenant_id],
           )
           await lc.query('COMMIT')
+          invalidateTenant(live.tenant_id) // recálculo + limpeza da marca valem: caches do tenant ficaram velhos
           results.comissoesRemarcadas = (results.comissoesRemarcadas ?? 0) + 1
           if (Array.isArray(r) && r.length > 0) results.vendas += r.length
         } catch (err) {

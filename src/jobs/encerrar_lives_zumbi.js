@@ -9,6 +9,7 @@
 import * as connectorManager from '../services/tiktok-connector-manager.js'
 import { withAdvisoryLock } from './advisory_lock.js'
 import { scanPorTenant } from './tenant_scan.js'
+import { invalidateTenant } from '../lib/dashboard-cache.js'
 
 const TICK_CRON = '5 */1 * * *' // 5min após cada hora cheia
 const LOCK_KEY = 7421900119911237n
@@ -90,6 +91,8 @@ export async function runEncerrarLivesZumbiTick(app) {
           app.log?.warn?.({ err: auditErr }, '[encerrar zumbi] audit log falhou (não-bloqueante)')
         }
         await client.query('COMMIT')
+        // Live encerrada entra em GMV/comissão/financeiro; job não passa pelo hook onResponse.
+        invalidateTenant(live.tenant_id)
 
         // Para connector in-memory pra parar reconexões
         try {

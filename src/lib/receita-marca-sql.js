@@ -34,6 +34,16 @@ export function condicaoVigenteLateralSql({ alias = 'mc', marcaExpr = 'm.id', me
 }
 
 /**
+ * Marca que gera receita comercial (título a receber): só marca de CLIENTE e nunca a
+ * marca-sistema do tenant. Afiliada / própria / parceira e "Livelab Sistema" têm GMV
+ * operacional, mas não têm cliente a cobrar — o GMV delas (× %) não é receita da casa.
+ * Mesmo filtro do fixo por vigência e da visão "em apuração".
+ */
+export function marcaGeraReceitaSql(marca = 'm') {
+  return `${marca}.tipo = 'cliente' AND COALESCE(${marca}.sistema, false) = false`
+}
+
+/**
  * Data de vencimento em SQL: dia `diaExpr` do mês (competência + offset);
  * dia maior que o último dia do mês vira o último dia. Mesmo cálculo de
  * `calcularVencimento` (receitas-comercial.js).
@@ -126,18 +136,20 @@ export function marcaFixoVigenciaSql() {
         interval '1 month'
       ) gs(mes)
       ${condicaoVigenteLateralSql({ alias: 'mc', marcaExpr: 'm.id', mesExpr: 'gs.mes' })}
-     WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente' AND COALESCE(m.sistema, false) = false`
+     WHERE m.tenant_id = $3::uuid AND ${marcaGeraReceitaSql('m')}`
 }
 
 /**
  * Comissão de franquia VARIÁVEL por marca e mês (gmv × pct da condição vigente na
  * data do fato). Mesma regra do CTE comissao_marca_raw/comissao_marca do /resumo:
  * lives encerradas (GMV inline) + vídeos (vendas_atribuidas não reprovadas).
+ * Só marcas que geram receita (`marcaGeraReceitaSql`): sem o filtro, GMV de marca
+ * afiliada/própria/parceira/sistema com % > 0 virava título de comissão.
  * Saída: marca_id, mes (date), comissao, gmv.
  */
 export function comissaoMarcaMensalSql() {
   return `
-    SELECT marca_id, mes::date AS mes, SUM(comissao) AS comissao, SUM(gmv) AS gmv
+    SELECT raw.marca_id, raw.mes::date AS mes, SUM(raw.comissao) AS comissao, SUM(raw.gmv) AS gmv
       FROM (
         SELECT mc.marca_id,
                date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes,
@@ -172,7 +184,9 @@ export function comissaoMarcaMensalSql() {
            AND va.data >= $1::date AND va.data <= $2::date
          GROUP BY va.marca_id, date_trunc('month', va.data::timestamp)
       ) raw
-     GROUP BY marca_id, mes`
+      JOIN marcas mr ON mr.id = raw.marca_id AND mr.tenant_id = $3::uuid
+     WHERE ${marcaGeraReceitaSql('mr')}
+     GROUP BY raw.marca_id, raw.mes`
 }
 
 /**
@@ -237,7 +251,7 @@ export function marcasCondicaoVigenteMesSql() {
       FROM marcas m
       LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = m.tenant_id
       ${condicaoVigenteLateralSql({ alias: 'mc', marcaExpr: 'm.id', mesExpr: '$1::date' })}
-     WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente' AND COALESCE(m.sistema, false) = false
+     WHERE m.tenant_id = $3::uuid AND ${marcaGeraReceitaSql('m')}
        AND mc.id IS NOT NULL
        AND ${inicioContratoSql('m')} <= $2::date
        AND (m.data_fim IS NULL OR m.data_fim >= $1::date)

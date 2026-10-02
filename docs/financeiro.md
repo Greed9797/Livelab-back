@@ -19,7 +19,7 @@ O financeiro **não calcula** a regra comercial. Consome títulos virtuais + mat
 
 ### Marcas e condições
 
-Fonte única: `marca_condicoes_comerciais` vigente no mês da competência (não cancelada; maior `inicio_vigencia` ≤ 1º dia do mês), com fallback nos campos da marca (`valor_fixo_minimo`, `tipo_cobranca`, `comissao_franquia_pct`). Só marcas `tipo = 'cliente'` e `sistema IS NOT TRUE`.
+Fonte única: `marca_condicoes_comerciais` vigente no mês da competência (não cancelada; maior `inicio_vigencia` ≤ 1º dia do mês), com fallback nos campos da marca (`valor_fixo_minimo`, `tipo_cobranca`, `comissao_franquia_pct`). Só marcas `tipo = 'cliente'` e `sistema IS NOT TRUE` (`marcaGeraReceitaSql`) — vale para o fixo **e** para a comissão: GMV de marca afiliada/própria/parceira ou da marca-sistema, mesmo com `%` > 0 na condição, não vira título. Título já materializado de marca não-cliente continua listado (com `marca_tipo`) até ser removido pelo `POST .../gerar` (sem baixa) ou dado como perdido; a aba Receita mostra um aviso nele.
 
 Dois componentes por marca × competência (quando valor > 0):
 

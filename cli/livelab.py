@@ -10,6 +10,9 @@ Uso rápido:
   python3 livelab.py api GET /v1/lives -q data_inicio=2026-09-01
   python3 livelab.py api POST /v1/marcas -d '{"nome":"Marca X","tipo":"afiliada"}'
   python3 livelab.py ingest relatorio.xlsx --marca-id <uuid> --apresentadora-id <uuid>
+  python3 livelab.py lancamentos --mes 2026-09 --status pendente
+  python3 livelab.py caixa --ate 2026-09-30
+  python3 livelab.py --api-key llk_... lancamentos --mes 2026-09
 
 Saída: o body JSON da API em stdout. Erro em stderr.
 Códigos de saída: 0 ok · 1 a API recusou (status fora de 2xx) · 2 uso errado
@@ -70,8 +73,8 @@ def falhar(mensagem, codigo):
     sys.exit(codigo)
 
 
-def chave():
-    valor = os.environ.get('LIVELAB_API_KEY', '').strip()
+def chave(flag=None):
+    valor = (flag or '').strip() or os.environ.get('LIVELAB_API_KEY', '').strip()
     if not valor:
         falhar('LIVELAB_API_KEY não definida', SAIDA_USO)
     return valor
@@ -90,14 +93,14 @@ def normalizar_rota(rota):
     return rota
 
 
-def chamar(metodo, rota, query=None, body=None, verbose=False, headers_extra=None):
+def chamar(metodo, rota, query=None, body=None, verbose=False, headers_extra=None, api_key=None):
     """Faz a chamada e imprime a resposta. Devolve 0 no 2xx; sai com 1/3 senão."""
     url = base_url() + normalizar_rota(rota)
     if query:
         url += ('&' if '?' in url else '?') + urllib.parse.urlencode(query)
     dados = None
     cabecalhos = {
-        'X-API-Key': chave(),
+        'X-API-Key': chave(api_key),
         'Accept': 'application/json',
         'User-Agent': 'livelab-cli/1.0',
     }
@@ -170,7 +173,8 @@ def ler_query(pares):
 
 
 def cmd_api(args):
-    return chamar(args.metodo.upper(), args.rota, ler_query(args.query), ler_body(args), getattr(args, 'verbose', False))
+    return chamar(args.metodo.upper(), args.rota, ler_query(args.query), ler_body(args),
+                  getattr(args, 'verbose', False), api_key=getattr(args, 'api_key', None))
 
 
 def cmd_ingest(args):
@@ -193,7 +197,31 @@ def cmd_ingest(args):
     if args.criar_lives:
         body['criar_lives'] = True
     rota = '/v1/analytics/imports/preview' if args.preview else '/v1/analytics/imports/ingest'
-    return chamar('POST', rota, None, body, getattr(args, 'verbose', False))
+    return chamar('POST', rota, None, body, getattr(args, 'verbose', False),
+                  api_key=getattr(args, 'api_key', None))
+
+
+def query_flags(args, *nomes):
+    query = []
+    for nome in nomes:
+        valor = getattr(args, nome, None)
+        if valor:
+            query.append((nome, valor))
+    return query
+
+
+def cmd_lancamentos(args):
+    return chamar('GET', '/v1/financeiro/lancamentos',
+                  query_flags(args, 'mes', 'tenant', 'status'),
+                  None, getattr(args, 'verbose', False),
+                  api_key=getattr(args, 'api_key', None))
+
+
+def cmd_caixa(args):
+    return chamar('GET', '/v1/financeiro/caixa',
+                  query_flags(args, 'ate', 'mes', 'tenant', 'status'),
+                  None, getattr(args, 'verbose', False),
+                  api_key=getattr(args, 'api_key', None))
 
 
 # Comandos nomeados: açúcar sobre `api`. Cada um só escolhe método e rota e
@@ -270,7 +298,8 @@ def cmd_nomeado(args):
         if not chave_idemp:
             falhar('condicao-confirmar exige Idempotency-Key: passe -d \'{"idempotency_key":"…", …}\'', SAIDA_USO)
         headers_extra = {'Idempotency-Key': str(chave_idemp)}
-    return chamar(metodo, rota, ler_query(args.query), body, getattr(args, 'verbose', False), headers_extra)
+    return chamar(metodo, rota, ler_query(args.query), body, getattr(args, 'verbose', False),
+                  headers_extra, api_key=getattr(args, 'api_key', None))
 
 
 def cmd_rotas(args):
@@ -285,11 +314,13 @@ def montar_parser():
     # SUPPRESS: sem isso o subcomando zera o --verbose dado antes dele.
     comum.add_argument('--verbose', action='store_true', default=argparse.SUPPRESS,
                        help='imprime método, URL e status em stderr')
+    comum.add_argument('--api-key', default=argparse.SUPPRESS, metavar='CHAVE',
+                       help='chave de API (senão LIVELAB_API_KEY); nunca salva em arquivo')
 
     parser = argparse.ArgumentParser(
         prog='livelab', parents=[comum],
-        description='CLI da API do Livelab para automação. Chave em LIVELAB_API_KEY; '
-                    'base em LIVELAB_API_URL (padrão: produção).',
+        description='CLI da API do Livelab para automação. Chave em LIVELAB_API_KEY ou --api-key; '
+                    'base em LIVELAB_API_URL (padrão: produção). Nunca grava a chave em arquivo.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='Códigos de saída: 0 ok · 1 API recusou · 2 uso errado · 3 rede.',
     )
@@ -311,6 +342,21 @@ def montar_parser():
     p_ing.add_argument('--criar-lives', action='store_true', help='cria live para linha que não casou com nenhuma')
     p_ing.add_argument('--preview', action='store_true', help='só analisa, não aplica')
     p_ing.set_defaults(func=cmd_ingest)
+
+    p_lanc = sub.add_parser('lancamentos', parents=[comum],
+                            help='GET /v1/financeiro/lancamentos (somente leitura)')
+    p_lanc.add_argument('--mes', help='competência AAAA-MM')
+    p_lanc.add_argument('--tenant', help='filtro de tenant, se a API aceitar')
+    p_lanc.add_argument('--status', help='previsto|pendente|atrasado|parcial|pago')
+    p_lanc.set_defaults(func=cmd_lancamentos)
+
+    p_caixa = sub.add_parser('caixa', parents=[comum],
+                             help='GET /v1/financeiro/caixa (somente leitura)')
+    p_caixa.add_argument('--ate', help='saldo até AAAA-MM-DD')
+    p_caixa.add_argument('--mes', help='competência AAAA-MM')
+    p_caixa.add_argument('--tenant', help='filtro de tenant, se a API aceitar')
+    p_caixa.add_argument('--status', help='previsto|pendente|atrasado|parcial|pago')
+    p_caixa.set_defaults(func=cmd_caixa)
 
     for entidade, acoes in NOMEADOS.items():
         p_ent = sub.add_parser(entidade, parents=[comum],

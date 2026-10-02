@@ -436,6 +436,7 @@ Serve para rodar no terminal de uma VM.
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/Greed9797/Livelab-back/codex/blumenau-operational-fase1/cli/livelab.py
 export LIVELAB_API_KEY=llk_...          # obrigatória; nunca vai para arquivo
+# ou: python3 livelab.py --api-key llk_... <comando>
 # LIVELAB_API_URL=...                  # opcional; padrão é a produção
 python3 livelab.py rotas                # o que a chave alcança
 python3 livelab.py --help
@@ -453,7 +454,13 @@ python3 livelab.py marcas list|get <id>|criar|editar <id>
 python3 livelab.py apresentadoras list|get <id>|editar <id>
 python3 livelab.py comissoes list -q mes=2026-09
 python3 livelab.py imports list|get <id>
+python3 livelab.py lancamentos [--mes AAAA-MM] [--tenant ...] [--status previsto|pendente|atrasado|parcial|pago]
+python3 livelab.py caixa [--ate AAAA-MM-DD]
 ```
+
+`lancamentos` e `caixa` são somente leitura (`GET /v1/financeiro/lancamentos` e
+`GET /v1/financeiro/caixa`). Pedem chave de escopo `financeiro`. A chave vai em
+`LIVELAB_API_KEY` ou `--api-key`; a CLI não grava chave em arquivo.
 
 `api` aceita a rota com ou sem `/v1` na frente. Os comandos nomeados só escolhem
 método e rota e aceitam os mesmos `-q`, `-d` e `-f`; `python3 livelab.py marcas --help`

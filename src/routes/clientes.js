@@ -436,6 +436,26 @@ export async function clientesRoutes(app) {
           })
         }
 
+        // Cadastro unificado: cada cliente tem UMA marca tipo='cliente'
+        // (uniq_marca_cliente_por_tenant). Se os dois têm marca espelho, mover a do
+        // duplicado violaria o índice — antes isso estourava 500 no meio do merge.
+        // Merge de marcas (lives, condições, títulos) é decisão manual: 409 claro.
+        const espelhos = await db.query(
+          `SELECT cliente_id, count(*)::int AS n
+             FROM marcas
+            WHERE tenant_id = $1::uuid AND tipo = 'cliente' AND cliente_id = ANY($2::uuid[])
+            GROUP BY cliente_id`,
+          [tenant_id, [vencedor_id, duplicado_id]],
+        )
+        if (espelhos.rows.length >= 2) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({
+            code: 'MERGE_MARCA_ESPELHO',
+            error: 'Merge bloqueado: os dois clientes têm marca própria (cadastro tipo cliente). '
+              + 'Unir duas marcas mexe em lives, condições comerciais e receitas — faça a revisão manual antes.',
+          })
+        }
+
         const migrations = {}
         for (const [table, column] of [
           ['lives', 'cliente_id'],
@@ -485,6 +505,12 @@ export async function clientesRoutes(app) {
         return { success: true, criterio, migracoes: migrations }
       } catch (error) {
         await db.query('ROLLBACK').catch(() => {})
+        if (error?.code === '23505' && error?.constraint === 'uniq_marca_cliente_por_tenant') {
+          return reply.code(409).send({
+            code: 'MERGE_MARCA_ESPELHO',
+            error: 'Merge bloqueado: os dois clientes têm marca própria (cadastro tipo cliente).',
+          })
+        }
         throw error
       }
     })
@@ -756,13 +782,32 @@ export async function clientesRoutes(app) {
   }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `UPDATE clientes SET deleted_at = NOW()
-         WHERE id = $1 AND tenant_id = $2::uuid AND deleted_at IS NULL
-         RETURNING id`,
-        [request.params.id, tenant_id]
-      )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      await db.query('BEGIN')
+      let result
+      try {
+        result = await db.query(
+          `UPDATE clientes SET deleted_at = NOW()
+           WHERE id = $1 AND tenant_id = $2::uuid AND deleted_at IS NULL
+           RETURNING id`,
+          [request.params.id, tenant_id]
+        )
+        if (!result.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Cliente não encontrado' })
+        }
+        // Cadastro unificado: a marca espelho some junto (arquivada), senão o
+        // cadastro seguiria "ativo" nas listas e seletores. Status não apaga
+        // dinheiro: lives, condições e títulos ficam intactos.
+        await db.query(
+          `UPDATE marcas SET status = 'arquivada', atualizado_em = NOW()
+           WHERE cliente_id = $1 AND tenant_id = $2::uuid AND tipo = 'cliente'`,
+          [request.params.id, tenant_id]
+        )
+        await db.query('COMMIT')
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {})
+        throw err
+      }
       app.audit?.log?.(request, { action: 'cliente.delete', entity_type: 'cliente', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { success: true }
     })

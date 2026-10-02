@@ -27,7 +27,8 @@ const MARCAS_CACHE_TTL_MS = Number(process.env.MARCAS_CACHE_TTL_MS ?? 300_000)
 /** Namespaces de cache afetados por qualquer escrita de marca/cliente. */
 export const LISTAGEM_NAMESPACES = ['marcas:list', 'clientes:list', 'cadastros:list']
 
-const marcaStatusOperacionalSql = marcaStatusBaseSql
+// Rotas de gestão: cliente soft-deletado (deleted_at) também derruba a marca espelho.
+const marcaStatusOperacionalSql = (marca = 'm', cliente = 'c') => marcaStatusBaseSql(marca, cliente, { considerarExcluido: true })
 
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, ${marcaStatusOperacionalSql()} AS status,
@@ -777,6 +778,31 @@ export async function marcasRoutes(app) {
       })) {
         await db.query('ROLLBACK')
         return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
+      }
+
+      // Entrar/sair de tipo='cliente' ou trocar a ficha de uma marca de cliente muda
+      // quem gera receita e quem é o cliente da marca: isso é o fluxo de cadastro
+      // (POST /v1/cadastros/:id/promover-cliente), não um PATCH de marca. Antes, o
+      // PATCH deixava a marca de cliente órfã/duplicada (I2/I4/I5).
+      if (updates.tipo !== undefined || updates.cliente_id !== undefined) {
+        const atualQ = await db.query(
+          `SELECT tipo, cliente_id FROM marcas WHERE id = $1 AND tenant_id = $2::uuid FOR UPDATE`,
+          [request.params.id, request.user.tenant_id],
+        )
+        const atual = atualQ.rows[0]
+        if (atual) {
+          const eraCliente = atual.tipo === 'cliente'
+          const seraCliente = (updates.tipo ?? atual.tipo) === 'cliente'
+          const trocaFicha = eraCliente && seraCliente && updates.cliente_id !== undefined
+            && (updates.cliente_id ?? null) !== (atual.cliente_id ?? null)
+          if (eraCliente !== seraCliente || trocaFicha) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({
+              code: 'USE_CADASTRO_ENDPOINT',
+              error: 'Mudar o tipo cliente ou o cliente da marca é feito pelo cadastro (POST /v1/cadastros/:id/promover-cliente).',
+            })
+          }
+        }
       }
 
       const result = fields.length > 0

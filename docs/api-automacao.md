@@ -58,6 +58,7 @@ contratos, usuários e configurações.
 | `POST` | `/v1/lives` | Iniciar live ao vivo numa cabine |
 | `PATCH` | `/v1/lives/:id` | Editar live |
 | `GET` `POST` `PATCH` | `/v1/marcas` · `/v1/marcas/:id` | Ler, cadastrar e editar marca |
+| `GET` | `/v1/cadastros` · `/v1/cadastros/:id` | Ler o cadastro unificado (marca + ficha). Para a chave, a ficha (contato/faturamento) vem `null` |
 | `GET` `PATCH` | `/v1/apresentadoras` · `/v1/apresentadoras/:id` | Ler e editar apresentadora (não há cadastro por API: apresentadora nasce do convite de usuário no painel) |
 | `GET` | `/v1/comissoes` | Ler comissão calculada |
 
@@ -174,6 +175,63 @@ curl -X POST "$BASE/v1/marcas" \
 Antes de criar, procure pelo nome em `GET /v1/marcas` — "Haag" e "HAAG" viram
 duas marcas diferentes se ninguém olhar, e a partir daí o GMV do mês se divide
 entre as duas sem que nada acuse o problema.
+
+## Cadastros (marca + ficha de cliente)
+
+A marca é o cadastro (`id` = `marca_id`); a ficha em `clientes` é o complemento
+comercial da marca `tipo = "cliente"`. As rotas antigas `/v1/clientes` e
+`/v1/marcas` continuam no mesmo formato (ganharam só `marca_id` em
+`/v1/clientes` e `/v1/clientes/:id`, e `gera_receita` em `/v1/marcas`).
+
+| Método | Rota | Quem | Para quê |
+|---|---|---|---|
+| `GET` | `/v1/cadastros` | `READ_MARCAS` (inclui a chave) | Lista. Filtros: `tipo` (`cliente`/`afiliada`/`propria`/`parceira`/`all`), `status` (padrão esconde `inativa`/`arquivada`; `all` mostra tudo), `q` (nome da marca, do cliente ou razão social), `gera_receita=true|false`, `sistema=false` (esconde a marca-sistema) |
+| `GET` | `/v1/cadastros/:id` | `READ_MARCAS` (inclui a chave) | Um cadastro. Aceita `marca_id` **ou** `cliente_id` da ficha |
+| `POST` | `/v1/cadastros` | `WRITE_CLIENTES` (não a chave) | Cria. `tipo` padrão `cliente` (exige `celular`; cria ficha + marca). Outros tipos criam só a marca |
+| `PATCH` | `/v1/cadastros/:id` | `WRITE_CLIENTES` | Edita roteando cada campo à tabela certa |
+| `POST` | `/v1/cadastros/:id/promover-cliente` | `WRITE_CLIENTES` | Afiliada/própria/parceira vira cliente (cria a ficha ou vincula `cliente_id` de uma ficha sem marca) |
+
+Resposta (lista = array destes objetos):
+
+```json
+{
+  "id": "9a8f2617-…", "marca_id": "9a8f2617-…", "cliente_id": "d2c08f85-…",
+  "tenant_id": "…", "nome": "Rosa do Deserto", "tipo": "cliente", "sistema": false,
+  "gera_receita": true, "status_operacional": "ativa", "status": "ativa",
+  "status_comercial": "ativo", "tiktok_username": "rosadodeserto",
+  "site": null, "marketplace_url": null, "logo_url": null, "cor": "#aabbcc",
+  "data_inicio": "2026-01-01", "data_fim": null, "observacoes": null,
+  "origem_dados": "manual", "criado_em": "2026-10-02T20:27:14.258Z", "atualizado_em": "…",
+  "cliente_nome": "Rosa do Deserto", "celular": "47999990000", "email": "contato@rosa.com",
+  "cnpj": "12345678000199", "razao_social": "Rosa LTDA", "nicho": null, "cidade": null, "estado": null,
+  "gateway_customer_id": "cus_…", "acesso_user_id": null, "acesso_email": null, "acesso_ativo": null,
+  "apresentadoras": [{ "id": "…", "nome": "Ana", "papel": "principal", "comissao_video_pct": 0 }],
+  "gmv_mes": 12500.5, "lives_mes": 4, "videos_mes": 0,
+  "configuracao_comercial": { "status": "configurado", "codigos": [], "fixo": { "status": "configurado", "valor": 1000 },
+    "comissao": { "status": "configurado", "percentual": 10 }, "resumo": "Condição comercial configurada" }
+}
+```
+
+- `cliente_id` e os campos da ficha só vêm preenchidos em marca `tipo = "cliente"`;
+  afiliada/própria/parceira (mesmo com `marcas.cliente_id`) vem com ficha `null`.
+- `status_operacional` (= `status`) segue a ficha: cliente arquivado ou apagado →
+  `arquivada`; cancelado/reprovado → `inativa`. `status_comercial` = `clientes.status`.
+- `gmv_mes`/`lives_mes`/`videos_mes`: mês corrente (São Paulo), números. Datas são texto.
+- Chave de API: `celular`, `email`, `cnpj`, `razao_social`, `gateway_customer_id`,
+  `acesso_*` vêm `null`.
+
+Erros (sempre `{ "code", "error" }`): `400 CADASTRO_INVALIDO` /
+`CAMPO_FICHA_SEM_CLIENTE` / `CADASTRO_SEM_CAMPOS`; `404 CADASTRO_NAO_ENCONTRADO`;
+`409 MARCA_NOME_DUPLICADA`, `USE_MARCA_CONDITION_ENDPOINT` (fixo/%/tipo_cobranca
+vão em `/v1/marcas/:id/condicoes`), `USE_PROMOVER_CLIENTE` (`tipo`/`cliente_id`
+no PATCH), `USE_STATUS_COMERCIAL` (`status` em cadastro com ficha — mande
+`status_comercial`), `CADASTRO_SISTEMA`, `CADASTRO_JA_E_CLIENTE`,
+`CLIENTE_JA_TEM_MARCA`, `PROMOCAO_CONDICAO_RETROATIVA` (traz `condicoes` e
+`data_inicio`; reenvie com `confirmar_retroativo: true` ou ajuste as condições).
+
+`PATCH /v1/marcas/:id` (inclusive pela chave) que tenta entrar/sair de
+`tipo = "cliente"` ou trocar o cliente de marca de cliente responde
+`409 USE_CADASTRO_ENDPOINT`.
 
 ## O que fica registrado: a tag BOT
 

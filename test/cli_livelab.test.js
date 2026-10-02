@@ -175,10 +175,16 @@ describe.skipIf(!temPython)('cli/livelab.py', () => {
   it('--help lista os comandos e cada comando explica seus campos', async () => {
     const geral = await cli(['--help'])
     expect(geral.status).toBe(0)
-    for (const c of ['api', 'ingest', 'rotas']) expect(geral.stdout).toContain(c)
+    for (const c of ['api', 'ingest', 'rotas', 'lancamentos', 'caixa']) expect(geral.stdout).toContain(c)
     const ing = await cli(['ingest', '--help'])
     expect(ing.status).toBe(0)
     for (const f of ['--marca-id', '--apresentadora-id', '--criar-lives', '--preview']) expect(ing.stdout).toContain(f)
+    const lanc = await cli(['lancamentos', '--help'])
+    expect(lanc.status).toBe(0)
+    for (const f of ['--mes', '--tenant', '--status']) expect(lanc.stdout).toContain(f)
+    const cx = await cli(['caixa', '--help'])
+    expect(cx.status).toBe(0)
+    expect(cx.stdout).toContain('--ate')
   })
 
   it('comandos nomeados traduzem para método e rota e delegam ao mesmo caminho', async () => {
@@ -208,6 +214,44 @@ describe.skipIf(!temPython)('cli/livelab.py', () => {
     const semId = await cli(['lives', 'get'])
     expect(semId.status).toBe(2)
     expect(semId.stderr).toContain('precisa do id')
+  })
+
+  it('lancamentos chama GET /v1/financeiro/lancamentos com mes, tenant e status', async () => {
+    const r = await cli(['lancamentos', '--mes', '2026-09', '--tenant', 'acme', '--status', 'pendente'])
+    expect(r.status).toBe(0)
+    expect(ultima()).toMatchObject({
+      method: 'GET',
+      url: '/v1/financeiro/lancamentos?mes=2026-09&tenant=acme&status=pendente',
+    })
+    expect(ultima().body).toBeNull()
+    expect(JSON.parse(r.stdout)).toEqual({
+      ok: true,
+      method: 'GET',
+      url: '/v1/financeiro/lancamentos?mes=2026-09&tenant=acme&status=pendente',
+    })
+  })
+
+  it('caixa chama GET /v1/financeiro/caixa com ate opcional', async () => {
+    const vazio = await cli(['caixa'])
+    expect(vazio.status).toBe(0)
+    expect(ultima()).toMatchObject({ method: 'GET', url: '/v1/financeiro/caixa' })
+    expect(ultima().body).toBeNull()
+
+    const comAte = await cli(['caixa', '--ate', '2026-09-30'])
+    expect(comAte.status).toBe(0)
+    expect(ultima()).toMatchObject({ method: 'GET', url: '/v1/financeiro/caixa?ate=2026-09-30' })
+  })
+
+  it('--api-key autentica sem LIVELAB_API_KEY e a chave não é gravada nem impressa', async () => {
+    const viaFlag = 'llk_so_na_flag'
+    const r = await cli(['--api-key', viaFlag, 'lancamentos', '--mes', '2026-09'], {
+      env: { LIVELAB_API_KEY: '' },
+    })
+    expect(r.status).toBe(0)
+    expect(ultima().headers['x-api-key']).toBe(viaFlag)
+    for (const saida of [r.stdout, r.stderr]) {
+      expect(saida).not.toContain(viaFlag)
+    }
   })
 
   it('--help de cada comando nomeado descreve os campos do body', async () => {

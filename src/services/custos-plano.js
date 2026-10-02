@@ -6,9 +6,12 @@
 //   - Recorrentes: o mês corrente/futuro aparece como item VIRTUAL (não materializado)
 //     até ser gerado (POST /custos/gerar) ou baixado; unique (recorrente_id, competencia)
 //     garante idempotência.
+//   - Cancelamento (migration 173): cancelado_em/motivo/por; status derivado 'cancelado'.
+//     A linha nunca é apagada; recorrente cancelado no mês continua materializado
+//     (a geração idempotente não o recria).
 // Datas trafegam como 'YYYY-MM-DD' / 'YYYY-MM' (sem Date) para evitar bugs de fuso.
 
-import { statusLancamento } from '../lib/lancamento-status.js'
+import { normalizarMotivo, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
 import { classeDoItem } from '../lib/custo-classe.js'
 
 export const GRUPOS_CUSTO = [
@@ -156,6 +159,9 @@ export function custoParaItem(row, hoje) {
     classe_custo: row.classe_custo ?? null,
     classe_custo_recorrente: row.classe_custo_recorrente ?? null,
     virtual: false,
+    cancelado_em: timestampIso(row.cancelado_em),
+    cancelado_motivo: row.cancelado_motivo ?? null,
+    cancelado_por: row.cancelado_por ?? null,
   }
   item.classe = classeDoItem(item)
   item.status = statusLancamento(item, hoje)
@@ -183,6 +189,9 @@ export function recorrenteParaItemVirtual(rec, mes, hoje) {
     classe_custo: null,
     classe_custo_recorrente: rec.classe_custo ?? null,
     virtual: true,
+    cancelado_em: null,
+    cancelado_motivo: null,
+    cancelado_por: null,
   }
   item.classe = classeDoItem(item)
   item.status = statusLancamento(item, hoje)
@@ -193,7 +202,8 @@ export const CUSTO_COLS = `
   id, descricao, valor, tipo, grupo, to_char(competencia,'YYYY-MM-DD') AS competencia,
   to_char(data_vencimento,'YYYY-MM-DD') AS data_vencimento, valor_pago,
   to_char(data_pagamento,'YYYY-MM-DD') AS data_pagamento,
-  parcela_grupo_id, parcela_num, parcelas_total, recorrente_id, observacao, classe_custo`
+  parcela_grupo_id, parcela_num, parcelas_total, recorrente_id, observacao, classe_custo,
+  cancelado_em, cancelado_motivo, cancelado_por`
 
 export const RECORRENTE_COLS = `
   id, nome, descricao, grupo, valor, dia_vencimento, mes_offset,
@@ -303,4 +313,59 @@ export async function materializarVirtual(db, { tenantId, recorrente_id, mes }) 
     [tenantId, r.id, primeiroDia(mes)],
   )
   return got.rows[0]?.id ?? null
+}
+
+const erroCusto = (message, statusCode, code) => Object.assign(new Error(message), { statusCode, code })
+
+/** 409 ao pagar custo cancelado. */
+export const erroCustoCancelado = () => erroCusto(
+  'Custo cancelado. Desfaça a perda/cancelamento antes de pagar.', 409, 'CUSTO_CANCELADO',
+)
+
+/**
+ * Cancela o custo (não será pago: cancelado/perdoado/duplicado). `id` é o uuid REAL
+ * (item virtual `rec:` já materializado pela rota — só aquele mês). A linha é preservada.
+ * Custo 100% pago → 409. Idempotente: já cancelado mantém cancelado_em/cancelado_por;
+ * `motivo` informado substitui o anterior. Retorna { row, ja_cancelado } ou null (404).
+ */
+export async function cancelarCusto(db, { tenantId, id, motivo, actorUserId = null }) {
+  const motivoNorm = normalizarMotivo(motivo)
+  const atual = await db.query(
+    `SELECT id, valor, valor_pago, cancelado_em FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+    [id, tenantId],
+  )
+  const a = atual.rows[0]
+  if (!a) return null
+  if (Number(a.valor_pago) > 0 && Number(a.valor_pago) >= Number(a.valor)) {
+    throw erroCusto('Custo já pago integralmente não pode ser cancelado', 409, 'CUSTO_PAGO')
+  }
+  const r = await db.query(
+    `UPDATE custos
+        SET cancelado_em = COALESCE(cancelado_em, NOW()),
+            cancelado_por = CASE WHEN cancelado_em IS NULL THEN $3::uuid ELSE cancelado_por END,
+            cancelado_motivo = CASE WHEN cancelado_em IS NULL THEN $4::text ELSE COALESCE($4::text, cancelado_motivo) END,
+            atualizado_em = NOW()
+      WHERE id = $1::uuid AND tenant_id = $2::uuid
+      RETURNING ${CUSTO_COLS}`,
+    [id, tenantId, actorUserId ?? null, motivoNorm],
+  )
+  return r.rows[0] ? { row: r.rows[0], ja_cancelado: Boolean(a.cancelado_em) } : null
+}
+
+/** Reativa (desfaz o cancelamento: cancelado_* → NULL). Idempotente. { row, estava_cancelado } ou null. */
+export async function reativarCusto(db, { tenantId, id }) {
+  const atual = await db.query(
+    `SELECT ${CUSTO_COLS} FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+    [id, tenantId],
+  )
+  const a = atual.rows[0]
+  if (!a) return null
+  if (!a.cancelado_em) return { row: a, estava_cancelado: false }
+  const r = await db.query(
+    `UPDATE custos SET cancelado_em = NULL, cancelado_motivo = NULL, cancelado_por = NULL, atualizado_em = NOW()
+      WHERE id = $1::uuid AND tenant_id = $2::uuid
+      RETURNING ${CUSTO_COLS}`,
+    [id, tenantId],
+  )
+  return r.rows[0] ? { row: r.rows[0], estava_cancelado: true } : null
 }

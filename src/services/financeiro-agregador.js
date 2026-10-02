@@ -16,6 +16,13 @@
 // lançamentos, DRE, fluxo, totais e imposto (dentroDoCorte). Sem corte, nada muda.
 // Saldo de caixa = financeiro_saldo_abertura + realizado desde o corte (calcularCaixa).
 //
+// Perdas/cancelamentos (migration 173): receita PERDIDA (perdido_em) e custo CANCELADO
+// (cancelado_em) encerram o SALDO em aberto (previsto − pago); valor_pago fica preservado.
+// Encerrado sai de pendente/atrasado/a receber/a pagar, do previsto do fluxo, da projeção
+// do imposto e dos candidatos da conciliação. DRE: receita.previsto NÃO muda (linha
+// `perdas.receita` à parte, descontada do resultado previsto); custos previstos excluem o
+// saldo cancelado. Realizado nunca muda. Ver encerrado()/valorEncerrado()/previstoEfetivo().
+//
 // Status é SEMPRE derivado (lib/lancamento-status.js). Datas trafegam como strings
 // 'YYYY-MM-DD' / 'YYYY-MM' — sem Date, para não haver bug de fuso.
 // Funções puras exportadas para teste; as que tocam o banco recebem `db` e
@@ -103,6 +110,37 @@ const BASE_ITEM = {
   grupo: null, componente: null, marca_id: null, marca_nome: null, cliente_id: null,
   cliente_nome: null, apresentadora_id: null, recorrente_id: null, parcela_grupo_id: null,
   parcela_num: null, parcelas_total: null, observacao: null, virtual: false, classe: null,
+  perdido_em: null, perdido_motivo: null, cancelado_em: null, cancelado_motivo: null,
+}
+
+// ─── Perdas e cancelamentos (encerramento do saldo) ───────────────────────
+
+const quitado = (i) => Number(i?.valor_pago) > 0 && Number(i.valor_pago) >= Number(i.valor_previsto)
+
+/**
+ * true se o item é receita PERDIDA ou custo CANCELADO (status derivado 'perdido'|'cancelado'
+ * OU perdido_em/cancelado_em preenchido). Item quitado nunca é encerrado (pago tem precedência).
+ */
+export function encerrado(i) {
+  if (!i || quitado(i)) return false
+  return i.status === 'perdido' || i.status === 'cancelado' || Boolean(i.perdido_em) || Boolean(i.cancelado_em)
+}
+
+/** Saldo encerrado pela perda/cancelamento: previsto − pago (0 se não encerrado). */
+export function valorEncerrado(i) {
+  return encerrado(i) ? Math.max(0, r2(r2(i.valor_previsto) - r2(i.valor_pago))) : 0
+}
+
+/** Previsto que ainda conta: valor_previsto − saldo encerrado (= valor_pago se encerrado). */
+export function previstoEfetivo(i) {
+  return r2(r2(i?.valor_previsto) - valorEncerrado(i))
+}
+
+/** Garante os campos de perda/cancelamento e o status derivado 'perdido'|'cancelado'. */
+export function marcarEncerramento(item) {
+  for (const k of ['perdido_em', 'perdido_motivo', 'cancelado_em', 'cancelado_motivo']) item[k] ??= null
+  if (encerrado(item)) item.status = item.natureza === 'custo' ? 'cancelado' : 'perdido'
+  return item
 }
 
 /** Título de receita (listarTitulosReceita) → item comum (origem marca_fixo|marca_comissao). */
@@ -118,7 +156,7 @@ export function normalizarReceita(t, hoje) {
     virtual: !t.materializado,
   }
   item.status = statusLancamento(item, hoje)
-  return item
+  return marcarEncerramento(item)
 }
 
 /** Custo (listarCustos) → item comum (valor_pago numérico). */
@@ -126,7 +164,7 @@ export function normalizarCusto(c, hoje) {
   const item = { ...BASE_ITEM, ...c, natureza: 'custo', valor_previsto: r2(c.valor_previsto), valor_pago: r2(c.valor_pago) }
   item.classe = classeDoItem(item)
   item.status = statusLancamento(item, hoje)
-  return item
+  return marcarEncerramento(item)
 }
 
 /**
@@ -216,12 +254,12 @@ export function montarItemImposto({ calculo, materializado = null, hoje }) {
   return item
 }
 
-/** Σ valor_previsto das receitas por mês de VENCIMENTO. */
+/** Σ previsto das receitas por mês de VENCIMENTO (perdidas contam só o que foi pago). */
 export function previstoReceitaPorVencimento(receitas) {
   const out = new Map()
   for (const r of receitas) {
     const m = mesDe(r.data_vencimento)
-    if (m) out.set(m, r2((out.get(m) ?? 0) + Number(r.valor_previsto || 0)))
+    if (m) out.set(m, r2((out.get(m) ?? 0) + previstoEfetivo(r)))
   }
   return out
 }
@@ -263,15 +301,18 @@ export function filtrarLancamentos(itens, { natureza, status, grupo, classe, ori
   ))
 }
 
-const emAberto = (i) => Math.max(0, r2(i.valor_previsto) - r2(i.valor_pago))
+/** Em aberto (previsto − pago); item perdido/cancelado não tem saldo em aberto. */
+const emAberto = (i) => (encerrado(i) ? 0 : Math.max(0, r2(i.valor_previsto) - r2(i.valor_pago)))
 
 /**
  * Totais por natureza: previsto (Σ valor_previsto), pago (Σ valor_pago),
  * atrasado (em aberto dos atrasados), pendente (em aberto dos demais não pagos).
+ * receita.perdido / custo.cancelado = saldo encerrado (previsto − pago) dos itens
+ * perdidos/cancelados — fora de pendente/atrasado. saldo_previsto desconta ambos.
  */
 export function totalizarLancamentos(itens) {
   const zero = () => ({ previsto: 0, pago: 0, atrasado: 0, pendente: 0 })
-  const t = { receita: zero(), custo: zero() }
+  const t = { receita: { ...zero(), perdido: 0 }, custo: { ...zero(), cancelado: 0 } }
   const aportes = { previsto: 0, pago: 0 }
   for (const i of itens) {
     const n = t[i.natureza]
@@ -282,7 +323,8 @@ export function totalizarLancamentos(itens) {
     }
     n.previsto += Number(i.valor_previsto) || 0
     n.pago += Number(i.valor_pago) || 0
-    if (i.status === 'atrasado') n.atrasado += emAberto(i)
+    if (encerrado(i)) n[i.natureza === 'receita' ? 'perdido' : 'cancelado'] += valorEncerrado(i)
+    else if (i.status === 'atrasado') n.atrasado += emAberto(i)
     else if (i.status !== 'pago') n.pendente += emAberto(i)
   }
   for (const n of [t.receita, t.custo]) for (const k of Object.keys(n)) n[k] = r2(n[k])
@@ -290,7 +332,7 @@ export function totalizarLancamentos(itens) {
     ...t,
     // aportes (receitas avulsas do grupo 'aporte') já estão em receita; aqui à parte.
     aportes: { previsto: r2(aportes.previsto), pago: r2(aportes.pago) },
-    saldo_previsto: r2(t.receita.previsto - t.custo.previsto),
+    saldo_previsto: r2((t.receita.previsto - t.receita.perdido) - (t.custo.previsto - t.custo.cancelado)),
     saldo_realizado: r2(t.receita.pago - t.custo.pago),
   }
 }
@@ -310,6 +352,11 @@ const addPr = (alvo, i) => {
   alvo.previsto += Number(i.valor_previsto) || 0
   alvo.realizado += Number(i.valor_pago) || 0
 }
+// Custo: previsto sem o saldo cancelado (cancelado sem pagamento sai do previsto).
+const addPrCusto = (alvo, i) => {
+  alvo.previsto += previstoEfetivo(i)
+  alvo.realizado += Number(i.valor_pago) || 0
+}
 const roundPr = (o) => ({ previsto: r2(o.previsto), realizado: r2(o.realizado) })
 
 /**
@@ -320,31 +367,38 @@ const roundPr = (o) => ({ previsto: r2(o.previsto), realizado: r2(o.realizado) }
  * apresentadoras e imposto), apresentadoras, imposto. `impostos` = Map mes → { aliquota, base }.
  * Aportes (receita avulsa grupo 'aporte') NÃO são receita operacional: linha
  * `aportes` informativa, fora do resultado.
+ * Perdas: receita.previsto inalterado (inclui perdidas); `perdas.receita.valor` = saldo
+ * encerrado das receitas perdidas da competência; custos (todas as visões) excluem o saldo
+ * cancelado do previsto. resultado.previsto = receita − perdas − custos_fixos −
+ * custos_variaveis; resultado.realizado inalterado.
  */
 export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQUOTA_IMPOSTO_PADRAO }) {
   const porMes = new Map(meses.map((m) => [m, {
     mes: m, receita: pr(), aportes: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
     imposto: { ...pr(), aliquota: impostos.get(m)?.aliquota ?? Number(aliquota), base: impostos.get(m)?.base ?? 0 },
-    custos_fixos: pr(), custos_variaveis: pr(),
+    custos_fixos: pr(), custos_variaveis: pr(), perdas: { receita: { valor: 0 } },
   }]))
   for (const i of itens) {
     const linha = porMes.get(mesDe(i.competencia))
     if (!linha) continue
     if (ehAporte(i)) addPr(linha.aportes, i)
-    else if (i.natureza === 'receita') addPr(linha.receita, i)
-    else {
-      addPr((i.classe ?? classeDoItem(i)) === 'fixo' ? linha.custos_fixos : linha.custos_variaveis, i)
-      if (i.origem === 'apresentadora') addPr(linha.apresentadoras, i)
-      else if (i.origem === 'imposto') addPr(linha.imposto, i)
+    else if (i.natureza === 'receita') {
+      addPr(linha.receita, i)
+      linha.perdas.receita.valor += valorEncerrado(i)
+    } else {
+      addPrCusto((i.classe ?? classeDoItem(i)) === 'fixo' ? linha.custos_fixos : linha.custos_variaveis, i)
+      if (i.origem === 'apresentadora') addPrCusto(linha.apresentadoras, i)
+      else if (i.origem === 'imposto') addPrCusto(linha.imposto, i)
       else {
-        addPr(linha.custos, i)
+        addPrCusto(linha.custos, i)
         const g = i.grupo || 'outros'
         linha.custos.por_grupo[g] ??= pr()
-        addPr(linha.custos.por_grupo[g], i)
+        addPrCusto(linha.custos.por_grupo[g], i)
       }
     }
   }
-  const resultado = (l, k) => r2(l.receita[k] - l.custos_fixos[k] - l.custos_variaveis[k])
+  const resultado = (l, k) => r2(l.receita[k] - (k === 'previsto' ? l.perdas.receita.valor : 0)
+    - l.custos_fixos[k] - l.custos_variaveis[k])
   const fechar = (l) => {
     const porGrupo = Object.fromEntries(Object.entries(l.custos.por_grupo).map(([g, v]) => [g, roundPr(v)]))
     const out = {
@@ -355,6 +409,7 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
       imposto: { ...roundPr(l.imposto), aliquota: l.imposto.aliquota, base: r2(l.imposto.base) },
       custos_fixos: roundPr(l.custos_fixos),
       custos_variaveis: roundPr(l.custos_variaveis),
+      perdas: { receita: { valor: r2(l.perdas.receita.valor) } },
     }
     out.resultado = { previsto: resultado(out, 'previsto'), realizado: resultado(out, 'realizado') }
     return out
@@ -363,8 +418,10 @@ export function montarDre({ meses, itens, impostos = new Map(), aliquota = ALIQU
   const tot = {
     receita: pr(), aportes: pr(), custos: { ...pr(), por_grupo: {} }, apresentadoras: pr(),
     imposto: { ...pr(), aliquota: Number(aliquota), base: 0 }, custos_fixos: pr(), custos_variaveis: pr(),
+    perdas: { receita: { valor: 0 } },
   }
   for (const l of linhas) {
+    tot.perdas.receita.valor += l.perdas.receita.valor
     for (const k of ['previsto', 'realizado']) {
       tot.receita[k] += l.receita[k]
       tot.aportes[k] += l.aportes[k]
@@ -404,6 +461,9 @@ function pctComissao(t) {
   return mem.gmv > 0 && mem.comissao_bruta != null ? pctDe(mem.comissao_bruta, mem.gmv) : null
 }
 
+// `previsto` = quanto o item conta no previsto da linha do DRE: receita perdida conta
+// cheia (a perda vai para `perdas.receita`); custo cancelado conta só o que foi pago.
+// `valor_encerrado` = saldo perdido/cancelado (0 se não encerrado).
 const itemResumo = (i) => ({
   id: i.id,
   descricao: i.descricao,
@@ -411,11 +471,17 @@ const itemResumo = (i) => ({
   grupo: i.grupo,
   classe: i.classe,
   componente: i.componente ?? null,
-  previsto: r2(i.valor_previsto),
+  previsto: i.natureza === 'custo' ? previstoEfetivo(i) : r2(i.valor_previsto),
   realizado: r2(i.valor_pago),
   status: i.status,
   data_vencimento: i.data_vencimento ?? null,
   virtual: Boolean(i.virtual),
+  valor_previsto: r2(i.valor_previsto),
+  valor_encerrado: valorEncerrado(i),
+  perdido_em: i.perdido_em ?? null,
+  perdido_motivo: i.perdido_motivo ?? null,
+  cancelado_em: i.cancelado_em ?? null,
+  cancelado_motivo: i.cancelado_motivo ?? null,
 })
 
 /** Custos (exceto apresentadoras e imposto) agrupados por `grupo`, maior previsto primeiro. */
@@ -425,7 +491,7 @@ function custosPorGrupo(itens) {
     const g = i.grupo || 'outros'
     if (!grupos.has(g)) grupos.set(g, { grupo: g, total: pr(), itens: [] })
     const alvo = grupos.get(g)
-    addPr(alvo.total, i)
+    addPrCusto(alvo.total, i)
     alvo.itens.push(itemResumo(i))
   }
   return [...grupos.values()]
@@ -472,15 +538,17 @@ function receitaPorCliente(titulos) {
   for (const t of titulos) {
     const cid = t.cliente_id ?? null
     const ck = cid ?? '__sem_cliente__'
-    if (!clientes.has(ck)) clientes.set(ck, { cliente_id: cid, cliente_nome: t.cliente_nome ?? null, marcas: new Map(), total: pr() })
+    if (!clientes.has(ck)) clientes.set(ck, { cliente_id: cid, cliente_nome: t.cliente_nome ?? null, marcas: new Map(), total: pr(), perdido: 0 })
     const c = clientes.get(ck)
     if (!c.marcas.has(t.marca_id)) {
-      c.marcas.set(t.marca_id, { marca_id: t.marca_id, marca_nome: t.marca_nome ?? null, fixo: pr(), comissao: pr(), gmv: null, pct: null })
+      c.marcas.set(t.marca_id, { marca_id: t.marca_id, marca_nome: t.marca_nome ?? null, fixo: pr(), comissao: pr(), gmv: null, pct: null, perdido: 0 })
     }
     const m = c.marcas.get(t.marca_id)
     const comp = t.origem === 'marca_fixo' ? 'fixo' : 'comissao'
     addPr(m[comp], t)
     addPr(c.total, t)
+    m.perdido += valorEncerrado(t)
+    c.perdido += valorEncerrado(t)
     if (comp === 'comissao') {
       const gmv = t.gmv ?? t.memoria?.gmv
       if (gmv != null) m.gmv = r2((m.gmv ?? 0) + Number(gmv))
@@ -492,8 +560,9 @@ function receitaPorCliente(titulos) {
       cliente_id: c.cliente_id,
       cliente_nome: c.cliente_nome,
       total: roundPr(c.total),
+      perdido: r2(c.perdido),
       marcas: [...c.marcas.values()]
-        .map((m) => ({ ...m, fixo: roundPr(m.fixo), comissao: roundPr(m.comissao) }))
+        .map((m) => ({ ...m, fixo: roundPr(m.fixo), comissao: roundPr(m.comissao), perdido: r2(m.perdido) }))
         .sort((a, b) => String(a.marca_nome ?? '').localeCompare(String(b.marca_nome ?? ''), 'pt-BR')),
     }))
     .sort((a, b) => b.total.previsto - a.total.previsto || String(a.cliente_nome ?? '').localeCompare(String(b.cliente_nome ?? ''), 'pt-BR'))
@@ -505,7 +574,9 @@ function receitaPorCliente(titulos) {
  *   receita.total            = atual.receita
  *   custos_fixos.total       = Σ por_grupo + Σ apresentadoras_fixo
  *   custos_variaveis.total   = Σ por_grupo + Σ apresentadoras_variavel + imposto
- *   atual.resultado          = receita − custos_fixos − custos_variaveis (aportes fora)
+ *   atual.resultado.previsto = receita − perdas.receita − custos_fixos − custos_variaveis (aportes fora)
+ *   receita.perdas.valor     = atual.perdas.receita.valor = Σ receita.perdidos[].valor_encerrado
+ * Itens perdidos/cancelados aparecem no detalhe (status + motivo + valor_encerrado).
  */
 export function montarDreDetalhe({ mes, itens, aliquota = ALIQUOTA_IMPOSTO_PADRAO, hoje = null }) {
   const anteriorMes = addMeses(mes, -1)
@@ -536,11 +607,17 @@ export function montarDreDetalhe({ mes, itens, aliquota = ALIQUOTA_IMPOSTO_PADRA
       custos_fixos: deltaPr(atual.custos_fixos, anterior.custos_fixos),
       custos_variaveis: deltaPr(atual.custos_variaveis, anterior.custos_variaveis),
       resultado: deltaPr(atual.resultado, anterior.resultado),
+      perdas: { receita: { valor: r2(atual.perdas.receita.valor - anterior.perdas.receita.valor) } },
     },
     receita: {
       por_cliente: receitaPorCliente(titulos),
       avulsas: avulsas.map(itemResumo),
       total: atual.receita,
+      perdas: atual.perdas.receita,
+      perdidos: [...titulos, ...avulsas].filter(encerrado).map((i) => ({
+        ...itemResumo(i), marca_id: i.marca_id ?? null, marca_nome: i.marca_nome ?? null,
+        cliente_id: i.cliente_id ?? null, cliente_nome: i.cliente_nome ?? null,
+      })),
     },
     custos_fixos: {
       total: atual.custos_fixos,
@@ -593,7 +670,7 @@ const labelFluxo = (k) => (k === 'cartao' ? 'Cartão' : `Dia ${k}`)
 
 /**
  * Fluxo de caixa do mês `mes`:
- *   previsto  = Σ valor_previsto por DATA DE VENCIMENTO no mês;
+ *   previsto  = Σ valor_previsto por DATA DE VENCIMENTO no mês (sem o saldo perdido/cancelado);
  *   realizado = Σ valor_pago por DATA DE PAGAMENTO no mês.
  * Linhas nas faixas 5/10/15/20/25/30 (+ 'cartao'), saldo e acumulado (a partir de
  * saldo_inicial). serie_anual jan–dez do ano de `mes`, mesma regra.
@@ -611,7 +688,8 @@ export function montarFluxoCaixa({ mes, itens, saldoInicial = 0, saldoInicialOri
 
   for (const i of itens) {
     const venc = vencimentoEfetivo(i)
-    const previsto = Number(i.valor_previsto) || 0
+    // perdido/cancelado: o saldo encerrado sai do previsto (o que foi pago continua)
+    const previsto = previstoEfetivo(i)
     const pago = Number(i.valor_pago) || 0
     if (venc) {
       const mv = mesDe(venc)
@@ -880,7 +958,7 @@ export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hoje
   ])
   return ordenarLancamentos(aplicarCorte([
     ...receitas.map((t) => normalizarReceita(t, hoje)),
-    ...avulsas.map((a) => ({ ...BASE_ITEM, ...a })),
+    ...avulsas.map((a) => marcarEncerramento({ ...BASE_ITEM, ...a })),
     // imposto materializado em `custos` sai daqui e entra como lançamento próprio
     ...custos.filter((c) => c.tipo !== 'imposto').map((c) => normalizarCusto(c, hoje)),
     ...apresentadoras.map((p) => normalizarApresentadora(p, hoje)),
@@ -984,7 +1062,8 @@ export async function saldoCaixaInicioMes(db, { tenantId, mes, config }) {
 
 /**
  * Pura: em aberto (previsto − pago) de receitas e custos com vencimento em
- * [dataCorte, fimMes]. Itens já passaram pela regra de corte.
+ * [dataCorte, fimMes]. Itens já passaram pela regra de corte. Perdidos/cancelados
+ * não têm saldo em aberto (emAberto = 0).
  */
 export function abertosAte(itens, { dataCorte, fimMes }) {
   const out = { a_receber: 0, a_pagar: 0 }

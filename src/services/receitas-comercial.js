@@ -4,7 +4,7 @@
 // (materializados/baixados). Status é sempre derivado (lib/lancamento-status.js).
 import '../lib/pg-date-string.js'
 import { marcasCondicaoVigenteMesSql, receitaMarcaMensalSql } from '../lib/receita-marca-sql.js'
-import { statusLancamento } from '../lib/lancamento-status.js'
+import { normalizarMotivo, saldoEncerrado, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
 // Ciclo estático intencional (o agregador importa este módulo): só usado em tempo de
@@ -27,6 +27,10 @@ function serviceError(message, code, statusCode = 400) {
   error.statusCode = statusCode
   return error
 }
+
+const erroEncerrado = () => serviceError(
+  'Título dado como perdido. Desfaça a perda/cancelamento antes de receber.', 'RECEITA_PERDIDA', 409,
+)
 
 /** Data de hoje (civil) em America/Sao_Paulo. */
 export function hojeSaoPaulo(now = new Date()) {
@@ -206,6 +210,9 @@ function tituloPublico({ stored, calc, hoje }) {
     divergente: Boolean(stored) && Math.abs(valorCalculado - valorPrevisto) >= 0.01,
     observacao: stored?.observacao ?? null,
     memoria: calc?.memoria ?? null,
+    perdido_em: timestampIso(stored?.perdido_em),
+    perdido_motivo: stored?.perdido_motivo ?? null,
+    perdido_por: stored?.perdido_por ?? null,
   }
   item.status = statusLancamento(item, hoje)
   return item
@@ -215,6 +222,7 @@ async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId 
   const { rows } = await db.query(
     `SELECT rt.id, rt.tenant_id, rt.marca_id, rt.cliente_id, rt.competencia, rt.componente,
             rt.valor_previsto, rt.valor_pago, rt.data_vencimento, rt.data_pagamento, rt.observacao,
+            rt.perdido_em, rt.perdido_motivo, rt.perdido_por,
             m.nome AS marca_nome, cl.nome AS cliente_nome, m.tipo_cobranca
        FROM receita_titulos rt
        JOIN marcas m ON m.id = rt.marca_id AND m.tenant_id = rt.tenant_id
@@ -267,25 +275,36 @@ export async function listarTitulosReceita(db, { tenantId, inicio, fim, hoje = h
   return filtrados
 }
 
-/** Totais de uma listagem de títulos (previsto, pago, em aberto e por status). */
+/**
+ * Totais de uma listagem de títulos (previsto, pago, em aberto e por status).
+ * `perdido` = saldo encerrado (previsto − pago) dos títulos perdidos; `em_aberto` o exclui.
+ * `valor_previsto` NÃO desconta perdas (o previsto continua; a perda é linha própria).
+ */
 export function totalizarTitulos(itens = []) {
   const porStatus = {}
   let previsto = 0
   let pago = 0
+  let perdido = 0
   for (const item of itens) {
     previsto += item.valor_previsto
     pago += item.valor_pago
+    perdido += saldoEncerrado(item)
     porStatus[item.status] = round2((porStatus[item.status] ?? 0) + item.valor_previsto)
   }
   return {
     valor_previsto: round2(previsto),
     valor_pago: round2(pago),
-    em_aberto: round2(Math.max(0, previsto - pago)),
+    em_aberto: round2(Math.max(0, previsto - pago - perdido)),
+    perdido: round2(perdido),
     quantidade: itens.length,
     por_status: porStatus,
   }
 }
 
+/**
+ * Cria/atualiza o título da chave (marca, competência, componente). Título PERDIDO é
+ * preservado (nunca tem valor/vencimento atualizados): devolve { id, inserido:false, perdido:true }.
+ */
 async function upsertTitulo(db, { tenantId, calc, actorUserId }) {
   const { rows } = await db.query(
     `INSERT INTO receita_titulos (
@@ -299,10 +318,19 @@ async function upsertTitulo(db, { tenantId, calc, actorUserId }) {
            data_vencimento = CASE WHEN receita_titulos.valor_pago = 0 AND receita_titulos.data_pagamento IS NULL
                                   THEN EXCLUDED.data_vencimento ELSE receita_titulos.data_vencimento END,
            atualizado_em = NOW()
+       WHERE receita_titulos.perdido_em IS NULL
      RETURNING id, (xmax = 0) AS inserido`,
     [tenantId, calc.marca_id, calc.cliente_id, calc.competencia, calc.componente, calc.valor, calc.data_vencimento, actorUserId ?? null],
   )
-  return rows[0]
+  if (rows[0]) return rows[0]
+  // ON CONFLICT ... WHERE falso → título perdido existente, intocado.
+  const existente = await db.query(
+    `SELECT id FROM receita_titulos
+      WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND competencia = $3::date AND componente = $4`,
+    [tenantId, calc.marca_id, calc.competencia, calc.componente],
+  )
+  if (!existente.rows[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+  return { id: existente.rows[0].id, inserido: false, perdido: true }
 }
 
 async function lockReceitas(db, tenantId) {
@@ -313,6 +341,8 @@ async function lockReceitas(db, tenantId) {
  * Materializa os títulos da competência `mes` (AAAA-MM) a partir do comercial:
  * cria os que faltam, atualiza valor previsto (e vencimento dos que não têm baixa)
  * e remove títulos sem baixa que o comercial não gera mais.
+ * Título PERDIDO nunca é apagado nem tem valor/vencimento atualizados
+ * (contado em `perdidos_preservados`).
  */
 export async function gerarTitulosReceita(db, { tenantId, mes, actorUserId = null, hoje = hojeSaoPaulo() } = {}) {
   if (!MONTH_RE.test(String(mes ?? ''))) throw serviceError('mes deve estar no formato AAAA-MM', 'INVALID_PERIOD')
@@ -322,22 +352,24 @@ export async function gerarTitulosReceita(db, { tenantId, mes, actorUserId = nul
     const calculados = await calcularReceitasComerciais(db, { tenantId, inicio: mes, fim: mes })
     let criados = 0
     let atualizados = 0
+    let perdidosPreservados = 0
     for (const calc of calculados) {
       const r = await upsertTitulo(db, { tenantId, calc, actorUserId })
-      if (r?.inserido) criados += 1
+      if (r?.perdido) perdidosPreservados += 1
+      else if (r?.inserido) criados += 1
       else atualizados += 1
     }
     const manter = calculados.map((c) => `${c.marca_id}:${c.componente}`)
     const removidos = await db.query(
       `DELETE FROM receita_titulos
         WHERE tenant_id = $1::uuid AND competencia = $2::date
-          AND valor_pago = 0 AND data_pagamento IS NULL
+          AND valor_pago = 0 AND data_pagamento IS NULL AND perdido_em IS NULL
           AND NOT ((marca_id::text || ':' || componente) = ANY($3::text[]))`,
       [tenantId, `${mes}-01`, manter],
     )
     await db.query('COMMIT')
     const itens = await listarTitulosReceita(db, { tenantId, inicio: mes, fim: mes, hoje })
-    return { mes, criados, atualizados, removidos: removidos.rowCount ?? 0, itens }
+    return { mes, criados, atualizados, removidos: removidos.rowCount ?? 0, perdidos_preservados: perdidosPreservados, itens }
   } catch (error) {
     await db.query('ROLLBACK').catch(() => {})
     throw error
@@ -385,6 +417,7 @@ export async function receberTitulo(db, { tenantId, id, valorPago, dataPagamento
   try {
     await lockReceitas(db, tenantId)
     const titulo = await buscarTituloParaBaixa(db, { tenantId, ref, actorUserId })
+    if (titulo.perdido_em) throw erroEncerrado()
     const valor = round2(valorPago ?? titulo.valor_previsto)
     if (!(valor > 0)) throw serviceError('valor_pago deve ser maior que zero', 'INVALID_PAYMENT')
     await db.query(
@@ -418,6 +451,92 @@ export async function desfazerRecebimento(db, { tenantId, id, hoje = hojeSaoPaul
   return tituloAtualizado(db, { tenantId, id: ref.id, hoje })
 }
 
+// ─── Perda (cliente não vai pagar) ────────────────────────────────────────
+//
+// Persistimos só perdido_em/perdido_motivo/perdido_por (migration 173); o status
+// 'perdido' é derivado. Perda parcial encerra o SALDO (previsto − pago): valor_pago
+// fica preservado e continua contando como recebido. Título 100% pago → 409.
+// Não altera contrato/condição comercial.
+
+/**
+ * Dá o título como perdido. Aceita uuid ou id virtual `calc:` (materializa e marca).
+ * Idempotente: título já perdido mantém perdido_em/perdido_por; `motivo` informado
+ * substitui o anterior.
+ */
+export async function perderTitulo(db, { tenantId, id, motivo, actorUserId = null, hoje = hojeSaoPaulo() } = {}) {
+  const ref = parseIdTitulo(id)
+  if (!ref) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+  const motivoNorm = normalizarMotivo(motivo)
+  await db.query('BEGIN')
+  let tituloId
+  let jaPerdido = false
+  try {
+    await lockReceitas(db, tenantId)
+    const titulo = await buscarTituloParaBaixa(db, { tenantId, ref, actorUserId })
+    const pago = round2(titulo.valor_pago)
+    if (pago > 0 && pago >= round2(titulo.valor_previsto)) {
+      throw serviceError('Título já recebido integralmente não pode ser dado como perdido', 'RECEITA_PAGA', 409)
+    }
+    jaPerdido = Boolean(titulo.perdido_em)
+    await db.query(
+      `UPDATE receita_titulos
+          SET perdido_em = COALESCE(perdido_em, NOW()),
+              perdido_por = CASE WHEN perdido_em IS NULL THEN $3::uuid ELSE perdido_por END,
+              perdido_motivo = CASE WHEN perdido_em IS NULL THEN $4::text ELSE COALESCE($4::text, perdido_motivo) END,
+              atualizado_em = NOW()
+        WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+      [tenantId, titulo.id, actorUserId ?? null, motivoNorm],
+    )
+    tituloId = titulo.id
+    await db.query('COMMIT')
+  } catch (error) {
+    await db.query('ROLLBACK').catch(() => {})
+    throw error
+  }
+  const item = await tituloAtualizado(db, { tenantId, id: tituloId, hoje })
+  return { item, ja_perdido: jaPerdido }
+}
+
+/**
+ * Desfaz a perda (perdido_* → NULL). Aceita uuid ou `calc:` (resolve o título já
+ * materializado da chave; se não houver, o título nunca foi perdido e volta como está).
+ * Idempotente.
+ */
+export async function desperderTitulo(db, { tenantId, id, hoje = hojeSaoPaulo() } = {}) {
+  const ref = parseIdTitulo(id)
+  if (!ref) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+  let tituloId = ref.id ?? null
+  if (ref.tipo === 'virtual') {
+    const { rows } = await db.query(
+      `SELECT id FROM receita_titulos
+        WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND competencia = $3::date AND componente = $4`,
+      [tenantId, ref.marca_id, `${ref.mes}-01`, ref.componente],
+    )
+    tituloId = rows[0]?.id ?? null
+    if (!tituloId) {
+      const itens = await listarTitulosReceita(db, { tenantId, inicio: ref.mes, fim: ref.mes, hoje, marca_id: ref.marca_id, componente: ref.componente })
+      if (!itens[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+      return { item: itens[0], estava_perdido: false }
+    }
+  }
+  const atual = await db.query(
+    'SELECT id, perdido_em FROM receita_titulos WHERE tenant_id = $1::uuid AND id = $2::uuid',
+    [tenantId, tituloId],
+  )
+  if (!atual.rows[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+  const estavaPerdido = Boolean(atual.rows[0].perdido_em)
+  if (estavaPerdido) {
+    await db.query(
+      `UPDATE receita_titulos
+          SET perdido_em = NULL, perdido_motivo = NULL, perdido_por = NULL, atualizado_em = NOW()
+        WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+      [tenantId, tituloId],
+    )
+  }
+  const item = await tituloAtualizado(db, { tenantId, id: tituloId, hoje })
+  return { item, estava_perdido: estavaPerdido }
+}
+
 // ─── Receita mensal (aba Receita do Financeiro) ───────────────────────────
 //
 // GET /v1/financeiro/receita?mes=AAAA-MM. Duas visões do MESMO conjunto de itens:
@@ -426,6 +545,8 @@ export async function desfazerRecebimento(db, { tenantId, id, hoje = hojeSaoPaul
 //                 em bloco próprio, como no DRE).
 //   vencimento  → o que cai no caixa no mês (títulos/avulsas, aportes inclusive, com
 //                 vencimento no mês). total.previsto == fluxo.totais.entradas.previsto.
+// Título/avulsa PERDIDO: continua no previsto (competencia.total.previsto == DRE), mas
+// seu saldo (previsto − pago) sai de `aberto`/`a_receber_mes` e vai para `perdido`.
 // a_receber_mes = em aberto (previsto − pago) da visão vencimento (mesma regra do
 // a_receber do /caixa). Corte: aplicarCorte/dentroDoCorte do agregador.
 
@@ -435,16 +556,20 @@ const addMes = (mes, n) => {
   return `${String(Math.floor(total / 12)).padStart(4, '0')}-${String((total % 12) + 1).padStart(2, '0')}`
 }
 const mesDeData = (d) => (d ? String(d).slice(0, 7) : null)
+// `aberto` exclui o saldo de itens perdidos, que vai para `perdido`; `previsto` não muda.
 const somaPrevistoPago = (itens) => {
   let previsto = 0
   let pago = 0
   let aberto = 0
+  let perdido = 0
   for (const i of itens) {
     previsto += toNum(i.valor_previsto)
     pago += toNum(i.valor_pago)
-    aberto += Math.max(0, round2(i.valor_previsto) - round2(i.valor_pago))
+    const saldo = Math.max(0, round2(i.valor_previsto) - round2(i.valor_pago))
+    if (i.status === 'perdido') perdido += saldo
+    else aberto += saldo
   }
-  return { previsto: round2(previsto), pago: round2(pago), aberto: round2(aberto) }
+  return { previsto: round2(previsto), pago: round2(pago), aberto: round2(aberto), perdido: round2(perdido) }
 }
 
 /** Título do comercial (listarTitulosReceita) → Titulo do contrato da aba Receita. */
@@ -519,20 +644,21 @@ export function montarReceitaMensal({
   for (const m of marcas.values()) {
     m.em_apuracao = m.comissao == null && !temComissao.has(m.marca_id) && m.pct > 0
     const t = somaPrevistoPago([m.fixo, m.comissao].filter(Boolean))
-    m.total = { previsto: t.previsto, pago: t.pago }
+    m.total = { previsto: t.previsto, pago: t.pago, perdido: t.perdido }
   }
 
   const clientes = new Map()
   for (const m of marcas.values()) {
     const key = m.cliente_id ?? `sem-cliente:${m.marca_id}`
     if (!clientes.has(key)) {
-      clientes.set(key, { cliente_id: m.cliente_id, cliente_nome: m.cliente_nome ?? m.marca_nome, total: { previsto: 0, pago: 0 }, marcas: [] })
+      clientes.set(key, { cliente_id: m.cliente_id, cliente_nome: m.cliente_nome ?? m.marca_nome, total: { previsto: 0, pago: 0, perdido: 0 }, marcas: [] })
     }
     const c = clientes.get(key)
     const { cliente_id: _cid, cliente_nome: _cn, ...marca } = m
     c.marcas.push(marca)
     c.total.previsto = round2(c.total.previsto + m.total.previsto)
     c.total.pago = round2(c.total.pago + m.total.pago)
+    c.total.perdido = round2(c.total.perdido + m.total.perdido)
   }
   const porNome = (a, b) => String(a ?? '').localeCompare(String(b ?? ''), 'pt-BR')
   const listaClientes = [...clientes.values()].sort((a, b) => porNome(a.cliente_nome, b.cliente_nome))

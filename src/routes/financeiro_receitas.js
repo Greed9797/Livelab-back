@@ -2,23 +2,28 @@
 //   GET   /v1/financeiro/receita?mes=AAAA-MM   (aba Receita: competência × vencimento,
 //         a_receber_mes; ver montarReceitaMensal)
 //   GET   /v1/financeiro/receitas?inicio=AAAA-MM&fim=AAAA-MM | ?mes=AAAA-MM
-//         [&status=previsto|pendente|atrasado|parcial|pago&marca_id=&cliente_id=&componente=fixo|comissao]
+//         [&status=previsto|pendente|atrasado|parcial|pago|perdido&marca_id=&cliente_id=&componente=fixo|comissao]
 //   POST  /v1/financeiro/receitas/gerar?mes=AAAA-MM
 //   PATCH /v1/financeiro/receitas/:id/receber   { valor_pago?, data_pagamento?, observacao? }
 //   PATCH /v1/financeiro/receitas/:id/desfazer
+//   PATCH /v1/financeiro/receitas/:id/perder     { motivo? (≤300) }  → status 'perdido' (migration 173)
+//   PATCH /v1/financeiro/receitas/:id/desperder  → remove a perda
+//   (receber título perdido → 409; perder título 100% pago → 409)
 // `:id` aceita uuid (título materializado) ou `calc:<marca_id>:<AAAA-MM>:<fixo|comissao>`
 // (título ainda só calculado — a baixa o materializa).
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
-import { STATUS_LANCAMENTO } from '../lib/lancamento-status.js'
+import { MOTIVO_MAX, STATUS_LANCAMENTO } from '../lib/lancamento-status.js'
 import {
   COMPONENTES_RECEITA,
   consultarReceitaMensal,
   desfazerRecebimento,
+  desperderTitulo,
   gerarTitulosReceita,
   hojeSaoPaulo,
   listarTitulosReceita,
+  perderTitulo,
   receberTitulo,
   totalizarTitulos,
 } from '../services/receitas-comercial.js'
@@ -47,6 +52,10 @@ const receberSchema = z.object({
   valor_pago: moneySchema.refine((v) => v > 0, 'valor_pago deve ser maior que zero').optional(),
   data_pagamento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'data_pagamento deve estar no formato AAAA-MM-DD').optional(),
   observacao: z.string().max(500).nullable().optional(),
+}).strict()
+
+const perderSchema = z.object({
+  motivo: z.string().max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
 }).strict()
 
 function erro(reply, error) {
@@ -105,7 +114,10 @@ export async function financeiroReceitasRoutes(app) {
         const result = await gerarTitulosReceita(db, { tenantId: tenant_id, mes: parsed.data.mes, actorUserId: sub ?? null })
         app.audit?.log?.(request, {
           action: 'receita_titulos.gerar', entity_type: 'receita_titulos', entity_id: null,
-          metadata: { mes: result.mes, criados: result.criados, atualizados: result.atualizados, removidos: result.removidos },
+          metadata: {
+            mes: result.mes, criados: result.criados, atualizados: result.atualizados, removidos: result.removidos,
+            perdidos_preservados: result.perdidos_preservados,
+          },
         })?.catch((err) => app.log.error({ err }, 'audit log failed'))
         return { ...result, totais: totalizarTitulos(result.itens) }
       } catch (error) {
@@ -148,6 +160,45 @@ export async function financeiroReceitasRoutes(app) {
           action: 'receita_titulo.desfazer', entity_type: 'receita_titulo', entity_id: titulo?.id ?? null, metadata: {},
         })?.catch((err) => app.log.error({ err }, 'audit log failed'))
         return titulo
+      } catch (error) {
+        return erro(reply, error)
+      }
+    })
+  })
+
+  app.patch('/v1/financeiro/receitas/:id/perder', { preHandler: write }, async (request, reply) => {
+    const parsed = perderSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id, sub } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        const { item, ja_perdido: jaPerdido } = await perderTitulo(db, {
+          tenantId: tenant_id, id: request.params.id, motivo: parsed.data.motivo, actorUserId: sub ?? null,
+        })
+        app.audit?.log?.(request, {
+          action: 'receita_titulo.perder', entity_type: 'receita_titulo', entity_id: item?.id ?? null,
+          metadata: {
+            id_informado: request.params.id, motivo: item?.perdido_motivo ?? null, ja_perdido: jaPerdido,
+            valor_previsto: item?.valor_previsto, valor_pago: item?.valor_pago,
+          },
+        })?.catch((err) => app.log.error({ err }, 'audit log failed'))
+        return item
+      } catch (error) {
+        return erro(reply, error)
+      }
+    })
+  })
+
+  app.patch('/v1/financeiro/receitas/:id/desperder', { preHandler: write }, async (request, reply) => {
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        const { item, estava_perdido: estavaPerdido } = await desperderTitulo(db, { tenantId: tenant_id, id: request.params.id })
+        app.audit?.log?.(request, {
+          action: 'receita_titulo.desperder', entity_type: 'receita_titulo', entity_id: item?.id ?? null,
+          metadata: { id_informado: request.params.id, estava_perdido: estavaPerdido },
+        })?.catch((err) => app.log.error({ err }, 'audit log failed'))
+        return item
       } catch (error) {
         return erro(reply, error)
       }

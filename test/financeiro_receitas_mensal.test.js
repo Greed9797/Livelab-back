@@ -110,11 +110,11 @@ describe('montarReceitaMensal — competência', () => {
 
   it('agrupa por cliente, avulsas e aportes em blocos; aporte fora do total', () => {
     expect(r.competencia.clientes.map((c) => c.cliente_nome)).toEqual(['Cliente Alfa', 'Cliente Beta', 'Cliente Delta', 'Cliente Épsilon', 'Cliente Gama'])
-    expect(r.competencia.clientes[0].total).toEqual({ previsto: 1300, pago: 100 })
+    expect(r.competencia.clientes[0].total).toEqual({ previsto: 1300, pago: 100, perdido: 0 })
     expect(r.competencia.avulsas.map((a) => a.id)).toEqual([U(21)])
     expect(r.competencia.aportes.map((a) => a.id)).toEqual([U(22)])
     // 1300 + 800 + 800 + 2500 + 500 + 300 (avulsa) — sem o aporte de 1000
-    expect(r.competencia.total).toEqual({ previsto: 6200, pago: 100, aberto: 6100 })
+    expect(r.competencia.total).toEqual({ previsto: 6200, pago: 100, aberto: 6100, perdido: 0 })
   })
 
   it('invariante: competência == DRE.receita.previsto e vencimento == entradas do fluxo', () => {
@@ -138,7 +138,7 @@ describe('montarReceitaMensal — vencimento e a receber', () => {
       ['2026-09-20', 'avulsa', null],
       ['2026-09-20', 'titulo', 'comissao'],
     ])
-    expect(r.vencimento.total).toEqual({ previsto: 2650, pago: 2100, aberto: 550 })
+    expect(r.vencimento.total).toEqual({ previsto: 2650, pago: 2100, aberto: 550, perdido: 0 })
     expect(r.a_receber_mes).toBe(550)
     expect(r.vencimento.itens[1]).toMatchObject({ cliente_nome: 'Cliente Alfa', marca_nome: 'Alfa', descricao: expect.any(String) })
   })

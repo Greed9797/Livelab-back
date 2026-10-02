@@ -81,8 +81,8 @@ describe('status derivado e normalização', () => {
     expect(filtrarLancamentos(itens, { grupo: 'ferramentas' }).map((i) => i.id)).toEqual(['c2'])
     expect(filtrarLancamentos(itens, { q: 'otica' }).map((i) => i.id)).toEqual(['r2'])
     expect(totalizarLancamentos(itens)).toEqual({
-      receita: { previsto: 1500, pago: 200, atrasado: 300, pendente: 1000 },
-      custo: { previsto: 400, pago: 100, atrasado: 300, pendente: 0 },
+      receita: { previsto: 1500, pago: 200, atrasado: 300, pendente: 1000, perdido: 0 },
+      custo: { previsto: 400, pago: 100, atrasado: 300, pendente: 0, cancelado: 0 },
       aportes: { previsto: 0, pago: 0 },
       saldo_previsto: 1100,
       saldo_realizado: 100,
@@ -175,6 +175,7 @@ describe('DRE', () => {
       // v3: manuais pontuais + apresentadora sem componente (legado) + imposto = variáveis
       custos_fixos: { previsto: 0, realizado: 0 },
       custos_variaveis: { previsto: 700, realizado: 100 },
+      perdas: { receita: { valor: 0 } },
       resultado: { previsto: 300, realizado: 900 },
     })
     expect(totais.resultado).toEqual({ previsto: 300, realizado: 900 })

@@ -84,7 +84,7 @@ describe('período, ids e totais', () => {
     expect(totalizarTitulos([
       { valor_previsto: 100, valor_pago: 100, status: 'pago' },
       { valor_previsto: 50, valor_pago: 20, status: 'parcial' },
-    ])).toEqual({ valor_previsto: 150, valor_pago: 120, em_aberto: 30, quantidade: 2, por_status: { pago: 100, parcial: 50 } })
+    ])).toEqual({ valor_previsto: 150, valor_pago: 120, em_aberto: 30, perdido: 0, quantidade: 2, por_status: { pago: 100, parcial: 50 } })
   })
 })
 

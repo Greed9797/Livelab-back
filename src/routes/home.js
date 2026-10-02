@@ -8,7 +8,7 @@ import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql } from '../lib/live-count-sql.js'
 import { countWeekdaysInMonth, countWeekdaysUpTo } from '../lib/dias_uteis.js'
 import { listarCustos } from '../services/custos-plano.js'
-import { buscarConfigFinanceiro, dentroDoCorte } from '../services/financeiro-agregador.js'
+import { buscarConfigFinanceiro, dentroDoCorte, previstoEfetivo } from '../services/financeiro-agregador.js'
 
 const hojeSaoPauloCustos = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date())
 
@@ -180,13 +180,14 @@ export async function homeRoutes(app) {
         // Custos do mês pela fonte única do financeiro (manuais, parcelas e recorrentes,
         // inclusive virtuais), tenant explícito. Imposto materializado fica de fora.
         // Regra de corte do financeiro (tenants.financeiro_data_corte): custos com data
-        // efetiva anterior ao corte ficam fora do total.
+        // efetiva anterior ao corte ficam fora do total. Custo CANCELADO não conta
+        // (previstoEfetivo: só o que já foi pago dele) — mesma regra do DRE.
         Promise.all([
           listarCustos(db, { tenantId: tenant_id, inicio: effectiveMonth, fim: effectiveMonth, hoje: hojeSaoPauloCustos() }),
           buscarConfigFinanceiro(db, tenant_id).then((cfg) => cfg.data_corte),
         ]).then(([itens, dataCorte]) => ({ rows: [{ valor: itens
             .filter((c) => c.tipo !== 'imposto' && dentroDoCorte(c, dataCorte))
-            .reduce((s, c) => s + Number(c.valor_previsto || 0), 0) }] })),
+            .reduce((s, c) => s + previstoEfetivo(c), 0) }] })),
         db.query(`
         SELECT
             c.id,

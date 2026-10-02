@@ -15,7 +15,8 @@ import { marcaFixoVigenciaSql } from '../lib/receita-marca-sql.js'
 import { listarCustos } from '../services/custos-plano.js'
 import {
   atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularDreMes, calcularFluxoCaixa,
-  consultarLancamentos, dataValida, desfazerImposto, hojeSaoPaulo, pagarImposto, resolverPeriodoMeses,
+  consultarLancamentos, dataValida, desfazerImposto, encerrado, hojeSaoPaulo, pagarImposto, previstoEfetivo,
+  resolverPeriodoMeses,
 } from '../services/financeiro-agregador.js'
 
 const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
@@ -23,7 +24,7 @@ const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACH
 // Filtros de GET /lancamentos e payloads de baixa/config (onda 2).
 const lancamentosQuerySchema = z.object({
   natureza: z.enum(['receita', 'custo']).optional(),
-  status: z.enum(['previsto', 'pendente', 'atrasado', 'parcial', 'pago']).optional(),
+  status: z.enum(['previsto', 'pendente', 'atrasado', 'parcial', 'pago', 'perdido', 'cancelado']).optional(),
   grupo: z.string().trim().min(1).max(40).optional(),
   classe: z.enum(['fixo', 'variavel']).optional(),
   origem: z.enum([
@@ -553,9 +554,10 @@ export async function financeiroRoutes(app) {
       // SAÍDA: custos manuais da competência (pontuais, parcelas e recorrentes — inclusive os
       // virtuais ainda não materializados) via listarCustos, fonte única do módulo de custos.
       // Imposto materializado (tipo 'imposto') não é custo manual e fica fora deste contrato.
+      // Custo CANCELADO sai do previsto (conta só o que já foi pago dele; sem pagamento, fora).
       const custosManuais = (await listarCustos(db, {
         tenantId: tenant_id, inicio: startDate.slice(0, 7), fim: endDate.slice(0, 7), hoje: hojeSaoPaulo(),
-      })).filter((c) => c.tipo !== 'imposto')
+      })).filter((c) => c.tipo !== 'imposto' && !(encerrado(c) && previstoEfetivo(c) === 0))
 
       // SAÍDA: adicionais de apresentadora lançados manualmente no fechamento. Não são
       // custos manuais e não entram em comissão: cada linha é descontada exatamente uma vez.
@@ -704,7 +706,7 @@ export async function financeiroRoutes(app) {
         ...custosManuais.map((c) => ({
           categoria: 'custo_manual',
           descricao: c.descricao,
-          valor: round2(c.valor_previsto),
+          valor: round2(previstoEfetivo(c)),
           memoria: {
             custo_id: c.id, tipo: c.tipo, grupo: c.grupo ?? null, origem: c.origem,
             competencia: c.competencia, data_vencimento: c.data_vencimento, status: c.status,

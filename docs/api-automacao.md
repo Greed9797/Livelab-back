@@ -241,6 +241,7 @@ rota:
 | `GET` | `/v1/financeiro/caixa` | Saldo de caixa. Query: `ate` (AAAA-MM-DD) |
 | `GET` | `/v1/financeiro/receita` | Receita do mês (competência × vencimento). Query: `mes` |
 | `GET` | `/v1/financeiro/dre/mes` | DRE do mês. Query: `mes` |
+| `GET` | `/v1/financeiro/painel` | Painel do mês: caixa, recebido/pago, a receber/a pagar com atrasados, projetado de fim de mês. Query: `mes` |
 | `GET` | `/v1/financeiro/resumo` | Resumo da unidade. Query: `inicio`/`fim` (AAAA-MM) ou `mes`+`ano` |
 | `GET` | `/v1/financeiro/fluxo-caixa` | Fluxo de caixa do mês. Query: `mes`, `saldo_inicial` |
 | `GET` | `/v1/financeiro/receitas` | Títulos a receber das marcas. Query: `mes` ou `inicio`/`fim`, `status`, `componente`, `marca_id`, `cliente_id` |

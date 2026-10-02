@@ -432,9 +432,14 @@ export async function clientePortalRoutes(app) {
     const { clienteId, tenantId } = clienteContext
 
     return app.withTenant(tenantId, async (db) => {
-      // Resolve marca ativa do cliente para criar o evento
+      // Resolve marca ativa do cliente para criar o evento. A marca do próprio
+      // cliente (tipo='cliente', cadastro unificado) vem antes de qualquer outra
+      // marca vinculada (afiliada/parceira com cliente_id, invariante I4).
       const marcaQ = await db.query(
-        `SELECT id FROM marcas WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativa' ORDER BY criado_em ASC LIMIT 1`,
+        `SELECT id FROM marcas
+          WHERE cliente_id = $1 AND tenant_id = $2 AND status = 'ativa'
+          ORDER BY (tipo = 'cliente') DESC, criado_em ASC
+          LIMIT 1`,
         [clienteId, tenantId]
       )
       const marcaId = marcaQ.rows[0]?.id ?? null

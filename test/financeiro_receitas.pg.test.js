@@ -143,6 +143,62 @@ describe.skipIf(!url)('receitas do comercial (Postgres real)', () => {
     expect(itens.every((i) => [ids.m1, ids.m2, ids.m3, ids.m5].includes(i.marca_id))).toBe(true)
   })
 
+  it('marca afiliada / própria / parceira / sistema com % > 0 não vira receita (só o GMV operacional)', async () => {
+    const t3 = (await q(`INSERT INTO tenants (nome) VALUES ('t-receitas-nao-cliente') RETURNING id`)).rows[0].id
+    try {
+      const naoCliente = async (nome, tipo, sistema = false) => {
+        const id = (await q(
+          `INSERT INTO marcas (tenant_id, nome, tipo, sistema, data_inicio) VALUES ($1, $2, $3, $4, '2026-01-01') RETURNING id`,
+          [t3, nome, tipo, sistema],
+        )).rows[0].id
+        // condição com fixo e % (ex.: % preenchido como 100 numa marca da casa)
+        await condicao(t3, id, '2026-01-01', { fixo: 500, pct: 100 })
+        await live(t3, id, '2026-08-10T15:00:00-03:00', 80000)
+        await q(
+          `INSERT INTO vendas_atribuidas (tenant_id, origem, origem_id, marca_id, data, gmv, comissao_franquia, status_aprovacao)
+           VALUES ($1, 'video', gen_random_uuid(), $2, '2026-08-20', 3000, 3000, 'aprovada')`,
+          [t3, id],
+        )
+        return id
+      }
+      const afiliada = await naoCliente('Afiliada X', 'afiliada')
+      const propria = await naoCliente('Própria X', 'propria')
+      const parceira = await naoCliente('Parceira X', 'parceira')
+      const sistema = await naoCliente('Livelab Sistema X', 'propria', true)
+      // controle: marca de cliente no mesmo tenant continua gerando fixo + comissão
+      const cli = await marca(t3, 'Cliente Ok', { data_inicio: '2026-01-01' })
+      await condicao(t3, cli.id, '2026-01-01', { fixo: 1000, pct: 10 })
+      await live(t3, cli.id, '2026-08-11T15:00:00-03:00', 20000)
+
+      const itens = await calcularReceitasComerciais(pool, { tenantId: t3, inicio: '2026-08', fim: '2026-08' })
+      for (const id of [afiliada, propria, parceira, sistema]) {
+        expect(itens.filter((i) => i.marca_id === id)).toEqual([])
+      }
+      expect(itens.filter((i) => i.marca_id === cli.id).map((i) => [i.componente, i.valor]).sort())
+        .toEqual([['comissao', 2000], ['fixo', 1000]])
+
+      const titulos = await listarTitulosReceita(pool, { tenantId: t3, inicio: '2026-08', fim: '2026-08', hoje: HOJE })
+      expect(titulos.every((i) => i.marca_id === cli.id && i.marca_tipo === 'cliente')).toBe(true)
+
+      // título materializado ANTES do filtro (marca própria): gerar remove o que não tem baixa
+      await q(
+        `INSERT INTO receita_titulos (tenant_id, marca_id, competencia, componente, valor_previsto, data_vencimento)
+         VALUES ($1, $2, '2026-08-01', 'comissao', 83000, '2026-09-05')`,
+        [t3, propria],
+      )
+      const antes = await listarTitulosReceita(pool, { tenantId: t3, inicio: '2026-08', fim: '2026-08', hoje: HOJE })
+      expect(antes.find((i) => i.marca_id === propria)).toMatchObject({ marca_tipo: 'propria', valor_calculado: 0, divergente: true })
+      const g = await gerarTitulosReceita(pool, { tenantId: t3, mes: '2026-08', hoje: HOJE })
+      expect(g.removidos).toBe(1)
+      expect(g.itens.some((i) => i.marca_id === propria)).toBe(false)
+    } finally {
+      for (const tabela of ['receita_titulos', 'vendas_atribuidas', 'lives', 'audit_log', 'marca_condicoes_comerciais', 'marcas', 'clientes']) {
+        await q(`DELETE FROM ${tabela} WHERE tenant_id = $1`, [t3])
+      }
+      await q('DELETE FROM tenants WHERE id = $1', [t3])
+    }
+  })
+
   it('modo legado (atividade) só cobra fixo em mês com GMV', async () => {
     const itens = await calcularReceitasComerciais(pool, { tenantId: t, inicio: '2026-07', fim: '2026-10', fixo: 'atividade' })
     const fixosM1 = itens.filter((i) => i.marca_id === ids.m1 && i.componente === 'fixo').map((i) => i.competencia)

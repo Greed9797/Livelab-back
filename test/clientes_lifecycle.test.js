@@ -92,3 +92,114 @@ describe('PATCH /v1/clientes/:id lifecycle da marca espelhada', () => {
     await app.close()
   })
 })
+
+describe('cadastro unificado — merge, exclusão e marca_id', () => {
+  const vencedor = '44444444-4444-4444-8444-444444444444'
+  const duplicado = '55555555-5555-4555-8555-555555555555'
+
+  function mergeQuery({ espelhos }) {
+    const calls = []
+    const query = vi.fn(async (sql) => {
+      calls.push(String(sql))
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] }
+      if (sql.includes('FROM clientes') && sql.includes('FOR UPDATE')) {
+        return { rows: [
+          { id: vencedor, nome: 'A', email: 'a@x.com', cnpj: null },
+          { id: duplicado, nome: 'A2', email: 'A@x.com ', cnpj: null },
+        ] }
+      }
+      if (sql.includes('GROUP BY cliente_id')) return { rows: espelhos }
+      if (/^\s*UPDATE (lives|marcas|contratos)/.test(sql)) return { rows: [], rowCount: 0 }
+      if (sql.includes('UPDATE clientes')) return { rows: [{ id: duplicado }] }
+      if (sql.includes('INSERT INTO cliente_merge_auditoria')) return { rows: [] }
+      throw new Error(`query inesperada: ${sql}`)
+    })
+    return { query, calls }
+  }
+
+  it('merge com marca espelho nos dois clientes → 409 MERGE_MARCA_ESPELHO sem mover nada', async () => {
+    const { query, calls } = mergeQuery({ espelhos: [{ cliente_id: vencedor, n: 1 }, { cliente_id: duplicado, n: 1 }] })
+    const app = buildApp(query)
+    await app.register(clientesRoutes)
+    const res = await app.inject({ method: 'POST', url: '/v1/clientes/merge-restrito', payload: { vencedor_id: vencedor, duplicado_id: duplicado } })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().code).toBe('MERGE_MARCA_ESPELHO')
+    expect(calls.some((sql) => /^\s*UPDATE/.test(sql))).toBe(false)
+    expect(calls).toContain('ROLLBACK')
+    await app.close()
+  })
+
+  it('merge com só uma marca espelho segue o fluxo antigo', async () => {
+    const { query } = mergeQuery({ espelhos: [{ cliente_id: duplicado, n: 1 }] })
+    const app = buildApp(query)
+    await app.register(clientesRoutes)
+    const res = await app.inject({ method: 'POST', url: '/v1/clientes/merge-restrito', payload: { vencedor_id: vencedor, duplicado_id: duplicado } })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ success: true, criterio: 'email' })
+    await app.close()
+  })
+
+  it('violação do índice de marca espelho vira 409 (corrida), não 500', async () => {
+    const { query } = mergeQuery({ espelhos: [] })
+    const base = query.getMockImplementation()
+    query.mockImplementation(async (sql, params) => {
+      if (/^\s*UPDATE marcas/.test(sql)) throw Object.assign(new Error('dup'), { code: '23505', constraint: 'uniq_marca_cliente_por_tenant' })
+      return base(sql, params)
+    })
+    const app = buildApp(query)
+    await app.register(clientesRoutes)
+    const res = await app.inject({ method: 'POST', url: '/v1/clientes/merge-restrito', payload: { vencedor_id: vencedor, duplicado_id: duplicado } })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().code).toBe('MERGE_MARCA_ESPELHO')
+    await app.close()
+  })
+
+  it('DELETE arquiva a marca espelho do cliente na mesma transação', async () => {
+    const calls = []
+    const query = vi.fn(async (sql, params) => {
+      calls.push([String(sql), params])
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] }
+      if (sql.includes('UPDATE clientes SET deleted_at')) return { rows: [{ id: clienteId }] }
+      if (sql.includes("UPDATE marcas SET status = 'arquivada'")) return { rows: [] }
+      throw new Error(`query inesperada: ${sql}`)
+    })
+    const app = buildApp(query)
+    await app.register(clientesRoutes)
+    const res = await app.inject({ method: 'DELETE', url: `/v1/clientes/${clienteId}` })
+    expect(res.statusCode).toBe(200)
+    const arquivar = calls.find(([sql]) => sql.includes("UPDATE marcas SET status = 'arquivada'"))
+    expect(arquivar[0]).toContain("tipo = 'cliente'")
+    expect(arquivar[1]).toEqual([clienteId, tenantId])
+    expect(calls.map(([sql]) => sql)).toEqual(['BEGIN', expect.stringContaining('deleted_at'), expect.stringContaining('arquivada'), 'COMMIT'])
+    await app.close()
+  })
+
+  it('DELETE de cliente inexistente → 404 sem tocar marca', async () => {
+    const calls = []
+    const query = vi.fn(async (sql) => {
+      calls.push(String(sql))
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] }
+      return { rows: [] }
+    })
+    const app = buildApp(query)
+    await app.register(clientesRoutes)
+    const res = await app.inject({ method: 'DELETE', url: `/v1/clientes/${clienteId}` })
+    expect(res.statusCode).toBe(404)
+    expect(calls.some((sql) => sql.includes('UPDATE marcas'))).toBe(false)
+    await app.close()
+  })
+
+  it('GET /v1/clientes/:id acrescenta marca_id (marca tipo cliente principal)', async () => {
+    const query = vi.fn(async (sql) => {
+      expect(sql).toContain("m.tipo = 'cliente'")
+      expect(sql).toContain('AS marca_id')
+      return { rows: [{ id: clienteId, nome: 'Cliente', marca_id: marcaId }] }
+    })
+    const app = buildApp(query)
+    await app.register(clientesRoutes)
+    const res = await app.inject({ method: 'GET', url: `/v1/clientes/${clienteId}` })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject({ id: clienteId, nome: 'Cliente', marca_id: marcaId })
+    await app.close()
+  })
+})

@@ -11,7 +11,7 @@ import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
-import { marcaFixoVigenciaSql } from '../lib/receita-marca-sql.js'
+import { marcaFixoVigenciaSql, marcaGeraReceitaSql } from '../lib/receita-marca-sql.js'
 import { listarCustos } from '../services/custos-plano.js'
 import {
   atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularDreMes, calcularFluxoCaixa,
@@ -198,13 +198,18 @@ export async function financeiroRoutes(app) {
             COUNT(*)::int AS total_lives,
             -- comissão de franquia variável = gmv × pct da marca resolvida (MESMA regra de
             -- comissao.js/commission-engine), calculada na hora — sem coluna estagnada.
-            COALESCE(SUM(${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0), 0) AS comissao_franquia_lives,
+            -- Só marca que gera receita (cliente, não sistema): GMV de afiliada/própria/
+            -- parceira × % não é comissão da franquia (decisão do dono, cadastro unificado F4b).
+            COALESCE(SUM(CASE WHEN ${marcaGeraReceitaSql('mg')}
+                              THEN ${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0
+                              ELSE 0 END), 0) AS comissao_franquia_lives,
             COALESCE(SUM(CASE WHEN mc.id IS NOT NULL AND COALESCE(mc.comissao_franquia_pct, 0) > 0 THEN 1 ELSE 0 END), 0)::int AS comissao_configurada,
             -- "faltante" agora = live COM gmv mas SEM marca/pct resolvível (problema real de
             -- config), não mais um artefato de timing do motor de comissão.
             COALESCE(SUM(CASE WHEN ${liveGmvSql('l')} > 0 AND (mc.id IS NULL OR COALESCE(mc.comissao_franquia_pct, 0) = 0) THEN 1 ELSE 0 END), 0)::int AS comissao_faltante_count
           FROM lives l
           ${marcaResolveLateralSql('$3')}
+          LEFT JOIN marcas mg ON mg.id = l.marca_id AND mg.tenant_id = $3::uuid
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND ${activeLiveSql('l')}
@@ -216,10 +221,12 @@ export async function financeiroRoutes(app) {
             COALESCE(SUM(vr.gmv_atribuido), 0) AS gmv_videos,
             COALESCE(SUM(vr.pedidos_atribuidos), 0)::int AS pedidos_videos,
             COUNT(*)::int AS total_videos,
-            COALESCE(SUM(CASE WHEN mc.id IS NOT NULL
+            COALESCE(SUM(CASE WHEN NOT (${marcaGeraReceitaSql('mg')}) THEN 0
+                              WHEN mc.id IS NOT NULL
                               THEN va.gmv * COALESCE(mc.comissao_franquia_pct, 0) / 100.0
                               ELSE va.comissao_franquia END), 0) AS comissao_franquia_videos
           FROM video_registros vr
+          LEFT JOIN marcas mg ON mg.id = vr.marca_id AND mg.tenant_id = $3::uuid
           LEFT JOIN vendas_atribuidas va
             ON va.tenant_id = vr.tenant_id AND va.origem = 'video' AND va.origem_id = vr.id
            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
@@ -268,10 +275,15 @@ export async function financeiroRoutes(app) {
              AND va.data >= $1::date AND va.data <= $2::date
            GROUP BY va.marca_id, date_trunc('month', va.data::timestamp)
         ),
+        -- Só marcas que geram receita (marcaGeraReceitaSql — mesma regra de
+        -- comissaoMarcaMensalSql/receitas-comercial): afiliada/própria/parceira/sistema
+        -- têm GMV, mas o GMV × % delas não é receita da franquia (F4b).
         comissao_marca AS (
-          SELECT marca_id, mes, SUM(comissao) AS comissao
-            FROM comissao_marca_raw
-           GROUP BY marca_id, mes
+          SELECT cmr.marca_id, cmr.mes, SUM(cmr.comissao) AS comissao
+            FROM comissao_marca_raw cmr
+            JOIN marcas mg ON mg.id = cmr.marca_id AND mg.tenant_id = $3::uuid
+           WHERE ${marcaGeraReceitaSql('mg')}
+           GROUP BY cmr.marca_id, cmr.mes
         ),
         -- Fixo mensal das marcas tipo='cliente' por vigência (valor × fator de rateio).
         -- Fonte compartilhada marcaFixoMensalSql() = marcaFixoVigenciaSql — mesma do /operacional e das receitas.

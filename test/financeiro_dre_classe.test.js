@@ -293,3 +293,29 @@ describe('rotas', () => {
     await app.close()
   })
 })
+
+describe('montarDreDetalhe — receita por cliente com marcas sem cliente (cadastro unificado F4a)', () => {
+  const titulo = (marca_id, marca_nome, cliente_id, cliente_nome, valor, origem = 'marca_comissao') => ({
+    natureza: 'receita', origem, competencia: '2026-10-01', data_vencimento: '2026-11-05',
+    marca_id, marca_nome, cliente_id, cliente_nome, valor_previsto: valor, valor_pago: 0,
+  })
+  const itens = [
+    titulo('m-a', 'Afiliada A', null, null, 100),
+    titulo('m-b', 'Afiliada B', null, null, 50),
+    titulo('m-c', 'Cliente C', 'c-1', 'Cliente C', 300, 'marca_fixo'),
+  ]
+  const d = montarDreDetalhe({ mes: '2026-10', itens, aliquota: 10 })
+
+  it('cada marca sem cliente vira o próprio grupo (chave sem-cliente:<marca_id>), com o nome da marca', () => {
+    const semCliente = d.receita.por_cliente.filter((c) => c.cliente_id == null)
+    expect(semCliente).toHaveLength(2)
+    expect(semCliente.map((c) => c.cliente_nome).sort()).toEqual(['Afiliada A', 'Afiliada B'])
+    expect(semCliente.every((c) => c.marcas.length === 1)).toBe(true)
+  })
+
+  it('totais idênticos (cosmético)', () => {
+    const soma = d.receita.por_cliente.reduce((s, c) => s + c.total.previsto, 0)
+    expect(soma).toBe(450)
+    expect(d.receita.por_cliente.find((c) => c.cliente_id === 'c-1').cliente_nome).toBe('Cliente C')
+  })
+})

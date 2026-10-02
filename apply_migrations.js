@@ -168,6 +168,9 @@ export const MIGRATIONS_LIST = [
   '171_custos_classe.sql',
   '172_apresentadora_pagamentos_componente.sql',
   '173_perdas_cancelamentos.sql',
+  '174_cadastro_unificado_diagnostico.sql',
+  '175_lives_cliente_da_marca.sql',
+  '176_lives_cliente_id_backfill.sql',
 ]
 
 async function ensureMigrationsTable(client) {

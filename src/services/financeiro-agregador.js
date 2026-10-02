@@ -537,8 +537,10 @@ function receitaPorCliente(titulos) {
   const clientes = new Map()
   for (const t of titulos) {
     const cid = t.cliente_id ?? null
-    const ck = cid ?? '__sem_cliente__'
-    if (!clientes.has(ck)) clientes.set(ck, { cliente_id: cid, cliente_nome: t.cliente_nome ?? null, marcas: new Map(), total: pr(), perdido: 0 })
+    // Mesma chave de receitas-comercial: marca sem cliente vira o próprio grupo
+    // (antes todas caíam juntas em '__sem_cliente__'). Totais idênticos.
+    const ck = cid ?? `sem-cliente:${t.marca_id}`
+    if (!clientes.has(ck)) clientes.set(ck, { cliente_id: cid, cliente_nome: t.cliente_nome ?? (cid ? null : t.marca_nome ?? null), marcas: new Map(), total: pr(), perdido: 0 })
     const c = clientes.get(ck)
     if (!c.marcas.has(t.marca_id)) {
       c.marcas.set(t.marca_id, { marca_id: t.marca_id, marca_nome: t.marca_nome ?? null, fixo: pr(), comissao: pr(), gmv: null, pct: null, perdido: 0 })

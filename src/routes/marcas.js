@@ -9,7 +9,8 @@ import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
-import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
+import { marcaStatusOperacionalSql as marcaStatusBaseSql } from '../lib/entity-status.js'
+import { marcaGeraReceitaSql } from '../lib/receita-marca-sql.js'
 import {
   atualizarVencimentoCondicao,
   confirmarCondicaoMarca,
@@ -24,7 +25,10 @@ import { vencimentoCondicaoSchema } from '../lib/marca-condicoes.js'
 const MARCAS_CACHE_TTL_MS = Number(process.env.MARCAS_CACHE_TTL_MS ?? 300_000)
 
 /** Namespaces de cache afetados por qualquer escrita de marca/cliente. */
-export const LISTAGEM_NAMESPACES = ['marcas:list', 'clientes:list']
+export const LISTAGEM_NAMESPACES = ['marcas:list', 'clientes:list', 'cadastros:list']
+
+// Rotas de gestão: cliente soft-deletado (deleted_at) também derruba a marca espelho.
+const marcaStatusOperacionalSql = (marca = 'm', cliente = 'c') => marcaStatusBaseSql(marca, cliente, { considerarExcluido: true })
 
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, ${marcaStatusOperacionalSql()} AS status,
@@ -33,7 +37,8 @@ const marcaCols = `
   m.data_inicio, m.data_fim,
   m.observacoes, m.origem_dados, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
-  COALESCE(am_agg.apresentadoras, '[]'::json) AS apresentadoras
+  COALESCE(am_agg.apresentadoras, '[]'::json) AS apresentadoras,
+  (${marcaGeraReceitaSql('m')}) AS gera_receita
 `
 
 const marcaBaseSchema = z.object({
@@ -773,6 +778,31 @@ export async function marcasRoutes(app) {
       })) {
         await db.query('ROLLBACK')
         return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
+      }
+
+      // Entrar/sair de tipo='cliente' ou trocar a ficha de uma marca de cliente muda
+      // quem gera receita e quem é o cliente da marca: isso é o fluxo de cadastro
+      // (POST /v1/cadastros/:id/promover-cliente), não um PATCH de marca. Antes, o
+      // PATCH deixava a marca de cliente órfã/duplicada (I2/I4/I5).
+      if (updates.tipo !== undefined || updates.cliente_id !== undefined) {
+        const atualQ = await db.query(
+          `SELECT tipo, cliente_id FROM marcas WHERE id = $1 AND tenant_id = $2::uuid FOR UPDATE`,
+          [request.params.id, request.user.tenant_id],
+        )
+        const atual = atualQ.rows[0]
+        if (atual) {
+          const eraCliente = atual.tipo === 'cliente'
+          const seraCliente = (updates.tipo ?? atual.tipo) === 'cliente'
+          const trocaFicha = eraCliente && seraCliente && updates.cliente_id !== undefined
+            && (updates.cliente_id ?? null) !== (atual.cliente_id ?? null)
+          if (eraCliente !== seraCliente || trocaFicha) {
+            await db.query('ROLLBACK')
+            return reply.code(409).send({
+              code: 'USE_CADASTRO_ENDPOINT',
+              error: 'Mudar o tipo cliente ou o cliente da marca é feito pelo cadastro (POST /v1/cadastros/:id/promover-cliente).',
+            })
+          }
+        }
       }
 
       const result = fields.length > 0

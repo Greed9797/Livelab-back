@@ -202,6 +202,9 @@ function tituloPublico({ stored, calc, hoje }) {
     data_pagamento: dataPagamento,
     marca_id: src.marca_id,
     marca_nome: marcaNome,
+    // 'cliente' gera receita; outro tipo só aparece por título materializado antigo
+    // (antes do filtro de marcaGeraReceitaSql) — a tela sinaliza para revisão.
+    marca_tipo: calc?.marca_tipo ?? stored?.marca_tipo ?? null,
     cliente_id: stored?.cliente_id ?? calc?.cliente_id ?? null,
     cliente_nome: src.cliente_nome ?? calc?.cliente_nome ?? null,
     tipo_cobranca: tipoCobranca,
@@ -223,7 +226,7 @@ async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId 
     `SELECT rt.id, rt.tenant_id, rt.marca_id, rt.cliente_id, rt.competencia, rt.componente,
             rt.valor_previsto, rt.valor_pago, rt.data_vencimento, rt.data_pagamento, rt.observacao,
             rt.perdido_em, rt.perdido_motivo, rt.perdido_por,
-            m.nome AS marca_nome, cl.nome AS cliente_nome, m.tipo_cobranca
+            m.nome AS marca_nome, m.tipo AS marca_tipo, cl.nome AS cliente_nome, m.tipo_cobranca
        FROM receita_titulos rt
        JOIN marcas m ON m.id = rt.marca_id AND m.tenant_id = rt.tenant_id
        LEFT JOIN clientes cl ON cl.id = rt.cliente_id AND cl.tenant_id = rt.tenant_id
@@ -622,6 +625,7 @@ export function montarReceitaMensal({
         cliente_nome: base.cliente_nome ?? linha?.cliente_nome ?? vig?.cliente_nome ?? null,
         marca_id: id,
         marca_nome: base.marca_nome ?? linha?.marca_nome ?? vig?.marca_nome ?? null,
+        marca_tipo: base.marca_tipo ?? linha?.marca_tipo ?? (vig ? 'cliente' : null), // vigentes = só tipo cliente
         tipo_cobranca: tipo,
         pct,
         gmv: round2(linha?.gmv ?? 0),

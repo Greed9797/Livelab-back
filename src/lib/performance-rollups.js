@@ -4,6 +4,7 @@ import { liveGmvSql } from './metric-sql.js'
 import { activeLiveSql } from './live-merge-sql.js'
 import { notArchivedSql } from './live-count-sql.js'
 import { officialLiveGmvSql, scaledStoredCommissionSql } from './sale-gmv-sql.js'
+import { marcaGeraReceitaSql } from './receita-marca-sql.js'
 
 /**
  * Parte do GMV oficial que entra na comissão desta linha.
@@ -250,9 +251,13 @@ export async function getPerformanceRanking(db, {
         SELECT * FROM video_source
       )
       ,marca_composicao AS (
+        -- Comissão de franquia (variável + fixo) só de marca que gera receita
+        -- (marcaGeraReceitaSql: tipo cliente e não sistema — mesma regra do financeiro).
+        -- Afiliada/própria/parceira continuam com GMV, pedidos e comissão de
+        -- apresentadora; só a comissão de franquia some (cadastro unificado F4b).
         SELECT combined.marca_id, combined.mes,
-               COALESCE(SUM(combined.comissao_franquia), 0) AS comissao,
-               COALESCE(MAX(CASE WHEN m.tipo = 'cliente'
+               COALESCE(SUM(CASE WHEN ${marcaGeraReceitaSql('m')} THEN combined.comissao_franquia ELSE 0 END), 0) AS comissao,
+               COALESCE(MAX(CASE WHEN ${marcaGeraReceitaSql('m')}
                  THEN COALESCE(mc.fixo_mensal, m.valor_fixo_minimo) ELSE 0 END), 0) AS fixo,
                COALESCE(MAX(CASE WHEN m.tipo = 'cliente'
                  THEN COALESCE(mc.tipo_cobranca, m.tipo_cobranca, 'fixo_mais_comissao')

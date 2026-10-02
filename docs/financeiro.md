@@ -19,7 +19,7 @@ O financeiro **não calcula** a regra comercial. Consome títulos virtuais + mat
 
 ### Marcas e condições
 
-Fonte única: `marca_condicoes_comerciais` vigente no mês da competência (não cancelada; maior `inicio_vigencia` ≤ 1º dia do mês), com fallback nos campos da marca (`valor_fixo_minimo`, `tipo_cobranca`, `comissao_franquia_pct`). Só marcas `tipo = 'cliente'` e `sistema IS NOT TRUE`.
+Fonte única: `marca_condicoes_comerciais` vigente no mês da competência (não cancelada; maior `inicio_vigencia` ≤ 1º dia do mês), com fallback nos campos da marca (`valor_fixo_minimo`, `tipo_cobranca`, `comissao_franquia_pct`). Só marcas `tipo = 'cliente'` e `sistema IS NOT TRUE` (`marcaGeraReceitaSql`) — vale para o fixo **e** para a comissão: GMV de marca afiliada/própria/parceira ou da marca-sistema, mesmo com `%` > 0 na condição, não vira título. Título já materializado de marca não-cliente continua listado (com `marca_tipo`) até ser removido pelo `POST .../gerar` (sem baixa) ou dado como perdido; a aba Receita mostra um aviso nele.
 
 Dois componentes por marca × competência (quando valor > 0):
 
@@ -42,6 +42,34 @@ Títulos: calculados (`id` virtual `calc:<marca_id>:<YYYY-MM>:<fixo|comissao>`) 
 O financeiro comercial **não lê** a tabela `contratos`. `src/routes/contratos.js` (entidade formal: `valor_fixo`, `comissao_pct`, status/auditoria) é fluxo separado (cadastro, aprovação, dashboards de cliente). A janela de cobrança do DRE/títulos usa **datas na marca** (`data_inicio` / `data_fim`) + condição vigente, não `contratos.valor_fixo`.
 
 A CONFIRMAR: jobs de billing/gateway que ainda leiam `contratos.valor_fixo` ficam fora deste documento (`/v1/financeiro/*` não os chama).
+
+### Cadastro unificado (marca + ficha de cliente) — migrations 174–176
+
+A **marca** é a entidade do cadastro (id público = `marca_id`). A linha em `clientes` é a ficha comercial/faturamento 1:1 **opcional** da marca `tipo = 'cliente'` (cnpj, contato, `gateway_customer_id`, `user_id` do portal, contratos, briefing). Nenhuma tabela/coluna foi apagada; ids virtuais `calc:<marca_id>:<mes>:<componente>` e `rec:<uuid>:<mes>` mantêm o significado; `receita_titulos` não recebeu UPDATE/DELETE.
+
+- Rotas novas: `GET/POST /v1/cadastros`, `GET/PATCH /v1/cadastros/:id` (aceita `marca_id` ou `cliente_id`), `POST /v1/cadastros/:id/promover-cliente` — `src/routes/cadastros.js`, `src/services/cadastros.js`, SQL em `src/lib/cadastro-sql.js`. Contrato em `docs/api-automacao.md` ("Cadastros").
+- `gera_receita` = `marcaGeraReceitaSql` (tipo cliente e não sistema). Afiliada/própria/parceira ficam na mesma lista, marcadas por `tipo`, sem gerar receita.
+- Dinheiro não muda por aqui: condições seguem em `/v1/marcas/:id/condicoes`; campo financeiro no cadastro → `409 USE_MARCA_CONDITION_ENDPOINT`. Promover a cliente com condição de fixo/% vigente **antes** de `data_inicio` → `409 PROMOCAO_CONDICAO_RETROATIVA` (GMV antigo viraria comissão) até `confirmar_retroativo: true`; `data_inicio` vazia é preenchida com a data informada ou hoje (o fixo por vigência começa ali).
+- `PATCH /v1/marcas/:id` que entra/sai de `tipo = 'cliente'` ou troca a ficha de marca de cliente → `409 USE_CADASTRO_ENDPOINT`. Merge de clientes com marca espelho nos dois → `409 MERGE_MARCA_ESPELHO` (antes 500). `DELETE /v1/clientes/:id` arquiva a marca espelho; cliente soft-deletado aparece como `arquivada` em `/v1/marcas` e `/v1/cadastros`.
+- `lives.cliente_id`: gatilho `lives_cliente_da_marca` (175) preenche só quando NULL e a marca é tipo cliente; backfill 176 com backup `migr176_lives_cliente_id_backup`, sem tocar lives em união. Receita/comissão resolvem por `marca_id` — nenhum valor muda. Rollback: `docs/ops/rollback-175-176-lives-cliente-id.sql`. Diagnóstico antes/depois: `docs/ops/consultas-unificacao-cadastro.sql` (I1..I15, E1..E3).
+
+### Comissão de marca não-cliente (F4b) — o que muda nos números
+
+Mesma regra dos títulos (`marcaGeraReceitaSql`) passou a valer nas telas que ainda somavam GMV × % de **qualquer** marca. Para marca `tipo = 'cliente'` (não sistema) **nada muda** (teste de equivalência em `test/cadastro_unificacao.pg.test.js`). Para afiliada/própria/parceira/sistema com `%` > 0 na condição, a comissão de franquia deixa de aparecer; GMV, pedidos, lives/vídeos e comissão de apresentadora continuam.
+
+| Tela / rota | Campo | Muda? |
+| --- | --- | --- |
+| Comissões — `GET /v1/comissoes/resumo` | `comissao_franquia`, `totais.comissao` | cai Σ (GMV × % de lives + comissão de vídeo) das marcas não-cliente no período |
+| idem | `gmv_*`, `pedidos_total`, `registros`, `comissao_apresentadoras`, `comissao_franqueadora` | não |
+| Comissões por marca / Ranking — `GET /v1/comissoes/marcas`, `GET /v1/ranking/marcas` (`src/lib/performance-rollups.js`) | `comissao_franquia` (e `comissao_fixo`) da linha de marca não-cliente | vira 0 (a linha continua, ordenada por GMV) |
+| idem | linha de marca cliente; `comissao_franqueadora` de qualquer marca | não |
+| Resumo legado — `GET /v1/financeiro/resumo` (`src/routes/financeiro.js`) | `receita_liquida`, `parcelas_competencia[].comissao/receita`, `fat_liquido` | cai a mesma comissão não-cliente (passa a bater com a soma dos títulos/receita comercial) |
+| idem | `comissao_franquia_lives`, `comissao_franquia_videos` | cai a parte de marca não-cliente |
+| idem | `gmv_*`, `pedidos`, `fixo_mensal`, `comissao_configurada`, `comissao_faltante_count`, `meses`/`totais` (DRE) | não |
+| DRE do mês — `GET /v1/financeiro/dre/mes` (`receita.por_cliente`) | agrupamento | marca sem cliente vira grupo próprio (`sem-cliente:<marca_id>`, nome = marca); totais iguais (F4a) |
+| Ranking da Home / ranking de apresentadoras / público | — | não (não usam comissão de franquia por marca) |
+
+Fora desta entrega (continuam como antes): detalhe por linha de venda (`/v1/comissoes/pendentes`, `/por-live`, `/export-csv`, `/memoria`, `/v1/lives/:id/comissoes`), `/v1/financeiro/faturamento` e títulos já materializados de marca não-cliente (I9).
 
 ---
 

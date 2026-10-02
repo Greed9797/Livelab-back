@@ -57,6 +57,8 @@ ROTAS = [
     ('PATCH', '/v1/marcas/:id', 'Editar marca (identidade; campos financeiros vão em condicoes)'),
     ('POST', '/v1/marcas/:id/condicoes/preview', 'Prévia do impacto de uma nova competência'),
     ('POST', '/v1/marcas/:id/condicoes', 'Confirmar condição comercial (Idempotency-Key + expected_revision)'),
+    ('GET', '/v1/cadastros', 'Listar cadastros (marca + ficha; tipo, gera_receita; ficha nula para a chave)'),
+    ('GET', '/v1/cadastros/:id', 'Ver um cadastro (aceita marca_id ou cliente_id)'),
     ('GET', '/v1/apresentadoras', 'Listar apresentadoras'),
     ('POST', '/v1/apresentadoras', 'Cadastrar usuária apresentadora (nome, email; papel opcional)'),
     ('PATCH', '/v1/apresentadoras/:id', 'Editar apresentadora'),

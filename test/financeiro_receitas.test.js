@@ -9,7 +9,14 @@ import {
   resolverVencimentoCondicao,
   VENCIMENTO_PADRAO,
 } from '../src/lib/marca-condicoes.js'
-import { marcaFixoVigenciaSql, receitaMarcaMensalSql, vencimentoSql } from '../src/lib/receita-marca-sql.js'
+import {
+  comissaoMarcaMensalSql,
+  marcaFixoVigenciaSql,
+  marcaGeraReceitaSql,
+  marcasCondicaoVigenteMesSql,
+  receitaMarcaMensalSql,
+  vencimentoSql,
+} from '../src/lib/receita-marca-sql.js'
 import { financeiroReceitasRoutes } from '../src/routes/financeiro_receitas.js'
 import { marcasRoutes } from '../src/routes/marcas.js'
 import {
@@ -97,6 +104,19 @@ describe('SQL de receita por vigência', () => {
     expect(sql).not.toContain('gmv_atribuido > 0') // não depende de atividade
     expect(receitaMarcaMensalSql({ fixo: 'atividade' })).toContain('gmv_atribuido > 0')
   })
+
+  it('comissão (GMV × %) só para marca de cliente não-sistema — mesmo filtro do fixo', () => {
+    expect(marcaGeraReceitaSql('mr')).toBe("mr.tipo = 'cliente' AND COALESCE(mr.sistema, false) = false")
+    const comissao = comissaoMarcaMensalSql()
+    expect(comissao).toContain('JOIN marcas mr ON mr.id = raw.marca_id AND mr.tenant_id = $3::uuid')
+    expect(comissao).toContain(marcaGeraReceitaSql('mr'))
+    // receita mensal (títulos, DRE, painel, aba Receita) herda o filtro nos dois componentes
+    const receita = receitaMarcaMensalSql()
+    expect(receita).toContain(marcaGeraReceitaSql('mr'))
+    expect(receita).toContain(marcaGeraReceitaSql('m'))
+    expect(marcaFixoVigenciaSql()).toContain(marcaGeraReceitaSql('m'))
+    expect(marcasCondicaoVigenteMesSql()).toContain(marcaGeraReceitaSql('m'))
+  })
 })
 
 function row(extra = {}) {
@@ -143,6 +163,19 @@ describe('calcularReceitasComerciais / listarTitulosReceita (db mock)', () => {
     for (const campo of ['id', 'natureza', 'origem', 'descricao', 'competencia', 'data_vencimento', 'valor_previsto', 'valor_pago', 'data_pagamento', 'status']) {
       expect(comissao).toHaveProperty(campo)
     }
+    expect(comissao.marca_tipo).toBe('cliente')
+  })
+
+  it('título materializado antigo de marca não-cliente continua listado, com marca_tipo para a tela sinalizar', async () => {
+    const outraMarca = '00000000-0000-4000-8000-000000000009'
+    const stored = [{
+      id: '00000000-0000-4000-8000-000000000010', marca_id: outraMarca, cliente_id: null, competencia: '2026-08-01',
+      componente: 'comissao', valor_previsto: '80000', valor_pago: '0', data_vencimento: '2026-09-05', data_pagamento: null,
+      observacao: null, marca_nome: 'Marca Própria', marca_tipo: 'propria', cliente_nome: null, tipo_cobranca: 'fixo_mais_comissao',
+    }]
+    const itens = await listarTitulosReceita({ query: dbMock({ stored }) }, { tenantId, inicio: '2026-08', hoje: '2026-09-30' })
+    const antigo = itens.find((i) => i.marca_id === outraMarca)
+    expect(antigo).toMatchObject({ marca_tipo: 'propria', materializado: true, valor_calculado: 0, divergente: true })
   })
 })
 

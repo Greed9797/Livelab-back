@@ -9,7 +9,8 @@ import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
-import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
+import { marcaStatusOperacionalSql as marcaStatusBaseSql } from '../lib/entity-status.js'
+import { marcaGeraReceitaSql } from '../lib/receita-marca-sql.js'
 import {
   atualizarVencimentoCondicao,
   confirmarCondicaoMarca,
@@ -24,7 +25,9 @@ import { vencimentoCondicaoSchema } from '../lib/marca-condicoes.js'
 const MARCAS_CACHE_TTL_MS = Number(process.env.MARCAS_CACHE_TTL_MS ?? 300_000)
 
 /** Namespaces de cache afetados por qualquer escrita de marca/cliente. */
-export const LISTAGEM_NAMESPACES = ['marcas:list', 'clientes:list']
+export const LISTAGEM_NAMESPACES = ['marcas:list', 'clientes:list', 'cadastros:list']
+
+const marcaStatusOperacionalSql = marcaStatusBaseSql
 
 const marcaCols = `
   m.id, m.tenant_id, m.cliente_id, m.nome, m.tipo, ${marcaStatusOperacionalSql()} AS status,
@@ -33,7 +36,8 @@ const marcaCols = `
   m.data_inicio, m.data_fim,
   m.observacoes, m.origem_dados, m.criado_em, m.atualizado_em,
   c.nome AS cliente_nome,
-  COALESCE(am_agg.apresentadoras, '[]'::json) AS apresentadoras
+  COALESCE(am_agg.apresentadoras, '[]'::json) AS apresentadoras,
+  (${marcaGeraReceitaSql('m')}) AS gera_receita
 `
 
 const marcaBaseSchema = z.object({

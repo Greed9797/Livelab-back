@@ -343,9 +343,18 @@ export async function clientesRoutes(app) {
                 (c.horas_contratadas - c.horas_consumidas) AS horas_restantes,
                 COALESCE(mtr.gmv_mes, 0) AS gmv_mes,
                 COALESCE(mtr.lives_mes, 0) AS lives_mes,
-                COALESCE(mtr.videos_mes, 0) AS videos_mes
+                COALESCE(mtr.videos_mes, 0) AS videos_mes,
+                mp.id AS marca_id
          FROM clientes cl
          LEFT JOIN users u ON u.id = cl.user_id AND u.tenant_id = cl.tenant_id AND u.papel = 'cliente_parceiro'
+         -- Cadastro unificado: marca tipo='cliente' principal (id público do cadastro).
+         -- Mesma ordem de ensureClienteMarca / resolverCadastroId.
+         LEFT JOIN LATERAL (
+           SELECT m.id FROM marcas m
+            WHERE m.tenant_id = $1::uuid AND m.cliente_id = cl.id AND m.tipo = 'cliente'
+            ORDER BY (m.status = 'ativa') DESC, m.atualizado_em DESC NULLS LAST, m.criado_em ASC
+            LIMIT 1
+         ) mp ON true
          LEFT JOIN LATERAL (
            SELECT horas_contratadas, horas_consumidas
            FROM contratos
@@ -503,8 +512,14 @@ export async function clientesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       // Defesa em profundidade: além do RLS via dbTenant, filtra explícito
       // por tenant_id pra evitar leak se RLS for desabilitado por engano.
+      // marca_id = marca tipo='cliente' principal (cadastro unificado). Só acréscimo.
       const result = await db.query(
-        `SELECT * FROM clientes WHERE id = $1 AND tenant_id = $2`,
+        `SELECT cl.*,
+                (SELECT m.id FROM marcas m
+                  WHERE m.tenant_id = cl.tenant_id AND m.cliente_id = cl.id AND m.tipo = 'cliente'
+                  ORDER BY (m.status = 'ativa') DESC, m.atualizado_em DESC NULLS LAST, m.criado_em ASC
+                  LIMIT 1) AS marca_id
+           FROM clientes cl WHERE cl.id = $1 AND cl.tenant_id = $2`,
         [request.params.id, tenant_id],
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })

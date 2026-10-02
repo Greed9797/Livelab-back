@@ -60,6 +60,10 @@ export const ROTAS_API_KEY = [
   ['PATCH', '/v1/marcas/'],
   ['POST', '/v1/marcas/:id/condicoes/preview'],
   ['POST', '/v1/marcas/:id/condicoes'],
+  // Cadastro unificado (marca + ficha): só leitura para a chave. A ficha
+  // (contato/faturamento) volta nula para a chave — ver services/cadastros.js.
+  ['GET', '/v1/cadastros'],
+  ['GET', '/v1/cadastros/:id'],
   ['GET', '/v1/apresentadoras'],
   ['PATCH', '/v1/apresentadoras/'],
   // Cadastro da apresentadora. Casa EXATO estes POST. Sem barra final:

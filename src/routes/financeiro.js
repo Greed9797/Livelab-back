@@ -15,8 +15,8 @@ import { marcaFixoVigenciaSql } from '../lib/receita-marca-sql.js'
 import { listarCustos } from '../services/custos-plano.js'
 import {
   atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularDreMes, calcularFluxoCaixa,
-  calcularPainelMes, consultarLancamentos, dataValida, desfazerImposto, encerrado, hojeSaoPaulo, pagarImposto, previstoEfetivo,
-  resolverPeriodoMeses,
+  calcularPainelMes, cancelarImposto, consultarLancamentos, dataValida, desfazerImposto, encerrado, hojeSaoPaulo, pagarImposto, previstoEfetivo,
+  reativarImposto, resolverPeriodoMeses,
 } from '../services/financeiro-agregador.js'
 
 const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
@@ -36,6 +36,8 @@ const lancamentosQuerySchema = z.object({
   ]).optional(),
   q: z.string().trim().max(120).optional(),
 }).passthrough()
+
+const cancelarImpostoSchema = z.object({ motivo: z.string().max(300).nullish() }).strict()
 
 const baixaImpostoSchema = z.object({
   valor_pago: moneySchema.refine((v) => v > 0, 'valor_pago deve ser positivo').optional(),
@@ -61,7 +63,7 @@ const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 
 // Erros de serviço (statusCode 4xx) viram resposta; o resto sobe para o error handler.
 function responderErro(reply, error) {
-  if (error?.statusCode && error.statusCode < 500) return reply.code(error.statusCode).send({ error: error.message })
+  if (error?.statusCode && error.statusCode < 500) return reply.code(error.statusCode).send(error.code ? { error: error.message, code: error.code } : { error: error.message })
   throw error
 }
 
@@ -866,6 +868,42 @@ export async function financeiroRoutes(app) {
       const item = await app.withTenant(tenant_id, (db) => desfazerImposto(db, { tenantId: tenant_id, mes, hoje: hojeSaoPaulo() }))
       invalidateTenant(tenant_id)
       app.audit?.log?.(request, { action: 'financeiro.imposto_desfazer', entity_type: 'imposto', entity_id: null, metadata: { mes } })
+        ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
+      return item
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // PATCH /v1/financeiro/impostos/:mes/cancelar {motivo?} — imposto não será pago (409 se já pago)
+  app.patch('/v1/financeiro/impostos/:mes/cancelar', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+    const { mes } = request.params
+    if (!MES_RE.test(mes)) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    const parsed = cancelarImpostoSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id } = request.user
+    try {
+      const item = await app.withTenant(tenant_id, (db) => cancelarImposto(db, {
+        tenantId: tenant_id, mes, motivo: parsed.data.motivo, actorUserId: request.user.sub ?? null, hoje: hojeSaoPaulo(),
+      }))
+      invalidateTenant(tenant_id)
+      app.audit?.log?.(request, { action: 'financeiro.imposto_cancelar', entity_type: 'imposto', entity_id: item.custo_id, metadata: { mes, motivo: parsed.data.motivo ?? null } })
+        ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
+      return item
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // PATCH /v1/financeiro/impostos/:mes/reativar
+  app.patch('/v1/financeiro/impostos/:mes/reativar', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+    const { mes } = request.params
+    if (!MES_RE.test(mes)) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    const { tenant_id } = request.user
+    try {
+      const item = await app.withTenant(tenant_id, (db) => reativarImposto(db, { tenantId: tenant_id, mes, hoje: hojeSaoPaulo() }))
+      invalidateTenant(tenant_id)
+      app.audit?.log?.(request, { action: 'financeiro.imposto_reativar', entity_type: 'imposto', entity_id: item.custo_id, metadata: { mes } })
         ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
       return item
     } catch (error) {

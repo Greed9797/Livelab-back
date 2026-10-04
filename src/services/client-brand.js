@@ -1,3 +1,5 @@
+import { DATA_FIM_REATIVACAO_SQL } from '../lib/marca-lifecycle-sql.js'
+
 /**
  * Invariante operacional: TODO cliente possui exatamente uma marca tipo='cliente'.
  *
@@ -12,7 +14,7 @@
  */
 export async function ensureClienteMarca(
   db,
-  { tenantId, clienteId, activateExisting = false, observacoes = 'Marca de cliente criada automaticamente.', origem = 'manual', baseline = {} } = {},
+  { tenantId, clienteId, activateExisting = false, observacoes = 'Marca de cliente criada automaticamente.', origem = 'manual', baseline = {}, resultado = {} } = {},
 ) {
   if (!tenantId || !clienteId) return null
 
@@ -66,12 +68,16 @@ export async function ensureClienteMarca(
       const updated = await db.query(
         `UPDATE marcas
             SET status = 'ativa',
+                ${DATA_FIM_REATIVACAO_SQL},
                 atualizado_em = NOW()
           WHERE id = $1::uuid
             AND tenant_id = $2::uuid
-          RETURNING id`,
+          RETURNING id, data_fim`,
         [marca.id, tenantId],
       )
+      // Decisão #4: o fixo vem de uma única janela inicio..data_fim (sem lacunas). data_fim já
+      // vencida não é apagada (cobraria os meses parados); sinaliza para a UI ajustar as datas.
+      if (updated.rows[0]?.data_fim) resultado.aviso = 'data_fim_expirada'
       return updated.rows[0]?.id ?? marca.id
     }
     return marca.id

@@ -9,6 +9,7 @@ import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
+import { DATA_FIM_ENCERRAMENTO_SQL, DATA_FIM_REATIVACAO_SQL, limparTitulosFuturosMarca } from '../lib/marca-lifecycle-sql.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 import {
   atualizarVencimentoCondicao,
@@ -464,7 +465,7 @@ export async function marcasRoutes(app) {
           result.rows[0].tiktok_username = d.tiktok_username ?? null
         }
         await db.query('COMMIT')
-        invalidateTenant(tenant_id, LISTAGEM_NAMESPACES)
+        invalidateTenant(tenant_id)
         app.audit?.log?.(request, { action: 'marca.create', entity_type: 'marca', entity_id: result.rows[0].id, metadata: { nome: d.nome, tipo: d.tipo } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         const criada = clienteMarcaExistia ? result.rows[0] : respostaMarcaNova(result.rows[0], d.tipo)
         return reply.code(201).send(criada)
@@ -525,7 +526,7 @@ export async function marcasRoutes(app) {
           actorUserId: sub ?? null,
           origem: origemDaCondicao(request),
         })
-        invalidateTenant(tenant_id, LISTAGEM_NAMESPACES)
+        invalidateTenant(tenant_id)
         return reply.code(result.idempotent ? 200 : 201).send(result)
       } catch (error) {
         return responderErroCondicao(reply, error)
@@ -558,7 +559,7 @@ export async function marcasRoutes(app) {
           vencimento: parsed.data,
           actorUserId: sub ?? null,
         })
-        invalidateTenant(tenant_id, LISTAGEM_NAMESPACES)
+        invalidateTenant(tenant_id)
         return reply.send(condition)
       } catch (error) {
         return responderErroCondicao(reply, error)
@@ -752,12 +753,30 @@ export async function marcasRoutes(app) {
     const fields = Object.keys(updates)
     if (fields.length === 0 && !hasTikTokUpdate) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
 
-    const values = [request.params.id, request.user.tenant_id, ...fields.map((field) => updates[field])]
-    const set = fields.map((field, index) => `${field} = $${index + 3}`).concat('atualizado_em = NOW()').join(', ')
-
     return app.withTenant(request.user.tenant_id, async (db) => {
       await db.query('BEGIN')
       try {
+      // Ciclo de vida do contrato só em TRANSIÇÃO real de status: o front reenvia status 'ativa'
+      // a cada salvar o cadastro e isso não pode apagar um data_fim planejado.
+      let anterior = null
+      if (updates.status !== undefined) {
+        anterior = (await db.query(
+          `SELECT status FROM marcas WHERE id = $1 AND tenant_id = $2::uuid FOR UPDATE`,
+          [request.params.id, request.user.tenant_id],
+        )).rows[0] ?? null
+      }
+      const transicao = updates.status !== undefined && anterior?.status !== updates.status
+      const encerrou = transicao && ['inativa', 'arquivada'].includes(updates.status)
+      const reativou = transicao && updates.status === 'ativa'
+      const values = [request.params.id, request.user.tenant_id, ...fields.map((field) => updates[field])]
+      const extras = ['atualizado_em = NOW()']
+      // salvo data_fim explícita no body
+      if (!fields.includes('data_fim')) {
+        if (encerrou) extras.push(DATA_FIM_ENCERRAMENTO_SQL)
+        else if (reativou) extras.push(DATA_FIM_REATIVACAO_SQL)
+      }
+      const set = fields.map((field, index) => `${field} = $${index + 3}`).concat(extras).join(', ')
+
       if (updates.cliente_id) {
         const cliente = await db.query('SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2::uuid', [updates.cliente_id, request.user.tenant_id])
         if (!cliente.rows[0]) {
@@ -805,8 +824,13 @@ export async function marcasRoutes(app) {
           [request.params.id, request.user.tenant_id],
         )
       }
+      if (encerrou) {
+        await limparTitulosFuturosMarca(db, {
+          tenantId: request.user.tenant_id, where: 'm.id = $2::uuid', params: [request.params.id],
+        })
+      }
       await db.query('COMMIT')
-      invalidateTenant(request.user.tenant_id, LISTAGEM_NAMESPACES)
+      invalidateTenant(request.user.tenant_id)
       app.audit?.log?.(request, {
         action: 'marca.update',
         entity_type: 'marca',
@@ -818,7 +842,9 @@ export async function marcasRoutes(app) {
           valor_fixo_minimo: result.rows[0].valor_fixo_minimo,
         },
       })?.catch?.(err => app.log.error({ err }, 'audit log marca.update failed'))
-      return result.rows[0]
+      return reativou && !fields.includes('data_fim') && result.rows[0].data_fim
+        ? { ...result.rows[0], aviso: 'data_fim_expirada' }
+        : result.rows[0]
       } catch (err) {
         await db.query('ROLLBACK')
         if (isNomeDuplicadoError(err)) return reply.code(409).send({ error: MARCA_NOME_DUPLICADA })
@@ -830,14 +856,26 @@ export async function marcasRoutes(app) {
   app.delete('/v1/marcas/:id', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const result = await db.query(
-        `UPDATE marcas SET status = 'inativa', atualizado_em = NOW()
-         WHERE id = $1 AND tenant_id = $2::uuid
-         RETURNING id`,
-        [request.params.id, tenant_id],
-      )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Marca não encontrada' })
-      return reply.code(204).send()
+      await db.query('BEGIN')
+      try {
+        const result = await db.query(
+          `UPDATE marcas SET status = 'inativa', atualizado_em = NOW(), ${DATA_FIM_ENCERRAMENTO_SQL}
+           WHERE id = $1 AND tenant_id = $2::uuid
+           RETURNING id`,
+          [request.params.id, tenant_id],
+        )
+        if (!result.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Marca não encontrada' })
+        }
+        await limparTitulosFuturosMarca(db, { tenantId: tenant_id, where: 'm.id = $2::uuid', params: [request.params.id] })
+        await db.query('COMMIT')
+        invalidateTenant(tenant_id)
+        return reply.code(204).send()
+      } catch (err) {
+        await db.query('ROLLBACK').catch(() => {})
+        throw err
+      }
     })
   })
 }

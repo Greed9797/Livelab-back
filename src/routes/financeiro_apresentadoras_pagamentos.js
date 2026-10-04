@@ -1,9 +1,10 @@
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
+import { invalidateTenant } from '../lib/dashboard-cache.js'
 import { DATA_RE, dataEhValida, MES_RE } from '../services/remuneracao-apresentadoras.js'
 import {
-  atualizarConfigVencimento, buscarConfigVencimento, ehComponente, desfazerPagamentoApresentadora, listarPagamentosApresentadoras,
-  registrarPagamentoApresentadora,
+  atualizarConfigVencimento, buscarConfigVencimento, cancelarPagamentoApresentadora, ehComponente, desfazerPagamentoApresentadora,
+  listarPagamentosApresentadoras, reativarPagamentoApresentadora, registrarPagamentoApresentadora,
 } from '../services/apresentadoras-pagamentos.js'
 
 const pagarSchema = z.object({
@@ -11,6 +12,12 @@ const pagarSchema = z.object({
   data_pagamento: z.string().regex(DATA_RE).refine(dataEhValida, 'data_pagamento inválida').optional(),
   observacao: z.string().trim().max(500).optional(),
 }).strict()
+
+const cancelarSchema = z.object({ motivo: z.string().trim().max(300).optional() }).strict()
+
+// Erros de regra do serviço (409 CANCELAMENTO_INVALIDO / CUSTO_CANCELADO) e motivo > 300 (400).
+const CODIGOS_409 = new Set(['CANCELAMENTO_INVALIDO', 'CUSTO_CANCELADO'])
+const erroDeRegra = (err) => CODIGOS_409.has(err?.code) || err?.code === 'INVALID_MOTIVO'
 
 const componenteCfg = z.object({
   dia: z.number().int().min(1).max(31).optional(),
@@ -102,8 +109,10 @@ export async function financeiroApresentadorasPagamentosRoutes(app) {
         apresentadora_id: p.id, mes: p.mes, componente: p.componente,
         valor_pago: pg.valor_pago, data_pagamento: pg.data_pagamento,
       })
+      invalidateTenant(tenantId)
       return pg
     } catch (err) {
+      if (erroDeRegra(err)) return reply.code(err.statusCode ?? 409).send({ error: err.message, code: err.code })
       if (err instanceof TypeError) return reply.code(400).send({ error: 'valor_pago deve ser positivo com até duas casas decimais' })
       throw err
     }
@@ -115,12 +124,50 @@ export async function financeiroApresentadorasPagamentosRoutes(app) {
     const ok = await app.withTenant(tenantId, (db) => desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId: p.id, mes: p.mes, componente: p.componente }))
     if (!ok) return reply.code(404).send({ error: 'Nenhum pagamento registrado para esta competência.' })
     auditar(request, 'financeiro.apresentadora_desfazer', null, { apresentadora_id: p.id, mes: p.mes, componente: p.componente })
+    invalidateTenant(tenantId)
     return { ok: true }
+  }
+
+  async function cancelar(request, reply) {
+    const p = validarParams(request, reply); if (!p) return
+    const parsed = cancelarSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const tenantId = request.user.tenant_id
+    try {
+      const item = await app.withTenant(tenantId, (db) => cancelarPagamentoApresentadora(db, {
+        tenantId, apresentadoraId: p.id, mes: p.mes, componente: p.componente,
+        motivo: parsed.data.motivo, actorUserId: request.user.sub ?? null,
+      }))
+      if (!item) return reply.code(404).send({ error: 'Apresentadora não encontrada nesta unidade.' })
+      // entity_id é UUID: item.id é a chave virtual 'apresentadora:<uuid>:<mes>:<componente>' (vai no metadata).
+      auditar(request, 'financeiro.apresentadora_cancelar', p.id, {
+        item_id: item.id, apresentadora_id: p.id, mes: p.mes, componente: p.componente, motivo: item.cancelado_motivo ?? null,
+      })
+      invalidateTenant(tenantId)
+      return item
+    } catch (err) {
+      if (erroDeRegra(err)) return reply.code(err.statusCode ?? 409).send({ error: err.message, code: err.code })
+      throw err
+    }
+  }
+
+  async function reativar(request, reply) {
+    const p = validarParams(request, reply); if (!p) return
+    const tenantId = request.user.tenant_id
+    const item = await app.withTenant(tenantId, (db) => reativarPagamentoApresentadora(db, {
+      tenantId, apresentadoraId: p.id, mes: p.mes, componente: p.componente,
+    }))
+    if (!item) return reply.code(404).send({ error: 'Nenhum cancelamento registrado para esta competência.' })
+    auditar(request, 'financeiro.apresentadora_reativar', p.id, { item_id: item.id, apresentadora_id: p.id, mes: p.mes, componente: p.componente })
+    invalidateTenant(tenantId)
+    return item
   }
 
   const escrita = { preHandler: app.requirePapel(WRITE_FINANCEIRO) }
   app.patch(`${BASE}/:apresentadora_id/:mes/:componente/pagar`, escrita, pagar)
   app.patch(`${BASE}/:apresentadora_id/:mes/:componente/desfazer`, escrita, desfazer)
+  app.patch(`${BASE}/:apresentadora_id/:mes/:componente/cancelar`, escrita, cancelar)
+  app.patch(`${BASE}/:apresentadora_id/:mes/:componente/reativar`, escrita, reativar)
   // Legadas (deprecadas): sem componente = 'fixo'.
   app.patch(`${BASE}/:apresentadora_id/:mes/pagar`, escrita, pagar)
   app.patch(`${BASE}/:apresentadora_id/:mes/desfazer`, escrita, desfazer)

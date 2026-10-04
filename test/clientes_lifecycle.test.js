@@ -57,6 +57,7 @@ describe('PATCH /v1/clientes/:id lifecycle da marca espelhada', () => {
       if (sql.includes('UPDATE clientes SET')) return clienteAtualizado(statusCliente)
       if (sql.includes('SELECT id, status') && sql.includes('FROM marcas')) return { rows: [{ id: marcaId, status: 'ativa' }] }
       if (sql.includes(`UPDATE marcas SET status = '${statusMarca}'`)) return { rows: [] }
+      if (sql.includes('DELETE FROM receita_titulos')) return { rows: [] }
       throw new Error(`query inesperada: ${sql}`)
     })
     const app = buildApp(query)

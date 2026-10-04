@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { financeiroApresentadorasPagamentosRoutes } from '../src/routes/financeiro_apresentadoras_pagamentos.js'
 import {
-  buscarConfigVencimento, desfazerPagamentoApresentadora, listarPagamentosApresentadoras, mesesDoPeriodo,
-  registrarPagamentoApresentadora, vencimentoApresentadora,
+  buscarConfigVencimento, cancelarPagamentoApresentadora, desfazerPagamentoApresentadora, listarPagamentosApresentadoras, mesesDoPeriodo,
+  reativarPagamentoApresentadora, registrarPagamentoApresentadora, vencimentoApresentadora,
 } from '../src/services/apresentadoras-pagamentos.js'
 
 const tenantId = '11111111-1111-4111-8111-111111111111'
@@ -212,5 +212,151 @@ describe('rotas', () => {
     await app.inject({ method: 'PATCH', url: C, payload: { dia: 7 } })
     expect(up.length + 1).toBe(db.calls.filter((c) => c.sql.startsWith('UPDATE tenants')).length)
     expect(db.calls.filter((c) => c.sql.startsWith('UPDATE tenants')).at(-1).params).toEqual([tenantId, 7, null, null, null])
+  })
+})
+
+describe('cancelamento (migration 174)', () => {
+  const mes = '2026-09'
+  const arg = { tenantId, apresentadoraId: apId, mes, componente: 'fixo' }
+  const cancelado = { apresentadora_id: apId, competencia: '2026-09-01', componente: 'fixo', valor_pago: '0', data_pagamento: null, cancelado_em: '2026-09-20T10:00:00.000Z', cancelado_motivo: 'saiu' }
+  // fakeDb + SELECT valor_pago/cancelado_em da linha única (as consultas pontuais não passam pela listagem em lote).
+  function dbCancel({ linha = null, ...opts } = {}) {
+    const base = fakeDb(opts)
+    const query = vi.fn(async (sql, params) => {
+      const s = String(sql)
+      if (s.startsWith('SELECT valor_pago') || s.startsWith('SELECT cancelado_em')) { base.calls.push({ sql: s, params }); return { rows: linha ? [linha] : [] } }
+      return base.query(sql, params)
+    })
+    return { query, calls: base.calls }
+  }
+
+  it('lista item cancelado: status cancelado, cancelado_* no item, divergente false', async () => {
+    const itens = await listarPagamentosApresentadoras(fakeDb({ pagos: [cancelado] }), { tenantId, inicio: '2026-09-01', fim: '2026-09-30', hoje: '2026-10-20' })
+    expect(itens.find((i) => i.componente === 'fixo')).toMatchObject({
+      status: 'cancelado', valor_pago: 0, data_pagamento: null, cancelado_em: '2026-09-20T10:00:00.000Z', cancelado_motivo: 'saiu', divergente: false,
+    })
+    expect(itens.find((i) => i.componente === 'variavel').cancelado_em).toBeNull()
+  })
+
+  it('cancelar componente virtual faz upsert com valor_pago 0, data NULL e motivo normalizado', async () => {
+    const db = dbCancel()
+    await cancelarPagamentoApresentadora(db, { ...arg, motivo: '  duplicado  ', actorUserId: 'u1' })
+    const up = db.calls.find((c) => c.sql.includes('INSERT INTO apresentadora_pagamentos'))
+    expect(up.sql).toContain('ON CONFLICT (tenant_id, apresentadora_id, competencia, componente)')
+    expect(up.params).toEqual([tenantId, apId, '2026-09-01', 'fixo', 'duplicado', 'u1'])
+    expect(up.sql).toMatch(/VALUES \(\$1::uuid, \$2::uuid, \$3::date, \$4::text, 0, NULL, NOW\(\)/)
+  })
+
+  it('cancelar parcial preserva a baixa; pago integral e previsto zero => 409 CANCELAMENTO_INVALIDO', async () => {
+    const parcial = dbCancel({ linha: { valor_pago: '100.00' } })
+    await cancelarPagamentoApresentadora(parcial, arg)
+    expect(parcial.calls.find((c) => c.sql.includes('INSERT INTO apresentadora_pagamentos')).sql).not.toMatch(/valor_pago = EXCLUDED/)
+    await expect(cancelarPagamentoApresentadora(dbCancel({ linha: { valor_pago: '2700.00' } }), arg))
+      .rejects.toMatchObject({ code: 'CANCELAMENTO_INVALIDO', statusCode: 409 })
+    await expect(cancelarPagamentoApresentadora(dbCancel({ fixo: '0.00' }), arg))
+      .rejects.toMatchObject({ code: 'CANCELAMENTO_INVALIDO' })
+  })
+
+  it('cancelar rejeita motivo > 300 e apresentadora inexistente devolve null', async () => {
+    await expect(cancelarPagamentoApresentadora(dbCancel(), { ...arg, motivo: 'x'.repeat(301) })).rejects.toMatchObject({ code: 'INVALID_MOTIVO' })
+    const sem = fakeDb()
+    const q = sem.query
+    sem.query = vi.fn(async (sql, p) => (String(sql).includes('SELECT id FROM apresentadoras') ? { rows: [] } : q(sql, p)))
+    expect(await cancelarPagamentoApresentadora(sem, arg)).toBeNull()
+  })
+
+  it('reativar: sem baixa apaga a linha; com baixa só limpa cancelado_*; nunca cancelado => null', async () => {
+    const apaga = fakeDb()
+    await reativarPagamentoApresentadora(apaga, arg)
+    expect(apaga.calls[0].sql).toMatch(/DELETE FROM apresentadora_pagamentos[\s\S]*cancelado_em IS NOT NULL AND COALESCE\(valor_pago, 0\) = 0/)
+
+    const limpa = fakeDb()
+    const q = limpa.query
+    limpa.query = vi.fn(async (sql, p) => (String(sql).includes('DELETE FROM') ? { rowCount: 0, rows: [] }
+      : String(sql).startsWith('UPDATE apresentadora_pagamentos') ? (limpa.calls.push({ sql: String(sql), params: p }), { rowCount: 1, rows: [{ id: 'x' }] }) : q(sql, p)))
+    await reativarPagamentoApresentadora(limpa, arg)
+    expect(limpa.calls.find((c) => c.sql.startsWith('UPDATE apresentadora_pagamentos')).sql).toMatch(/cancelado_em = NULL, cancelado_motivo = NULL, cancelado_por = NULL/)
+    const nunca = fakeDb()
+    nunca.query = vi.fn(async () => ({ rowCount: 0, rows: [] }))
+    expect(await reativarPagamentoApresentadora(nunca, arg)).toBeNull()
+  })
+
+  it('pagar item cancelado => 409 CUSTO_CANCELADO sem INSERT', async () => {
+    const db = dbCancel({ linha: { cancelado_em: '2026-09-20T10:00:00.000Z' } })
+    await expect(registrarPagamentoApresentadora(db, { tenantId, apresentadoraId: apId, mes, componente: 'fixo' }))
+      .rejects.toMatchObject({ code: 'CUSTO_CANCELADO', statusCode: 409 })
+    expect(db.calls.some((c) => c.sql.includes('INSERT INTO apresentadora_pagamentos'))).toBe(false)
+  })
+
+  it('desfazer em linha cancelada zera a baixa e mantém o cancelamento (sem DELETE)', async () => {
+    const db = fakeDb()
+    const q = db.query
+    db.query = vi.fn(async (sql, p) => (String(sql).startsWith('UPDATE apresentadora_pagamentos') ? (db.calls.push({ sql: String(sql), params: p }), { rowCount: 1, rows: [{ id: 'x' }] }) : q(sql, p)))
+    expect(await desfazerPagamentoApresentadora(db, arg)).toBe(true)
+    expect(db.calls[0].sql).toMatch(/SET valor_pago = 0, data_pagamento = NULL[\s\S]*cancelado_em IS NOT NULL/)
+    expect(db.calls.some((c) => c.sql.includes('DELETE'))).toBe(false)
+  })
+
+  describe('rotas', () => {
+    const B = `/v1/financeiro/apresentadoras-pagamentos/${apId}/2026-09/fixo`
+    function buildApp(db) {
+      const app = Fastify()
+      app.decorate('requirePapel', () => async (request) => { request.user = { tenant_id: tenantId, sub: '44444444-4444-4444-8444-444444444444', papel: 'financeiro' } })
+      app.decorate('withTenant', async (t, fn) => fn(db))
+      app.register(financeiroApresentadorasPagamentosRoutes)
+      return app
+    }
+    it('PATCH cancelar devolve o item com status cancelado; motivo > 300 => 400', async () => {
+      const base = fakeDb()
+      let gravou = false
+      const db = { calls: base.calls, query: vi.fn(async (sql, p) => {
+        const s = String(sql)
+        if (s.startsWith('SELECT valor_pago')) return { rows: [] }
+        if (s.includes('INSERT INTO apresentadora_pagamentos')) { gravou = true; return { rows: [] } }
+        if (gravou && s.includes('FROM apresentadora_pagamentos')) return { rows: [{ apresentadora_id: apId, competencia: '2026-09-01', componente: 'fixo', valor_pago: '0', data_pagamento: null, cancelado_em: '2026-09-20T10:00:00.000Z' }] }
+        return base.query(sql, p)
+      }) }
+      const app = buildApp(db)
+      const res = await app.inject({ method: 'PATCH', url: `${B}/cancelar`, payload: { motivo: 'saiu' } })
+      expect(res.statusCode).toBe(200)
+      expect(res.json()).toMatchObject({ id: `apresentadora:${apId}:2026-09:fixo`, status: 'cancelado', cancelado_em: '2026-09-20T10:00:00.000Z' })
+      expect((await app.inject({ method: 'PATCH', url: `${B}/cancelar`, payload: { motivo: 'x'.repeat(301) } })).statusCode).toBe(400)
+    })
+    it('auditoria de cancelar/reativar usa UUID em entity_id (chave virtual vai no metadata)', async () => {
+      const audits = []
+      const base = fakeDb()
+      let gravou = false
+      const db = { calls: base.calls, query: vi.fn(async (sql, p) => {
+        const s = String(sql)
+        if (s.startsWith('SELECT valor_pago')) return { rows: [] }
+        if (s.includes('INSERT INTO apresentadora_pagamentos')) { gravou = true; return { rows: [] } }
+        if (gravou && s.includes('FROM apresentadora_pagamentos')) return { rows: [{ apresentadora_id: apId, competencia: '2026-09-01', componente: 'fixo', valor_pago: '0', data_pagamento: null, cancelado_em: '2026-09-20T10:00:00.000Z' }] }
+        return base.query(sql, p)
+      }) }
+      const app = buildApp(db)
+      app.decorate('audit', { log: async (_req, e) => { audits.push(e) } })
+      await app.inject({ method: 'PATCH', url: `${B}/cancelar`, payload: { motivo: 'saiu' } })
+      expect(audits[0].action).toBe('financeiro.apresentadora_cancelar')
+      expect(audits[0].entity_id).toBe(apId)
+      expect(audits[0].metadata.item_id).toBe(`apresentadora:${apId}:2026-09:fixo`)
+    })
+    it('cancelar pago integral => 409; reativar nunca cancelado => 404; pagar cancelado => 409', async () => {
+      const pago = fakeDb()
+      const q = pago.query
+      pago.query = vi.fn(async (sql, p) => (String(sql).startsWith('SELECT valor_pago') ? { rows: [{ valor_pago: '2700.00' }] } : q(sql, p)))
+      const r1 = await buildApp(pago).inject({ method: 'PATCH', url: `${B}/cancelar`, payload: {} })
+      expect(r1.statusCode).toBe(409)
+      expect(r1.json().code).toBe('CANCELAMENTO_INVALIDO')
+
+      const vazio = { query: vi.fn(async () => ({ rowCount: 0, rows: [] })) }
+      expect((await buildApp(vazio).inject({ method: 'PATCH', url: `${B}/reativar` })).statusCode).toBe(404)
+
+      const canc = fakeDb()
+      const q2 = canc.query
+      canc.query = vi.fn(async (sql, p) => (String(sql).startsWith('SELECT cancelado_em') ? { rows: [{ cancelado_em: 'x' }] } : q2(sql, p)))
+      const r3 = await buildApp(canc).inject({ method: 'PATCH', url: `${B}/pagar`, payload: {} })
+      expect(r3.statusCode).toBe(409)
+      expect(r3.json().code).toBe('CUSTO_CANCELADO')
+    })
   })
 })

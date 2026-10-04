@@ -624,6 +624,7 @@ export function montarReceitaMensal({
         marca_nome: base.marca_nome ?? linha?.marca_nome ?? vig?.marca_nome ?? null,
         tipo_cobranca: tipo,
         pct,
+        janela_inicio_dia: Number(linha?.comissao_janela_inicio_dia ?? vig?.comissao_janela_inicio_dia ?? 1),
         gmv: round2(linha?.gmv ?? 0),
         comissao_bruta: round2(linha?.comissao ?? 0),
         em_apuracao: false,

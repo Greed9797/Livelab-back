@@ -112,7 +112,8 @@ async function listRows(db, { tenantId, marcaId, includeCancelled = false }) {
             fixo_confirmado, comissao_confirmada, origem, motivo, created_by,
             created_at, revision, cancelled_at, idempotency_key,
             fixo_vencimento_dia, fixo_vencimento_mes_offset,
-            comissao_vencimento_dia, comissao_vencimento_mes_offset
+            comissao_vencimento_dia, comissao_vencimento_mes_offset,
+            comissao_janela_inicio_dia
        FROM marca_condicoes_comerciais
       WHERE tenant_id = $1::uuid AND marca_id = $2::uuid
         ${includeCancelled ? '' : 'AND cancelled_at IS NULL'}
@@ -414,8 +415,9 @@ export async function confirmarCondicaoMarca(db, {
          revision, idempotency_key,
          fixo_vencimento_dia, fixo_vencimento_mes_offset,
          comissao_vencimento_dia, comissao_vencimento_mes_offset,
+         comissao_janela_inicio_dia,
          payload_hash
-       ) VALUES ($1::uuid,$2::uuid,$3::date,$4,$5 / 100.0,$6 / 100.0,$7,$8,$9,$10,$11,$12::uuid,$13,$14,$15,$16,$17,$18,$19)
+       ) VALUES ($1::uuid,$2::uuid,$3::date,$4,$5 / 100.0,$6 / 100.0,$7,$8,$9,$10,$11,$12::uuid,$13,$14,$15,$16,$17,$18,$19,$20)
        RETURNING *`,
       [
         tenantId, marcaId, normalized.inicio_vigencia,
@@ -427,6 +429,7 @@ export async function confirmarCondicaoMarca(db, {
         actorUserId, currentRevision + 1, idempotencyKey,
         vencimento.fixo_vencimento_dia, vencimento.fixo_vencimento_mes_offset,
         vencimento.comissao_vencimento_dia, vencimento.comissao_vencimento_mes_offset,
+        vencimento.comissao_janela_inicio_dia,
         payloadHash,
       ],
     )
@@ -480,12 +483,41 @@ export async function atualizarVencimentoCondicao(db, {
   }
   await db.query('BEGIN')
   try {
+    // Mudar a janela com títulos já materializados (qualquer status) na vigência da versão
+    // reescreveria a competência do passado: exige nova versão com inicio_vigencia futuro.
+    if (campos.comissao_janela_inicio_dia !== undefined) {
+      const jaTemTitulos = await db.query(
+        `SELECT EXISTS (
+           SELECT 1
+             FROM marca_condicoes_comerciais c
+             JOIN receita_titulos rt ON rt.tenant_id = c.tenant_id AND rt.marca_id = c.marca_id
+            WHERE c.id = $3::uuid AND c.tenant_id = $1::uuid AND c.marca_id = $2::uuid
+              AND c.cancelled_at IS NULL
+              AND c.comissao_janela_inicio_dia IS DISTINCT FROM $4::smallint
+              AND rt.competencia >= c.inicio_vigencia
+              AND rt.competencia < COALESCE((
+                    SELECT MIN(n.inicio_vigencia) FROM marca_condicoes_comerciais n
+                     WHERE n.tenant_id = c.tenant_id AND n.marca_id = c.marca_id
+                       AND n.cancelled_at IS NULL AND n.inicio_vigencia > c.inicio_vigencia
+                  ), DATE '9999-12-01')
+         ) AS tem`,
+        [tenantId, marcaId, condicaoId, campos.comissao_janela_inicio_dia],
+      )
+      if (jaTemTitulos.rows[0]?.tem) {
+        throw serviceError(
+          'Esta condição já tem títulos de receita gerados; alterar a janela de apuração reescreveria o passado. Crie uma nova versão da condição com início de vigência futuro.',
+          'JANELA_RETROATIVA',
+          400,
+        )
+      }
+    }
     const updated = await db.query(
       `UPDATE marca_condicoes_comerciais
           SET fixo_vencimento_dia = COALESCE($4::smallint, fixo_vencimento_dia),
               fixo_vencimento_mes_offset = COALESCE($5::smallint, fixo_vencimento_mes_offset),
               comissao_vencimento_dia = COALESCE($6::smallint, comissao_vencimento_dia),
-              comissao_vencimento_mes_offset = COALESCE($7::smallint, comissao_vencimento_mes_offset)
+              comissao_vencimento_mes_offset = COALESCE($7::smallint, comissao_vencimento_mes_offset),
+              comissao_janela_inicio_dia = COALESCE($8::smallint, comissao_janela_inicio_dia)
         WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND id = $3::uuid
           AND cancelled_at IS NULL
         RETURNING *`,
@@ -493,6 +525,7 @@ export async function atualizarVencimentoCondicao(db, {
         tenantId, marcaId, condicaoId,
         campos.fixo_vencimento_dia ?? null, campos.fixo_vencimento_mes_offset ?? null,
         campos.comissao_vencimento_dia ?? null, campos.comissao_vencimento_mes_offset ?? null,
+        campos.comissao_janela_inicio_dia ?? null,
       ],
     )
     const row = updated.rows[0]

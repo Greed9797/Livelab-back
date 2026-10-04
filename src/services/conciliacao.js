@@ -393,10 +393,11 @@ async function baixarApresentadora(db, { tenantId, tx, alvoId, userId }) {
   const [, apresentadoraId, mes] = m
   const componente = (m[3] ?? 'fixo').toLowerCase()
   const ex = await db.query(
-    `SELECT id, valor_pago FROM apresentadora_pagamentos
+    `SELECT id, valor_pago, cancelado_em FROM apresentadora_pagamentos
       WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date AND componente = $4::text FOR UPDATE`,
     [tenantId, apresentadoraId, `${mes}-01`, componente],
   )
+  if (ex.rows[0]?.cancelado_em) throw encerradoErro('custo')
   if (ex.rows[0] && jaPago(ex.rows[0].valor_pago)) {
     return { aplicada: false, motivo: 'ja_baixado', alvo_id: ex.rows[0].id }
   }
@@ -520,7 +521,20 @@ export async function desfazerBaixaConciliacao(db, { tenantId, tipo, alvoId } = 
     return r.rows[0] ? { desfeita: true } : { desfeita: false, motivo: 'alvo_inexistente' }
   }
   if (tipo === 'apresentadora') {
-    const r = await db.query(
+    // Linha cancelada mantém o cancelamento (decisão 3): só zera a baixa; senão apaga a linha.
+    const u = await db.query(
+      `UPDATE apresentadora_pagamentos SET valor_pago = 0, data_pagamento = NULL, atualizado_em = now()
+        WHERE id = $1::uuid AND tenant_id = $2::uuid AND cancelado_em IS NOT NULL RETURNING id`,
+      [alvoId, tenantId],
+    )
+    if (u.rows[0]) return { desfeita: true }
+    // Linha cancelada mantém o cancelamento (decisão 3): só zera a baixa; sem cancelamento, apaga.
+    const zerada = await db.query(
+      `UPDATE apresentadora_pagamentos SET valor_pago = 0, data_pagamento = NULL, atualizado_em = now()
+        WHERE id = $1::uuid AND tenant_id = $2::uuid AND cancelado_em IS NOT NULL RETURNING id`,
+      [alvoId, tenantId],
+    )
+    const r = zerada.rows[0] ? zerada : await db.query(
       'DELETE FROM apresentadora_pagamentos WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING id',
       [alvoId, tenantId],
     )

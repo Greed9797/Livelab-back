@@ -28,7 +28,7 @@
 // Funções puras exportadas para teste; as que tocam o banco recebem `db` e
 // `tenantId` explícito (além do RLS).
 
-import { statusLancamento } from '../lib/lancamento-status.js'
+import { normalizarMotivo, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
 import { hojeSaoPaulo, listarTitulosReceita } from './receitas-comercial.js'
 import { addMeses, diasNoMes, listarCustos, mesesEntre, ultimoDia } from './custos-plano.js'
 import { listarPagamentosApresentadoras } from './apresentadoras-pagamentos.js'
@@ -182,11 +182,13 @@ export function normalizarApresentadora(p, hoje) {
     componente: p.componente === 'fixo' || p.componente === 'variavel' ? p.componente : null,
     valor_previsto: r2(p.valor_previsto),
     valor_pago: r2(p.valor_pago),
-    virtual: !(Number(p.valor_pago) > 0),
+    virtual: !(Number(p.valor_pago) > 0) && !p.cancelado_em,
+    cancelado_em: timestampIso(p.cancelado_em),
+    cancelado_motivo: p.cancelado_motivo ?? null,
   }
   item.classe = classeDoItem(item)
   item.status = statusLancamento(item, hoje)
-  return item
+  return marcarEncerramento(item)
 }
 
 // ─── Imposto (lógica pura) ────────────────────────────────────────────────
@@ -249,9 +251,12 @@ export function montarItemImposto({ calculo, materializado = null, hoje }) {
     mes_base: calculo.mes_base,
     valor_calculado: calculo.valor,
     classe: 'variavel',
+    cancelado_em: timestampIso(materializado?.cancelado_em),
+    cancelado_motivo: materializado?.cancelado_motivo ?? null,
+    cancelado_por: materializado?.cancelado_por ?? null,
   }
   item.status = statusLancamento(item, hoje)
-  return item
+  return marcarEncerramento(item)
 }
 
 /** Σ previsto das receitas por mês de VENCIMENTO (perdidas contam só o que foi pago). */
@@ -318,7 +323,8 @@ export function totalizarLancamentos(itens) {
     const n = t[i.natureza]
     if (!n) continue
     if (ehAporte(i)) {
-      aportes.previsto += Number(i.valor_previsto) || 0
+      // previsto EFETIVO: o saldo de um aporte perdido já sai em receita.perdido (não subtrair 2x)
+      aportes.previsto += previstoEfetivo(i)
       aportes.pago += Number(i.valor_pago) || 0
     }
     n.previsto += Number(i.valor_previsto) || 0
@@ -332,8 +338,9 @@ export function totalizarLancamentos(itens) {
     ...t,
     // aportes (receitas avulsas do grupo 'aporte') já estão em receita; aqui à parte.
     aportes: { previsto: r2(aportes.previsto), pago: r2(aportes.pago) },
-    saldo_previsto: r2((t.receita.previsto - t.receita.perdido) - (t.custo.previsto - t.custo.cancelado)),
-    saldo_realizado: r2(t.receita.pago - t.custo.pago),
+    // Mesma conta do DRE (resultado): aporte é entrada de caixa, fora da receita operacional.
+    saldo_previsto: r2((t.receita.previsto - t.receita.perdido - aportes.previsto) - (t.custo.previsto - t.custo.cancelado)),
+    saldo_realizado: r2((t.receita.pago - aportes.pago) - t.custo.pago),
   }
 }
 
@@ -537,8 +544,10 @@ function receitaPorCliente(titulos) {
   const clientes = new Map()
   for (const t of titulos) {
     const cid = t.cliente_id ?? null
-    const ck = cid ?? '__sem_cliente__'
-    if (!clientes.has(ck)) clientes.set(ck, { cliente_id: cid, cliente_nome: t.cliente_nome ?? null, marcas: new Map(), total: pr(), perdido: 0 })
+    // Mesma chave de receitas-comercial: marca sem cliente vira o próprio grupo
+    // (antes todas caíam juntas em '__sem_cliente__'). Totais idênticos.
+    const ck = cid ?? `sem-cliente:${t.marca_id}`
+    if (!clientes.has(ck)) clientes.set(ck, { cliente_id: cid, cliente_nome: t.cliente_nome ?? (cid ? null : t.marca_nome ?? null), marcas: new Map(), total: pr(), perdido: 0 })
     const c = clientes.get(ck)
     if (!c.marcas.has(t.marca_id)) {
       c.marcas.set(t.marca_id, { marca_id: t.marca_id, marca_nome: t.marca_nome ?? null, fixo: pr(), comissao: pr(), gmv: null, pct: null, perdido: 0 })
@@ -804,7 +813,8 @@ export async function atualizarConfigFinanceiro(db, tenantId, patch = {}) {
 const IMPOSTO_COLS = `id, valor, valor_pago, observacao,
   to_char(competencia,'YYYY-MM-DD') AS competencia,
   to_char(data_vencimento,'YYYY-MM-DD') AS data_vencimento,
-  to_char(data_pagamento,'YYYY-MM-DD') AS data_pagamento`
+  to_char(data_pagamento,'YYYY-MM-DD') AS data_pagamento,
+  cancelado_em, cancelado_motivo, cancelado_por`
 
 /**
  * Σ valor_pago das receitas operacionais (receita_titulos + receitas avulsas exceto
@@ -916,6 +926,8 @@ async function itemImpostoDoMes(db, { tenantId, mes, hoje }) {
 export async function pagarImposto(db, { tenantId, mes, valorPago, dataPagamento, observacao, hoje = hojeSaoPaulo() } = {}) {
   if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
   if (dataPagamento != null && !RE_DATA.test(String(dataPagamento))) throw erro('data_pagamento deve estar no formato AAAA-MM-DD', 400, 'INVALID_PAYMENT')
+  const atual = await impostosMaterializados(db, { tenantId, inicio: mes, fim: mes })
+  if (atual.get(mes)?.cancelado_em) throw erro('Imposto cancelado. Reative antes de pagar.', 409, 'CUSTO_CANCELADO')
   const [calculo] = await calcularImpostos(db, { tenantId, inicio: mes, fim: mes, hoje })
   const pago = valorPago == null ? calculo.valor : r2(valorPago)
   if (!(pago > 0)) throw erro('valor_pago deve ser maior que zero (imposto calculado é zero)', 400, 'INVALID_PAYMENT')
@@ -934,13 +946,71 @@ export async function pagarImposto(db, { tenantId, mes, valorPago, dataPagamento
   return itemImpostoDoMes(db, { tenantId, mes, hoje })
 }
 
-/** Desfaz a baixa: remove a linha materializada (o imposto volta a ser calculado). */
+/**
+ * Cancela o imposto da competência `mes` (não será pago): materializa a linha de `custos`
+ * com o previsto calculado agora, `valor_pago` 0 e `cancelado_*`. Já cancelado: mantém
+ * cancelado_em/por; motivo informado substitui o anterior. Imposto pago integralmente → 409.
+ */
+export async function cancelarImposto(db, { tenantId, mes, motivo, actorUserId = null, hoje = hojeSaoPaulo() } = {}) {
+  if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
+  const motivoNorm = normalizarMotivo(motivo)
+  const [calculo] = await calcularImpostos(db, { tenantId, inicio: mes, fim: mes, hoje })
+  const atual = (await impostosMaterializados(db, { tenantId, inicio: mes, fim: mes })).get(mes)
+  const previsto = atual ? r2(atual.valor) : calculo.valor
+  if (r2(atual?.valor_pago) > 0 && r2(atual.valor_pago) >= previsto) throw erro('Imposto já pago integralmente não pode ser cancelado', 409, 'JA_PAGO')
+  if (!(previsto > 0)) throw erro('Imposto sem valor previsto não pode ser cancelado', 409, 'CANCELAMENTO_INVALIDO')
+  await db.query(
+    `INSERT INTO custos (tenant_id, descricao, valor, tipo, grupo, competencia, data_vencimento,
+                         valor_pago, cancelado_em, cancelado_por, cancelado_motivo)
+     VALUES ($1::uuid, $2, $3, 'imposto', 'outros', $4::date, $5::date, 0, NOW(), $6::uuid, $7::text)
+     ON CONFLICT (tenant_id, competencia) WHERE tipo = 'imposto'
+     DO UPDATE SET cancelado_em = COALESCE(custos.cancelado_em, NOW()),
+                   cancelado_por = CASE WHEN custos.cancelado_em IS NULL THEN $6::uuid ELSE custos.cancelado_por END,
+                   cancelado_motivo = CASE WHEN custos.cancelado_em IS NULL THEN $7::text ELSE COALESCE($7::text, custos.cancelado_motivo) END,
+                   atualizado_em = NOW()`,
+    [tenantId, `Imposto ${mes.slice(5)}/${mes.slice(0, 4)}`, previsto, `${mes}-01`, vencimentoImposto(mes),
+      actorUserId ?? null, motivoNorm],
+  )
+  return itemImpostoDoMes(db, { tenantId, mes, hoje })
+}
+
+/** Reativa o imposto cancelado: sem baixa a linha some (volta a ser calculado); com baixa só limpa cancelado_*. */
+export async function reativarImposto(db, { tenantId, mes, hoje = hojeSaoPaulo() } = {}) {
+  if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
+  const comp = `${mes}-01`
+  const del = await db.query(
+    `DELETE FROM custos WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date
+        AND cancelado_em IS NOT NULL AND COALESCE(valor_pago, 0) = 0 RETURNING id`,
+    [tenantId, comp],
+  )
+  if (!del.rows[0]) {
+    const upd = await db.query(
+      `UPDATE custos SET cancelado_em = NULL, cancelado_motivo = NULL, cancelado_por = NULL, atualizado_em = NOW()
+        WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date AND cancelado_em IS NOT NULL
+        RETURNING id`,
+      [tenantId, comp],
+    )
+    if (!upd.rows[0]) throw erro('Imposto não está cancelado', 404, 'IMPOSTO_NOT_FOUND')
+  }
+  return itemImpostoDoMes(db, { tenantId, mes, hoje })
+}
+
+/** Desfaz a baixa: remove a linha materializada (o imposto volta a ser calculado). Cancelado: só zera a baixa. */
 export async function desfazerImposto(db, { tenantId, mes, hoje = hojeSaoPaulo() } = {}) {
   if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
-  const r = await db.query(
-    `DELETE FROM custos WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date RETURNING id`,
-    [tenantId, `${mes}-01`],
+  const comp = `${mes}-01`
+  let r = await db.query(
+    `UPDATE custos SET valor_pago = 0, data_pagamento = NULL, atualizado_em = NOW()
+      WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date AND cancelado_em IS NOT NULL
+      RETURNING id`,
+    [tenantId, comp],
   )
+  if (!r.rows[0]) {
+    r = await db.query(
+      `DELETE FROM custos WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date RETURNING id`,
+      [tenantId, comp],
+    )
+  }
   if (!r.rows[0]) throw erro('Imposto sem baixa registrada', 404, 'IMPOSTO_NOT_FOUND')
   return itemImpostoDoMes(db, { tenantId, mes, hoje })
 }
@@ -1006,9 +1076,13 @@ export async function calcularDre(db, { tenantId, inicio, fim, hoje = hojeSaoPau
 export async function calcularDreMes(db, { tenantId, mes, hoje = hojeSaoPaulo() } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
-  const { aliquota_imposto_pct: aliquota, data_corte: dataCorte } = await buscarConfigFinanceiro(db, tenantId)
+  const cfg = await buscarConfigFinanceiro(db, tenantId)
+  const { aliquota_imposto_pct: aliquota, data_corte: dataCorte } = cfg
   const itens = await listarLancamentos(db, { tenantId, inicio: addMeses(mes, -1), fim: mes, hoje, aliquota, dataCorte })
-  return { hoje, aliquota, data_corte: dataCorte, ...montarDreDetalhe({ mes, itens, aliquota, hoje }) }
+  const caixa = dataCorte
+    ? { saldo_inicio_mes: await saldoCaixaInicioMes(db, { tenantId, mes, config: cfg }), saldo_abertura: r2(cfg.saldo_abertura), data_corte: dataCorte, origem: 'caixa' }
+    : { saldo_inicio_mes: 0, saldo_abertura: 0, data_corte: null, origem: 'padrao' }
+  return { hoje, aliquota, data_corte: dataCorte, caixa, ...montarDreDetalhe({ mes, itens, aliquota, hoje }) }
 }
 
 /**

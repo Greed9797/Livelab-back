@@ -5,8 +5,10 @@ import pg from 'pg'
 import { describe, expect, it } from 'vitest'
 import '../src/lib/pg-date-string.js'
 import {
+  cancelarPagamentoApresentadora,
   desfazerPagamentoApresentadora,
   listarPagamentosApresentadoras,
+  reativarPagamentoApresentadora,
   registrarPagamentoApresentadora,
 } from '../src/services/apresentadoras-pagamentos.js'
 
@@ -20,6 +22,9 @@ describe.skipIf(!url)('apresentadoras-pagamentos (Postgres real)', () => {
     const sql = fs.readFileSync('migrations/172_apresentadora_pagamentos_componente.sql', 'utf8')
     await pool.query(sql)
     await pool.query(sql)
+    const sql177 = fs.readFileSync('migrations/177_apresentadora_pagamentos_cancelamento.sql', 'utf8')
+    await pool.query(sql177)
+    await pool.query(sql177)
     const t = (await pool.query(`INSERT INTO tenants (nome) VALUES ('t-apres-pag') RETURNING id`)).rows[0].id
     const apId = (await pool.query(
       `INSERT INTO apresentadoras (tenant_id, nome, fixo) VALUES ($1, 'Ana', 2700) RETURNING id`, [t],
@@ -96,6 +101,23 @@ describe.skipIf(!url)('apresentadoras-pagamentos (Postgres real)', () => {
       expect(por(aposDesfazerVar, 'fixo')).toMatchObject({ status: 'pago', valor_pago: 2700 })
       expect(por(aposDesfazerVar, 'variavel')).toMatchObject({ status: 'atrasado', valor_pago: 0, data_pagamento: null })
       expect((await rowsPg()).rows.map((r) => r.componente)).toEqual(['fixo'])
+
+      // Cancelamento: variável (virtual) -> cancelado -> pagar 409 -> reativar apaga a linha (volta a virtual).
+      const arg = { tenantId: t, apresentadoraId: apId, mes: MES, componente: 'variavel' }
+      const item = await cancelarPagamentoApresentadora(pool, { ...arg, motivo: 'saiu' })
+      expect(item).toMatchObject({ status: 'cancelado', virtual: false, valor_pago: 0, data_pagamento: null, cancelado_motivo: 'saiu' })
+      expect(item.cancelado_em).toEqual(expect.any(String))
+      await expect(registrarPagamentoApresentadora(pool, { ...arg, dataPagamento: '2026-10-15' }))
+        .rejects.toMatchObject({ code: 'CUSTO_CANCELADO' })
+      expect((await rowsPg()).rows.map((r) => r.componente)).toEqual(['fixo', 'variavel'])
+      await reativarPagamentoApresentadora(pool, arg)
+      expect((await rowsPg()).rows.map((r) => r.componente)).toEqual(['fixo'])
+      expect(por(await listar('2026-10-16'), 'variavel')).toMatchObject({ status: 'atrasado', valor_pago: 0 })
+      expect(await reativarPagamentoApresentadora(pool, arg)).toBeNull()
+
+      // Fixo pago integral não cancela.
+      await expect(cancelarPagamentoApresentadora(pool, { ...arg, componente: 'fixo' }))
+        .rejects.toMatchObject({ code: 'CANCELAMENTO_INVALIDO' })
     } finally {
       await pool.query('DELETE FROM apresentadora_pagamentos WHERE tenant_id = $1', [t])
       await pool.query('DELETE FROM apresentadora_remuneracao_adicionais WHERE tenant_id = $1', [t])

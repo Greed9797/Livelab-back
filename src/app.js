@@ -60,6 +60,7 @@ import { webhookMakeCrmRoutes } from './routes/webhook_make_crm.js'
 import { notificacoesRoutes } from './routes/notificacoes.js'
 import { auditLogRoutes } from './routes/audit_log.js'
 import { marcasRoutes } from './routes/marcas.js'
+import { cadastrosRoutes } from './routes/cadastros.js'
 import { apiKeysRoutes } from './routes/api_keys.js'
 import { agendaRoutes } from './routes/agenda.js'
 import { gradeRoutes } from './routes/grade.js'
@@ -386,6 +387,7 @@ export async function buildApp(opts = {}) {
   await app.register(notificacoesRoutes)
   await app.register(auditLogRoutes)
   await app.register(marcasRoutes)
+  await app.register(cadastrosRoutes)
   await app.register(apiKeysRoutes)
   await app.register(agendaRoutes)
   await app.register(gradeRoutes)

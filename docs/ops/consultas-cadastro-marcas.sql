@@ -20,7 +20,8 @@
 --   marca_condicoes_comerciais        151  (vencimentos em 165)
 --
 -- Alinhado a src/lib/receita-marca-sql.js:
---   fixo por vigência só entra para tipo = 'cliente' AND sistema = false
+--   fixo por vigência E comissão (GMV × %) só entram para tipo = 'cliente' AND sistema = false
+--   (marcaGeraReceitaSql; antes a comissão não tinha esse filtro — ver consulta 7)
 --   condição vigente = cancelled_at IS NULL AND inicio_vigencia <= data,
 --     ORDER BY inicio_vigencia DESC LIMIT 1
 --   status não apaga dinheiro histórico; aqui entra só como cadastro inativo
@@ -242,3 +243,66 @@ WHERE m.tipo <> 'cliente'
    OR cv.id IS NULL
 -- AND m.tenant_id = '00000000-0000-0000-0000-000000000000'::uuid
 ORDER BY m.tenant_id, m.nome;
+
+-- ---------------------------------------------------------------------------
+-- 7) GMV que pode ter virado receita indevida (ex.: "Rosa do Deserto")
+--    a) marca NÃO-cliente (ou sistema) com % de comissão > 0 na condição vigente
+--       ou na própria marca — até a correção de marcaGeraReceitaSql a comissão
+--       (GMV × %) dessas marcas virava título de receita;
+--    b) marca com % >= 50 (ex.: 100% = o GMV inteiro vira receita);
+--    c) títulos materializados (receita_titulos) dessas marcas.
+--    Trocar o filtro de nome/tenant conforme o caso.
+-- ---------------------------------------------------------------------------
+SELECT
+  m.tenant_id,
+  m.id AS marca_id,
+  m.nome,
+  m.tipo,
+  m.sistema,
+  m.status,
+  m.cliente_id,
+  cl.nome AS cliente_nome,
+  m.comissao_franquia_pct AS marca_pct,
+  m.valor_fixo_minimo AS marca_fixo,
+  cv.inicio_vigencia AS condicao_inicio,
+  cv.comissao_franquia_pct AS condicao_pct,
+  cv.fixo_mensal AS condicao_fixo,
+  cv.origem AS condicao_origem
+FROM marcas m
+LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = m.tenant_id
+LEFT JOIN LATERAL (
+  SELECT c.inicio_vigencia, c.comissao_franquia_pct, c.fixo_mensal, c.origem
+    FROM marca_condicoes_comerciais c
+   WHERE c.tenant_id = m.tenant_id AND c.marca_id = m.id
+     AND c.inicio_vigencia <= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
+     AND c.cancelled_at IS NULL
+   ORDER BY c.inicio_vigencia DESC
+   LIMIT 1
+) cv ON true
+WHERE m.nome ILIKE '%deserto%'
+   OR ((m.tipo <> 'cliente' OR m.sistema = true)
+       AND COALESCE(cv.comissao_franquia_pct, m.comissao_franquia_pct, 0) > 0)
+   OR COALESCE(cv.comissao_franquia_pct, m.comissao_franquia_pct, 0) >= 50
+-- AND m.tenant_id = '00000000-0000-0000-0000-000000000000'::uuid
+ORDER BY m.tenant_id, m.nome;
+
+-- 7c) títulos já gravados (baixados, perdidos ou só materializados) dessas marcas
+SELECT
+  rt.tenant_id,
+  m.nome AS marca_nome,
+  m.tipo,
+  m.sistema,
+  rt.competencia,
+  rt.componente,
+  rt.valor_previsto,
+  rt.valor_pago,
+  rt.data_vencimento,
+  rt.data_pagamento,
+  rt.perdido_em
+FROM receita_titulos rt
+JOIN marcas m ON m.id = rt.marca_id AND m.tenant_id = rt.tenant_id
+WHERE m.nome ILIKE '%deserto%'
+   OR m.tipo <> 'cliente'
+   OR m.sistema = true
+-- AND rt.tenant_id = '00000000-0000-0000-0000-000000000000'::uuid
+ORDER BY rt.tenant_id, m.nome, rt.competencia, rt.componente;

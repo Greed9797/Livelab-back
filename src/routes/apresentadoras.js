@@ -5,6 +5,7 @@ import { moneySchema } from '../lib/money.js'
 import { recalcularVendasAtribuidasApresentadora } from './vendas_atribuidas.js'
 import { isPresenterRole, resolvePresenterId } from '../services/presenter-identity.js'
 import { convidarUsuario } from './usuarios.js'
+import { invalidateTenant } from '../lib/dashboard-cache.js'
 
 const imageUrlSchema = z.string().max(500000).nullable().optional()
 
@@ -379,6 +380,7 @@ export async function apresentadorasRoutes(app) {
         if (fields.includes('comissao_pct')) await recalcularVendasAtribuidasApresentadora(db, { tenantId: tenant_id, apresentadoraId })
         await db.query('COMMIT')
         if (linkedUser && (deactivatesLinkedLogin || emailChanged)) app.invalidateTokenVersionCache?.(linkedUser.id)
+        invalidateTenant(tenant_id)
         app.audit?.log?.(request, { action: 'apresentadora.update', entity_type: 'apresentadora', entity_id: apresentadoraId, metadata: { changed_fields: fields } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return result.rows[0]
       } catch (error) {
@@ -421,6 +423,7 @@ export async function apresentadorasRoutes(app) {
         }
         await db.query('COMMIT')
         if (lockedUserId) app.invalidateTokenVersionCache?.(lockedUserId)
+        invalidateTenant(tenant_id)
         app.audit?.log?.(request, { action: 'apresentadora.delete', entity_type: 'apresentadora', entity_id: apresentadoraId, metadata: { soft_delete: true } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         return reply.code(204).send()
       } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error }

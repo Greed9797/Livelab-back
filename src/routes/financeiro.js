@@ -11,12 +11,12 @@ import { performance } from 'node:perf_hooks'
 import { withCache, buildCacheKey, setCacheControl, invalidateTenant } from '../lib/dashboard-cache.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
-import { marcaFixoVigenciaSql } from '../lib/receita-marca-sql.js'
+import { marcaFixoVigenciaSql, marcaGeraReceitaSql } from '../lib/receita-marca-sql.js'
 import { listarCustos } from '../services/custos-plano.js'
 import {
   atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularDreMes, calcularFluxoCaixa,
-  calcularPainelMes, consultarLancamentos, dataValida, desfazerImposto, encerrado, hojeSaoPaulo, pagarImposto, previstoEfetivo,
-  resolverPeriodoMeses,
+  calcularPainelMes, cancelarImposto, consultarLancamentos, dataValida, desfazerImposto, encerrado, hojeSaoPaulo, pagarImposto, previstoEfetivo,
+  reativarImposto, resolverPeriodoMeses,
 } from '../services/financeiro-agregador.js'
 
 const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
@@ -36,6 +36,8 @@ const lancamentosQuerySchema = z.object({
   ]).optional(),
   q: z.string().trim().max(120).optional(),
 }).passthrough()
+
+const cancelarImpostoSchema = z.object({ motivo: z.string().max(300).nullish() }).strict()
 
 const baixaImpostoSchema = z.object({
   valor_pago: moneySchema.refine((v) => v > 0, 'valor_pago deve ser positivo').optional(),
@@ -61,7 +63,7 @@ const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 
 // Erros de serviço (statusCode 4xx) viram resposta; o resto sobe para o error handler.
 function responderErro(reply, error) {
-  if (error?.statusCode && error.statusCode < 500) return reply.code(error.statusCode).send({ error: error.message })
+  if (error?.statusCode && error.statusCode < 500) return reply.code(error.statusCode).send(error.code ? { error: error.message, code: error.code } : { error: error.message })
   throw error
 }
 
@@ -198,13 +200,18 @@ export async function financeiroRoutes(app) {
             COUNT(*)::int AS total_lives,
             -- comissão de franquia variável = gmv × pct da marca resolvida (MESMA regra de
             -- comissao.js/commission-engine), calculada na hora — sem coluna estagnada.
-            COALESCE(SUM(${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0), 0) AS comissao_franquia_lives,
+            -- Só marca que gera receita (cliente, não sistema): GMV de afiliada/própria/
+            -- parceira × % não é comissão da franquia (decisão do dono, cadastro unificado F4b).
+            COALESCE(SUM(CASE WHEN ${marcaGeraReceitaSql('mg')}
+                              THEN ${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0
+                              ELSE 0 END), 0) AS comissao_franquia_lives,
             COALESCE(SUM(CASE WHEN mc.id IS NOT NULL AND COALESCE(mc.comissao_franquia_pct, 0) > 0 THEN 1 ELSE 0 END), 0)::int AS comissao_configurada,
             -- "faltante" agora = live COM gmv mas SEM marca/pct resolvível (problema real de
             -- config), não mais um artefato de timing do motor de comissão.
             COALESCE(SUM(CASE WHEN ${liveGmvSql('l')} > 0 AND (mc.id IS NULL OR COALESCE(mc.comissao_franquia_pct, 0) = 0) THEN 1 ELSE 0 END), 0)::int AS comissao_faltante_count
           FROM lives l
           ${marcaResolveLateralSql('$3')}
+          LEFT JOIN marcas mg ON mg.id = l.marca_id AND mg.tenant_id = $3::uuid
           WHERE l.tenant_id = $3::uuid
             AND l.status = 'encerrada'
             AND ${activeLiveSql('l')}
@@ -216,10 +223,12 @@ export async function financeiroRoutes(app) {
             COALESCE(SUM(vr.gmv_atribuido), 0) AS gmv_videos,
             COALESCE(SUM(vr.pedidos_atribuidos), 0)::int AS pedidos_videos,
             COUNT(*)::int AS total_videos,
-            COALESCE(SUM(CASE WHEN mc.id IS NOT NULL
+            COALESCE(SUM(CASE WHEN NOT (${marcaGeraReceitaSql('mg')}) THEN 0
+                              WHEN mc.id IS NOT NULL
                               THEN va.gmv * COALESCE(mc.comissao_franquia_pct, 0) / 100.0
                               ELSE va.comissao_franquia END), 0) AS comissao_franquia_videos
           FROM video_registros vr
+          LEFT JOIN marcas mg ON mg.id = vr.marca_id AND mg.tenant_id = $3::uuid
           LEFT JOIN vendas_atribuidas va
             ON va.tenant_id = vr.tenant_id AND va.origem = 'video' AND va.origem_id = vr.id
            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
@@ -268,10 +277,15 @@ export async function financeiroRoutes(app) {
              AND va.data >= $1::date AND va.data <= $2::date
            GROUP BY va.marca_id, date_trunc('month', va.data::timestamp)
         ),
+        -- Só marcas que geram receita (marcaGeraReceitaSql — mesma regra de
+        -- comissaoMarcaMensalSql/receitas-comercial): afiliada/própria/parceira/sistema
+        -- têm GMV, mas o GMV × % delas não é receita da franquia (F4b).
         comissao_marca AS (
-          SELECT marca_id, mes, SUM(comissao) AS comissao
-            FROM comissao_marca_raw
-           GROUP BY marca_id, mes
+          SELECT cmr.marca_id, cmr.mes, SUM(cmr.comissao) AS comissao
+            FROM comissao_marca_raw cmr
+            JOIN marcas mg ON mg.id = cmr.marca_id AND mg.tenant_id = $3::uuid
+           WHERE ${marcaGeraReceitaSql('mg')}
+           GROUP BY cmr.marca_id, cmr.mes
         ),
         -- Fixo mensal das marcas tipo='cliente' por vigência (valor × fator de rateio).
         -- Fonte compartilhada marcaFixoMensalSql() = marcaFixoVigenciaSql — mesma do /operacional e das receitas.
@@ -392,8 +406,11 @@ export async function financeiroRoutes(app) {
                  ${liveGmvSql('l')} AS gmv,
                  -- comissão de franquia inline (gmv × pct da marca resolvida), não da coluna
                  -- pré-calculada/estagnada do motor — mantém o breakdown por cliente coerente
-                 -- com /resumo e com a aba Comissões.
-                 ${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0 AS comissao_franquia,
+                 -- com /resumo e com a aba Comissões. Só marca que gera receita
+                 -- (marcaGeraReceitaSql — mesma regra do /resumo, F4b): GMV continua.
+                 CASE WHEN ${marcaGeraReceitaSql('marca_cliente')}
+                      THEN ${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0
+                      ELSE 0 END AS comissao_franquia,
                  1 AS is_live, 0 AS is_video
           FROM lives l
           ${marcaResolveLateralSql('$3')}
@@ -407,13 +424,14 @@ export async function financeiroRoutes(app) {
           UNION ALL
           SELECT m.cliente_id, vr.marca_id,
                  vr.gmv_atribuido AS gmv,
+                 CASE WHEN NOT (${marcaGeraReceitaSql('m')}) THEN 0 ELSE
                  vr.gmv_atribuido * COALESCE((
                    SELECT c.comissao_franquia_pct
                      FROM marca_condicoes_comerciais c
                     WHERE c.tenant_id = vr.tenant_id AND c.marca_id = vr.marca_id
                       AND c.inicio_vigencia <= vr.data AND c.cancelled_at IS NULL
                     ORDER BY c.inicio_vigencia DESC LIMIT 1
-                 ), m.comissao_franquia_pct, 0) / 100.0 AS comissao_franquia,
+                 ), m.comissao_franquia_pct, 0) / 100.0 END AS comissao_franquia,
                  0 AS is_live, 1 AS is_video
           FROM video_registros vr
           JOIN marcas m ON m.id = vr.marca_id AND m.tenant_id = vr.tenant_id
@@ -866,6 +884,42 @@ export async function financeiroRoutes(app) {
       const item = await app.withTenant(tenant_id, (db) => desfazerImposto(db, { tenantId: tenant_id, mes, hoje: hojeSaoPaulo() }))
       invalidateTenant(tenant_id)
       app.audit?.log?.(request, { action: 'financeiro.imposto_desfazer', entity_type: 'imposto', entity_id: null, metadata: { mes } })
+        ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
+      return item
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // PATCH /v1/financeiro/impostos/:mes/cancelar {motivo?} — imposto não será pago (409 se já pago)
+  app.patch('/v1/financeiro/impostos/:mes/cancelar', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+    const { mes } = request.params
+    if (!MES_RE.test(mes)) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    const parsed = cancelarImpostoSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id } = request.user
+    try {
+      const item = await app.withTenant(tenant_id, (db) => cancelarImposto(db, {
+        tenantId: tenant_id, mes, motivo: parsed.data.motivo, actorUserId: request.user.sub ?? null, hoje: hojeSaoPaulo(),
+      }))
+      invalidateTenant(tenant_id)
+      app.audit?.log?.(request, { action: 'financeiro.imposto_cancelar', entity_type: 'imposto', entity_id: item.custo_id, metadata: { mes, motivo: parsed.data.motivo ?? null } })
+        ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
+      return item
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // PATCH /v1/financeiro/impostos/:mes/reativar
+  app.patch('/v1/financeiro/impostos/:mes/reativar', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
+    const { mes } = request.params
+    if (!MES_RE.test(mes)) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    const { tenant_id } = request.user
+    try {
+      const item = await app.withTenant(tenant_id, (db) => reativarImposto(db, { tenantId: tenant_id, mes, hoje: hojeSaoPaulo() }))
+      invalidateTenant(tenant_id)
+      app.audit?.log?.(request, { action: 'financeiro.imposto_reativar', entity_type: 'imposto', entity_id: item.custo_id, metadata: { mes } })
         ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))
       return item
     } catch (error) {

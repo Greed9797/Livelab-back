@@ -84,3 +84,16 @@ describe('cliente portal security', () => {
     await app.close()
   })
 })
+
+describe('cadastro unificado — marca do evento pedido pelo cliente', () => {
+  it('portal e dashboard do cliente preferem a marca tipo cliente (não uma afiliada vinculada)', async () => {
+    const fs = await import('node:fs')
+    for (const arquivo of ['src/routes/cliente_portal.js', 'src/routes/cliente_dashboard.js']) {
+      const src = fs.readFileSync(arquivo, 'utf8')
+      const sql = src.slice(src.indexOf('SELECT id FROM marcas'), src.indexOf('LIMIT 1', src.indexOf('SELECT id FROM marcas')))
+      expect(sql, arquivo).toContain("status = 'ativa'")
+      expect(sql, arquivo).toContain("ORDER BY (tipo = 'cliente') DESC, criado_em ASC")
+      expect(sql, arquivo).toContain('tenant_id = $2')
+    }
+  })
+})

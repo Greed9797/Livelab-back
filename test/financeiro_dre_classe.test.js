@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   calcularImpostoMes, classeDoItem, filtrarLancamentos, montarDre, montarDreDetalhe, montarItemImposto,
-  normalizarApresentadora, normalizarCusto, normalizarReceita,
+  normalizarApresentadora, normalizarCusto, normalizarReceita, totalizarLancamentos,
 } from '../src/services/financeiro-agregador.js'
 import { custoParaItem, listarCustos, recorrenteParaItemVirtual } from '../src/services/custos-plano.js'
 import { financeiroRoutes } from '../src/routes/financeiro.js'
@@ -197,6 +197,17 @@ describe('montarDreDetalhe (GET /dre/mes)', () => {
   })
 })
 
+describe('apresentadora encerrada', () => {
+  it('cancelada sai do previsto do DRE e do a pagar; deixa de ser virtual', () => {
+    const ativa = apresentadora({ id: `apresentadora:${AP2}:2026-10:fixo`, apresentadora_id: AP2, valor_previsto: 500 })
+    const cancelada = apresentadora({ valor_previsto: 2000, cancelado_em: '2026-10-12T13:00:00.000Z', cancelado_motivo: 'saiu' })
+    expect(cancelada).toMatchObject({ status: 'cancelado', virtual: false, cancelado_motivo: 'saiu', cancelado_em: '2026-10-12T13:00:00.000Z' })
+    const { meses: [out] } = montarDre({ meses: ['2026-10'], itens: [ativa, cancelada], aliquota: 10 })
+    expect(out.custos_fixos.previsto).toBe(500)
+    expect(totalizarLancamentos([ativa, cancelada]).custo).toMatchObject({ cancelado: 2000, atrasado: 500, pendente: 0 })
+  })
+})
+
 describe('rotas', () => {
   function buildApp(query) {
     const app = Fastify()
@@ -233,10 +244,24 @@ describe('rotas', () => {
     expect(body.atual.custos_fixos).toEqual({ previsto: 150, realizado: 0 })
     expect(body.atual.custos_variaveis).toEqual({ previsto: 50, realizado: 0 })
     expect(body.custos_fixos.por_grupo[0].itens[0]).toMatchObject({ id: 'c', classe: 'fixo' })
+    expect(body.caixa).toEqual({ saldo_inicio_mes: 0, saldo_abertura: 0, data_corte: '2026-10-01', origem: 'caixa' })
     const leituras = query.mock.calls.filter(([s]) => /FROM custos\s+WHERE tenant_id = \$1::uuid\s+AND competencia/.test(String(s)))
     expect(leituras).toHaveLength(1)
     expect(leituras[0][1]).toEqual([TENANT, '2026-09-01', '2026-10-31'])
     for (const [, params] of query.mock.calls) expect(params).toContain(TENANT)
+    await app.close()
+  })
+
+  it('GET /dre/mes sem corte: caixa padrão (origem padrao, zeros)', async () => {
+    const query = vi.fn(async (sql) => {
+      if (String(sql).includes('aliquota_imposto_pct')) return { rows: [{ aliquota_imposto_pct: 10, data_corte: null, saldo_abertura: 0 }] }
+      return { rows: [] }
+    })
+    const app = buildApp(query)
+    await app.register(financeiroRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/dre/mes?mes=2026-10' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().caixa).toEqual({ saldo_inicio_mes: 0, saldo_abertura: 0, data_corte: null, origem: 'padrao' })
     await app.close()
   })
 
@@ -291,5 +316,31 @@ describe('rotas', () => {
     const recUpd = query.mock.calls.find(([s]) => String(s).startsWith('UPDATE custos_recorrentes'))
     expect(recUpd[1]).toEqual([REC, TENANT, 'fixo'])
     await app.close()
+  })
+})
+
+describe('montarDreDetalhe — receita por cliente com marcas sem cliente (cadastro unificado F4a)', () => {
+  const titulo = (marca_id, marca_nome, cliente_id, cliente_nome, valor, origem = 'marca_comissao') => ({
+    natureza: 'receita', origem, competencia: '2026-10-01', data_vencimento: '2026-11-05',
+    marca_id, marca_nome, cliente_id, cliente_nome, valor_previsto: valor, valor_pago: 0,
+  })
+  const itens = [
+    titulo('m-a', 'Afiliada A', null, null, 100),
+    titulo('m-b', 'Afiliada B', null, null, 50),
+    titulo('m-c', 'Cliente C', 'c-1', 'Cliente C', 300, 'marca_fixo'),
+  ]
+  const d = montarDreDetalhe({ mes: '2026-10', itens, aliquota: 10 })
+
+  it('cada marca sem cliente vira o próprio grupo (chave sem-cliente:<marca_id>), com o nome da marca', () => {
+    const semCliente = d.receita.por_cliente.filter((c) => c.cliente_id == null)
+    expect(semCliente).toHaveLength(2)
+    expect(semCliente.map((c) => c.cliente_nome).sort()).toEqual(['Afiliada A', 'Afiliada B'])
+    expect(semCliente.every((c) => c.marcas.length === 1)).toBe(true)
+  })
+
+  it('totais idênticos (cosmético)', () => {
+    const soma = d.receita.por_cliente.reduce((s, c) => s + c.total.previsto, 0)
+    expect(soma).toBe(450)
+    expect(d.receita.por_cliente.find((c) => c.cliente_id === 'c-1').cliente_nome).toBe('Cliente C')
   })
 })

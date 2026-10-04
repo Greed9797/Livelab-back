@@ -22,7 +22,8 @@ export function condicaoVigenteLateralSql({ alias = 'mc', marcaExpr = 'm.id', me
   return `LEFT JOIN LATERAL (
         SELECT c.id, c.fixo_mensal, c.tipo_cobranca, c.comissao_franquia_pct,
                c.fixo_vencimento_dia, c.fixo_vencimento_mes_offset,
-               c.comissao_vencimento_dia, c.comissao_vencimento_mes_offset
+               c.comissao_vencimento_dia, c.comissao_vencimento_mes_offset,
+               c.comissao_janela_inicio_dia
           FROM marca_condicoes_comerciais c
          WHERE c.tenant_id = ${tenantParam}::uuid
            AND c.marca_id = ${marcaExpr}
@@ -136,7 +137,8 @@ export function marcaFixoVigenciaSql() {
         interval '1 month'
       ) gs(mes)
       ${condicaoVigenteLateralSql({ alias: 'mc', marcaExpr: 'm.id', mesExpr: 'gs.mes' })}
-     WHERE m.tenant_id = $3::uuid AND ${marcaGeraReceitaSql('m')}`
+     WHERE m.tenant_id = $3::uuid AND ${marcaGeraReceitaSql('m')}
+       AND (m.status NOT IN ('inativa','arquivada') OR m.data_fim IS NOT NULL)`
 }
 
 /**
@@ -148,11 +150,15 @@ export function marcaFixoVigenciaSql() {
  * Saída: marca_id, mes (date), comissao, gmv.
  */
 export function comissaoMarcaMensalSql() {
+  // Competência = mês em que a janela de apuração começa (j=1 → mês civil).
+  const compLive = `date_trunc('month', (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') - make_interval(days => mc.comissao_janela_inicio_dia - 1))`
+  const compVideo = `date_trunc('month', va.data::timestamp - make_interval(days => COALESCE(vc.comissao_janela_inicio_dia, 1) - 1))`
+  // Fatos até $2 + 27 dias podem cair na competência de $2; o filtro final recorta por competência.
   return `
     SELECT raw.marca_id, raw.mes::date AS mes, SUM(raw.comissao) AS comissao, SUM(raw.gmv) AS gmv
       FROM (
         SELECT mc.marca_id,
-               date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo') AS mes,
+               ${compLive} AS mes,
                COALESCE(SUM(${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0), 0) AS comissao,
                COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv
         FROM lives l
@@ -161,19 +167,19 @@ export function comissaoMarcaMensalSql() {
           AND l.status = 'encerrada'
           AND ${activeLiveSql('l')}
           AND ${notArchivedSql('l')}
-          AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '$2')}
+          AND ${saoPauloInclusiveRangeSql('l.iniciado_em', '$1', '($2::date + 27)')}
           AND mc.id IS NOT NULL
-        GROUP BY mc.marca_id, date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+        GROUP BY mc.marca_id, ${compLive}
         UNION ALL
         SELECT va.marca_id,
-               date_trunc('month', va.data::timestamp) AS mes,
+               ${compVideo} AS mes,
                COALESCE(SUM(CASE WHEN vc.id IS NOT NULL
                                  THEN va.gmv * COALESCE(vc.comissao_franquia_pct, 0) / 100.0
                                  ELSE va.comissao_franquia END), 0) AS comissao,
                COALESCE(SUM(va.gmv), 0) AS gmv
           FROM vendas_atribuidas va
           LEFT JOIN LATERAL (
-            SELECT c.id, c.comissao_franquia_pct
+            SELECT c.id, c.comissao_franquia_pct, c.comissao_janela_inicio_dia
               FROM marca_condicoes_comerciais c
              WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
                AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
@@ -181,11 +187,12 @@ export function comissaoMarcaMensalSql() {
           ) vc ON true
          WHERE va.tenant_id = $3::uuid AND va.origem = 'video'
            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
-           AND va.data >= $1::date AND va.data <= $2::date
-         GROUP BY va.marca_id, date_trunc('month', va.data::timestamp)
+           AND va.data >= $1::date AND va.data <= ($2::date + 27)
+         GROUP BY va.marca_id, ${compVideo}
       ) raw
       JOIN marcas mr ON mr.id = raw.marca_id AND mr.tenant_id = $3::uuid
      WHERE ${marcaGeraReceitaSql('mr')}
+       AND raw.mes::date BETWEEN date_trunc('month', $1::date)::date AND date_trunc('month', $2::date)::date
      GROUP BY raw.marca_id, raw.mes`
 }
 
@@ -224,7 +231,8 @@ export function receitaMarcaMensalSql({ fixo = 'vigencia' } = {}) {
            COALESCE(mc.fixo_vencimento_dia, 5) AS fixo_vencimento_dia,
            COALESCE(mc.fixo_vencimento_mes_offset, 1) AS fixo_vencimento_mes_offset,
            COALESCE(mc.comissao_vencimento_dia, 5) AS comissao_vencimento_dia,
-           COALESCE(mc.comissao_vencimento_mes_offset, 1) AS comissao_vencimento_mes_offset
+           COALESCE(mc.comissao_vencimento_mes_offset, 1) AS comissao_vencimento_mes_offset,
+           COALESCE(mc.comissao_janela_inicio_dia, 1) AS comissao_janela_inicio_dia
       FROM base b
       JOIN marcas m ON m.id = b.marca_id AND m.tenant_id = $3::uuid
       LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = m.tenant_id
@@ -247,12 +255,14 @@ export function marcasCondicaoVigenteMesSql() {
            COALESCE(mc.comissao_franquia_pct, 0) AS comissao_franquia_pct,
            COALESCE(mc.fixo_mensal, 0) AS fixo_mensal,
            COALESCE(mc.comissao_vencimento_dia, 5) AS comissao_vencimento_dia,
-           COALESCE(mc.comissao_vencimento_mes_offset, 1) AS comissao_vencimento_mes_offset
+           COALESCE(mc.comissao_vencimento_mes_offset, 1) AS comissao_vencimento_mes_offset,
+           COALESCE(mc.comissao_janela_inicio_dia, 1) AS comissao_janela_inicio_dia
       FROM marcas m
       LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = m.tenant_id
       ${condicaoVigenteLateralSql({ alias: 'mc', marcaExpr: 'm.id', mesExpr: '$1::date' })}
      WHERE m.tenant_id = $3::uuid AND ${marcaGeraReceitaSql('m')}
        AND mc.id IS NOT NULL
+       AND m.status = 'ativa'
        AND ${inicioContratoSql('m')} <= $2::date
        AND (m.data_fim IS NULL OR m.data_fim >= $1::date)
      ORDER BY m.nome`

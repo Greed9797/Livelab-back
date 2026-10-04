@@ -262,7 +262,7 @@ describe('vencimento na condição comercial', () => {
   it('herda da versão anterior e cai no padrão dia 5 / mês seguinte', () => {
     expect(resolverVencimentoCondicao({}, null)).toEqual(VENCIMENTO_PADRAO)
     expect(resolverVencimentoCondicao({ fixo_vencimento_dia: 10 }, { comissao_vencimento_dia: 20, comissao_vencimento_mes_offset: 0 }))
-      .toEqual({ fixo_vencimento_dia: 10, fixo_vencimento_mes_offset: 1, comissao_vencimento_dia: 20, comissao_vencimento_mes_offset: 0 })
+      .toEqual({ fixo_vencimento_dia: 10, fixo_vencimento_mes_offset: 1, comissao_vencimento_dia: 20, comissao_vencimento_mes_offset: 0, comissao_janela_inicio_dia: 1 })
   })
 
   it('payload sem vencimento mantém o mesmo hash de idempotência de antes', () => {

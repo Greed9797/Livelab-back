@@ -628,6 +628,7 @@ export function montarReceitaMensal({
         marca_tipo: base.marca_tipo ?? linha?.marca_tipo ?? (vig ? 'cliente' : null), // vigentes = só tipo cliente
         tipo_cobranca: tipo,
         pct,
+        janela_inicio_dia: Number(linha?.comissao_janela_inicio_dia ?? vig?.comissao_janela_inicio_dia ?? 1),
         gmv: round2(linha?.gmv ?? 0),
         comissao_bruta: round2(linha?.comissao ?? 0),
         em_apuracao: false,

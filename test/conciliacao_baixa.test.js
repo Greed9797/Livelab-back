@@ -215,6 +215,14 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
     expect(r).toMatchObject({ aplicada: false, motivo: 'ja_baixado', alvo_id: PG })
     expect(apres.registrarPagamentoApresentadora).not.toHaveBeenCalled()
   })
+
+  it('apresentadora cancelada: 409 ALVO_CANCELADO e não registra pagamento', async () => {
+    apres.registrarPagamentoApresentadora.mockClear()
+    const db = fakeDb((sql) => (/FROM apresentadora_pagamentos/.test(sql) ? { rows: [{ id: PG, valor_pago: '0', cancelado_em: '2026-02-10T00:00:00Z' }] } : null))
+    await expect(darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'apresentadora', alvoId: `apresentadora:${APRES}:2026-02:fixo` }))
+      .rejects.toMatchObject({ status: 409, codigo: 'ALVO_CANCELADO' })
+    expect(apres.registrarPagamentoApresentadora).not.toHaveBeenCalled()
+  })
 })
 
 describe('darBaixaConciliacao — avulsa', () => {
@@ -259,5 +267,16 @@ describe('desfazerBaixaConciliacao', () => {
   it('apresentadora remove a linha de pagamento', async () => {
     const db = fakeDb((sql) => (/DELETE FROM apresentadora_pagamentos/.test(sql) ? { rows: [{ id: PG }] } : null))
     expect(await desfazerBaixaConciliacao(db, { tenantId: T, tipo: 'apresentadora', alvoId: PG })).toEqual({ desfeita: true })
+  })
+  it('apresentadora cancelada: zera a baixa e mantém o cancelamento (sem DELETE)', async () => {
+    const db = fakeDb((sql) => (/^\s*UPDATE apresentadora_pagamentos/.test(sql) ? { rows: [{ id: PG }] } : null))
+    expect(await desfazerBaixaConciliacao(db, { tenantId: T, tipo: 'apresentadora', alvoId: PG })).toEqual({ desfeita: true })
+    expect(db.queries[0].sql).toMatch(/valor_pago = 0, data_pagamento = NULL[\s\S]*cancelado_em IS NOT NULL/)
+    expect(db.queries.some((q) => /DELETE/.test(q.sql))).toBe(false)
+  })
+  it('apresentadora cancelada: zera a baixa e mantém o cancelamento (sem DELETE)', async () => {
+    const db = fakeDb((sql) => (/UPDATE apresentadora_pagamentos SET valor_pago = 0/.test(sql) && /cancelado_em IS NOT NULL/.test(sql) ? { rows: [{ id: PG }] } : null))
+    expect(await desfazerBaixaConciliacao(db, { tenantId: T, tipo: 'apresentadora', alvoId: PG })).toEqual({ desfeita: true })
+    expect(db.queries.some((q) => /DELETE FROM apresentadora_pagamentos/.test(q.sql))).toBe(false)
   })
 })

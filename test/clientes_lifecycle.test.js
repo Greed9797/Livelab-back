@@ -57,6 +57,7 @@ describe('PATCH /v1/clientes/:id lifecycle da marca espelhada', () => {
       if (sql.includes('UPDATE clientes SET')) return clienteAtualizado(statusCliente)
       if (sql.includes('SELECT id, status') && sql.includes('FROM marcas')) return { rows: [{ id: marcaId, status: 'ativa' }] }
       if (sql.includes(`UPDATE marcas SET status = '${statusMarca}'`)) return { rows: [] }
+      if (sql.includes('DELETE FROM receita_titulos')) return { rows: [] }
       throw new Error(`query inesperada: ${sql}`)
     })
     const app = buildApp(query)
@@ -161,6 +162,7 @@ describe('cadastro unificado — merge, exclusão e marca_id', () => {
       if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] }
       if (sql.includes('UPDATE clientes SET deleted_at')) return { rows: [{ id: clienteId }] }
       if (sql.includes("UPDATE marcas SET status = 'arquivada'")) return { rows: [] }
+      if (sql.includes('DELETE FROM receita_titulos')) return { rows: [] }
       throw new Error(`query inesperada: ${sql}`)
     })
     const app = buildApp(query)
@@ -170,7 +172,7 @@ describe('cadastro unificado — merge, exclusão e marca_id', () => {
     const arquivar = calls.find(([sql]) => sql.includes("UPDATE marcas SET status = 'arquivada'"))
     expect(arquivar[0]).toContain("tipo = 'cliente'")
     expect(arquivar[1]).toEqual([clienteId, tenantId])
-    expect(calls.map(([sql]) => sql)).toEqual(['BEGIN', expect.stringContaining('deleted_at'), expect.stringContaining('arquivada'), 'COMMIT'])
+    expect(calls.map(([sql]) => sql)).toEqual(['BEGIN', expect.stringContaining('deleted_at'), expect.stringContaining('arquivada'), expect.stringContaining('DELETE FROM receita_titulos'), 'COMMIT'])
     await app.close()
   })
 

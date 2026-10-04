@@ -4,13 +4,14 @@ import crypto from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { resolveCepToGeo } from './cep.js'
 import { READ_CLIENTES, WRITE_CLIENTES } from '../config/role_groups.js'
-import { buildCacheKey, setCacheControl, withCache } from '../lib/dashboard-cache.js'
+import { buildCacheKey, invalidateTenant, setCacheControl, withCache } from '../lib/dashboard-cache.js'
 
 // TTL longo: quem mantém a lista fresca é a invalidação por evento (hook global
 // em app.js). Este limite só existe como rede de segurança.
 const CLIENTES_CACHE_TTL_MS = Number(process.env.CLIENTES_CACHE_TTL_MS ?? 300_000)
 import { getClienteOperacional, resolveMonthRange } from '../lib/operacional.js'
 import { ensureClienteMarca } from '../services/client-brand.js'
+import { DATA_FIM_ENCERRAMENTO_SQL, limparTitulosFuturosMarca } from '../lib/marca-lifecycle-sql.js'
 import { liveGmvSql } from '../lib/metric-sql.js'
 import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
@@ -670,10 +671,12 @@ export async function clientesRoutes(app) {
         // explícita para ativo pode fazê-lo.
         const clienteCancelado = ['cancelado', 'cancelado_automaticamente'].includes(updates.status)
         const clienteArquivado = updates.status === 'arquivado'
+        const reativacao = {}
         const marcaId = await ensureClienteMarca(db, {
           tenantId: tenant_id,
           clienteId: request.params.id,
           activateExisting: updates.status === 'ativo',
+          resultado: reativacao,
         })
         // Nome do cliente é também o nome da única marca operacional vinculada. Atualiza
         // apenas a marca que o helper escolheu/criou, sem tocar marcas de outros clientes.
@@ -702,18 +705,22 @@ export async function clientesRoutes(app) {
           )
           if (!marcaAtualizada.rows[0]) throw Object.assign(new Error(CLIENTE_MARCA_SYNC_CONFLICT), { code: 'CLIENTE_MARCA_SYNC_CONFLICT' })
         }
-        if (clienteCancelado) {
+        if (clienteCancelado || clienteArquivado) {
+          const statusMarca = clienteCancelado ? 'inativa' : 'arquivada'
           await db.query(
-            `UPDATE marcas SET status = 'inativa', atualizado_em = NOW()
+            `UPDATE marcas SET status = '${statusMarca}', atualizado_em = NOW(),
+                            ${DATA_FIM_ENCERRAMENTO_SQL}
              WHERE cliente_id = $1 AND tenant_id = $2::uuid AND tipo = 'cliente'`,
             [request.params.id, tenant_id],
           )
-        } else if (clienteArquivado) {
-          await db.query(
-            `UPDATE marcas SET status = 'arquivada', atualizado_em = NOW()
-             WHERE cliente_id = $1 AND tenant_id = $2::uuid AND tipo = 'cliente'`,
-            [request.params.id, tenant_id],
-          )
+          // Títulos materializados e ainda não tocados (sem pagamento, não perdidos) de
+          // meses POSTERIORES ao fim do contrato não são mais devidos. O mês de data_fim
+          // fica (pro-rata fora de escopo).
+          await limparTitulosFuturosMarca(db, {
+            tenantId: tenant_id,
+            where: "m.cliente_id = $2 AND m.tipo = 'cliente'",
+            params: [request.params.id],
+          })
         }
 
         if (Object.prototype.hasOwnProperty.call(updates, 'logo_url')) {
@@ -733,7 +740,9 @@ export async function clientesRoutes(app) {
         } else {
           app.audit?.log?.(request, { action: 'clientes.update', entity_type: 'cliente', entity_id: request.params.id, metadata: { changed_fields: keys } })?.catch(err => app.log.error({ err }, 'audit log failed'))
         }
-        return result.rows[0]
+        // Receita/DRE derivam de marcas (data_fim/status) e títulos: invalida todos os namespaces.
+        invalidateTenant(tenant_id)
+        return reativacao.aviso ? { ...result.rows[0], aviso: reativacao.aviso } : result.rows[0]
       } catch (err) {
         await db.query('ROLLBACK').catch(() => {})
         if (err?.code === '23505' && err?.constraint === 'uniq_marca_nome_por_tenant') {
@@ -796,18 +805,23 @@ export async function clientesRoutes(app) {
           return reply.code(404).send({ error: 'Cliente não encontrado' })
         }
         // Cadastro unificado: a marca espelho some junto (arquivada), senão o
-        // cadastro seguiria "ativo" nas listas e seletores. Status não apaga
-        // dinheiro: lives, condições e títulos ficam intactos.
+        // cadastro seguiria "ativo" nas listas e seletores. Também sai da Receita:
+        // encerra o contrato (data_fim) e apaga só os títulos futuros sem movimento;
+        // lives, condições e títulos já realizados ficam intactos.
         await db.query(
-          `UPDATE marcas SET status = 'arquivada', atualizado_em = NOW()
+          `UPDATE marcas SET status = 'arquivada', atualizado_em = NOW(), ${DATA_FIM_ENCERRAMENTO_SQL}
            WHERE cliente_id = $1 AND tenant_id = $2::uuid AND tipo = 'cliente'`,
           [request.params.id, tenant_id]
         )
+        await limparTitulosFuturosMarca(db, {
+          tenantId: tenant_id, where: "m.cliente_id = $2::uuid AND m.tipo = 'cliente'", params: [request.params.id],
+        })
         await db.query('COMMIT')
       } catch (err) {
         await db.query('ROLLBACK').catch(() => {})
         throw err
       }
+      invalidateTenant(tenant_id)
       app.audit?.log?.(request, { action: 'cliente.delete', entity_type: 'cliente', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return { success: true }
     })

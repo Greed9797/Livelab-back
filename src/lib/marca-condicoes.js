@@ -16,6 +16,8 @@ export const VENCIMENTO_PADRAO = Object.freeze({
   fixo_vencimento_mes_offset: 1,
   comissao_vencimento_dia: 5,
   comissao_vencimento_mes_offset: 1,
+  // Dia em que a janela de apuração da comissão começa (1 = mês civil).
+  comissao_janela_inicio_dia: 1,
 })
 
 export const CAMPOS_VENCIMENTO = Object.freeze(Object.keys(VENCIMENTO_PADRAO))
@@ -33,12 +35,21 @@ const offsetVencimentoSchema = z.preprocess(
   z.union([z.literal(0), z.literal(1)], { error: 'deve ser 0 (mesmo mês) ou 1 (mês seguinte)' }),
 )
 
+const janelaInicioSchema = z.preprocess(
+  inteiro,
+  z.number({ error: 'deve ser um inteiro entre 1 e 28' })
+    .int('deve ser um inteiro entre 1 e 28')
+    .min(1, 'deve ser um inteiro entre 1 e 28')
+    .max(28, 'deve ser um inteiro entre 1 e 28'),
+)
+
 /** Campos de vencimento da condição comercial; todos opcionais (ausente = herdar). */
 export const vencimentoCondicaoSchema = z.object({
   fixo_vencimento_dia: diaVencimentoSchema.optional(),
   fixo_vencimento_mes_offset: offsetVencimentoSchema.optional(),
   comissao_vencimento_dia: diaVencimentoSchema.optional(),
   comissao_vencimento_mes_offset: offsetVencimentoSchema.optional(),
+  comissao_janela_inicio_dia: janelaInicioSchema.optional(),
 })
 
 function invalid(message) {

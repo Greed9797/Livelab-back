@@ -90,6 +90,39 @@ describe('status derivado e normalização', () => {
   })
 })
 
+describe('totais: saldo_previsto/realizado = resultado do DRE', () => {
+  it('aporte, perdido e cancelado: card === montarDre(...).resultado', () => {
+    const base = { natureza: 'receita', competencia: '2026-09-01', data_vencimento: '2026-09-05', data_pagamento: null }
+    const itens = [
+      receita({ valor_previsto: 1000, valor_pago: 600, data_pagamento: '2026-09-06' }),
+      receita({ id: 'r2', valor_previsto: 500, perdido_em: '2026-09-10T12:00:00.000Z' }),
+      { ...base, id: 'ap', origem: 'avulsa', grupo: 'aporte', descricao: 'Aporte', valor_previsto: 2000, valor_pago: 2000, status: 'pago', data_pagamento: '2026-09-02' },
+      custo({ valor_previsto: 300, valor_pago: 100, data_pagamento: '2026-09-07' }),
+      custo({ id: 'c2', valor_previsto: 200, cancelado_em: '2026-09-11T12:00:00.000Z' }),
+    ]
+    const t = totalizarLancamentos(itens)
+    const { resultado } = montarDre({ meses: ['2026-09'], itens, aliquota: 10 }).meses[0]
+    expect(t.saldo_previsto).toBe(resultado.previsto)
+    expect(t.saldo_realizado).toBe(resultado.realizado)
+    expect(t.saldo_previsto).toBe((1000 + 500 - 500) - (300 + 200 - 200))
+    expect(t.saldo_realizado).toBe(600 - 100)
+  })
+})
+
+describe('totais: aporte perdido não é descontado duas vezes', () => {
+  it('aporte 1000 pago 0 e perdido: card === DRE', () => {
+    const base = { natureza: 'receita', competencia: '2026-09-01', data_vencimento: '2026-09-05', data_pagamento: null }
+    const itens = [
+      receita({ valor_previsto: 1000, valor_pago: 1000, data_pagamento: '2026-09-06' }),
+      { ...base, id: 'ap', origem: 'avulsa', grupo: 'aporte', descricao: 'Aporte', valor_previsto: 1000, valor_pago: 0, perdido_em: '2026-09-10T12:00:00.000Z' },
+    ]
+    const t = totalizarLancamentos(itens)
+    const { resultado } = montarDre({ meses: ['2026-09'], itens, aliquota: 10 }).meses[0]
+    expect(t.saldo_previsto).toBe(resultado.previsto)
+    expect(t.saldo_previsto).toBe(1000)
+  })
+})
+
 describe('imposto', () => {
   it('base = recebido em M-1 quando M-1 fechou; vence dia 20 de M', () => {
     const c = calcularImpostoMes({ mes: '2026-09', mesAtual: '2026-09', aliquota: 10, recebidoAnterior: 12345.67, previstoAnterior: 99999 })

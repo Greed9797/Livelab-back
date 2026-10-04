@@ -323,6 +323,12 @@ rota:
 | `PATCH` | `/v1/financeiro/apresentadoras-pagamentos/:id/:mes/:componente/pagar` · `/desfazer` | Pagar fixo ou variável da apresentadora (`:id` = apresentadora) |
 | `PATCH` | `/v1/financeiro/impostos/:mes/pagar` · `/desfazer` | Pagar o imposto do mês / desfazer |
 
+Perder/cancelar e reativar (`/perder`, `/desperder`, `/cancelar`, `/reativar` em
+receitas, custos, apresentadoras e impostos) **não** estão na allowlist da chave:
+mudam previsto, a pagar e DRE sem baixa, então ficam para quem está no painel.
+Na leitura, itens encerrados chegam com `status` `perdido` ou `cancelado` (mais
+`perdido_*`/`cancelado_*`); baixar um deles responde 409 e exige reativar antes.
+
 No `:vid`, use o `:` sem codificar (`calc:…`). Se o cliente HTTP codificar
 como `%3A`, também funciona.
 

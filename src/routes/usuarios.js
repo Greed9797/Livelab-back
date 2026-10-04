@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { SECURITY } from '../config/security.js'
 import { DEFAULT_APRESENTADORA_FIXO, MAX_APRESENTADORA_FIXO, ensureDefaultPresenterCommissionTiers, presenterFixedSql } from '../config/presenter_defaults.js'
 import { notify } from '../services/mailer.js'
+import { invalidateTenant } from '../lib/dashboard-cache.js'
 import { origemDados } from '../plugins/auth.js'
 import { isPresenterRole, linkedPresenterForUser } from '../services/presenter-identity.js'
 
@@ -482,6 +483,8 @@ export async function usuariosRoutes(app) {
         await db.query('COMMIT')
 
         if (revokeSessions) app.invalidateTokenVersionCache?.(request.params.id)
+        // Fixo/ativo da apresentadora muda custos fixos, DRE e painel.
+        invalidateTenant(request.user.tenant_id)
 
         if (userFields.papel !== undefined && currentUser.papel !== null && currentUser.papel !== userFields.papel) {
           app.audit?.log?.(request, {
@@ -793,6 +796,7 @@ export async function usuariosRoutes(app) {
         throw error
       }
       app.invalidateTokenVersionCache?.(request.params.id)
+      invalidateTenant(request.user.tenant_id)
       app.audit?.log?.(request, { action: 'usuarios.delete', entity_type: 'user', entity_id: request.params.id })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(204).send()
     })

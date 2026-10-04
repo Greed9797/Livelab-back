@@ -69,7 +69,24 @@ Mesma regra dos títulos (`marcaGeraReceitaSql`) passou a valer nas telas que ai
 | DRE do mês — `GET /v1/financeiro/dre/mes` (`receita.por_cliente`) | agrupamento | marca sem cliente vira grupo próprio (`sem-cliente:<marca_id>`, nome = marca); totais iguais (F4a) |
 | Ranking da Home / ranking de apresentadoras / público | — | não (não usam comissão de franquia por marca) |
 
-Fora desta entrega (continuam como antes): detalhe por linha de venda (`/v1/comissoes/pendentes`, `/por-live`, `/export-csv`, `/memoria`, `/v1/lives/:id/comissoes`), `/v1/financeiro/faturamento` e títulos já materializados de marca não-cliente (I9).
+#### Extensão ao detalhe por linha e ao faturamento
+
+Mesma regra (`marcaGeraReceitaSql`), aplicada **só na leitura** — `vendas_atribuidas.comissao_franquia` continua gravado pelo commission-engine como antes (nenhum UPDATE, nenhuma escrita alterada). Marca sem `marca_id` resolvido também mostra 0 (mesmo comportamento do Ranking/`/resumo`).
+
+| Tela / rota | Campo | Muda? |
+| --- | --- | --- |
+| Detalhe da live — `GET /v1/lives/:id/comissoes` (`src/routes/comissoes.js`, `comissaoFranquiaExibidaExpr`) | `comissoes[].comissao_franquia` | 0 quando a marca da linha não gera receita; cliente igual ao gravado (escalado pelo GMV oficial, como antes) |
+| Comissões por live — `GET /v1/comissoes/por-live` | `comissao_franquia` | idem |
+| Export — `GET /v1/comissoes/export-csv` | coluna `comissao_franquia` (live e vídeo) | idem |
+| essas três | `gmv`, `pedidos`, `comissao_apresentadora`, `comissao_franqueadora`, `pct_*`, `status_aprovacao`, linhas listadas | não |
+| Faturamento — `GET /v1/financeiro/faturamento` (`src/routes/financeiro.js`) | `por_cliente[].receita_liquida` | cai GMV × % de live/vídeo de marca não-cliente; cliente com afiliada vinculada (ex.: Beta + Beta Afiliada) passa a mostrar só a parte da marca cliente |
+| idem | `total`, `gmv_mes`, `lives_mes`, `videos_mes`, agrupamento | não |
+| Fila de aprovação — `GET /v1/comissoes/pendentes` | `comissao_franquia` | **não** (fluxo de aprovação; mostra o gravado) |
+| Memória — `GET /v1/comissoes/memoria` | — | não (só comissão de apresentadora) |
+
+Testes: `test/comissao_franquia_exibida_marca.test.js` (SQL das rotas) e `test/comissao_detalhe_marca_nao_cliente.pg.test.js` (Postgres real: cliente inalterado, afiliada/própria/parceira/sistema com franquia 0 em cada rota, GMV igual, `vendas_atribuidas` intacta).
+
+Continuam como antes: `/v1/comissoes/pendentes` (acima) e títulos já materializados de marca não-cliente (I9).
 
 ---
 

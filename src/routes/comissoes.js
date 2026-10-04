@@ -4,6 +4,7 @@ import { liveOrdersSql } from '../lib/metric-sql.js'
 import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr, officialLiveGmvSql, sameCalendarMonthSql } from '../lib/sale-gmv-sql.js'
 import { getPresenterRanking, limitFromQuery, monthRangeFromQuery } from '../lib/presenter-ranking.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
+import { marcaGeraReceitaSql } from '../lib/receita-marca-sql.js'
 import { getPerformanceRanking } from '../lib/performance-rollups.js'
 import { getOperationalRanking } from '../lib/operational-ranking.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
@@ -21,6 +22,16 @@ const DIAGNOSTICO_OPERACIONAL_SQL = `CASE
              WHEN COALESCE(va.comissao_apresentadora, 0) = 0 THEN 'comissao_zero'
              ELSE 'pronta_para_aprovar'
            END`
+
+// Comissão de franquia EXIBIDA por linha: só de marca que gera receita
+// (marcaGeraReceitaSql — mesma regra de /resumo, Ranking e títulos; cadastro unificado F4b).
+// Marca afiliada/própria/parceira/sistema (ou linha sem marca) mostra 0. Só leitura:
+// vendas_atribuidas.comissao_franquia gravado pelo commission-engine não muda.
+function comissaoFranquiaExibidaExpr(saleAlias = 'va', marcaAlias = 'm') {
+  return `CASE WHEN ${marcaGeraReceitaSql(marcaAlias)}
+    THEN ${officialLineCommissionExpr(saleAlias, 'comissao_franquia')}
+    ELSE 0 END`
+}
 
 function motivoInformado(body) {
   const raw = body?.motivo
@@ -441,6 +452,8 @@ export async function comissoesRoutes(app) {
   })
 
   // GET /v1/comissoes/pendentes — lista comissões aguardando aprovação
+  // Fila de APROVAÇÃO (gate pela comissão da apresentadora): fica fora da regra F4b de
+  // comissão de franquia exibida — mostra a linha como gravada (docs/financeiro.md).
   app.get('/v1/comissoes/pendentes', { preHandler: writeAccess }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
@@ -631,7 +644,7 @@ export async function comissoesRoutes(app) {
            va.id,
            (${officialLineGmvExpr('va')}) AS gmv,
            (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
-           (${officialLineCommissionExpr('va', 'comissao_franquia')}) AS comissao_franquia,
+           (${comissaoFranquiaExibidaExpr('va', 'm')}) AS comissao_franquia,
            (${officialLineCommissionExpr('va', 'comissao_franqueadora')}) AS comissao_franqueadora,
            va.status_aprovacao,
            ${officialLinePctExpr('va')} AS pct_apresentadora,
@@ -685,7 +698,7 @@ export async function comissoesRoutes(app) {
            va.data,
            (${officialLineGmvExpr('va')}) AS gmv,
            (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
-           (${officialLineCommissionExpr('va', 'comissao_franquia')}) AS comissao_franquia,
+           (${comissaoFranquiaExibidaExpr('va', 'm')}) AS comissao_franquia,
            (${officialLineCommissionExpr('va', 'comissao_franqueadora')}) AS comissao_franqueadora,
            va.status_aprovacao,
            ${officialLinePctExpr('va')} AS pct_aplicado,
@@ -847,7 +860,7 @@ export async function comissoesRoutes(app) {
            va.origem,
            (${officialLineGmvExpr('va')}) AS gmv,
            (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
-           (${officialLineCommissionExpr('va', 'comissao_franquia')}) AS comissao_franquia,
+           (${comissaoFranquiaExibidaExpr('va', 'm')}) AS comissao_franquia,
            (${officialLineCommissionExpr('va', 'comissao_franqueadora')}) AS comissao_franqueadora,
            va.status_aprovacao AS status
          FROM vendas_atribuidas va

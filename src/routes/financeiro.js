@@ -404,8 +404,11 @@ export async function financeiroRoutes(app) {
                  ${liveGmvSql('l')} AS gmv,
                  -- comissão de franquia inline (gmv × pct da marca resolvida), não da coluna
                  -- pré-calculada/estagnada do motor — mantém o breakdown por cliente coerente
-                 -- com /resumo e com a aba Comissões.
-                 ${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0 AS comissao_franquia,
+                 -- com /resumo e com a aba Comissões. Só marca que gera receita
+                 -- (marcaGeraReceitaSql — mesma regra do /resumo, F4b): GMV continua.
+                 CASE WHEN ${marcaGeraReceitaSql('marca_cliente')}
+                      THEN ${liveGmvSql('l')} * COALESCE(mc.comissao_franquia_pct, 0) / 100.0
+                      ELSE 0 END AS comissao_franquia,
                  1 AS is_live, 0 AS is_video
           FROM lives l
           ${marcaResolveLateralSql('$3')}
@@ -419,13 +422,14 @@ export async function financeiroRoutes(app) {
           UNION ALL
           SELECT m.cliente_id, vr.marca_id,
                  vr.gmv_atribuido AS gmv,
+                 CASE WHEN NOT (${marcaGeraReceitaSql('m')}) THEN 0 ELSE
                  vr.gmv_atribuido * COALESCE((
                    SELECT c.comissao_franquia_pct
                      FROM marca_condicoes_comerciais c
                     WHERE c.tenant_id = vr.tenant_id AND c.marca_id = vr.marca_id
                       AND c.inicio_vigencia <= vr.data AND c.cancelled_at IS NULL
                     ORDER BY c.inicio_vigencia DESC LIMIT 1
-                 ), m.comissao_franquia_pct, 0) / 100.0 AS comissao_franquia,
+                 ), m.comissao_franquia_pct, 0) / 100.0 END AS comissao_franquia,
                  0 AS is_live, 1 AS is_video
           FROM video_registros vr
           JOIN marcas m ON m.id = vr.marca_id AND m.tenant_id = vr.tenant_id

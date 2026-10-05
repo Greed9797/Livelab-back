@@ -137,7 +137,7 @@ Ordem real da função (não há status gravado; a entrada também recebe `perdi
 4. Com pagamento parcial (`0 < valor_pago < valor_previsto`): `atrasado` se `data_vencimento < hoje`; senão `parcial`.
 5. Sem pagamento: `atrasado` se vencido; `pendente` se não há vencimento; `previsto` se o **mês** do vencimento é futuro; senão `pendente`.
 
-**Encerrados** (`perdido`/`cancelado`): saldo em aberto = 0 — saem de a receber/a pagar, do caixa projetado, do fluxo, de pendente/atrasado, da base do imposto e da conciliação; no DRE a receita perdida aparece em coluna própria e o custo cancelado sai do previsto. Parcial + encerrado: o pago fica, só o saldo (`previsto − pago`) é encerrado. Pagar/conciliar item encerrado → 409 (`RECEITA_PERDIDA`, `CUSTO_CANCELADO`, `ALVO_PERDIDO`, `ALVO_CANCELADO`); é preciso reativar antes. Novas perdas de receita exigem motivo não vazio (até 300 caracteres); repetição de perda já registrada aceita ausência de motivo e conserva o motivo anterior. Cancelamentos de custo continuam com motivo opcional.
+**Encerrados** (`perdido`/`cancelado`): saldo em aberto = 0. Perda parcial de receita reduz só o valor escolhido; o aberto é `previsto − pago − valor_perdido` e pode continuar vencido. O valor pago é preservado. Perda ou reversão nova exige motivo (até 300 caracteres); uma repetição sem efeito não o substitui. Operações com valor explícito exigem `chave_operacao` UUID para evitar aplicação duplicada. O DRE reconhece eventos FIN-02 no mês do registro; perdas legadas continuam identificadas. Cancelamentos de custo mantêm a regra anterior e motivo opcional.
 
 **`saldo_previsto` / `saldo_realizado`** (`totais` de `GET /lancamentos`): `saldo_previsto = (receita.previsto − receita.perdido − aportes.previsto) − (custo.previsto − custo.cancelado)`; `saldo_realizado = (receita.pago − aportes.pago) − custo.pago`. Aporte não é receita do DRE, então `saldo_previsto` é igual ao `resultado.previsto` de `/dre/mes` do mesmo mês.
 
@@ -245,8 +245,8 @@ Handler = função exportada do plugin + serviço quando o route é fino. Query 
 | POST | `/v1/financeiro/receitas/gerar` | `mes` em query ou body | `gerarTitulosReceita` |
 | PATCH | `/v1/financeiro/receitas/:id/receber` | body `valor_pago?`, `data_pagamento?`, `observacao?` | `receberTitulo` |
 | PATCH | `/v1/financeiro/receitas/:id/desfazer` | `:id` | `desfazerRecebimento` |
-| PATCH | `/v1/financeiro/receitas/:id/perder` | body `motivo` obrigatório para nova perda (≤ 300); 409 se 100% recebido | `perderTitulo` |
-| PATCH | `/v1/financeiro/receitas/:id/desperder` | `:id` | `desperderTitulo` |
+| PATCH | `/v1/financeiro/receitas/:id/perder` | body `motivo` obrigatório para nova perda (≤ 300), `valor_perda?` decimal e `chave_operacao` UUID quando há valor; 409 se 100% recebido | `perderTitulo` |
+| PATCH | `/v1/financeiro/receitas/:id/desperder` | body `motivo` da reversão, `valor_reversao?` decimal e `chave_operacao` UUID quando há valor | `desperderTitulo` |
 
 ### Receitas avulsas — `financeiroReceitasAvulsasRoutes` (`src/routes/financeiro_receitas_avulsas.js`)
 
@@ -260,8 +260,8 @@ Grupos: `aporte`, `servico`, `reembolso`, `outros`.
 | DELETE | `/v1/financeiro/receitas-avulsas/:id` | `:id` UUID | `excluirReceitaAvulsa` |
 | PATCH | `/v1/financeiro/receitas-avulsas/:id/receber` | body `valor_pago?`, `data_pagamento?` | `receberReceitaAvulsa` |
 | PATCH | `/v1/financeiro/receitas-avulsas/:id/desfazer` | `:id` | `desfazerReceitaAvulsa` |
-| PATCH | `/v1/financeiro/receitas-avulsas/:id/perder` | body `motivo` obrigatório para nova perda (≤ 300); 409 se 100% recebida | `perderReceitaAvulsa` |
-| PATCH | `/v1/financeiro/receitas-avulsas/:id/desperder` | `:id` | `desperderReceitaAvulsa` |
+| PATCH | `/v1/financeiro/receitas-avulsas/:id/perder` | body `motivo` obrigatório para nova perda (≤ 300), `valor_perda?` decimal e `chave_operacao` UUID quando há valor; 409 se 100% recebida | `perderReceitaAvulsa` |
+| PATCH | `/v1/financeiro/receitas-avulsas/:id/desperder` | body `motivo` da reversão, `valor_reversao?` decimal e `chave_operacao` UUID quando há valor | `desperderReceitaAvulsa` |
 
 ### Custos — `financeiroCustosRoutes` (`src/routes/financeiro_custos.js`)
 

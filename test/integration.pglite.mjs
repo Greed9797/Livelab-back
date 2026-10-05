@@ -11,5 +11,6 @@ await import('./financeiro_perdas_schema.pglite.mjs')
 await import('./financeiro_perdas_writer.pglite.mjs')
 await import('./financeiro_perdas_servico.pglite.mjs')
 await import('./financeiro_dre_perdas_eventos.pglite.mjs')
+await import('./financeiro_fechamentos.pglite.mjs')
 
 console.log('PASS: all PGlite integration fixtures')

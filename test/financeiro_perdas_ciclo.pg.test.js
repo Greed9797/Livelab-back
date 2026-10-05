@@ -159,8 +159,8 @@ describe.skipIf(!url)('perdas e cancelamentos (Postgres real)', () => {
 
     const parcial = await receberTitulo(pool, { tenantId: t, id: perdido.id, valorPago: 400, dataPagamento: '2026-09-12', hoje: HOJE })
     expect(parcial).toMatchObject({ status: 'atrasado', valor_pago: 400 }) // parcial vencido
-    const { item: perdaParcial } = await perderTitulo(pool, { tenantId: t, id: perdido.id, hoje: HOJE })
-    expect(perdaParcial).toMatchObject({ status: 'perdido', valor_pago: 400, data_pagamento: '2026-09-12', perdido_motivo: null })
+    const { item: perdaParcial } = await perderTitulo(pool, { tenantId: t, id: perdido.id, motivo: 'Saldo não será pago', hoje: HOJE })
+    expect(perdaParcial).toMatchObject({ status: 'perdido', valor_pago: 400, data_pagamento: '2026-09-12', perdido_motivo: 'Saldo não será pago' })
     const tot = totalizarTitulos(await listarTitulosReceita(pool, { tenantId: t, inicio: '2026-09', fim: '2026-09', hoje: HOJE }))
     expect(tot).toMatchObject({ valor_previsto: 1200, valor_pago: 400, em_aberto: 0, perdido: 800 })
 

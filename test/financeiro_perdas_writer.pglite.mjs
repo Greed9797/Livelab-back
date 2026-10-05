@@ -49,6 +49,7 @@ const migrationClient = {
     return { rows: [] }
   },
 }
+await applyMigration(migrationClient, '180_financeiro_liquidacoes_estornos.sql')
 await applyMigration(migrationClient, '181_financeiro_perdas_reversoes.sql')
 
 const db = {

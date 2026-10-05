@@ -170,6 +170,20 @@ function titulosDb({ titulos = [], calc = [calcRow()], failAudit = false } = {})
           .reduce((n, r) => n + Number(r.valor), 0).toFixed(2) }))
         .filter((e) => Number(e.valor) > Number(e.valor_revertido)) }
     }
+    // A baixa agora grava um fato canônico; a semântica SQL completa é coberta
+    // pelo fixture PGlite de liquidações comerciais.
+    if (text.includes('FROM financeiro_liquidacoes') && text.includes('SUM(l.valor)')) {
+      return { rows: [{ liquidado: '0', estornado: '0' }] }
+    }
+    if (text.includes('FROM financeiro_liquidacoes')) return { rows: [] }
+    if (text.includes('INSERT INTO financeiro_liquidacoes')) {
+      return { rows: [{
+        id: '00000000-0000-4000-8000-0000000000f1', tenant_id: params[0], natureza: params[1],
+        origem_tipo: params[2], origem_id: params[3], valor: params[4], data_liquidacao: params[5],
+        comando_origem: params[6], ator_tipo: params[7], ator_id: params[8], motivo: params[9],
+        idempotencia_chave: params[10], idempotencia_payload: JSON.parse(params[11]),
+      }] }
+    }
     if (text.includes('WITH comissao_marca')) return { rows: calc }
     if (text.includes('INSERT INTO audit_log')) {
       if (failAudit) throw new Error('audit indisponível')
@@ -221,6 +235,9 @@ function titulosDb({ titulos = [], calc = [calcRow()], failAudit = false } = {})
             ? r.perdido_em : null
           if (Number(params[2]) === 0) { r.perdido_por = null; r.perdido_motivo = null }
         }
+      } else if (text.includes('SET valor_pago = valor_pago + $3')) {
+        r.valor_pago = (Number(r.valor_pago) + Number(params[2])).toFixed(2)
+        r.data_pagamento = params[3]
       } else if (text.includes('SET valor_pago = $3')) {
         r.valor_pago = String(params[2]); r.data_pagamento = params[3]
       } else if (text.includes('SET valor_pago = 0')) {
@@ -527,9 +544,20 @@ function avulsasDb(row, { failAudit = false } = {}) {
         .filter((e) => Number(e.valor) > Number(e.valor_revertido)) }
     }
     const r = state.row
+    if (text.includes('FROM financeiro_liquidacoes')) return { rows: [] }
+    if (text.includes('INSERT INTO financeiro_liquidacoes')) {
+      return { rows: [{
+        id: '00000000-0000-4000-8000-0000000000f2', tenant_id: params[0], natureza: params[1],
+        origem_tipo: params[2], origem_id: params[3], valor: params[4], data_liquidacao: params[5],
+        comando_origem: params[6], ator_tipo: params[7], ator_id: params[8], motivo: params[9],
+        idempotencia_chave: params[10], idempotencia_payload: JSON.parse(params[11]),
+      }] }
+    }
     if (/^\s*SELECT/.test(text) && text.includes('FROM receitas_avulsas')) {
       expect(params[1]).toBe(tenantId)
-      return { rows: r && r.id === params[0] ? [{ ...r }] : [] }
+      return { rows: r && r.id === params[0] ? [{
+        ...r, previsto: r.valor_previsto, pago: r.valor_pago, perdido: r.valor_perdido ?? '0',
+      }] : [] }
     }
     if (text.includes('UPDATE receitas_avulsas')) {
       expect(params[1]).toBe(tenantId)
@@ -544,6 +572,9 @@ function avulsasDb(row, { failAudit = false } = {}) {
             ? r.perdido_em : null
           if (Number(params[2]) === 0) { r.perdido_por = null; r.perdido_motivo = null }
         }
+      } else if (text.includes('SET valor_pago = valor_pago + $3::numeric')) {
+        r.valor_pago = (Number(r.valor_pago) + Number(params[2])).toFixed(2)
+        r.data_pagamento = params[3]
       } else if (text.includes('SET valor_pago = COALESCE($3::numeric')) {
         if (r.perdido_em || Number(r.valor_pago) >= Number(r.valor_previsto) - Number(r.valor_perdido ?? 0)) return { rows: [] }
         r.valor_pago = String(params[2] ?? (Number(r.valor_previsto) - Number(r.valor_perdido ?? 0)))

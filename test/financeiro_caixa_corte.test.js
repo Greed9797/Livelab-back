@@ -238,6 +238,7 @@ describe('receitas avulsas — service (tenant explícito)', () => {
     await desfazerReceitaAvulsa(db, { tenantId: TENANT, id: ID, hoje: HOJE })
     expect(await excluirReceitaAvulsa(db, { tenantId: TENANT, id: ID })).toBe(true)
     for (const [sql, params] of db.query.mock.calls) {
+      if (/^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE SAVEPOINT)/.test(String(sql))) continue
       expect(String(sql)).toMatch(/tenant_id = \$\d::uuid/)
       expect(params).toContain(TENANT)
     }

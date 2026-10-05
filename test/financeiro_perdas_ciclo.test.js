@@ -23,6 +23,8 @@ const avulsaId = '00000000-0000-4000-8000-0000000000b1'
 const custoId = '00000000-0000-4000-8000-0000000000c1'
 const recId = '00000000-0000-4000-8000-0000000000d1'
 const matRecId = '00000000-0000-4000-8000-0000000000d2'
+const chavePerda = '00000000-0000-4000-8000-0000000000e1'
+const chaveReversao = '00000000-0000-4000-8000-0000000000e2'
 
 // ─── status derivado ──────────────────────────────────────────────────────
 
@@ -116,16 +118,67 @@ function calcRow(extra = {}) {
 }
 
 /** Fake de receita_titulos: guarda as linhas e aplica os UPDATEs de perda/baixa. */
-function titulosDb({ titulos = [], calc = [calcRow()] } = {}) {
+function titulosDb({ titulos = [], calc = [calcRow()], failAudit = false } = {}) {
   const rows = new Map(titulos.map((t) => [t.id, { ...t }]))
+  let failEvents = failAudit
+  let events = []
+  let eventSnapshot = null
   let seq = 0
+  let snapshot = null
   const byKey = (marca, comp, componente) => [...rows.values()]
     .find((r) => r.marca_id === marca && r.competencia === comp && r.componente === componente)
   const sqls = []
+  const audit = []
   const query = vi.fn(async (sql, params = []) => {
     const text = String(sql)
     sqls.push(text)
+    if (text === 'BEGIN') {
+      snapshot = new Map([...rows].map(([id, r]) => [id, { ...r }]))
+      eventSnapshot = events.map((e) => ({ ...e }))
+      return { rows: [] }
+    }
+    if (text === 'COMMIT') {
+      snapshot = null
+      return { rows: [] }
+    }
+    if (text === 'ROLLBACK') {
+      if (snapshot) {
+        rows.clear()
+        for (const [id, r] of snapshot) rows.set(id, { ...r })
+      }
+      snapshot = null
+      events = eventSnapshot ?? events
+      eventSnapshot = null
+      return { rows: [] }
+    }
+    if (text.includes('INSERT INTO financeiro_perdas_eventos')) {
+      if (failEvents) throw new Error('evento indisponível')
+      const id = `00000000-0000-4000-8000-${String(events.length + 100).padStart(12, '0')}`
+      events.push({ id, tipo: params[1], origem_id: params[2], valor: params[3], motivo: params[4],
+        ator_tipo: params[5], ator_id: params[6], competencia: params[7], perda_original_id: params[8],
+        chave_operacao: params[9], requisicao: params[10] ? JSON.parse(params[10]) : null })
+      return { rows: [{ id }] }
+    }
+    if (text.includes('SELECT requisicao FROM financeiro_perdas_eventos')) {
+      const found = events.find((e) => e.chave_operacao === params[1])
+      return { rows: found ? [{ requisicao: found.requisicao }] : [] }
+    }
+    if (text.includes('FROM financeiro_perdas_eventos p')) {
+      return { rows: events.filter((e) => e.tipo === 'perda' && e.origem_id === params[1])
+        .map((e) => ({ id: e.id, valor: e.valor, valor_revertido: events
+          .filter((r) => r.tipo === 'reversao' && r.perda_original_id === e.id)
+          .reduce((n, r) => n + Number(r.valor), 0).toFixed(2) }))
+        .filter((e) => Number(e.valor) > Number(e.valor_revertido)) }
+    }
     if (text.includes('WITH comissao_marca')) return { rows: calc }
+    if (text.includes('INSERT INTO audit_log')) {
+      if (failAudit) throw new Error('audit indisponível')
+      audit.push({
+        tenant_id: params[0], user_id: params[1], action: params[2], entity_id: params[3],
+        metadata: JSON.parse(params[4]),
+      })
+      return { rows: [{ id: 'audit-1' }] }
+    }
     if (text.includes('INSERT INTO receita_titulos')) {
       const [tenant, marca, cliente, comp, componente, valor, venc] = params
       expect(tenant).toBe(tenantId)
@@ -141,7 +194,7 @@ function titulosDb({ titulos = [], calc = [calcRow()] } = {}) {
       rows.set(id, {
         id, tenant_id: tenant, marca_id: marca, cliente_id: cliente, competencia: comp, componente,
         valor_previsto: String(valor), valor_pago: '0', data_vencimento: venc, data_pagamento: null,
-        perdido_em: null, perdido_motivo: null, perdido_por: null,
+        perdido_em: null, perdido_motivo: null, perdido_por: null, valor_perdido: null,
       })
       return { rows: [{ id, inserido: true }] }
     }
@@ -149,7 +202,7 @@ function titulosDb({ titulos = [], calc = [calcRow()] } = {}) {
       const ex = byKey(params[1], params[2], params[3])
       return { rows: ex ? [{ id: ex.id }] : [] }
     }
-    if (text.includes('SELECT * FROM receita_titulos') || text.includes('SELECT id, perdido_em FROM receita_titulos')) {
+    if (text.includes('FROM receita_titulos') && text.includes('WHERE tenant_id = $1::uuid AND id = $2::uuid')) {
       expect(params[0]).toBe(tenantId)
       const r = rows.get(params[1])
       return { rows: r ? [{ ...r }] : [] }
@@ -158,14 +211,16 @@ function titulosDb({ titulos = [], calc = [calcRow()] } = {}) {
       expect(params[0]).toBe(tenantId)
       const r = rows.get(params[1])
       if (!r) return { rows: [], rowCount: 0 }
-      if (text.includes('perdido_em = COALESCE(perdido_em, NOW())')) {
-        if (!r.perdido_em) {
-          r.perdido_em = new Date('2026-09-15T13:00:00.000Z')
-          r.perdido_por = params[2]
-          r.perdido_motivo = params[3]
-        } else if (params[3] != null) r.perdido_motivo = params[3]
-      } else if (text.includes('perdido_em = NULL')) {
-        r.perdido_em = null; r.perdido_motivo = null; r.perdido_por = null
+      if (text.includes('SET valor_perdido = $3::numeric')) {
+        r.valor_perdido = params[2]
+        if (text.includes('$4::boolean')) {
+          r.perdido_em = params[3] ? (r.perdido_em ?? new Date('2026-09-15T13:00:00.000Z')) : null
+          r.perdido_por = params[4]; r.perdido_motivo = params[5]
+        } else {
+          r.perdido_em = Number(params[2]) >= Number(r.valor_previsto) - Number(r.valor_pago)
+            ? r.perdido_em : null
+          if (Number(params[2]) === 0) { r.perdido_por = null; r.perdido_motivo = null }
+        }
       } else if (text.includes('SET valor_pago = $3')) {
         r.valor_pago = String(params[2]); r.data_pagamento = params[3]
       } else if (text.includes('SET valor_pago = 0')) {
@@ -186,13 +241,14 @@ function titulosDb({ titulos = [], calc = [calcRow()] } = {}) {
     }
     return { rows: [], rowCount: 0 }
   })
-  return { query, rows, sqls }
+  return { query, rows, sqls, audit, get events() { return events }, set failEvents(value) { failEvents = value } }
 }
 
-function buildReceitasApp(query, papel = 'franqueado') {
+function buildReceitasApp(query, papel = 'franqueado', apiKeyId = null) {
   const app = Fastify()
   app.decorate('authenticate', async (request) => {
-    request.user = { tenant_id: tenantId, sub: userId, papel }
+    request.user = { tenant_id: tenantId, sub: apiKeyId ? null : userId, papel }
+    if (apiKeyId) request.viaApiKey = { id: apiKeyId }
   })
   app.decorate('requirePapel', (roles) => async (request, reply) => {
     if (!roles.includes(request.user.papel)) return reply.code(403).send({ error: 'Acesso negado' })
@@ -209,7 +265,7 @@ const tituloArmazenado = (extra = {}) => ({
 })
 
 describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
-  it('perde título materializado, é idempotente e desfaz; audita cada ação', async () => {
+  it('perde título materializado, é idempotente e desfaz; audita só transições reais', async () => {
     const db = titulosDb({ titulos: [tituloArmazenado()] })
     const app = buildReceitasApp(db.query)
     await app.register(financeiroReceitasRoutes)
@@ -222,22 +278,25 @@ describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
       perdido_em: '2026-09-15T13:00:00.000Z', valor_previsto: 1600, valor_pago: 0,
     })
 
-    // idempotente: segunda chamada sem motivo mantém data/autor/motivo
-    const r2 = await app.inject({ method: 'PATCH', url: `${url}/perder` })
+    // Replay válido não troca data/autor/motivo e não duplica auditoria.
+    const r2 = await app.inject({ method: 'PATCH', url: `${url}/perder`, payload: { motivo: 'outro motivo' } })
     expect(r2.statusCode).toBe(200)
     expect(r2.json()).toMatchObject({ status: 'perdido', perdido_motivo: 'Cliente fechou', perdido_em: '2026-09-15T13:00:00.000Z' })
+    const retrySemMotivo = await app.inject({ method: 'PATCH', url: `${url}/perder`, payload: {} })
+    expect(retrySemMotivo.statusCode).toBe(200)
+    expect(db.events).toHaveLength(1)
+    expect(db.events[0]).toMatchObject({ tipo: 'perda', origem_id: tituloId, valor: '1600.00',
+      motivo: 'Cliente fechou', ator_tipo: 'usuario', ator_id: userId, competencia: '2026-08-01' })
 
-    const audit = app.audit.log.mock.calls.map(([, e]) => e)
-    expect(audit[0]).toMatchObject({ action: 'receita_titulo.perder', entity_type: 'receita_titulo', entity_id: tituloId, metadata: { motivo: 'Cliente fechou', ja_perdido: false } })
-    expect(audit[1]).toMatchObject({ action: 'receita_titulo.perder', metadata: { ja_perdido: true } })
-
-    const d1 = await app.inject({ method: 'PATCH', url: `${url}/desperder` })
+    const d1 = await app.inject({ method: 'PATCH', url: `${url}/desperder`, payload: { motivo: 'cliente retomou acordo' } })
     expect(d1.statusCode).toBe(200)
     expect(d1.json()).toMatchObject({ status: 'atrasado', perdido_em: null, perdido_motivo: null, perdido_por: null })
-    const d2 = await app.inject({ method: 'PATCH', url: `${url}/desperder` })
+    const d2 = await app.inject({ method: 'PATCH', url: `${url}/desperder`, payload: { motivo: 'replay' } })
     expect(d2.statusCode).toBe(200)
-    expect(app.audit.log.mock.calls.slice(2).map(([, e]) => [e.action, e.metadata.estava_perdido]))
-      .toEqual([['receita_titulo.desperder', true], ['receita_titulo.desperder', false]])
+    expect(db.events).toHaveLength(2)
+    expect(db.events[1]).toMatchObject({ tipo: 'reversao', valor: '1600.00',
+      motivo: 'cliente retomou acordo', perda_original_id: db.events[0].id })
+    expect(app.audit.log).not.toHaveBeenCalled()
     await app.close()
   })
 
@@ -254,7 +313,7 @@ describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
     expect(db.sqls).toContain('BEGIN')
     expect(db.sqls).toContain('COMMIT')
 
-    const d = await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas/${vid}/desperder` })
+    const d = await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas/${vid}/desperder`, payload: { motivo: 'acordo refeito' } })
     expect(d.statusCode).toBe(200)
     expect(d.json()).toMatchObject({ id: r.json().id, perdido_em: null })
 
@@ -262,7 +321,9 @@ describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
     const db2 = titulosDb()
     const app2 = buildReceitasApp(db2.query)
     await app2.register(financeiroReceitasRoutes)
-    const d2 = await app2.inject({ method: 'PATCH', url: `/v1/financeiro/receitas/calc:${marcaId}:2026-08:fixo/desperder` })
+    const d2 = await app2.inject({
+      method: 'PATCH', url: `/v1/financeiro/receitas/calc:${marcaId}:2026-08:fixo/desperder`, payload: { motivo: 'checagem' },
+    })
     expect(d2.statusCode).toBe(200)
     expect(d2.json()).toMatchObject({ id: `calc:${marcaId}:2026-08:fixo`, materializado: false })
     expect(db2.rows.size).toBe(0)
@@ -277,20 +338,25 @@ describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
     const app = buildReceitasApp(db.query)
     await app.register(financeiroReceitasRoutes)
     const url = `/v1/financeiro/receitas/${tituloId}/perder`
-    const parcial = await app.inject({ method: 'PATCH', url })
+    expect((await app.inject({ method: 'PATCH', url })).statusCode).toBe(400)
+    const parcial = await app.inject({ method: 'PATCH', url, payload: { motivo: 'saldo incobrável' } })
+    expect(parcial.statusCode).toBe(200)
     expect(parcial.json()).toMatchObject({ status: 'perdido', valor_pago: 600, valor_previsto: 1600, data_pagamento: '2026-09-02' })
     expect(db.rows.get(tituloId).valor_pago).toBe('600')
+    expect(db.events[0].valor).toBe('1000.00')
 
     db.rows.get(tituloId).valor_pago = '1600'
     db.rows.get(tituloId).perdido_em = null
-    const pago = await app.inject({ method: 'PATCH', url })
+    const pago = await app.inject({ method: 'PATCH', url, payload: { motivo: 'tentativa inválida' } })
     expect(pago.statusCode).toBe(409)
     expect(pago.json()).toMatchObject({ code: 'RECEITA_PAGA' })
     expect(db.sqls).toContain('ROLLBACK')
 
     expect((await app.inject({ method: 'PATCH', url, payload: { motivo: 'x'.repeat(301) } })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url })).statusCode).toBe(409)
+    expect((await app.inject({ method: 'PATCH', url, payload: { motivo: '   ' } })).statusCode).toBe(400)
     expect((await app.inject({ method: 'PATCH', url, payload: { status: 'perdido' } })).statusCode).toBe(400)
-    expect((await app.inject({ method: 'PATCH', url: '/v1/financeiro/receitas/abc/perder' })).statusCode).toBe(404)
+    expect((await app.inject({ method: 'PATCH', url: '/v1/financeiro/receitas/abc/perder', payload: { motivo: 'x' } })).statusCode).toBe(404)
     await app.close()
 
     const leitor = buildReceitasApp(db.query, 'financeiro_readonly')
@@ -300,7 +366,7 @@ describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
     await leitor.close()
   })
 
-  it('receber título perdido → 409 e não grava baixa; após desperder, recebe', async () => {
+  it('receber título legado perdido → 409 e rejeita reversão sem evento', async () => {
     const db = titulosDb({ titulos: [tituloArmazenado({ perdido_em: new Date('2026-09-10T00:00:00Z'), perdido_motivo: 'x' })] })
     const app = buildReceitasApp(db.query)
     await app.register(financeiroReceitasRoutes)
@@ -308,10 +374,9 @@ describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
     expect(res.statusCode).toBe(409)
     expect(res.json()).toMatchObject({ code: 'RECEITA_PERDIDA', error: expect.stringContaining('Desfaça a perda/cancelamento antes') })
     expect(db.rows.get(tituloId).valor_pago).toBe('0')
-    await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas/${tituloId}/desperder` })
-    const ok = await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas/${tituloId}/receber`, payload: { data_pagamento: '2026-09-15' } })
-    expect(ok.statusCode).toBe(200)
-    expect(ok.json()).toMatchObject({ status: 'pago', valor_pago: 1600 })
+    const reversao = await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas/${tituloId}/desperder`, payload: {} })
+    expect(reversao.statusCode).toBe(409)
+    expect(reversao.json().code).toBe('RECEITA_PERDA_LEGADA')
     await app.close()
   })
 
@@ -321,6 +386,82 @@ describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
     await app.register(financeiroReceitasRoutes)
     const res = await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas/calc:${marcaId}:2026-08:fixo/receber`, payload: {} })
     expect(res.statusCode).toBe(409)
+    await app.close()
+  })
+
+  it('falha ao persistir evento faz rollback da perda', async () => {
+    const db = titulosDb({ titulos: [tituloArmazenado()], failAudit: true })
+    const app = buildReceitasApp(db.query)
+    await app.register(financeiroReceitasRoutes)
+    const res = await app.inject({
+      method: 'PATCH', url: `/v1/financeiro/receitas/${tituloId}/perder`, payload: { motivo: 'incobrável' },
+    })
+    expect(res.statusCode).toBe(500)
+    expect(db.sqls).toContain('ROLLBACK')
+    expect(db.rows.get(tituloId)).toMatchObject({ perdido_em: null, perdido_motivo: null, perdido_por: null })
+    await app.close()
+  })
+
+  it('falha de evento ao desperder faz rollback e preserva a perda', async () => {
+    const db = titulosDb({
+      titulos: [tituloArmazenado()],
+    })
+    const app = buildReceitasApp(db.query)
+    await app.register(financeiroReceitasRoutes)
+    await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas/${tituloId}/perder`, payload: { motivo: 'incobrável' } })
+    db.failEvents = true
+    const res = await app.inject({
+      method: 'PATCH', url: `/v1/financeiro/receitas/${tituloId}/desperder`, payload: { motivo: 'acordo retomado' },
+    })
+    expect(res.statusCode).toBe(500)
+    expect(db.sqls).toContain('ROLLBACK')
+    expect(db.rows.get(tituloId)).toMatchObject({ perdido_motivo: 'incobrável', perdido_por: userId })
+    await app.close()
+  })
+
+  it('audita saldo em decimal exato no limite de NUMERIC(15,2)', async () => {
+    const db = titulosDb({
+      titulos: [tituloArmazenado({ valor_previsto: '9999999999999.99', valor_pago: '9999999999999.98' })],
+    })
+    const app = buildReceitasApp(db.query)
+    await app.register(financeiroReceitasRoutes)
+    const res = await app.inject({
+      method: 'PATCH', url: `/v1/financeiro/receitas/${tituloId}/perder`, payload: { motivo: 'centavo residual' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(db.events[0].valor).toBe('0.01')
+    await app.close()
+  })
+
+  it('perda parcial, baixa do restante e reversão em eventos vinculados', async () => {
+    const db = titulosDb({ titulos: [tituloArmazenado()] })
+    const app = buildReceitasApp(db.query)
+    await app.register(financeiroReceitasRoutes)
+    const base = `/v1/financeiro/receitas/${tituloId}`
+    const perdaPayload = { motivo: 'parcial', valor_perda: '400.25', chave_operacao: chavePerda }
+    expect((await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: perdaPayload })).json())
+      .toMatchObject({ valor_perdido: 400.25, status: 'atrasado' })
+    expect((await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: perdaPayload })).json())
+      .toMatchObject({ valor_perdido: 400.25 })
+    expect(db.events).toHaveLength(1)
+    expect((await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: {
+      ...perdaPayload, motivo: 'outro motivo',
+    } })).statusCode).toBe(409)
+    expect((await app.inject({ method: 'PATCH', url: `${base}/receber`, payload: {} })).json())
+      .toMatchObject({ valor_pago: 1199.75, valor_perdido: 400.25, status: 'perdido' })
+    const reversaoPayload = { motivo: 'acordo', valor_reversao: '100.25', chave_operacao: chaveReversao }
+    const reversao = await app.inject({ method: 'PATCH', url: `${base}/desperder`, payload: reversaoPayload })
+    expect(reversao.json()).toMatchObject({ valor_perdido: 300, status: 'atrasado' })
+    expect((await app.inject({ method: 'PATCH', url: `${base}/desperder`, payload: reversaoPayload })).json())
+      .toMatchObject({ valor_perdido: 300 })
+    expect(db.events.map((e) => e.valor)).toEqual(['400.25', '100.25'])
+    expect(db.events[1].perda_original_id).toBe(db.events[0].id)
+    expect((await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: {
+      motivo: 'sem chave', valor_perda: '1.00',
+    } })).statusCode).toBe(400)
+    for (const valor_perda of ['12.345', '1,00', 'R$ 10', '-1.00', '0', 10]) {
+      expect((await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: { motivo: 'x', valor_perda } })).statusCode).toBe(400)
+    }
     await app.close()
   })
 })
@@ -339,10 +480,52 @@ describe('gerarTitulosReceita preserva perdido', () => {
 
 // ─── receitas avulsas ─────────────────────────────────────────────────────
 
-function avulsasDb(row) {
+function avulsasDb(row, { failAudit = false } = {}) {
   const state = { row: row ? { ...row } : null }
+  let failEvents = failAudit
+  let events = []
+  let eventSnapshot = null
+  let snapshot = null
+  const audit = []
+  const sqls = []
   const query = vi.fn(async (sql, params = []) => {
     const text = String(sql)
+    sqls.push(text)
+    if (text === 'BEGIN' || text === 'SAVEPOINT receita_avulsa_receber') {
+      snapshot = state.row ? { ...state.row } : null
+      eventSnapshot = events.map((e) => ({ ...e }))
+      return { rows: [] }
+    }
+    if (text === 'COMMIT' || text === 'RELEASE SAVEPOINT receita_avulsa_receber') {
+      snapshot = null
+      return { rows: [] }
+    }
+    if (text === 'ROLLBACK' || text === 'ROLLBACK TO SAVEPOINT receita_avulsa_receber') {
+      state.row = snapshot ? { ...snapshot } : null
+      events = eventSnapshot ?? events
+      eventSnapshot = null
+      snapshot = null
+      return { rows: [] }
+    }
+    if (text.includes('INSERT INTO financeiro_perdas_eventos')) {
+      if (failEvents) throw new Error('evento indisponível')
+      const id = `00000000-0000-4000-8000-${String(events.length + 200).padStart(12, '0')}`
+      events.push({ id, tipo: params[1], origem_id: params[2], valor: params[3], motivo: params[4],
+        ator_tipo: params[5], ator_id: params[6], competencia: params[7], perda_original_id: params[8],
+        chave_operacao: params[9], requisicao: params[10] ? JSON.parse(params[10]) : null })
+      return { rows: [{ id }] }
+    }
+    if (text.includes('SELECT requisicao FROM financeiro_perdas_eventos')) {
+      const found = events.find((e) => e.chave_operacao === params[1])
+      return { rows: found ? [{ requisicao: found.requisicao }] : [] }
+    }
+    if (text.includes('FROM financeiro_perdas_eventos p')) {
+      return { rows: events.filter((e) => e.tipo === 'perda' && e.origem_id === params[1])
+        .map((e) => ({ id: e.id, valor: e.valor, valor_revertido: events
+          .filter((r) => r.tipo === 'reversao' && r.perda_original_id === e.id)
+          .reduce((n, r) => n + Number(r.valor), 0).toFixed(2) }))
+        .filter((e) => Number(e.valor) > Number(e.valor_revertido)) }
+    }
     const r = state.row
     if (/^\s*SELECT/.test(text) && text.includes('FROM receitas_avulsas')) {
       expect(params[1]).toBe(tenantId)
@@ -351,28 +534,33 @@ function avulsasDb(row) {
     if (text.includes('UPDATE receitas_avulsas')) {
       expect(params[1]).toBe(tenantId)
       if (!r || r.id !== params[0]) return { rows: [] }
-      if (text.includes('perdido_em = COALESCE(perdido_em, NOW())')) {
-        if (Number(r.valor_pago) > 0 && Number(r.valor_pago) >= Number(r.valor_previsto)) return { rows: [] }
-        if (!r.perdido_em) { r.perdido_em = new Date('2026-09-15T13:00:00.000Z'); r.perdido_por = params[2]; r.perdido_motivo = params[3] }
-        else if (params[3] != null) r.perdido_motivo = params[3]
-      } else if (text.includes('perdido_em = NULL')) {
-        r.perdido_em = null; r.perdido_motivo = null; r.perdido_por = null
-      } else if (text.includes('COALESCE($3::numeric, valor_previsto)')) {
-        expect(text).toContain('perdido_em IS NULL')
-        if (r.perdido_em) return { rows: [] }
-        r.valor_pago = String(params[2] ?? r.valor_previsto); r.data_pagamento = params[3] ?? params[4]
+      if (text.includes('SET valor_perdido = $3::numeric')) {
+        r.valor_perdido = params[2]
+        if (text.includes('$4::boolean')) {
+          r.perdido_em = params[3] ? (r.perdido_em ?? new Date('2026-09-15T13:00:00.000Z')) : null
+          r.perdido_por = params[4]; r.perdido_motivo = params[5]
+        } else {
+          r.perdido_em = Number(params[2]) >= Number(r.valor_previsto) - Number(r.valor_pago)
+            ? r.perdido_em : null
+          if (Number(params[2]) === 0) { r.perdido_por = null; r.perdido_motivo = null }
+        }
+      } else if (text.includes('SET valor_pago = COALESCE($3::numeric')) {
+        if (r.perdido_em || Number(r.valor_pago) >= Number(r.valor_previsto) - Number(r.valor_perdido ?? 0)) return { rows: [] }
+        r.valor_pago = String(params[2] ?? (Number(r.valor_previsto) - Number(r.valor_perdido ?? 0)))
+        r.data_pagamento = params[3] ?? params[4]
       }
       return { rows: [{ ...r }] }
     }
     return { rows: [] }
   })
-  return { query, state }
+  return { query, state, audit, sqls, get events() { return events }, set failEvents(value) { failEvents = value } }
 }
 
-function buildApp(query, papel = 'franqueado') {
+function buildApp(query, papel = 'franqueado', apiKeyId = null) {
   const app = Fastify()
   app.decorate('requirePapel', (roles) => async (request, reply) => {
-    request.user = { tenant_id: tenantId, sub: userId, papel }
+    request.user = { tenant_id: tenantId, sub: apiKeyId ? null : userId, papel }
+    if (apiKeyId) request.viaApiKey = { id: apiKeyId }
     if (!roles.includes(papel)) return reply.code(403).send({ error: 'Acesso negado' })
   })
   app.decorate('withTenant', async (_t, fn) => fn({ query }))
@@ -383,10 +571,34 @@ function buildApp(query, papel = 'franqueado') {
 const avulsaRow = (extra = {}) => ({
   id: avulsaId, descricao: 'Consultoria', grupo: 'servico', valor_previsto: '500.00', valor_pago: '0.00',
   observacao: null, data_vencimento: '2026-09-10', data_pagamento: null, competencia: '2026-09-01',
-  perdido_em: null, perdido_motivo: null, perdido_por: null, ...extra,
+  perdido_em: null, perdido_motivo: null, perdido_por: null, valor_perdido: null, ...extra,
 })
 
 describe('PATCH /v1/financeiro/receitas-avulsas/:id/perder | /desperder', () => {
+  it('reversão de perda legada sem motivo retorna 409 específico', async () => {
+    const db = avulsasDb(avulsaRow({ perdido_em: new Date('2026-09-10T00:00:00Z') }))
+    const app = buildApp(db.query)
+    await app.register(financeiroReceitasAvulsasRoutes)
+    const res = await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${avulsaId}/desperder`, payload: {} })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().code).toBe('RECEITA_PERDA_LEGADA')
+    await app.close()
+  })
+
+  it('valor de perda aceita só texto decimal exato e exige motivo para nova perda', async () => {
+    const db = avulsasDb(avulsaRow())
+    const app = buildApp(db.query)
+    await app.register(financeiroReceitasAvulsasRoutes)
+    const url = `/v1/financeiro/receitas-avulsas/${avulsaId}/perder`
+    for (const valor_perda of ['12.345', 'R$ 12,34', 12.34]) {
+      const res = await app.inject({ method: 'PATCH', url, payload: { motivo: 'teste', valor_perda } })
+      expect(res.statusCode).toBe(400)
+    }
+    expect((await app.inject({ method: 'PATCH', url, payload: { valor_perda: '12.34' } })).statusCode).toBe(400)
+    expect(db.events).toHaveLength(0)
+    await app.close()
+  })
+
   it('perde (idempotente), bloqueia receber com 409, desfaz e recebe', async () => {
     const db = avulsasDb(avulsaRow())
     const app = buildApp(db.query)
@@ -396,21 +608,31 @@ describe('PATCH /v1/financeiro/receitas-avulsas/:id/perder | /desperder', () => 
     expect(p1.statusCode).toBe(200)
     expect(p1.json()).toMatchObject({ status: 'perdido', perdido_motivo: 'cliente sumiu', perdido_por: userId, origem: 'avulsa' })
     const p2 = await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: { motivo: 'novo motivo' } })
-    expect(p2.json()).toMatchObject({ status: 'perdido', perdido_motivo: 'novo motivo', perdido_em: '2026-09-15T13:00:00.000Z' })
+    expect(p2.json()).toMatchObject({ status: 'perdido', perdido_motivo: 'cliente sumiu', perdido_em: '2026-09-15T13:00:00.000Z' })
+    const retrySemMotivo = await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: {} })
+    expect(retrySemMotivo.statusCode).toBe(200)
+    expect(db.events).toHaveLength(1)
+    expect(db.events[0]).toMatchObject({ tipo: 'perda', origem_id: avulsaId, valor: '500.00',
+      motivo: 'cliente sumiu', ator_tipo: 'usuario', ator_id: userId, competencia: '2026-09-01' })
 
     const rec = await app.inject({ method: 'PATCH', url: `${base}/receber`, payload: {} })
     expect(rec.statusCode).toBe(409)
     expect(rec.json()).toMatchObject({ code: 'RECEITA_PERDIDA' })
     expect(db.state.row.valor_pago).toBe('0.00')
 
-    const d = await app.inject({ method: 'PATCH', url: `${base}/desperder` })
+    const d = await app.inject({ method: 'PATCH', url: `${base}/desperder`, payload: { motivo: 'cliente retomou' } })
     expect(d.statusCode).toBe(200)
     expect(d.json()).toMatchObject({ status: 'atrasado', perdido_em: null })
+    const d2 = await app.inject({ method: 'PATCH', url: `${base}/desperder`, payload: { motivo: 'replay' } })
+    expect(d2.statusCode).toBe(200)
+    expect(db.events).toHaveLength(2)
+    expect(db.events[1]).toMatchObject({ tipo: 'reversao', valor: '500.00',
+      motivo: 'cliente retomou', perda_original_id: db.events[0].id })
     const ok = await app.inject({ method: 'PATCH', url: `${base}/receber`, payload: {} })
     expect(ok.json()).toMatchObject({ status: 'pago', valor_pago: 500 })
 
     const acoes = app.audit.log.mock.calls.map(([, e]) => e.action)
-    expect(acoes).toEqual(['receita_avulsa.perder', 'receita_avulsa.perder', 'receita_avulsa.desperder', 'receita_avulsa.receber'])
+    expect(acoes).toEqual(['receita_avulsa.receber'])
     await app.close()
   })
 
@@ -419,19 +641,24 @@ describe('PATCH /v1/financeiro/receitas-avulsas/:id/perder | /desperder', () => 
     const app = buildApp(db.query)
     await app.register(financeiroReceitasAvulsasRoutes)
     const base = `/v1/financeiro/receitas-avulsas/${avulsaId}`
-    const p = await app.inject({ method: 'PATCH', url: `${base}/perder` })
+    expect((await app.inject({ method: 'PATCH', url: `${base}/perder` })).statusCode).toBe(400)
+    const p = await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: { motivo: 'saldo perdido' } })
+    expect(p.statusCode).toBe(200)
     expect(p.json()).toMatchObject({ status: 'perdido', valor_pago: 200, valor_previsto: 500 })
+    expect(db.events[0].valor).toBe('300.00')
 
     db.state.row.perdido_em = null
     db.state.row.valor_pago = '500.00'
-    const pago = await app.inject({ method: 'PATCH', url: `${base}/perder` })
+    const pago = await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: { motivo: 'tentativa inválida' } })
     expect(pago.statusCode).toBe(409)
     expect(pago.json()).toMatchObject({ code: 'RECEITA_PAGA' })
 
     const outro = '00000000-0000-4000-8000-0000000000b9'
-    expect((await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${outro}/perder` })).statusCode).toBe(404)
-    expect((await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${outro}/desperder` })).statusCode).toBe(404)
-    expect((await app.inject({ method: 'PATCH', url: '/v1/financeiro/receitas-avulsas/xyz/perder' })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${outro}/perder`, payload: { motivo: 'x' } })).statusCode).toBe(404)
+    expect((await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${outro}/desperder`, payload: { motivo: 'x' } })).statusCode).toBe(404)
+    expect((await app.inject({ method: 'PATCH', url: '/v1/financeiro/receitas-avulsas/xyz/perder', payload: { motivo: 'x' } })).statusCode).toBe(400)
+    expect((await app.inject({ method: 'PATCH', url: `${base}/perder` })).statusCode).toBe(409)
+    expect((await app.inject({ method: 'PATCH', url: `${base}/desperder`, payload: { motivo: '   ' } })).statusCode).toBe(400)
     expect((await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: { motivo: 'x'.repeat(301) } })).statusCode).toBe(400)
     await app.close()
 
@@ -440,9 +667,98 @@ describe('PATCH /v1/financeiro/receitas-avulsas/:id/perder | /desperder', () => 
     expect((await leitor.inject({ method: 'PATCH', url: `${base}/perder` })).statusCode).toBe(403)
     await leitor.close()
   })
+
+  it('falha ao persistir evento faz rollback da perda', async () => {
+    const db = avulsasDb(avulsaRow(), { failAudit: true })
+    const app = buildApp(db.query)
+    await app.register(financeiroReceitasAvulsasRoutes)
+    const res = await app.inject({
+      method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${avulsaId}/perder`, payload: { motivo: 'incobrável' },
+    })
+    expect(res.statusCode).toBe(500)
+    expect(db.sqls).toContain('ROLLBACK')
+    expect(db.state.row).toMatchObject({ perdido_em: null, perdido_motivo: null, perdido_por: null })
+    await app.close()
+  })
+
+  it('falha de evento ao desperder faz rollback e preserva a perda', async () => {
+    const db = avulsasDb(avulsaRow())
+    const app = buildApp(db.query)
+    await app.register(financeiroReceitasAvulsasRoutes)
+    await app.inject({ method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${avulsaId}/perder`, payload: { motivo: 'incobrável' } })
+    db.failEvents = true
+    const res = await app.inject({
+      method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${avulsaId}/desperder`, payload: { motivo: 'acordo retomado' },
+    })
+    expect(res.statusCode).toBe(500)
+    expect(db.sqls).toContain('ROLLBACK')
+    expect(db.state.row).toMatchObject({ perdido_motivo: 'incobrável', perdido_por: userId })
+    await app.close()
+  })
+
+  it('audita saldo em decimal exato no limite de NUMERIC(15,2)', async () => {
+    const db = avulsasDb(avulsaRow({ valor_previsto: '9999999999999.99', valor_pago: '9999999999999.98' }))
+    const app = buildApp(db.query)
+    await app.register(financeiroReceitasAvulsasRoutes)
+    const res = await app.inject({
+      method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${avulsaId}/perder`, payload: { motivo: 'centavo residual' },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(db.events[0].valor).toBe('0.01')
+    await app.close()
+  })
+
+  it('perda parcial e recebimento do restante conservam perda líquida e status', async () => {
+    const db = avulsasDb(avulsaRow())
+    const app = buildApp(db.query)
+    await app.register(financeiroReceitasAvulsasRoutes)
+    const base = `/v1/financeiro/receitas-avulsas/${avulsaId}`
+    expect((await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: { motivo: 'parcial', valor_perda: '125.01', chave_operacao: chavePerda } })).json())
+      .toMatchObject({ valor_perdido: 125.01, status: 'atrasado' })
+    expect((await app.inject({ method: 'PATCH', url: `${base}/receber`, payload: {} })).json())
+      .toMatchObject({ valor_pago: 374.99, valor_perdido: 125.01, status: 'perdido' })
+    expect((await app.inject({ method: 'PATCH', url: `${base}/desperder`, payload: { motivo: 'acordo', valor_reversao: '25.01', chave_operacao: chaveReversao } })).json())
+      .toMatchObject({ valor_perdido: 100, status: 'atrasado' })
+    expect(db.events.map((e) => e.valor)).toEqual(['125.01', '25.01'])
+    expect(db.events[1].perda_original_id).toBe(db.events[0].id)
+    for (const valor_perda of ['12.345', '1,00', 'R$ 10', '-1.00', '0', 10]) {
+      expect((await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: { motivo: 'x', valor_perda } })).statusCode).toBe(400)
+    }
+    await app.close()
+  })
 })
 
 // ─── custos ───────────────────────────────────────────────────────────────
+
+describe('FIN-02 autoria por chave de API', () => {
+  const apiKeyId = '00000000-0000-4000-8000-000000000099'
+
+  it('separa o id da chave do FK de usuário nas duas origens', async () => {
+    const titulos = titulosDb({ titulos: [tituloArmazenado()] })
+    const appTitulo = buildReceitasApp(titulos.query, 'franqueado', apiKeyId)
+    await appTitulo.register(financeiroReceitasRoutes)
+    const titulo = await appTitulo.inject({
+      method: 'PATCH', url: `/v1/financeiro/receitas/${tituloId}/perder`,
+      payload: { motivo: 'inadimplência', valor_perda: '10.00', chave_operacao: chavePerda },
+    })
+    expect(titulo.statusCode).toBe(200)
+    expect(titulos.rows.get(tituloId).perdido_por).toBeNull()
+    expect(titulos.events[0]).toMatchObject({ ator_tipo: 'api_key', ator_id: apiKeyId })
+    await appTitulo.close()
+
+    const avulsas = avulsasDb(avulsaRow())
+    const appAvulsa = buildApp(avulsas.query, 'franqueado', apiKeyId)
+    await appAvulsa.register(financeiroReceitasAvulsasRoutes)
+    const avulsa = await appAvulsa.inject({
+      method: 'PATCH', url: `/v1/financeiro/receitas-avulsas/${avulsaId}/perder`,
+      payload: { motivo: 'inadimplência', valor_perda: '10.00', chave_operacao: chavePerda },
+    })
+    expect(avulsa.statusCode).toBe(200)
+    expect(avulsas.state.row.perdido_por).toBeNull()
+    expect(avulsas.events[0]).toMatchObject({ ator_tipo: 'api_key', ator_id: apiKeyId })
+    await appAvulsa.close()
+  })
+})
 
 const recorrente = {
   id: recId, nome: 'Aluguel', descricao: null, grupo: 'estrutural', valor: '3000.00',

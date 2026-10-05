@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS financeiro_perdas_eventos (
   registrado_em          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   perda_original_id      UUID NULL,
   perda_original_tipo    TEXT NULL,
+  chave_operacao         UUID NULL,
+  requisicao             JSONB NULL,
   CONSTRAINT financeiro_perdas_eventos_tipo_check
     CHECK (tipo IN ('perda', 'reversao')),
   CONSTRAINT financeiro_perdas_eventos_origem_tipo_check
@@ -73,6 +75,9 @@ CREATE TABLE IF NOT EXISTS financeiro_perdas_eventos (
       OR
       (tipo = 'reversao' AND perda_original_id IS NOT NULL AND perda_original_tipo = 'perda')
     ),
+  CONSTRAINT financeiro_perdas_eventos_requisicao_check
+    CHECK ((chave_operacao IS NULL) = (requisicao IS NULL)),
+  CONSTRAINT financeiro_perdas_eventos_chave_uk UNIQUE (tenant_id, chave_operacao),
   CONSTRAINT financeiro_perdas_eventos_referencia_uk
     UNIQUE (tenant_id, id, tipo, origem_tipo, origem_id, competencia_obrigacao),
   CONSTRAINT financeiro_perdas_eventos_reversao_fk

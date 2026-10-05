@@ -9,14 +9,14 @@
 //   DELETE /v1/financeiro/receitas-avulsas/:id
 //   PATCH  /v1/financeiro/receitas-avulsas/:id/receber   { valor_pago?, data_pagamento? }
 //   PATCH  /v1/financeiro/receitas-avulsas/:id/desfazer
-//   PATCH  /v1/financeiro/receitas-avulsas/:id/perder     { motivo? (≤300) } → status 'perdido' (migration 173)
-//   PATCH  /v1/financeiro/receitas-avulsas/:id/desperder
+//   PATCH  /v1/financeiro/receitas-avulsas/:id/perder     { motivo (1..300), valor_perda }
+//   PATCH  /v1/financeiro/receitas-avulsas/:id/desperder  { motivo (1..300), valor_reversao }
 //   (receber receita perdida → 409; perder receita 100% recebida → 409)
 //
 // Grupo 'aporte' = entrada de caixa fora da receita operacional (DRE) e da base do imposto.
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
-import { moneySchema } from '../lib/money.js'
+import { exactMoneyToCents, moneySchema } from '../lib/money.js'
 import { MOTIVO_MAX, STATUS_LANCAMENTO } from '../lib/lancamento-status.js'
 import { invalidateTenant } from '../lib/dashboard-cache.js'
 import { dataValida } from '../services/financeiro-agregador.js'
@@ -65,8 +65,28 @@ const receberSchema = z.object({
   data_pagamento: dataSchema.optional(),
 }).strict()
 
+function exactPositiveMoneySchema(campo) {
+  return z.string().trim().superRefine((valor, ctx) => {
+    try {
+      if (exactMoneyToCents(valor) <= 0n) {
+        ctx.addIssue({ code: 'custom', message: `${campo} deve ser maior que zero` })
+      }
+    } catch {
+      ctx.addIssue({ code: 'custom', message: `${campo} deve ser decimal com até duas casas` })
+    }
+  })
+}
+
 const perderSchema = z.object({
-  motivo: z.string().max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
+  motivo: z.string().trim().min(1, 'motivo é obrigatório').max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
+  valor_perda: exactPositiveMoneySchema('valor_perda').optional(),
+  chave_operacao: z.string().uuid().optional(),
+}).strict()
+
+const desperderSchema = z.object({
+  motivo: z.string().trim().min(1, 'motivo é obrigatório').max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
+  valor_reversao: exactPositiveMoneySchema('valor_reversao').optional(),
+  chave_operacao: z.string().uuid().optional(),
 }).strict()
 
 function responderErro(reply, error) {
@@ -192,16 +212,17 @@ export async function financeiroReceitasAvulsasRoutes(app) {
     const parsed = perderSchema.safeParse(request.body ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const { tenant_id, sub } = request.user
+    const actorUserId = request.viaApiKey ? null : sub ?? null
+    const actorId = request.viaApiKey?.id ?? sub ?? null
+    const actorType = request.viaApiKey ? 'api_key' : 'usuario'
     try {
       const res = await app.withTenant(tenant_id, (db) => perderReceitaAvulsa(db, {
-        tenantId: tenant_id, id: request.params.id, motivo: parsed.data.motivo, actorUserId: sub ?? null, hoje: hojeSaoPaulo(),
+        tenantId: tenant_id, id: request.params.id, motivo: parsed.data.motivo,
+        valorPerda: parsed.data.valor_perda, chaveOperacao: parsed.data.chave_operacao,
+        actorUserId, actorId, actorType, hoje: hojeSaoPaulo(),
       }))
       if (!res) return reply.code(404).send(NAO_ENCONTRADA)
       invalidateTenant(tenant_id)
-      auditar(app, request, 'receita_avulsa.perder', res.item.id, {
-        motivo: res.item.perdido_motivo, ja_perdido: res.ja_perdido,
-        valor_previsto: res.item.valor_previsto, valor_pago: res.item.valor_pago,
-      })
       return res.item
     } catch (error) {
       return responderErro(reply, error)
@@ -210,14 +231,20 @@ export async function financeiroReceitasAvulsasRoutes(app) {
 
   app.patch('/v1/financeiro/receitas-avulsas/:id/desperder', WRITE, async (request, reply) => {
     if (!UUID.safeParse(request.params.id).success) return reply.code(400).send({ error: 'id inválido' })
-    const { tenant_id } = request.user
+    const parsed = desperderSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id, sub } = request.user
+    const actorUserId = request.viaApiKey ? null : sub ?? null
+    const actorId = request.viaApiKey?.id ?? sub ?? null
+    const actorType = request.viaApiKey ? 'api_key' : 'usuario'
     try {
       const res = await app.withTenant(tenant_id, (db) => desperderReceitaAvulsa(db, {
-        tenantId: tenant_id, id: request.params.id, hoje: hojeSaoPaulo(),
+        tenantId: tenant_id, id: request.params.id, motivo: parsed.data.motivo,
+        valorReversao: parsed.data.valor_reversao, chaveOperacao: parsed.data.chave_operacao,
+        actorUserId, actorId, actorType, hoje: hojeSaoPaulo(),
       }))
       if (!res) return reply.code(404).send(NAO_ENCONTRADA)
       invalidateTenant(tenant_id)
-      auditar(app, request, 'receita_avulsa.desperder', res.item.id, { estava_perdido: res.estava_perdido })
       return res.item
     } catch (error) {
       return responderErro(reply, error)

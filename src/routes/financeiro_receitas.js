@@ -6,14 +6,14 @@
 //   POST  /v1/financeiro/receitas/gerar?mes=AAAA-MM
 //   PATCH /v1/financeiro/receitas/:id/receber   { valor_pago?, data_pagamento?, observacao? }
 //   PATCH /v1/financeiro/receitas/:id/desfazer
-//   PATCH /v1/financeiro/receitas/:id/perder     { motivo? (≤300) }  → status 'perdido' (migration 173)
-//   PATCH /v1/financeiro/receitas/:id/desperder  → remove a perda
+//   PATCH /v1/financeiro/receitas/:id/perder     { motivo (1..300), valor_perda }
+//   PATCH /v1/financeiro/receitas/:id/desperder  { motivo (1..300), valor_reversao }
 //   (receber título perdido → 409; perder título 100% pago → 409)
 // `:id` aceita uuid (título materializado) ou `calc:<marca_id>:<AAAA-MM>:<fixo|comissao>`
 // (título ainda só calculado — a baixa o materializa).
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
-import { moneySchema } from '../lib/money.js'
+import { exactMoneyToCents, moneySchema } from '../lib/money.js'
 import { MOTIVO_MAX, STATUS_LANCAMENTO } from '../lib/lancamento-status.js'
 import {
   COMPONENTES_RECEITA,
@@ -54,8 +54,28 @@ const receberSchema = z.object({
   observacao: z.string().max(500).nullable().optional(),
 }).strict()
 
+function exactPositiveMoneySchema(campo) {
+  return z.string().trim().superRefine((valor, ctx) => {
+    try {
+      if (exactMoneyToCents(valor) <= 0n) {
+        ctx.addIssue({ code: 'custom', message: `${campo} deve ser maior que zero` })
+      }
+    } catch {
+      ctx.addIssue({ code: 'custom', message: `${campo} deve ser decimal com até duas casas` })
+    }
+  })
+}
+
 const perderSchema = z.object({
-  motivo: z.string().max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
+  motivo: z.string().trim().min(1, 'motivo é obrigatório').max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
+  valor_perda: exactPositiveMoneySchema('valor_perda').optional(),
+  chave_operacao: z.string().uuid().optional(),
+}).strict()
+
+const desperderSchema = z.object({
+  motivo: z.string().trim().min(1, 'motivo é obrigatório').max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
+  valor_reversao: exactPositiveMoneySchema('valor_reversao').optional(),
+  chave_operacao: z.string().uuid().optional(),
 }).strict()
 
 function erro(reply, error) {
@@ -170,18 +190,16 @@ export async function financeiroReceitasRoutes(app) {
     const parsed = perderSchema.safeParse(request.body ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const { tenant_id, sub } = request.user
+    const actorUserId = request.viaApiKey ? null : sub ?? null
+    const actorId = request.viaApiKey?.id ?? sub ?? null
+    const actorType = request.viaApiKey ? 'api_key' : 'usuario'
     return app.withTenant(tenant_id, async (db) => {
       try {
-        const { item, ja_perdido: jaPerdido } = await perderTitulo(db, {
-          tenantId: tenant_id, id: request.params.id, motivo: parsed.data.motivo, actorUserId: sub ?? null,
+        const { item } = await perderTitulo(db, {
+          tenantId: tenant_id, id: request.params.id, motivo: parsed.data.motivo,
+          valorPerda: parsed.data.valor_perda, chaveOperacao: parsed.data.chave_operacao,
+          actorUserId, actorId, actorType,
         })
-        app.audit?.log?.(request, {
-          action: 'receita_titulo.perder', entity_type: 'receita_titulo', entity_id: item?.id ?? null,
-          metadata: {
-            id_informado: request.params.id, motivo: item?.perdido_motivo ?? null, ja_perdido: jaPerdido,
-            valor_previsto: item?.valor_previsto, valor_pago: item?.valor_pago,
-          },
-        })?.catch((err) => app.log.error({ err }, 'audit log failed'))
         return item
       } catch (error) {
         return erro(reply, error)
@@ -190,14 +208,19 @@ export async function financeiroReceitasRoutes(app) {
   })
 
   app.patch('/v1/financeiro/receitas/:id/desperder', { preHandler: write }, async (request, reply) => {
-    const { tenant_id } = request.user
+    const parsed = desperderSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id, sub } = request.user
+    const actorUserId = request.viaApiKey ? null : sub ?? null
+    const actorId = request.viaApiKey?.id ?? sub ?? null
+    const actorType = request.viaApiKey ? 'api_key' : 'usuario'
     return app.withTenant(tenant_id, async (db) => {
       try {
-        const { item, estava_perdido: estavaPerdido } = await desperderTitulo(db, { tenantId: tenant_id, id: request.params.id })
-        app.audit?.log?.(request, {
-          action: 'receita_titulo.desperder', entity_type: 'receita_titulo', entity_id: item?.id ?? null,
-          metadata: { id_informado: request.params.id, estava_perdido: estavaPerdido },
-        })?.catch((err) => app.log.error({ err }, 'audit log failed'))
+        const { item } = await desperderTitulo(db, {
+          tenantId: tenant_id, id: request.params.id, motivo: parsed.data.motivo,
+          valorReversao: parsed.data.valor_reversao, chaveOperacao: parsed.data.chave_operacao,
+          actorUserId, actorId, actorType,
+        })
         return item
       } catch (error) {
         return erro(reply, error)

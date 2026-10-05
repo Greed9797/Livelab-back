@@ -8,5 +8,8 @@ await import('./financeiro_liquidacoes_schema.pglite.mjs')
 await import('./financeiro_liquidacoes_read.pglite.mjs')
 await import('./financeiro_liquidacoes_command.pglite.mjs')
 await import('./financeiro_perdas_schema.pglite.mjs')
+await import('./financeiro_perdas_writer.pglite.mjs')
+await import('./financeiro_perdas_servico.pglite.mjs')
+await import('./financeiro_dre_perdas_eventos.pglite.mjs')
 
 console.log('PASS: all PGlite integration fixtures')

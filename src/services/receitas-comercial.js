@@ -5,6 +5,8 @@
 import '../lib/pg-date-string.js'
 import { marcasCondicaoVigenteMesSql, receitaMarcaMensalSql } from '../lib/receita-marca-sql.js'
 import { normalizarMotivo, saldoEncerrado, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
+import { centsToExactMoney, exactMoneyToCents } from '../lib/money.js'
+import { perdaJaRegistrada, requisicaoPerda } from '../lib/perda-idempotencia.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
 // Ciclo estático intencional (o agregador importa este módulo): só usado em tempo de
@@ -184,6 +186,9 @@ function tituloPublico({ stored, calc, hoje }) {
   const competencia = dateKey(stored?.competencia ?? calc.competencia)
   const valorPrevisto = round2(stored ? stored.valor_previsto : calc.valor)
   const valorPago = round2(stored?.valor_pago ?? 0)
+  const valorPerdido = stored?.valor_perdido == null
+    ? (stored?.perdido_em ? round2(Math.max(0, valorPrevisto - valorPago)) : 0)
+    : round2(stored.valor_perdido)
   const dataVencimento = dateKey(stored?.data_vencimento ?? calc.data_vencimento)
   const dataPagamento = dateKey(stored?.data_pagamento ?? null)
   const tipoCobranca = calc?.tipo_cobranca ?? stored?.tipo_cobranca ?? 'fixo_mais_comissao'
@@ -199,6 +204,7 @@ function tituloPublico({ stored, calc, hoje }) {
     data_vencimento: dataVencimento,
     valor_previsto: valorPrevisto,
     valor_pago: valorPago,
+    valor_perdido: valorPerdido,
     data_pagamento: dataPagamento,
     marca_id: src.marca_id,
     marca_nome: marcaNome,
@@ -218,6 +224,10 @@ function tituloPublico({ stored, calc, hoje }) {
     perdido_por: stored?.perdido_por ?? null,
   }
   item.status = statusLancamento(item, hoje)
+  if (stored?.valor_perdido != null && !stored.perdido_em && exactMoneyToCents(String(stored.valor_perdido)) > 0n &&
+      exactMoneyToCents(String(stored.valor_pago)) + exactMoneyToCents(String(stored.valor_perdido)) >= exactMoneyToCents(String(stored.valor_previsto))) {
+    item.status = 'perdido'
+  }
   return item
 }
 
@@ -225,7 +235,7 @@ async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId 
   const { rows } = await db.query(
     `SELECT rt.id, rt.tenant_id, rt.marca_id, rt.cliente_id, rt.competencia, rt.componente,
             rt.valor_previsto, rt.valor_pago, rt.data_vencimento, rt.data_pagamento, rt.observacao,
-            rt.perdido_em, rt.perdido_motivo, rt.perdido_por,
+            rt.perdido_em, rt.perdido_motivo, rt.perdido_por, rt.valor_perdido,
             m.nome AS marca_nome, m.tipo AS marca_tipo, cl.nome AS cliente_nome, m.tipo_cobranca
        FROM receita_titulos rt
        JOIN marcas m ON m.id = rt.marca_id AND m.tenant_id = rt.tenant_id
@@ -291,7 +301,7 @@ export function totalizarTitulos(itens = []) {
   for (const item of itens) {
     previsto += item.valor_previsto
     pago += item.valor_pago
-    perdido += saldoEncerrado(item)
+    perdido += item.valor_perdido ?? saldoEncerrado(item)
     porStatus[item.status] = round2((porStatus[item.status] ?? 0) + item.valor_previsto)
   }
   return {
@@ -322,6 +332,7 @@ async function upsertTitulo(db, { tenantId, calc, actorUserId }) {
                                   THEN EXCLUDED.data_vencimento ELSE receita_titulos.data_vencimento END,
            atualizado_em = NOW()
        WHERE receita_titulos.perdido_em IS NULL
+         AND receita_titulos.valor_perdido IS NULL
      RETURNING id, (xmax = 0) AS inserido`,
     [tenantId, calc.marca_id, calc.cliente_id, calc.competencia, calc.componente, calc.valor, calc.data_vencimento, actorUserId ?? null],
   )
@@ -367,6 +378,7 @@ export async function gerarTitulosReceita(db, { tenantId, mes, actorUserId = nul
       `DELETE FROM receita_titulos
         WHERE tenant_id = $1::uuid AND competencia = $2::date
           AND valor_pago = 0 AND data_pagamento IS NULL AND perdido_em IS NULL
+          AND valor_perdido IS NULL
           AND NOT ((marca_id::text || ':' || componente) = ANY($3::text[]))`,
       [tenantId, `${mes}-01`, manter],
     )
@@ -420,15 +432,22 @@ export async function receberTitulo(db, { tenantId, id, valorPago, dataPagamento
   try {
     await lockReceitas(db, tenantId)
     const titulo = await buscarTituloParaBaixa(db, { tenantId, ref, actorUserId })
-    if (titulo.perdido_em) throw erroEncerrado()
-    const valor = round2(valorPago ?? titulo.valor_previsto)
-    if (!(valor > 0)) throw serviceError('valor_pago deve ser maior que zero', 'INVALID_PAYMENT')
+    if (titulo.perdido_em && titulo.valor_perdido == null) throw erroEncerrado()
+    const perdido = titulo.valor_perdido == null ? 0n : exactMoneyToCents(titulo.valor_perdido)
+    const previsto = exactMoneyToCents(titulo.valor_previsto)
+    const maximoRecebivel = previsto > perdido ? previsto - perdido : 0n
+    if (maximoRecebivel <= exactMoneyToCents(titulo.valor_pago)) throw erroEncerrado()
+    const valor = valorPago == null ? maximoRecebivel : exactMoneyToCents(round2(valorPago).toFixed(2))
+    if (valor <= 0n) throw serviceError('valor_pago deve ser maior que zero', 'INVALID_PAYMENT')
+    if (valor > maximoRecebivel) {
+      throw serviceError('valor_pago excede o saldo após perdas', 'INVALID_PAYMENT', 409)
+    }
     await db.query(
       `UPDATE receita_titulos
-          SET valor_pago = $3, data_pagamento = $4::date,
+          SET valor_pago = $3::numeric, data_pagamento = $4::date,
               observacao = COALESCE($5, observacao), atualizado_em = NOW()
         WHERE tenant_id = $1::uuid AND id = $2::uuid`,
-      [tenantId, titulo.id, valor, dataPagamento ?? hoje, observacao ?? null],
+      [tenantId, titulo.id, centsToExactMoney(valor), dataPagamento ?? hoje, observacao ?? null],
     )
     tituloId = titulo.id
     await db.query('COMMIT')
@@ -445,7 +464,10 @@ export async function desfazerRecebimento(db, { tenantId, id, hoje = hojeSaoPaul
   if (!ref || ref.tipo !== 'materializado') throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
   const { rows } = await db.query(
     `UPDATE receita_titulos
-        SET valor_pago = 0, data_pagamento = NULL, atualizado_em = NOW()
+        SET valor_pago = 0, data_pagamento = NULL,
+            perdido_em = CASE WHEN valor_perdido IS NOT NULL AND valor_perdido < valor_previsto
+                              THEN NULL ELSE perdido_em END,
+            atualizado_em = NOW()
       WHERE tenant_id = $1::uuid AND id = $2::uuid
       RETURNING id`,
     [tenantId, ref.id],
@@ -456,41 +478,159 @@ export async function desfazerRecebimento(db, { tenantId, id, hoje = hojeSaoPaul
 
 // ─── Perda (cliente não vai pagar) ────────────────────────────────────────
 //
-// Persistimos só perdido_em/perdido_motivo/perdido_por (migration 173); o status
-// 'perdido' é derivado. Perda parcial encerra o SALDO (previsto − pago): valor_pago
-// fica preservado e continua contando como recebido. Título 100% pago → 409.
-// Não altera contrato/condição comercial.
+// FIN-02: valor_perdido é a projeção líquida; eventos 181 são a trilha imutável.
+// perdido_em continua como compatibilidade e só representa encerramento integral
+// do saldo ainda não pago. valor_pago é sempre preservado.
+
+function motivoPerdaObrigatorio(motivo) {
+  const normalizado = normalizarMotivo(motivo)
+  if (!normalizado) throw serviceError('motivo é obrigatório', 'INVALID_MOTIVO', 400)
+  return normalizado
+}
+
+function centsTitulo(titulo) {
+  return {
+    previsto: exactMoneyToCents(titulo.valor_previsto),
+    pago: exactMoneyToCents(titulo.valor_pago),
+  }
+}
+
+function centsValorSolicitado(valor, campo) {
+  let cents
+  try {
+    cents = exactMoneyToCents(valor)
+  } catch {
+    throw serviceError(`${campo} deve ser um valor monetário válido com até duas casas`, 'INVALID_PERDA_VALUE', 400)
+  }
+  if (cents <= 0n) throw serviceError(`${campo} deve ser maior que zero`, 'INVALID_PERDA_VALUE', 400)
+  return cents
+}
+
+function atorEvento(actorType, actorId) {
+  const id = String(actorId ?? '').trim()
+  if (!id) throw serviceError('ator da perda é obrigatório', 'INVALID_PERDA_ACTOR', 500)
+  return { tipo: String(actorType ?? 'usuario').trim() || 'usuario', id }
+}
+
+function centsPerdidosAtuais(titulo) {
+  if (titulo.valor_perdido != null) return exactMoneyToCents(titulo.valor_perdido)
+  if (!titulo.perdido_em) return 0n
+  const { previsto, pago } = centsTitulo(titulo)
+  return previsto > pago ? previsto - pago : 0n
+}
+
+function perdaLegada(titulo) {
+  return Boolean(titulo.perdido_em) && titulo.valor_perdido == null
+}
+
+async function inserirEventoPerdaTitulo(db, {
+  tenantId, titulo, tipo, valorCents, motivo, actorType, actorId, perdaOriginalId = null,
+  chaveOperacao = null, requisicao = null,
+}) {
+  const ator = atorEvento(actorType, actorId)
+  const { rows } = await db.query(
+    `INSERT INTO financeiro_perdas_eventos (
+       tenant_id, tipo, origem_tipo, origem_id, valor, motivo,
+       ator_tipo, ator_id, competencia_obrigacao, perda_original_id, perda_original_tipo,
+       chave_operacao, requisicao
+     ) VALUES (
+       $1::uuid, $2, 'receita_titulo', $3::uuid, $4::numeric, $5,
+       $6, $7, $8::date, $9::uuid, CASE WHEN $2 = 'reversao' THEN 'perda' ELSE NULL END,
+       $10::uuid, $11::jsonb
+     )
+     RETURNING id`,
+    [
+      tenantId, tipo, titulo.id, centsToExactMoney(valorCents), motivo,
+      ator.tipo, ator.id, dateKey(titulo.competencia), perdaOriginalId,
+      chaveOperacao, requisicao && JSON.stringify(requisicao),
+    ],
+  )
+  return rows[0]
+}
+
+async function perdasReversiveisTitulo(db, { tenantId, titulo }) {
+  const { rows } = await db.query(
+    `SELECT p.id, p.valor::text AS valor,
+            COALESCE(SUM(r.valor), 0)::text AS valor_revertido
+       FROM financeiro_perdas_eventos p
+       LEFT JOIN financeiro_perdas_eventos r
+         ON r.tenant_id = p.tenant_id
+        AND r.tipo = 'reversao'
+        AND r.perda_original_id = p.id
+      WHERE p.tenant_id = $1::uuid
+        AND p.tipo = 'perda'
+        AND p.origem_tipo = 'receita_titulo'
+        AND p.origem_id = $2::uuid
+        AND p.competencia_obrigacao = $3::date
+      GROUP BY p.id, p.valor, p.registrado_em
+     HAVING p.valor > COALESCE(SUM(r.valor), 0)
+      ORDER BY p.registrado_em, p.id`,
+    [tenantId, titulo.id, dateKey(titulo.competencia)],
+  )
+  return rows.map((row) => ({
+    id: row.id,
+    disponivel: exactMoneyToCents(row.valor) - exactMoneyToCents(row.valor_revertido),
+  }))
+}
 
 /**
  * Dá o título como perdido. Aceita uuid ou id virtual `calc:` (materializa e marca).
- * Idempotente: título já perdido mantém perdido_em/perdido_por; `motivo` informado
- * substitui o anterior.
+ * Replay sem mudança real é idempotente: preserva data/autor/motivo e não duplica auditoria.
  */
-export async function perderTitulo(db, { tenantId, id, motivo, actorUserId = null, hoje = hojeSaoPaulo() } = {}) {
+export async function perderTitulo(db, {
+  tenantId, id, motivo, valorPerda, chaveOperacao = null, actorUserId = null, actorId = actorUserId, actorType = 'usuario', hoje = hojeSaoPaulo(),
+} = {}) {
   const ref = parseIdTitulo(id)
   if (!ref) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
-  const motivoNorm = normalizarMotivo(motivo)
+  const perdaSolicitada = valorPerda == null ? null : centsValorSolicitado(valorPerda, 'valor_perda')
+  const requisicao = requisicaoPerda({ chaveOperacao, tipo: 'perda', origemTipo: 'receita_titulo', ref: id, motivo, valor: valorPerda })
   await db.query('BEGIN')
   let tituloId
   let jaPerdido = false
   try {
     await lockReceitas(db, tenantId)
+    if (await perdaJaRegistrada(db, { tenantId, chaveOperacao, requisicao })) {
+      await db.query('COMMIT')
+      return { item: await tituloAtualizado(db, { tenantId, id, hoje }), ja_perdido: true }
+    }
     const titulo = await buscarTituloParaBaixa(db, { tenantId, ref, actorUserId })
-    const pago = round2(titulo.valor_pago)
-    if (pago > 0 && pago >= round2(titulo.valor_previsto)) {
+    const { previsto, pago } = centsTitulo(titulo)
+    if (pago >= previsto) {
       throw serviceError('Título já recebido integralmente não pode ser dado como perdido', 'RECEITA_PAGA', 409)
     }
-    jaPerdido = Boolean(titulo.perdido_em)
-    await db.query(
-      `UPDATE receita_titulos
-          SET perdido_em = COALESCE(perdido_em, NOW()),
-              perdido_por = CASE WHEN perdido_em IS NULL THEN $3::uuid ELSE perdido_por END,
-              perdido_motivo = CASE WHEN perdido_em IS NULL THEN $4::text ELSE COALESCE($4::text, perdido_motivo) END,
-              atualizado_em = NOW()
-        WHERE tenant_id = $1::uuid AND id = $2::uuid`,
-      [tenantId, titulo.id, actorUserId ?? null, motivoNorm],
-    )
+    if (perdaLegada(titulo)) {
+      throw serviceError('Título possui perda legada sem evento FIN-02', 'RECEITA_PERDA_LEGADA', 409)
+    }
     tituloId = titulo.id
+    const perdidoAtual = centsPerdidosAtuais(titulo)
+    jaPerdido = perdidoAtual > 0n
+    const saldoDisponivel = previsto > pago + perdidoAtual ? previsto - pago - perdidoAtual : 0n
+    if (saldoDisponivel === 0n && perdaSolicitada == null && perdidoAtual > 0n) {
+      await db.query('COMMIT')
+      return { item: await tituloAtualizado(db, { tenantId, id: tituloId, hoje }), ja_perdido: true }
+    }
+    const motivoNorm = motivoPerdaObrigatorio(motivo)
+    const perdaCents = perdaSolicitada ?? saldoDisponivel
+    if (perdaCents > saldoDisponivel) {
+      throw serviceError('valor_perda excede o saldo disponível para perda', 'PERDA_MAIOR_QUE_SALDO', 409)
+    }
+    const novoPerdido = perdidoAtual + perdaCents
+    const saldoOriginal = previsto > pago ? previsto - pago : 0n
+    const encerraSaldo = novoPerdido >= saldoOriginal
+    const atualizado = await db.query(
+      `UPDATE receita_titulos
+          SET valor_perdido = $3::numeric,
+              perdido_em = CASE WHEN $4::boolean THEN COALESCE(perdido_em, NOW()) ELSE NULL END,
+              perdido_por = $5::uuid, perdido_motivo = $6::text, atualizado_em = NOW()
+        WHERE tenant_id = $1::uuid AND id = $2::uuid
+        RETURNING id`,
+      [tenantId, titulo.id, centsToExactMoney(novoPerdido), encerraSaldo, actorUserId, motivoNorm],
+    )
+    if (!atualizado.rows[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+    await inserirEventoPerdaTitulo(db, {
+      tenantId, titulo, tipo: 'perda', valorCents: perdaCents, motivo: motivoNorm, actorType, actorId,
+      chaveOperacao, requisicao,
+    })
     await db.query('COMMIT')
   } catch (error) {
     await db.query('ROLLBACK').catch(() => {})
@@ -501,40 +641,105 @@ export async function perderTitulo(db, { tenantId, id, motivo, actorUserId = nul
 }
 
 /**
- * Desfaz a perda (perdido_* → NULL). Aceita uuid ou `calc:` (resolve o título já
- * materializado da chave; se não houver, o título nunca foi perdido e volta como está).
- * Idempotente.
+ * Desfaz a perda (perdido_* → NULL). Aceita uuid ou `calc:`. Motivo da reversão é
+ * obrigatório; a trilha preserva também o motivo original da perda. Replay sem
+ * mudança real não grava outro evento.
  */
-export async function desperderTitulo(db, { tenantId, id, hoje = hojeSaoPaulo() } = {}) {
+export async function desperderTitulo(db, {
+  tenantId, id, motivo, valorReversao, chaveOperacao = null, actorUserId = null, actorId = actorUserId, actorType = 'usuario', hoje = hojeSaoPaulo(),
+} = {}) {
   const ref = parseIdTitulo(id)
   if (!ref) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+  const reversaoSolicitada = valorReversao == null ? null : centsValorSolicitado(valorReversao, 'valor_reversao')
+  const requisicao = requisicaoPerda({ chaveOperacao, tipo: 'reversao', origemTipo: 'receita_titulo', ref: id, motivo, valor: valorReversao })
+  await db.query('BEGIN')
   let tituloId = ref.id ?? null
-  if (ref.tipo === 'virtual') {
-    const { rows } = await db.query(
-      `SELECT id FROM receita_titulos
-        WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND competencia = $3::date AND componente = $4`,
-      [tenantId, ref.marca_id, `${ref.mes}-01`, ref.componente],
-    )
-    tituloId = rows[0]?.id ?? null
-    if (!tituloId) {
-      const itens = await listarTitulosReceita(db, { tenantId, inicio: ref.mes, fim: ref.mes, hoje, marca_id: ref.marca_id, componente: ref.componente })
-      if (!itens[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
-      return { item: itens[0], estava_perdido: false }
+  let estavaPerdido = false
+  try {
+    await lockReceitas(db, tenantId)
+    if (await perdaJaRegistrada(db, { tenantId, chaveOperacao, requisicao })) {
+      await db.query('COMMIT')
+      return { item: await tituloAtualizado(db, { tenantId, id, hoje }), estava_perdido: true }
     }
-  }
-  const atual = await db.query(
-    'SELECT id, perdido_em FROM receita_titulos WHERE tenant_id = $1::uuid AND id = $2::uuid',
-    [tenantId, tituloId],
-  )
-  if (!atual.rows[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
-  const estavaPerdido = Boolean(atual.rows[0].perdido_em)
-  if (estavaPerdido) {
-    await db.query(
-      `UPDATE receita_titulos
-          SET perdido_em = NULL, perdido_motivo = NULL, perdido_por = NULL, atualizado_em = NOW()
-        WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+    if (ref.tipo === 'virtual') {
+      const { rows } = await db.query(
+        `SELECT id FROM receita_titulos
+          WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND competencia = $3::date AND componente = $4
+          FOR UPDATE`,
+        [tenantId, ref.marca_id, `${ref.mes}-01`, ref.componente],
+      )
+      tituloId = rows[0]?.id ?? null
+      if (!tituloId) {
+        await db.query('COMMIT')
+        const itens = await listarTitulosReceita(db, {
+          tenantId, inicio: ref.mes, fim: ref.mes, hoje, marca_id: ref.marca_id, componente: ref.componente,
+        })
+        if (!itens[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+        return { item: itens[0], estava_perdido: false }
+      }
+    }
+    const atual = await db.query(
+      `SELECT id, perdido_em, perdido_motivo, perdido_por, valor_previsto, valor_pago, valor_perdido,
+              to_char(data_vencimento, 'YYYY-MM-DD') AS data_vencimento,
+              to_char(competencia, 'YYYY-MM-DD') AS competencia
+         FROM receita_titulos
+        WHERE tenant_id = $1::uuid AND id = $2::uuid
+        FOR UPDATE`,
       [tenantId, tituloId],
     )
+    const titulo = atual.rows[0]
+    if (!titulo) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+    estavaPerdido = centsPerdidosAtuais(titulo) > 0n
+    if (perdaLegada(titulo)) {
+      throw serviceError('Perda legada sem evento FIN-02 exige reconciliação antes de reverter', 'RECEITA_PERDA_LEGADA', 409)
+    } else if (estavaPerdido) {
+      const motivoNorm = motivoPerdaObrigatorio(motivo)
+      const perdidoAtual = centsPerdidosAtuais(titulo)
+      const reversaoCents = reversaoSolicitada ?? perdidoAtual
+      if (reversaoCents > perdidoAtual) {
+        throw serviceError('valor_reversao excede a perda líquida atual', 'REVERSAO_MAIOR_QUE_PERDA', 409)
+      }
+      const perdas = await perdasReversiveisTitulo(db, { tenantId, titulo })
+      const disponivelEventos = perdas.reduce((total, perda) => total + perda.disponivel, 0n)
+      if (disponivelEventos < reversaoCents) {
+        throw serviceError('Histórico FIN-02 insuficiente para vincular a reversão', 'PERDA_EVENTOS_INCONSISTENTES', 409)
+      }
+      const novoPerdido = perdidoAtual - reversaoCents
+      const atualizado = await db.query(
+        `UPDATE receita_titulos
+            SET valor_perdido = $3::numeric,
+                perdido_em = CASE WHEN $3::numeric > 0
+                                      AND $3::numeric >= GREATEST(valor_previsto - valor_pago, 0)
+                                  THEN perdido_em ELSE NULL END,
+                perdido_motivo = CASE WHEN $3::numeric = 0 THEN NULL ELSE perdido_motivo END,
+                perdido_por = CASE WHEN $3::numeric = 0 THEN NULL ELSE perdido_por END,
+                atualizado_em = NOW()
+          WHERE tenant_id = $1::uuid AND id = $2::uuid
+          RETURNING id`,
+        [tenantId, tituloId, centsToExactMoney(novoPerdido)],
+      )
+      if (!atualizado.rows[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+      let restante = reversaoCents
+      let primeiraParcela = true
+      for (const perda of perdas) {
+        if (restante <= 0n) break
+        const parcela = perda.disponivel < restante ? perda.disponivel : restante
+        await inserirEventoPerdaTitulo(db, {
+          tenantId, titulo, tipo: 'reversao', valorCents: parcela, motivo: motivoNorm,
+          actorType, actorId, perdaOriginalId: perda.id,
+          chaveOperacao: primeiraParcela ? chaveOperacao : null,
+          requisicao: primeiraParcela ? requisicao : null,
+        })
+        primeiraParcela = false
+        restante -= parcela
+      }
+    } else if (reversaoSolicitada != null) {
+      throw serviceError('Título não possui perda para reverter', 'REVERSAO_MAIOR_QUE_PERDA', 409)
+    }
+    await db.query('COMMIT')
+  } catch (error) {
+    await db.query('ROLLBACK').catch(() => {})
+    throw error
   }
   const item = await tituloAtualizado(db, { tenantId, id: tituloId, hoje })
   return { item, estava_perdido: estavaPerdido }

@@ -42,6 +42,15 @@ const painel = (o = {}) => montarPainel({
 })
 
 describe('montarPainel (puro)', () => {
+  it('Resultado do painel reconhece perda FIN-02 no mês do registro', () => {
+    const item = rec({ id: 'perda-1', valor_previsto: 1000, valor_perdido: 800 })
+    const p = painel({ itens: [item], eventosPerda: [{
+      tipo: 'perda', origem_tipo: 'receita_avulsa', origem_id: 'perda-1',
+      competencia_obrigacao: '2026-09-01', mes_registro: '2026-10', valor: '800.00',
+    }] })
+    expect(p.competencia.resultado.previsto).toBe(200)
+    expect(p.a_receber.total).toBe(200)
+  })
   it('a_receber: no_mes × atrasado_anterior, atrasados (vence < hoje) e perdido fora', () => {
     const p = painel()
     // A(100, set) atrasado anterior; B(200, 20/10) a vencer; C(300−100 pago=200, 05/10) atrasado; D perdido, E depois do mês, F antes do corte

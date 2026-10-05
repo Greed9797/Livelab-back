@@ -188,6 +188,17 @@ describe('montarDreDetalhe (GET /dre/mes)', () => {
     expect(d.margem).toEqual({ contribuicao: { previsto: 1820, realizado: 800 }, pct: { previsto: 72.8, realizado: 100 } })
   })
 
+  it('margem prevista desconta perda de receita e preserva realizado, com custo variável zero ou não zero', () => {
+    const perdida = receita({ valor_previsto: 1000, valor_pago: 200, perdido_em: '2026-10-12T00:00:00.000Z' })
+    const semVariavel = montarDreDetalhe({ mes: '2026-10', itens: [perdida] })
+    expect(semVariavel.atual.perdas.receita.valor).toBe(800)
+    expect(semVariavel.margem).toEqual({ contribuicao: { previsto: 200, realizado: 200 }, pct: { previsto: 20, realizado: 100 } })
+
+    const variavel = custo({ id: 'var', classe_custo: 'variavel', valor_previsto: 50, valor_pago: 25 })
+    const comVariavel = montarDreDetalhe({ mes: '2026-10', itens: [perdida, variavel] })
+    expect(comVariavel.margem).toEqual({ contribuicao: { previsto: 150, realizado: 175 }, pct: { previsto: 15, realizado: 87.5 } })
+  })
+
   it('apresentadora sem componente (contrato antigo) cai em variáveis', () => {
     const legado = normalizarApresentadora({ id: `apresentadora:${AP1}:2026-10`, apresentadora_id: AP1, descricao: 'Pagamento Ana - 10/2026', competencia: '2026-10-01', valor_previsto: 2450, fixo: 2000, comissao: 400, adicionais: 50, valor_pago: 0 }, HOJE)
     const x = montarDreDetalhe({ mes: '2026-10', itens: [legado] })

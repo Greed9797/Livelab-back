@@ -37,7 +37,8 @@ await db.exec(`
     agenda_evento_id uuid, status text NOT NULL,
     iniciado_em timestamptz NOT NULL, encerrado_em timestamptz,
     previsto_fim timestamptz, uniao_destino_id uuid,
-    uniao_id uuid, uniao_desfeita_em timestamptz
+    uniao_id uuid, uniao_desfeita_em timestamptz,
+    arquivada_em timestamptz
   );
   CREATE TABLE live_apresentadoras_v2 (
     live_id uuid NOT NULL, tenant_id uuid NOT NULL,

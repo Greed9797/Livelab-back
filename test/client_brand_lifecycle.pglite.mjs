@@ -15,7 +15,7 @@ try {
     CREATE TABLE clientes (id uuid PRIMARY KEY, tenant_id uuid NOT NULL, nome text, site text, logo_url text, status text NOT NULL);
     CREATE TABLE marcas (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL, cliente_id uuid NOT NULL,
-      nome text, tipo text, status text, tiktok_username text, site text, logo_url text,
+      nome text, tipo text, status text, data_fim date, tiktok_username text, site text, logo_url text,
       observacoes text, origem_dados text, valor_fixo_minimo numeric DEFAULT 0,
       comissao_franquia_pct numeric DEFAULT 0, comissao_franqueadora_pct numeric DEFAULT 0,
       tipo_cobranca text DEFAULT 'fixo_mais_comissao',

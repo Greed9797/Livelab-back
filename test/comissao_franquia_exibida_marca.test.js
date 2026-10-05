@@ -1,6 +1,6 @@
 // F4b estendida ao detalhe: comissão de franquia exibida por linha só de marca que gera
 // receita (marcaGeraReceitaSql). Garante que as rotas de detalhe usam a MESMA regra do
-// /resumo e do Ranking, que a fila de aprovação (/pendentes) ficou como antes e que
+// /resumo e do Ranking, incluindo a fila de aprovação (/pendentes), e que
 // nenhuma dessas rotas escreve em vendas_atribuidas. Prova numérica no *.pg.test.js.
 import Fastify from 'fastify'
 import { describe, expect, it, vi } from 'vitest'
@@ -48,10 +48,13 @@ describe('comissão de franquia exibida — marca não-cliente (F4b detalhe)', (
     expect(sql).not.toMatch(/\b(UPDATE|INSERT|DELETE)\b/)
   })
 
-  it('/v1/comissoes/pendentes (fila de aprovação) não muda', async () => {
+  it('/v1/comissoes/pendentes usa a mesma franquia exibida e mantém escopo do tenant', async () => {
     const sql = await sqlDe('/v1/comissoes/pendentes')
-    expect(sql).not.toContain(GATE_M)
-    expect(sql).toMatch(/va\.comissao_franquia \* \(/)
+    expect(sql).toContain(GATE_M)
+    expect(sql).toMatch(/ELSE 0 END\)\s+AS comissao_franquia/)
+    expect(sql).toContain('va.tenant_id = $1::uuid')
+    expect(sql).toContain('m.id = va.marca_id AND m.tenant_id = va.tenant_id')
+    expect(sql).toContain("va.status_aprovacao = 'pendente_aprovacao'")
   })
 
   it('/v1/comissoes/memoria não expõe comissão de franquia', async () => {

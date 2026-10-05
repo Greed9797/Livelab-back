@@ -101,6 +101,7 @@ describe.skipIf(!url)('cadastro unificado (Postgres real)', () => {
     await condicao(t, ids.delta, '2026-01-01', 0, 5)
     ids.sistema = await marca(t, 'Livelab Sistema T', 'propria', null, { sistema: true })
     ids.epsilon = await marca(t, 'Epsilon', 'parceira')
+    ids.epsilonExplicit = await cliente(t, 'Epsilon vínculo explícito')
 
     ids.lImportada = await live(t, ids.alfa, '2026-08-10', 10000)
     ids.lComCliente = await live(t, ids.alfa, '2026-08-12', 5000, ids.c1)
@@ -109,6 +110,8 @@ describe.skipIf(!url)('cadastro unificado (Postgres real)', () => {
     ids.lGama = await live(t, ids.gama, '2026-08-15', 700)
     ids.lDelta = await live(t, ids.delta, '2026-08-16', 2000)
     ids.lSistema = await live(t, ids.sistema, '2026-08-17', 500)
+    ids.lEpsilonSemCliente = await live(t, ids.epsilon, '2026-08-18', 0)
+    ids.lEpsilonComCliente = await live(t, ids.epsilon, '2026-08-19', 0, ids.epsilonExplicit)
 
     // União: destino (GMV 3000) + origem absorvida, ambos sem cliente_id em marca de cliente.
     const c = await pool.connect()
@@ -142,6 +145,8 @@ describe.skipIf(!url)('cadastro unificado (Postgres real)', () => {
     ids.c3 = await cliente(t2, 'Outro')
     ids.outra = await marca(t2, 'Outra', 'cliente', ids.c3, { data_inicio: '2026-01-01' })
     ids.lOutra = await live(t2, ids.outra, '2026-08-10', 999)
+    ids.epsilonOutroTenant = await marca(t2, 'Epsilon outro tenant', 'parceira')
+    ids.lEpsilonOutroTenant = await live(t2, ids.epsilonOutroTenant, '2026-08-18', 0)
 
     // Títulos reais de agosto antes das migrations (devem ficar intocados).
     await gerarTitulosReceita(pool, { tenantId: t, mes: '2026-08', hoje: HOJE })
@@ -299,6 +304,9 @@ describe.skipIf(!url)('cadastro unificado (Postgres real)', () => {
     const promovida = await promoverACliente(pool, { tenantId: t, id: ids.epsilon, dados: { celular: '2', data_inicio: '2026-10-01' } })
     expect(promovida.cadastro).toMatchObject({ tipo: 'cliente', gera_receita: true, data_inicio: '2026-10-01' })
     expect(promovida.cadastro.cliente_id).toBeTruthy()
+    expect(await clienteDaLive(ids.lEpsilonSemCliente)).toBe(promovida.cadastro.cliente_id)
+    expect(await clienteDaLive(ids.lEpsilonComCliente)).toBe(ids.epsilonExplicit)
+    expect(await clienteDaLive(ids.lEpsilonOutroTenant)).toBeNull()
     expect(await dinheiro(t)).toEqual(antes)
   })
 

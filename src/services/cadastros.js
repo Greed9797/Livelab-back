@@ -547,6 +547,14 @@ export async function promoverACliente(db, { tenantId, id, dados }) {
         WHERE id = $1::uuid AND tenant_id = $2::uuid`,
       [marca.id, tenantId, clienteId, dataInicio],
     )
+    await db.query(
+      `UPDATE lives
+          SET cliente_id = $3::uuid
+        WHERE tenant_id = $1::uuid
+          AND marca_id = $2::uuid
+          AND cliente_id IS NULL`,
+      [tenantId, marca.id, clienteId],
+    )
     // Garante a condição baseline (idempotente; reaproveita a marca recém-promovida).
     await ensureClienteMarca(db, { tenantId, clienteId })
     return { clienteId, tipoAnterior: marca.tipo, dataInicio, retroativo: retro.rows.length > 0 }

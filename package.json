@@ -9,6 +9,7 @@
     "start": "node apply_migrations.js && node src/server.js",
     "test": "vitest run test/*.test.js",
     "test:integration": "node test/integration.pglite.mjs",
+    "test:pg": "vitest run test/*.pg.test.js --no-file-parallelism",
     "test:watch": "vitest"
   },
   "engines": {

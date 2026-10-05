@@ -4,7 +4,7 @@
 // Regra (marcaGeraReceitaSql): só marca tipo 'cliente' e não sistema mostra comissão de franquia.
 // Afiliada / própria / parceira / sistema: comissao_franquia exibida = 0; GMV, pedidos, comissão de
 // apresentadora e de franqueadora iguais ao gravado. Nada gravado muda (vendas_atribuidas intacta).
-// /v1/comissoes/pendentes é fila de aprovação e fica como antes (mostra o gravado).
+// /v1/comissoes/pendentes exibe a mesma comissão de franquia do detalhe/export.
 import pg from 'pg'
 import Fastify from 'fastify'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -173,10 +173,12 @@ describe.skipIf(!url)('comissão de franquia no detalhe — marca não-cliente (
     expect(gmvTotal).toBe(10000 + 1000 + 700 + 2000 + 1500 + 500 + 300 + 400)
   })
 
-  it('/v1/comissoes/pendentes (fila de aprovação) — inalterada: mostra a franquia gravada', async () => {
+  it('/v1/comissoes/pendentes — cliente preservado e não-cliente com franquia exibida 0', async () => {
     const rows = (await get('/v1/comissoes/pendentes?mes=2026-08')).json()
+    const alfa = rows.find((r) => r.origem === 'live' && r.origem_id === lives.alfa)
     const gama = rows.find((r) => r.origem === 'live' && r.origem_id === lives.gama)
-    expect(Number(gama.comissao_franquia)).toBeCloseTo(700, 2)
+    expect(Number(alfa.comissao_franquia)).toBeCloseTo(1000, 2)
+    expect(Number(gama.comissao_franquia)).toBe(0)
   })
 
   it('/v1/financeiro/faturamento — receita_liquida só de marca cliente; GMV (total) igual', async () => {

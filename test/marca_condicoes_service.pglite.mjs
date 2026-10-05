@@ -58,6 +58,7 @@ await db.exec(`
 `)
 await db.exec(await readFile(new URL('../migrations/151_marca_condicoes_comerciais.sql', import.meta.url), 'utf8'))
 await db.exec(await readFile(new URL('../migrations/165_receita_titulos_vencimento_condicoes.sql', import.meta.url), 'utf8'))
+await db.exec(await readFile(new URL('../migrations/179_condicoes_comissao_janela.sql', import.meta.url), 'utf8'))
 await db.query(`SELECT set_config('app.tenant_id',$1,false)`, [tenant])
 
 const preview = await preverCondicaoMarca(db, { tenantId: tenant, marcaId: marca, proposta: proposal })

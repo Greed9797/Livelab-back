@@ -452,8 +452,8 @@ export async function comissoesRoutes(app) {
   })
 
   // GET /v1/comissoes/pendentes — lista comissões aguardando aprovação
-  // Fila de APROVAÇÃO (gate pela comissão da apresentadora): fica fora da regra F4b de
-  // comissão de franquia exibida — mostra a linha como gravada (docs/financeiro.md).
+  // Fila de APROVAÇÃO continua com gate pela comissão da apresentadora, mas a comissão
+  // de franquia exibida segue a mesma regra de detalhe/export (marca não-cliente = 0).
   app.get('/v1/comissoes/pendentes', { preHandler: writeAccess }, async (request) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
@@ -467,7 +467,7 @@ export async function comissoesRoutes(app) {
            (${officialLineGmvExpr('va')}) AS gmv,
            va.pedidos,
            (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
-           (${officialLineCommissionExpr('va', 'comissao_franquia')}) AS comissao_franquia,
+           (${comissaoFranquiaExibidaExpr('va', 'm')}) AS comissao_franquia,
            (${officialLineCommissionExpr('va', 'comissao_franqueadora')}) AS comissao_franqueadora,
            va.status_aprovacao,
            va.criado_em,

@@ -141,7 +141,7 @@ function mockDb(handlers = {}) {
 const cfgRow = (corte = '2026-08-01') => ({ rows: [{ aliquota_imposto_pct: 10, data_corte: corte, saldo_abertura: '1000' }] })
 
 describe('calcularPainelMes (banco mockado)', () => {
-  it('janela única de lançamentos [corte−2m, mes]; 400 para mes inválido; tenant em toda query', async () => {
+  it('janela única de lançamentos [mes−12m, mes]; 400 para mes inválido; tenant em toda query', async () => {
     const db = mockDb({
       financeiro_data_corte: () => cfgRow(),
       'FROM custos\n        WHERE': () => ({ rows: [
@@ -152,9 +152,25 @@ describe('calcularPainelMes (banco mockado)', () => {
     expect(p.a_pagar).toMatchObject({ no_mes: 120, total: 120, qtd: 1, atrasados: { qtd: 1, valor: 120 } })
     const custosCalls = db.query.mock.calls.filter(([s]) => String(s).includes('FROM custos\n        WHERE'))
     expect(custosCalls).toHaveLength(1)
-    expect(custosCalls[0][1]).toEqual([TENANT, '2026-06-01', '2026-10-31']) // addMeses(2026-08,-2) .. mes
+    expect(custosCalls[0][1]).toEqual([TENANT, '2025-10-01', '2026-10-31'])
     for (const [, params] of db.query.mock.calls) expect(params).toContain(TENANT)
     await expect(calcularPainelMes(db, { tenantId: TENANT, mes: '2026-13', hoje: HOJE })).rejects.toMatchObject({ statusCode: 400 })
+  })
+
+  it('sem corte usa 12 meses anteriores ao mês do painel e não conta perdido/pago como aberto', async () => {
+    const db = mockDb({
+      financeiro_data_corte: () => cfgRow(null),
+      'FROM receitas_avulsas\n      WHERE': () => ({ rows: [
+        { id: 'aberto', descricao: 'Antigo', grupo: 'servico', valor_previsto: '100', valor_pago: '0', data_vencimento: '2025-11-10', competencia: '2025-11-01' },
+        { id: 'perdido', descricao: 'Perdido', grupo: 'servico', valor_previsto: '200', valor_pago: '0', data_vencimento: '2025-12-10', competencia: '2025-12-01', perdido_em: '2026-01-01T00:00:00.000Z' },
+        { id: 'pago', descricao: 'Pago', grupo: 'servico', valor_previsto: '300', valor_pago: '300', data_vencimento: '2026-01-10', data_pagamento: '2026-01-10', competencia: '2026-01-01' },
+      ] }),
+    })
+    const p = await calcularPainelMes(db, { tenantId: TENANT, mes: '2026-10', hoje: HOJE })
+    const calls = db.query.mock.calls.filter(([s]) => String(s).includes('FROM receitas_avulsas\n      WHERE'))
+    expect(calls[0][1]).toEqual([TENANT, '2025-10-01', '2026-10-01'])
+    expect(p.a_receber).toMatchObject({ atrasado_anterior: 100, total: 100, qtd: 1 })
+    for (const [, params] of db.query.mock.calls) expect(params).toContain(TENANT)
   })
 
   it('projetado_fim_mes bate com saldo_projetado_fim_mes de /caixa (mesmos dados)', async () => {
@@ -268,10 +284,34 @@ describe('rotas: painel, dre e cache do agregador', () => {
     const body = r.json()
     expect(body).toMatchObject({ inicio: '2026-01', fim: '2026-03', aliquota: 10, data_corte: null })
     expect(body.meses).toHaveLength(3)
+    expect(body.meses.map((m) => m.caixa)).toEqual([
+      { saldo_inicio_mes: null }, { saldo_inicio_mes: null }, { saldo_inicio_mes: null },
+    ])
     expect(body.totais).toBeDefined()
     expect(body).not.toHaveProperty('fat_bruto')
     expect((await app.inject({ method: 'GET', url: '/v1/financeiro/dre?inicio=2026-05&fim=2026-01' })).statusCode).toBe(400)
     expect((await app.inject({ method: 'GET', url: '/v1/financeiro/dre?inicio=x' })).statusCode).toBe(400)
+    await app.close()
+  })
+
+  it('GET /dre inclui caixa.saldo_inicio_mes em cada mês; preserva zero configurado', async () => {
+    const db = mockDb({
+      financeiro_data_corte: () => ({ rows: [{ aliquota_imposto_pct: 10, data_corte: '2026-02-15', saldo_abertura: '0' }] }),
+      'WITH meses AS': () => ({ rows: [
+        { mes: '2026-02', saldo_inicio_mes: '0' },
+        { mes: '2026-03', saldo_inicio_mes: '125.50' },
+      ] }),
+    })
+    const app = buildApp(db)
+    await app.register(financeiroRoutes)
+    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/dre?inicio=2026-01&fim=2026-03' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().meses.map((m) => [m.mes, m.caixa])).toEqual([
+      ['2026-01', { saldo_inicio_mes: null }],
+      ['2026-02', { saldo_inicio_mes: 0 }],
+      ['2026-03', { saldo_inicio_mes: 125.5 }],
+    ])
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes('WITH meses AS'))).toHaveLength(1)
     await app.close()
   })
 

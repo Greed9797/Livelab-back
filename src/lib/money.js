@@ -77,14 +77,15 @@ export function allocateCentsByWeight(totalCents, allocations) {
     return { id, cents: numerator / totalWeight, remainder: numerator % totalWeight }
   })
   let remaining = totalCents - shares.reduce((sum, share) => sum + share.cents, 0n)
+  const compareIds = (left, right) => left < right ? -1 : left > right ? 1 : 0
   shares.sort((a, b) => a.remainder === b.remainder
-    ? a.id.localeCompare(b.id, 'en')
+    ? compareIds(a.id, b.id)
     : a.remainder > b.remainder ? -1 : 1)
   for (const share of shares) {
     if (remaining === 0n) break
     share.cents += 1n
     remaining -= 1n
   }
-  return shares.sort((a, b) => a.id.localeCompare(b.id, 'en'))
+  return shares.sort((a, b) => compareIds(a.id, b.id))
     .map(({ id, cents }) => ({ id, cents }))
 }

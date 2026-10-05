@@ -30,3 +30,7 @@ PROMPT_*.md
 
 # Trajetórias do fastcontext — ferramenta local, não é do projeto
 .fastcontext/
+
+# Ferramentas locais (não versionar)
+.agent/
+.serena/

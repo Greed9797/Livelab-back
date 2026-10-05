@@ -4,5 +4,8 @@ await import('./assiduidade_union.pglite.mjs')
 await import('./marca_condicoes_schema.pglite.mjs')
 await import('./marca_condicoes_service.pglite.mjs')
 await import('./client_brand_lifecycle.pglite.mjs')
+await import('./financeiro_liquidacoes_schema.pglite.mjs')
+await import('./financeiro_liquidacoes_read.pglite.mjs')
+await import('./financeiro_perdas_schema.pglite.mjs')
 
 console.log('PASS: all PGlite integration fixtures')

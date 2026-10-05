@@ -404,7 +404,10 @@ nesta entrega.
 
 ## 11. Decisões PENDENTES
 
-Nenhuma linha desta tabela é decidida por FIN-01B sem revisão de Lucas.
+Esta tabela registra as alternativas abertas quando a FIN-01B foi escrita. As
+decisões posteriores de Lucas e os padrões técnicos adotados estão em
+[financeiro-decisoes-v1.md](financeiro-decisoes-v1.md); quando houver conflito,
+usar o registro de decisões mais recente.
 
 | Decisão PENDENTE | Responsável | Impacto | Alternativas a avaliar |
 |---|---|---|---|

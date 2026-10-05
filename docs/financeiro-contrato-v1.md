@@ -434,4 +434,7 @@ Resultado conceitual:
 14. **Lucas + Financeiro/Controladoria:** a receber, a pagar, vencido e caixa projetado devem incluir obrigações antigas fora da janela de competência hoje carregada por `/caixa`/`painel`?
 15. **Lucas + Produto/Engenharia:** como registrar eventos de baixa/reversão e reconstruir `liquidado_titulos_competencia(M,T)` após correções?
 
-Essas escolhas alteram regra de negócio, governança ou modelo de dados; ficam fora da FIN-01A até decisão explícita.
+Este é o registro das questões levantadas na FIN-01A. As decisões tomadas em
+05/10/2026 e as regras de implementação adotadas constam em
+[financeiro-decisoes-v1.md](financeiro-decisoes-v1.md); a lista acima deve ser
+lida junto desse registro, pois parte das questões já foi respondida.

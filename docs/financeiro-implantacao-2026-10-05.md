@@ -7,7 +7,7 @@ Estado verificado em 05/10/2026. Fonte de escopo: `PLANO-FINANCEIRO-LIVELAB-CONS
 | Frente | Estado verificado | Evidência |
 | --- | --- | --- |
 | API | Commit `b95bff9` em `codex/blumenau-operational-fase1`; `/health` retornou o SHA e `/readyz` 200 | Railway, 05/10/2026 |
-| Painel | Commit `c1eed56` em `feat/multi-apresentadora-agenda`; GitHub Actions concluiu com sucesso | Run `37260793508`; `version.json` passou a `1791172127820` |
+| Painel | Commit `375ced3` em `feat/multi-apresentadora-agenda`; GitHub Actions concluiu com sucesso | Run `37309762398`; `version.json` passou a `1791203436905` |
 | Testes da API | 1.826 aprovados; integração PGlite aprovada | `npm test`, `npm run test:integration` |
 | Testes do painel | 812 aprovados; typecheck e build aprovados | `npm run typecheck`, `npm run test`, `npm run build` |
 
@@ -19,7 +19,9 @@ Domínio: financeiro multi-tenant. Complexidade: alta. Risco: dinheiro, acusaç�
 - [Modelo FIN-01B](financeiro-modelo-v1.md): fatos financeiros, invariantes propostas, idempotência, Asaas, escritores legados, migração aditiva e política monetária pendente. A revisão independente de aderência ao plano foi aprovada; o conteúdo ainda aguarda aprovação de Lucas.
 - Revisão técnica local: referências principais a papéis, allowlist, RLS e filtros de caixa/DRE foram confrontadas com o código. Uma sessão adicional de revisão por subagente caiu antes de ler os arquivos, portanto ela não fornece parecer.
 - FIN-02 a FIN-07 não foram implementadas nesta rodada: dependem do aceite das regras registradas nos dois documentos. Não há schema, liquidação, saldo ou permissão nova em produção por efeito deste gate.
-- H03 continua local no commit `375ced3`: uma nova tentativa de push foi rejeitada pelo GitHub porque o OAuth ativo não possui escopo `workflow`. `gh auth status` também reportou credencial inválida. Publicar depois de renovar a credencial com esse escopo.
+- Após o gate documental, Lucas autorizou adotar as opções financeiras seguras e decidiu o efeito temporal de perdas, os papéis de fechamento/reabertura e o escopo inicial do caixa. Ver [decisões FIN v1](financeiro-decisoes-v1.md). O trabalho de implementação posterior deve validar cada corte antes de publicar.
+- H03 foi publicado no commit `375ced3` após renovação da credencial Git. GitHub Actions run `37309762398` concluiu com sucesso; `/login` respondeu 200, `version.json` passou a `1791203436905` e o bundle não contém `[SENSITIVE]`. O `gh auth status` local ainda reporta uma credencial antiga inválida, mas o push Git foi aceito.
+- O workflow do backend passou a executar as fixtures SQL PGlite no commit `29d3b79` da branch de produção. GitHub Actions run `37312207295` concluiu com sucesso; `/health` confirmou `29d3b79`. Esse push continha apenas o workflow de CI, sem migrations ou escritores financeiros novos.
 
 ## Reconciliação do handoff
 
@@ -28,7 +30,7 @@ Domínio: financeiro multi-tenant. Complexidade: alta. Risco: dinheiro, acusaç�
 | G01 | Repositórios e branches publicados conferidos | Instruções locais e commits lidos; registro no Todoist ainda aberto |
 | H01 | Botão “Gerar títulos” publicado | Visível na aba Receita; nenhuma geração disparada na verificação |
 | H02 | Criação/edição roteadas por `/v1/cadastros` | Flag de produção ligada em `.env.production`; formulário verificado sem gravar cliente |
-| H03 | Patch de CI preparado no commit local `375ced3` | Git local recusou push por falta de escopo `workflow`; conector GitHub retornou 403 |
+| H03 | Patch de CI publicado em `375ced3` | Deploy `37309762398` aprovado; versão e bundle de produção verificados |
 | H04 | Promoção preenche `lives.cliente_id` vazio da mesma marca/tenant | Testes unitários/PGlite; teste `*.pg.test.js` pulou sem `TEST_PG_URL` |
 | H05 | Pendentes mostra comissão de franquia como detalhe/export | Testes existentes atualizados |
 | H06 | Margem prevista desconta `perdas.receita.valor` | Fórmula em produção; confirmar semântica temporal no contrato FIN-01A |
@@ -75,6 +77,6 @@ A [documentação de eventos de cobrança da Asaas](https://docs.asaas.com/docs/
 - Aprovar FIN-01B: precisão monetária, resíduo, limite de baixa, contas cobertas, posição legada e cardinalidade de conciliação.
 - Definir papéis reais para perda, estorno, fechamento/reabertura, ajuste, data esperada, conciliação, caixa e aporte.
 - Disponibilizar ambiente Postgres de teste para validar SQL e migrações sem tocar produção.
-- Disponibilizar credencial GitHub com permissão de editar workflow para H03 e conta de teste para automatizar H13. Não inserir segredos em cartões ou neste documento.
+- Disponibilizar conta de teste para automatizar H13. Não inserir segredos em cartões ou neste documento.
 
 Até cada decisão, os fluxos correspondentes podem ser desenhados e testados de forma isolada, sem ativar nova escrita financeira em produção.

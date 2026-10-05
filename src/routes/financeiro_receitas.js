@@ -6,7 +6,7 @@
 //   POST  /v1/financeiro/receitas/gerar?mes=AAAA-MM
 //   PATCH /v1/financeiro/receitas/:id/receber   { valor_pago?, data_pagamento?, observacao? }
 //   PATCH /v1/financeiro/receitas/:id/desfazer
-//   PATCH /v1/financeiro/receitas/:id/perder     { motivo? (≤300) }  → status 'perdido' (migration 173)
+//   PATCH /v1/financeiro/receitas/:id/perder     { motivo (≤300; opcional se já perdido) } → status 'perdido'
 //   PATCH /v1/financeiro/receitas/:id/desperder  → remove a perda
 //   (receber título perdido → 409; perder título 100% pago → 409)
 // `:id` aceita uuid (título materializado) ou `calc:<marca_id>:<AAAA-MM>:<fixo|comissao>`
@@ -55,7 +55,7 @@ const receberSchema = z.object({
 }).strict()
 
 const perderSchema = z.object({
-  motivo: z.string().max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
+  motivo: z.string().trim().max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
 }).strict()
 
 function erro(reply, error) {

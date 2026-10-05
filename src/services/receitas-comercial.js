@@ -481,6 +481,9 @@ export async function perderTitulo(db, { tenantId, id, motivo, actorUserId = nul
       throw serviceError('Título já recebido integralmente não pode ser dado como perdido', 'RECEITA_PAGA', 409)
     }
     jaPerdido = Boolean(titulo.perdido_em)
+    if (!jaPerdido && (typeof motivo !== 'string' || !motivoNorm)) {
+      throw serviceError('motivo é obrigatório para dar a receita como perdida', 'INVALID_MOTIVO')
+    }
     await db.query(
       `UPDATE receita_titulos
           SET perdido_em = COALESCE(perdido_em, NOW()),

@@ -197,6 +197,9 @@ export async function perderReceitaAvulsa(db, { tenantId, id, motivo, actorUserI
   if (atual.valor_pago > 0 && atual.valor_pago >= atual.valor_previsto) {
     throw erro('Receita já recebida integralmente não pode ser dada como perdida', 409, 'RECEITA_PAGA')
   }
+  if (!atual.perdido_em && (typeof motivo !== 'string' || !motivoNorm)) {
+    throw erro('motivo é obrigatório para dar a receita como perdida', 400, 'INVALID_MOTIVO')
+  }
   const { rows } = await db.query(
     `UPDATE receitas_avulsas
         SET perdido_em = COALESCE(perdido_em, NOW()),

@@ -9,7 +9,7 @@
 //   DELETE /v1/financeiro/receitas-avulsas/:id
 //   PATCH  /v1/financeiro/receitas-avulsas/:id/receber   { valor_pago?, data_pagamento? }
 //   PATCH  /v1/financeiro/receitas-avulsas/:id/desfazer
-//   PATCH  /v1/financeiro/receitas-avulsas/:id/perder     { motivo? (≤300) } → status 'perdido' (migration 173)
+//   PATCH  /v1/financeiro/receitas-avulsas/:id/perder     { motivo (≤300; opcional se já perdido) } → status 'perdido'
 //   PATCH  /v1/financeiro/receitas-avulsas/:id/desperder
 //   (receber receita perdida → 409; perder receita 100% recebida → 409)
 //
@@ -66,7 +66,7 @@ const receberSchema = z.object({
 }).strict()
 
 const perderSchema = z.object({
-  motivo: z.string().max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
+  motivo: z.string().trim().max(MOTIVO_MAX, `motivo deve ter no máximo ${MOTIVO_MAX} caracteres`).nullish(),
 }).strict()
 
 function responderErro(reply, error) {

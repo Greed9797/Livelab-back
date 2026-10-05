@@ -11,7 +11,8 @@ import { financeiroReceitasRoutes } from '../src/routes/financeiro_receitas.js'
 import { financeiroReceitasAvulsasRoutes } from '../src/routes/financeiro_receitas_avulsas.js'
 import { financeiroCustosRoutes } from '../src/routes/financeiro_custos.js'
 import { gerarCustosDoMes, idVirtual as idVirtualCusto, listarCustos } from '../src/services/custos-plano.js'
-import { gerarTitulosReceita, montarReceitaMensal, totalizarTitulos } from '../src/services/receitas-comercial.js'
+import { gerarTitulosReceita, montarReceitaMensal, perderTitulo, totalizarTitulos } from '../src/services/receitas-comercial.js'
+import { perderReceitaAvulsa } from '../src/services/receitas-avulsas.js'
 
 const HOJE = '2026-09-15'
 const tenantId = '00000000-0000-4000-8000-000000000001'
@@ -277,7 +278,7 @@ describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
     const app = buildReceitasApp(db.query)
     await app.register(financeiroReceitasRoutes)
     const url = `/v1/financeiro/receitas/${tituloId}/perder`
-    const parcial = await app.inject({ method: 'PATCH', url })
+    const parcial = await app.inject({ method: 'PATCH', url, payload: { motivo: 'Saldo não será pago' } })
     expect(parcial.json()).toMatchObject({ status: 'perdido', valor_pago: 600, valor_previsto: 1600, data_pagamento: '2026-09-02' })
     expect(db.rows.get(tituloId).valor_pago).toBe('600')
 
@@ -298,6 +299,33 @@ describe('PATCH /v1/financeiro/receitas/:id/perder | /desperder', () => {
     expect((await leitor.inject({ method: 'PATCH', url })).statusCode).toBe(403)
     expect((await leitor.inject({ method: 'PATCH', url: `/v1/financeiro/receitas/${tituloId}/desperder` })).statusCode).toBe(403)
     await leitor.close()
+  })
+
+  it('exige motivo para perda nova via API e serviço; reverte título virtual inválido', async () => {
+    const db = titulosDb({ titulos: [tituloArmazenado()] })
+    const app = buildReceitasApp(db.query)
+    await app.register(financeiroReceitasRoutes)
+    const url = `/v1/financeiro/receitas/${tituloId}/perder`
+    for (const payload of [undefined, { motivo: null }, { motivo: '' }, { motivo: '   ' }]) {
+      const res = await app.inject({ method: 'PATCH', url, ...(payload === undefined ? {} : { payload }) })
+      expect(res.statusCode).toBe(400)
+      expect(db.rows.get(tituloId).perdido_em).toBeNull()
+    }
+    for (const motivo of [undefined, null, '   ', 123]) {
+      await expect(perderTitulo({ query: db.query }, { tenantId, id: tituloId, motivo, hoje: HOJE }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'INVALID_MOTIVO' })
+    }
+    expect(db.sqls.filter((sql) => sql.includes('perdido_em = COALESCE(perdido_em, NOW())'))).toHaveLength(0)
+    expect(db.sqls.filter((sql) => sql === 'ROLLBACK')).toHaveLength(8)
+
+    const virtual = titulosDb()
+    await expect(perderTitulo({ query: virtual.query }, {
+      tenantId, id: `calc:${marcaId}:2026-08:fixo`, motivo: ' ', hoje: HOJE,
+    })).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_MOTIVO' })
+    // O fake não desfaz INSERT no ROLLBACK; a transação real desfaz a materialização.
+    expect(virtual.sqls).toContain('ROLLBACK')
+    expect(virtual.sqls).not.toContain('COMMIT')
+    await app.close()
   })
 
   it('receber título perdido → 409 e não grava baixa; após desperder, recebe', async () => {
@@ -419,7 +447,7 @@ describe('PATCH /v1/financeiro/receitas-avulsas/:id/perder | /desperder', () => 
     const app = buildApp(db.query)
     await app.register(financeiroReceitasAvulsasRoutes)
     const base = `/v1/financeiro/receitas-avulsas/${avulsaId}`
-    const p = await app.inject({ method: 'PATCH', url: `${base}/perder` })
+    const p = await app.inject({ method: 'PATCH', url: `${base}/perder`, payload: { motivo: 'Saldo não será pago' } })
     expect(p.json()).toMatchObject({ status: 'perdido', valor_pago: 200, valor_previsto: 500 })
 
     db.state.row.perdido_em = null
@@ -439,6 +467,29 @@ describe('PATCH /v1/financeiro/receitas-avulsas/:id/perder | /desperder', () => 
     await leitor.register(financeiroReceitasAvulsasRoutes)
     expect((await leitor.inject({ method: 'PATCH', url: `${base}/perder` })).statusCode).toBe(403)
     await leitor.close()
+  })
+
+  it('exige motivo para perda avulsa nova via API e serviço; retry sem motivo preserva o antigo', async () => {
+    const db = avulsasDb(avulsaRow())
+    const app = buildApp(db.query)
+    await app.register(financeiroReceitasAvulsasRoutes)
+    const url = `/v1/financeiro/receitas-avulsas/${avulsaId}/perder`
+    for (const payload of [undefined, { motivo: null }, { motivo: '' }, { motivo: '   ' }]) {
+      const res = await app.inject({ method: 'PATCH', url, ...(payload === undefined ? {} : { payload }) })
+      expect(res.statusCode).toBe(400)
+      expect(db.state.row.perdido_em).toBeNull()
+    }
+    for (const motivo of [undefined, null, '   ', 123]) {
+      await expect(perderReceitaAvulsa({ query: db.query }, { tenantId, id: avulsaId, motivo, hoje: HOJE }))
+        .rejects.toMatchObject({ statusCode: 400, code: 'INVALID_MOTIVO' })
+    }
+    const first = await app.inject({ method: 'PATCH', url, payload: { motivo: '  ' + 'x'.repeat(300) + '  ' } })
+    expect(first.statusCode).toBe(200)
+    expect(db.state.row.perdido_motivo).toBe('x'.repeat(300))
+    const retry = await app.inject({ method: 'PATCH', url })
+    expect(retry.statusCode).toBe(200)
+    expect(retry.json().perdido_motivo).toBe('x'.repeat(300))
+    await app.close()
   })
 })
 

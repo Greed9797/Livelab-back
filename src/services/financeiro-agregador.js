@@ -29,7 +29,10 @@
 // `tenantId` explícito (além do RLS).
 
 import { normalizarMotivo, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
+import { centsToExactMoney, exactMoneyToCents } from '../lib/money.js'
+import { randomUUID } from 'node:crypto'
 import { hojeSaoPaulo, listarTitulosReceita } from './receitas-comercial.js'
+import { registrarEstorno, registrarLiquidacao } from './financeiro-liquidacoes-command.js'
 import { addMeses, diasNoMes, listarCustos, mesesEntre, ultimoDia } from './custos-plano.js'
 import { listarPagamentosApresentadoras } from './apresentadoras-pagamentos.js'
 import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
@@ -960,26 +963,116 @@ async function itemImpostoDoMes(db, { tenantId, mes, hoje }) {
  * Baixa do imposto da competência `mes`: materializa (upsert) a linha em `custos`
  * com o valor previsto calculado agora; valor_pago default = previsto; data default = hoje.
  */
-export async function pagarImposto(db, { tenantId, mes, valorPago, dataPagamento, observacao, hoje = hojeSaoPaulo() } = {}) {
+function erroImposto(message, code, statusCode = 409) {
+  return erro(message, statusCode, code)
+}
+
+function centavosImposto(valor, campo = 'valor_pago') {
+  try {
+    return exactMoneyToCents(typeof valor === 'number' ? r2(valor).toFixed(2) : (valor ?? '0'))
+  } catch {
+    throw erro(`${campo} deve ser um valor monetário válido`, 400, 'INVALID_PAYMENT')
+  }
+}
+
+async function impostoMaterializadoAtual(db, tenantId, mes, lock = false) {
+  const { rows } = await db.query(
+    `SELECT id, tenant_id, valor::text AS valor, COALESCE(valor_pago, 0)::text AS valor_pago,
+            cancelado_em
+       FROM custos
+      WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date${lock ? ' FOR UPDATE' : ''}`,
+    [tenantId, `${mes}-01`],
+  )
+  return rows[0] ?? null
+}
+
+async function totalLiquidoImposto(db, tenantId, custoId) {
+  const { rows } = await db.query(
+    `SELECT COALESCE(SUM(l.valor), 0)::text AS liquidado,
+            COALESCE(SUM(e.total), 0)::text AS estornado
+       FROM financeiro_liquidacoes l
+       LEFT JOIN LATERAL (
+         SELECT SUM(valor) AS total FROM financeiro_estornos
+          WHERE tenant_id = l.tenant_id AND liquidacao_id = l.id
+       ) e ON true
+      WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'imposto' AND l.origem_id = $2::uuid`,
+    [tenantId, custoId],
+  )
+  return exactMoneyToCents(rows[0].liquidado) - exactMoneyToCents(rows[0].estornado)
+}
+
+/**
+ * Baixa do imposto no contrato FIN-03A. A linha de `custos` é somente a
+ * projeção agregada da obrigação; o fato financeiro e a projeção são gravados
+ * juntos pelo comando canônico.
+ */
+export async function pagarImposto(db, {
+  tenantId, mes, valorPago, dataPagamento, observacao, hoje = hojeSaoPaulo(),
+  ator = { tipo: 'sistema', id: 'financeiro-agregador' }, chaveOperacao = randomUUID(),
+} = {}) {
   if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
   if (dataPagamento != null && !RE_DATA.test(String(dataPagamento))) throw erro('data_pagamento deve estar no formato AAAA-MM-DD', 400, 'INVALID_PAYMENT')
-  const atual = await impostosMaterializados(db, { tenantId, inicio: mes, fim: mes })
-  if (atual.get(mes)?.cancelado_em) throw erro('Imposto cancelado. Reative antes de pagar.', 409, 'CUSTO_CANCELADO')
+  const materializados = await impostosMaterializados(db, { tenantId, inicio: mes, fim: mes })
+  if (materializados.get(mes)?.cancelado_em) throw erro('Imposto cancelado. Reative antes de pagar.', 409, 'CUSTO_CANCELADO')
   const [calculo] = await calcularImpostos(db, { tenantId, inicio: mes, fim: mes, hoje })
-  const pago = valorPago == null ? calculo.valor : r2(valorPago)
-  if (!(pago > 0)) throw erro('valor_pago deve ser maior que zero (imposto calculado é zero)', 400, 'INVALID_PAYMENT')
-  const previsto = calculo.valor > 0 ? calculo.valor : pago
+  const alvo = valorPago == null ? centavosImposto(calculo.valor) : centavosImposto(valorPago)
+  if (alvo <= 0n) throw erro('valor_pago deve ser maior que zero (imposto calculado é zero)', 400, 'INVALID_PAYMENT')
+  const previsto = calculo.valor > 0 ? calculo.valor : Number(centsToExactMoney(alvo))
   const obs = observacao ?? `Base ${calculo.mes_base} (${calculo.base_tipo}): ${calculo.base.toFixed(2)} × ${calculo.aliquota}%`
+  // Materialização cria apenas a obrigação. Nunca grava a baixa fora do
+  // comando: isso mantém evento e projeção atômicos.
   await db.query(
     `INSERT INTO custos (tenant_id, descricao, valor, tipo, grupo, competencia, data_vencimento,
-                         valor_pago, data_pagamento, observacao)
-     VALUES ($1::uuid, $2, $3, 'imposto', 'outros', $4::date, $5::date, $6, $7::date, $8)
+                         observacao)
+     VALUES ($1::uuid, $2, $3, 'imposto', 'outros', $4::date, $5::date, $6)
      ON CONFLICT (tenant_id, competencia) WHERE tipo = 'imposto'
-     DO UPDATE SET valor_pago = EXCLUDED.valor_pago, data_pagamento = EXCLUDED.data_pagamento,
-                   observacao = COALESCE($8, custos.observacao), atualizado_em = NOW()`,
+     DO NOTHING`,
     [tenantId, `Imposto ${mes.slice(5)}/${mes.slice(0, 4)}`, previsto, `${mes}-01`, vencimentoImposto(mes),
-      pago, dataPagamento ?? hoje, obs],
+      obs],
   )
+  const atual = await impostoMaterializadoAtual(db, tenantId, mes)
+  if (!atual) throw erroImposto('Imposto não encontrado neste tenant', 'IMPOSTO_NAO_ENCONTRADO', 404)
+  if (atual.cancelado_em) throw erro('Imposto cancelado. Reative antes de pagar.', 409, 'CUSTO_CANCELADO')
+  const previstoCents = centavosImposto(atual.valor, 'valor')
+  const pagoAtual = centavosImposto(atual.valor_pago)
+  const liquidoAtual = await totalLiquidoImposto(db, tenantId, atual.id)
+  if (liquidoAtual !== pagoAtual) throw erroImposto('Baixa legada sem fatos equivalentes; revisão necessária', 'IMPOSTO_LIQUIDACAO_DIVERGENTE')
+  if (alvo > previstoCents) throw erroImposto('valor_pago excede o valor previsto', 'IMPOSTO_VALOR_EXCEDENTE')
+  const { rows: anteriores } = await db.query(
+    `SELECT valor::text AS valor, to_char(data_liquidacao, 'YYYY-MM-DD') AS data
+       FROM financeiro_liquidacoes WHERE tenant_id = $1::uuid AND idempotencia_chave = $2`,
+    [tenantId, chaveOperacao],
+  )
+  const anterior = anteriores[0]
+  const delta = anterior ? centavosImposto(anterior.valor, 'valor') : alvo - pagoAtual
+  if (!anterior && delta <= 0n) throw erroImposto('Imposto já pago neste valor', 'IMPOSTO_SEM_SALDO')
+  const data = dataPagamento ?? anterior?.data ?? hoje
+  const motivo = JSON.stringify({ alvo: centsToExactMoney(alvo), observacao: obs, operacao: 'baixa_total_legada' })
+  await registrarLiquidacao(db, {
+    tenantId, origemTipo: 'imposto', origemId: atual.id, valor: centsToExactMoney(delta), data,
+    ator, idempotenciaChave: chaveOperacao, comandoOrigem: 'impostos.pagar', motivo,
+    validarOrigemParaUpdate: async (tx) => {
+      const imposto = await impostoMaterializadoAtual(tx, tenantId, mes, true)
+      if (!imposto) return null
+      if (imposto.cancelado_em) throw erro('Imposto cancelado. Reative antes de pagar.', 409, 'CUSTO_CANCELADO')
+      const valor = centavosImposto(imposto.valor, 'valor')
+      const pago = centavosImposto(imposto.valor_pago)
+      const liquido = await totalLiquidoImposto(tx, tenantId, imposto.id)
+      if (liquido !== pago) throw erroImposto('Baixa legada sem fatos equivalentes; revisão necessária', 'IMPOSTO_LIQUIDACAO_DIVERGENTE')
+      if (alvo !== pago + delta) throw erroImposto('valor_pago mudou durante a baixa; tente novamente', 'IMPOSTO_PAGAMENTO_CONCORRENTE')
+      const saldo = valor - pago
+      if (saldo <= 0n) throw erroImposto('Imposto sem saldo disponível', 'IMPOSTO_SEM_SALDO')
+      return { tenantId: imposto.tenant_id, natureza: 'custo', saldoElegivel: centsToExactMoney(saldo) }
+    },
+    aplicarProjecao: async (tx, evento) => {
+      await tx.query(
+        `UPDATE custos SET valor_pago = COALESCE(valor_pago, 0) + $3::numeric,
+                data_pagamento = $4::date, observacao = COALESCE($5, observacao), atualizado_em = NOW()
+          WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+        [tenantId, atual.id, evento.valor, data, observacao ?? null],
+      )
+    },
+  })
   return itemImpostoDoMes(db, { tenantId, mes, hoje })
 }
 
@@ -1032,23 +1125,54 @@ export async function reativarImposto(db, { tenantId, mes, hoje = hojeSaoPaulo()
   return itemImpostoDoMes(db, { tenantId, mes, hoje })
 }
 
-/** Desfaz a baixa: remove a linha materializada (o imposto volta a ser calculado). Cancelado: só zera a baixa. */
-export async function desfazerImposto(db, { tenantId, mes, hoje = hojeSaoPaulo() } = {}) {
+/** Desfaz uma baixa canônica; a linha materializada permanece como projeção agregada. */
+export async function desfazerImposto(db, {
+  tenantId, mes, hoje = hojeSaoPaulo(), ator = { tipo: 'sistema', id: 'financeiro-agregador' }, chaveOperacao = randomUUID(),
+} = {}) {
   if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
-  const comp = `${mes}-01`
-  let r = await db.query(
-    `UPDATE custos SET valor_pago = 0, data_pagamento = NULL, atualizado_em = NOW()
-      WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date AND cancelado_em IS NOT NULL
-      RETURNING id`,
-    [tenantId, comp],
+  const atual = await impostoMaterializadoAtual(db, tenantId, mes)
+  if (!atual) throw erro('Imposto sem baixa registrada', 404, 'IMPOSTO_NOT_FOUND')
+  const { rows: anteriores } = await db.query(
+    `SELECT liquidacao_id, valor::text AS valor, to_char(data_estorno, 'YYYY-MM-DD') AS data
+       FROM financeiro_estornos WHERE tenant_id = $1::uuid AND idempotencia_chave = $2`,
+    [tenantId, chaveOperacao],
   )
-  if (!r.rows[0]) {
-    r = await db.query(
-      `DELETE FROM custos WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date RETURNING id`,
-      [tenantId, comp],
+  let fato = anteriores[0]
+  if (!fato) {
+    const { rows: fatos } = await db.query(
+      `SELECT l.id, (l.valor - COALESCE(SUM(e.valor), 0))::text AS saldo
+         FROM financeiro_liquidacoes l
+         LEFT JOIN financeiro_estornos e ON e.tenant_id = l.tenant_id AND e.liquidacao_id = l.id
+        WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'imposto' AND l.origem_id = $2::uuid
+        GROUP BY l.id, l.valor HAVING l.valor > COALESCE(SUM(e.valor), 0)
+        ORDER BY l.id`,
+      [tenantId, atual.id],
     )
+    const pago = centavosImposto(atual.valor_pago)
+    const total = fatos.reduce((sum, item) => sum + centavosImposto(item.saldo, 'saldo'), 0n)
+    if (total !== pago) throw erroImposto('Baixa legada sem fatos equivalentes; revisão necessária', 'IMPOSTO_LIQUIDACAO_DIVERGENTE')
+    if (fatos.length === 0) throw erro('Imposto sem baixa registrada', 404, 'IMPOSTO_NOT_FOUND')
+    if (fatos.length > 1) throw erroImposto('Múltiplas liquidações exigem estorno granular', 'IMPOSTO_ESTORNO_GRANULAR_NECESSARIO')
+    fato = { liquidacao_id: fatos[0].id, valor: fatos[0].saldo, data: hoje }
   }
-  if (!r.rows[0]) throw erro('Imposto sem baixa registrada', 404, 'IMPOSTO_NOT_FOUND')
+  await registrarEstorno(db, {
+    tenantId, liquidacaoId: fato.liquidacao_id, valor: fato.valor, data: fato.data,
+    ator, idempotenciaChave: chaveOperacao, comandoOrigem: 'impostos.desfazer', motivo: 'Desfazer pagamento de imposto',
+    aplicarProjecao: async (tx, evento) => {
+      if (evento.natureza !== 'custo' || evento.origemTipo !== 'imposto' || evento.origemId !== atual.id) {
+        throw erroImposto('Liquidação não pertence ao imposto', 'IMPOSTO_LIQUIDACAO_DIVERGENTE')
+      }
+      const { rows } = await tx.query(
+        `UPDATE custos SET valor_pago = valor_pago - $3::numeric,
+                data_pagamento = CASE WHEN valor_pago = $3::numeric THEN NULL ELSE data_pagamento END,
+                atualizado_em = NOW()
+          WHERE tenant_id = $1::uuid AND id = $2::uuid AND valor_pago >= $3::numeric
+          RETURNING id`,
+        [tenantId, atual.id, evento.valor],
+      )
+      if (!rows[0]) throw erroImposto('Pagamento mudou durante o estorno; revisão necessária', 'IMPOSTO_ESTORNO_CONCORRENTE')
+    },
+  })
   return itemImpostoDoMes(db, { tenantId, mes, hoje })
 }
 

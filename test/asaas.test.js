@@ -1,6 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import Fastify from 'fastify'
 
+vi.mock('../src/services/custos-plano.js', async (orig) => {
+  const real = await orig()
+  return { ...real, pagarCusto: vi.fn(), desfazerBaixaCusto: vi.fn() }
+})
+vi.mock('../src/services/receitas-avulsas.js', async (orig) => {
+  const real = await orig()
+  return { ...real, receberReceitaAvulsa: vi.fn() }
+})
+
+import * as custos from '../src/services/custos-plano.js'
+import * as avulsas from '../src/services/receitas-avulsas.js'
+
 import {
   AsaasError,
   ASAAS_BASE_URL_PROD,
@@ -179,6 +191,9 @@ function buildApp({ papel = 'franqueado', tabelasExistem = true, onQuery = () =>
 describe('rotas /v1/asaas', () => {
   let fetchMock
   beforeEach(() => {
+    custos.pagarCusto.mockReset()
+    custos.desfazerBaixaCusto.mockReset()
+    avulsas.receberReceitaAvulsa.mockReset()
     process.env.ASAAS_BASE_URL = 'http://mock.local/v3'
     fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
@@ -343,6 +358,10 @@ describe('rotas /v1/asaas', () => {
   const CUSTO_ID = '44444444-4444-4444-4444-444444444444'
 
   it('POST /conciliar: custo — baixa + vínculo na mesma transação, com tenant_id', async () => {
+    custos.pagarCusto.mockImplementation(async (db) => {
+      await db.query('BEGIN'); await db.query('COMMIT')
+      return { valor_pago: 250, data_pagamento: '2026-03-20' }
+    })
     const { app, queries } = buildApp({
       onQuery: (sql) => {
         if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
@@ -359,30 +378,31 @@ describe('rotas /v1/asaas', () => {
     expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 250, data_pagamento: '2026-03-20' })
     const sqls = queries.map((q) => q.sql)
     const iBegin = sqls.indexOf('BEGIN')
-    const iBaixa = sqls.findIndex((x) => /UPDATE custos/.test(x))
+    const iBaixa = sqls.findIndex((x) => /^SAVEPOINT conc_sp_/.test(x))
     const iVinculo = sqls.findIndex((x) => /UPDATE gateway_transacoes/.test(x))
     const iCommit = sqls.indexOf('COMMIT')
     expect(iBegin).toBeGreaterThanOrEqual(0)
     expect(iBaixa).toBeGreaterThan(iBegin)
     expect(iVinculo).toBeGreaterThan(iBaixa)
     expect(iCommit).toBeGreaterThan(iVinculo)
-    expect(queries[iBaixa].params.slice(0, 2)).toEqual([CUSTO_ID, TENANT])
+    expect(custos.pagarCusto.mock.calls[0][1]).toMatchObject({ tenantId: TENANT, id: CUSTO_ID, valorPago: '250.00' })
+    expect(sqls.some((x) => /UPDATE custos/.test(x))).toBe(false)
     expect(queries[iVinculo].params).toEqual([TX_ID, TENANT, 'custo', CUSTO_ID, '33333333-3333-3333-3333-333333333333', true])
   })
 
   const AVULSA_ID = '55555555-5555-5555-5555-555555555555'
 
   it('POST /conciliar: avulsa — baixa a receita avulsa e vincula na mesma transação', async () => {
+    avulsas.receberReceitaAvulsa.mockImplementation(async (db) => {
+      await db.query('BEGIN'); await db.query('COMMIT')
+      return { id: AVULSA_ID, valor_pago: 800, data_pagamento: '2026-03-21' }
+    })
     const { app, queries } = buildApp({
       onQuery: (sql) => {
         if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
           return { rows: [{ id: TX_ID, tipo: 'entrada', valor: 800, data: '2026-03-21', conciliado_com_id: null }] }
         }
         if (/SELECT id, valor_pago(, perdido_em)? FROM receitas_avulsas/.test(sql)) return { rows: [{ id: AVULSA_ID, valor_pago: '0.00' }] }
-        if (/UPDATE receitas_avulsas/.test(sql)) {
-          return { rows: [{ id: AVULSA_ID, descricao: 'Serviço', grupo: 'servico', valor_previsto: '800.00', valor_pago: '800.00',
-            data_vencimento: '2026-03-20', data_pagamento: '2026-03-21', competencia: '2026-03-01' }] }
-        }
         if (/UPDATE gateway_transacoes/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'avulsa', conciliado_com_id: AVULSA_ID, conciliado_baixa: true }] }
         return { rows: [] }
       },
@@ -391,12 +411,15 @@ describe('rotas /v1/asaas', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 800, data_pagamento: '2026-03-21' })
     const sqls = queries.map((q) => q.sql)
-    const iBaixa = sqls.findIndex((x) => /UPDATE receitas_avulsas/.test(x))
+    const iBaixa = sqls.findIndex((x) => /^SAVEPOINT conc_sp_/.test(x))
     const iVinculo = sqls.findIndex((x) => /UPDATE gateway_transacoes/.test(x))
     expect(iBaixa).toBeGreaterThan(sqls.indexOf('BEGIN'))
     expect(iVinculo).toBeGreaterThan(iBaixa)
     expect(sqls.indexOf('COMMIT')).toBeGreaterThan(iVinculo)
-    expect(queries[iBaixa].params[1]).toBe(TENANT)
+    expect(avulsas.receberReceitaAvulsa.mock.calls[0][1]).toMatchObject({
+      tenantId: TENANT, id: AVULSA_ID, valorPago: '800.00',
+    })
+    expect(sqls.some((x) => /UPDATE receitas_avulsas/.test(x))).toBe(false)
     expect(queries[iVinculo].params.slice(2, 4)).toEqual(['avulsa', AVULSA_ID])
   })
 
@@ -446,18 +469,54 @@ describe('rotas /v1/asaas', () => {
   })
 
   it('DELETE /conciliacao: desfaz baixa gerada pela conciliação', async () => {
+    custos.desfazerBaixaCusto.mockImplementation(async (db) => {
+      await db.query('BEGIN'); await db.query('COMMIT')
+      return { id: CUSTO_ID }
+    })
     const { app, queries } = buildApp({
       onQuery: (sql) => {
-        if (/FOR UPDATE/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'custo', conciliado_com_id: CUSTO_ID, conciliado_baixa: true }] }
-        if (/UPDATE custos/.test(sql)) return { rows: [{ id: CUSTO_ID }] }
+        if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'custo', conciliado_com_id: CUSTO_ID, conciliado_baixa: true }] }
+        if (/FROM financeiro_liquidacoes l/.test(sql)) return { rows: [{ id: RECEITA_ID, origem_tipo: 'custo', origem_id: CUSTO_ID, saldo: '250.00' }] }
         return { rows: [] }
       },
     })
     const res = await app.inject({ method: 'DELETE', url: `/v1/asaas/conciliacao/${TX_ID}` })
     expect(res.statusCode).toBe(200)
     expect(res.json()).toMatchObject({ ok: true, baixa_desfeita: true })
-    expect(queries.some((q) => /UPDATE custos SET valor_pago = NULL/.test(q.sql) && q.params[1] === TENANT)).toBe(true)
+    expect(custos.desfazerBaixaCusto.mock.calls[0][1]).toMatchObject({ tenantId: TENANT, id: CUSTO_ID })
+    expect(queries.some((q) => /UPDATE custos/.test(q.sql))).toBe(false)
+    expect(queries.some((q) => /UPDATE gateway_transacoes/.test(q.sql))).toBe(true)
     expect(queries.map((q) => q.sql)).toContain('COMMIT')
+  })
+
+  it('DELETE /conciliacao: vínculo antigo sem fato marcado retorna 409 e mantém vínculo', async () => {
+    const { app, queries } = buildApp({
+      onQuery: (sql) => (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)
+        ? { rows: [{ id: TX_ID, conciliado_com_tipo: 'custo', conciliado_com_id: CUSTO_ID, conciliado_baixa: true }] }
+        : { rows: [] }),
+    })
+    const res = await app.inject({ method: 'DELETE', url: `/v1/asaas/conciliacao/${TX_ID}` })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().codigo).toBe('CONCILIACAO_BAIXA_AMBIGUA')
+    expect(queries.some((q) => /UPDATE gateway_transacoes/.test(q.sql))).toBe(false)
+    expect(queries.map((q) => q.sql)).toContain('ROLLBACK')
+  })
+
+  it('DELETE /conciliacao: schema financeiro ausente retorna 409 e mantém vínculo', async () => {
+    const { app, queries } = buildApp({
+      onQuery: (sql) => {
+        if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
+          return { rows: [{ id: TX_ID, conciliado_com_tipo: 'custo', conciliado_com_id: CUSTO_ID, conciliado_baixa: true }] }
+        }
+        if (/FROM financeiro_liquidacoes l/.test(sql)) throw Object.assign(new Error('relation does not exist'), { code: '42P01' })
+        return { rows: [] }
+      },
+    })
+    const res = await app.inject({ method: 'DELETE', url: `/v1/asaas/conciliacao/${TX_ID}` })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('Módulo financeiro ainda não migrado')
+    expect(queries.some((q) => /UPDATE gateway_transacoes/.test(q.sql))).toBe(false)
+    expect(queries.map((q) => q.sql)).toContain('ROLLBACK')
   })
 
   it('DELETE /conciliacao: baixa manual (conciliado_baixa=false) NÃO é desfeita', async () => {

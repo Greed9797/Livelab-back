@@ -358,7 +358,7 @@ export async function asaasRoutes(app) {
       await db.query('BEGIN')
       try {
         const t = await db.query(
-          `SELECT id, tipo, valor::float AS valor, to_char(data, 'YYYY-MM-DD') AS data, conciliado_com_id
+          `SELECT id, tipo, valor::text AS valor, to_char(data, 'YYYY-MM-DD') AS data, conciliado_com_id
              FROM gateway_transacoes
             WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE`,
           [transacao_id, tenant_id],
@@ -416,7 +416,7 @@ export async function asaasRoutes(app) {
     if (!uuidGenerico.safeParse(transacao_id).success) {
       return reply.code(400).send({ error: 'transacao_id inválido' })
     }
-    const { tenant_id } = request.user
+    const { tenant_id, sub: userId } = request.user
     const out = await app.withTenant(tenant_id, async (db) => {
       await db.query('BEGIN')
       try {
@@ -431,9 +431,21 @@ export async function asaasRoutes(app) {
         // Só desfaz a baixa se foi gerada pela conciliação (nunca uma baixa manual).
         let baixa = { desfeita: false, motivo: 'baixa_nao_gerada_pela_conciliacao' }
         if (tx.conciliado_com_id && tx.conciliado_baixa) {
-          baixa = await desfazerBaixaConciliacao(db, {
-            tenantId: tenant_id, tipo: tx.conciliado_com_tipo, alvoId: tx.conciliado_com_id,
-          })
+          try {
+            baixa = await desfazerBaixaConciliacao(db, {
+              tenantId: tenant_id, tipo: tx.conciliado_com_tipo, alvoId: tx.conciliado_com_id,
+              transacaoId: tx.id, userId: userId ?? null,
+            })
+          } catch (err) {
+            if (erroSchemaAusente(err)) {
+              return fim(db, 409, { error: 'Módulo financeiro ainda não migrado' })
+            }
+            const status = err instanceof ConciliacaoError ? err.status : (err?.status ?? err?.statusCode)
+            if (Number.isInteger(status) && status >= 400 && status < 500) {
+              return fim(db, status, { error: err.message, codigo: err.codigo ?? err.code })
+            }
+            throw err
+          }
         }
         await db.query(
           `UPDATE gateway_transacoes

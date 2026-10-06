@@ -174,7 +174,9 @@ export const MIGRATIONS_LIST = [
   '177_apresentadora_pagamentos_cancelamento.sql',
   '178_marcas_data_fim_inativas.sql',
   '179_condicoes_comissao_janela.sql',
+  '180_financeiro_liquidacoes_estornos.sql',
   '181_financeiro_perdas_reversoes.sql',
+  '182_financeiro_fechamentos.sql',
 ]
 
 async function ensureMigrationsTable(client) {

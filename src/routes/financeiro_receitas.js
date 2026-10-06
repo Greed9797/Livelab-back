@@ -52,7 +52,10 @@ const receberSchema = z.object({
   valor_pago: moneySchema.refine((v) => v > 0, 'valor_pago deve ser maior que zero').optional(),
   data_pagamento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'data_pagamento deve estar no formato AAAA-MM-DD').optional(),
   observacao: z.string().max(500).nullable().optional(),
+  chave_operacao: z.string().uuid().optional(),
 }).strict()
+
+const desfazerSchema = z.object({ chave_operacao: z.string().uuid().optional() }).strict()
 
 function exactPositiveMoneySchema(campo) {
   return z.string().trim().superRefine((valor, ctx) => {
@@ -150,6 +153,9 @@ export async function financeiroReceitasRoutes(app) {
     const parsed = receberSchema.safeParse(request.body ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const { tenant_id, sub } = request.user
+    const actorUserId = request.viaApiKey ? null : sub ?? null
+    const actorId = request.viaApiKey?.id ?? sub ?? null
+    const actorType = request.viaApiKey ? 'api_key' : 'usuario'
     return app.withTenant(tenant_id, async (db) => {
       try {
         const titulo = await receberTitulo(db, {
@@ -158,7 +164,8 @@ export async function financeiroReceitasRoutes(app) {
           valorPago: parsed.data.valor_pago,
           dataPagamento: parsed.data.data_pagamento,
           observacao: parsed.data.observacao,
-          actorUserId: sub ?? null,
+          chaveOperacao: parsed.data.chave_operacao,
+          actorUserId, actorId, actorType,
         })
         app.audit?.log?.(request, {
           action: 'receita_titulo.receber', entity_type: 'receita_titulo', entity_id: titulo?.id ?? null,
@@ -172,10 +179,17 @@ export async function financeiroReceitasRoutes(app) {
   })
 
   app.patch('/v1/financeiro/receitas/:id/desfazer', { preHandler: write }, async (request, reply) => {
-    const { tenant_id } = request.user
+    const parsed = desfazerSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id, sub } = request.user
     return app.withTenant(tenant_id, async (db) => {
       try {
-        const titulo = await desfazerRecebimento(db, { tenantId: tenant_id, id: request.params.id })
+        const titulo = await desfazerRecebimento(db, {
+          tenantId: tenant_id, id: request.params.id,
+          chaveOperacao: parsed.data.chave_operacao,
+          actorId: request.viaApiKey?.id ?? sub ?? 'sistema',
+          actorType: request.viaApiKey ? 'api_key' : 'usuario',
+        })
         app.audit?.log?.(request, {
           action: 'receita_titulo.desfazer', entity_type: 'receita_titulo', entity_id: titulo?.id ?? null, metadata: {},
         })?.catch((err) => app.log.error({ err }, 'audit log failed'))

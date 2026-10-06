@@ -13,6 +13,9 @@
 
 import { normalizarMotivo, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
 import { classeDoItem } from '../lib/custo-classe.js'
+import { randomUUID } from 'node:crypto'
+import { centsToExactMoney, exactMoneyToCents } from '../lib/money.js'
+import { registrarEstorno, registrarLiquidacao } from './financeiro-liquidacoes-command.js'
 
 export const GRUPOS_CUSTO = [
   'operacional', 'estrutural', 'diversos', 'investimento', 'prolabore',
@@ -316,6 +319,170 @@ export async function materializarVirtual(db, { tenantId, recorrente_id, mes }) 
 }
 
 const erroCusto = (message, statusCode, code) => Object.assign(new Error(message), { statusCode, code })
+
+const erroCustoNaoEncontrado = () => erroCusto('Custo não encontrado', 404, 'CUSTO_NAO_ENCONTRADO')
+const erroCustoDivergente = () => erroCusto(
+  'Baixa legada sem fatos equivalentes; revisão necessária', 409, 'CUSTO_LIQUIDACAO_DIVERGENTE',
+)
+
+function centsCusto(value, field) {
+  try {
+    return exactMoneyToCents(String(value))
+  } catch {
+    throw erroCusto(`${field} deve ser texto decimal exato com até duas casas`, 400, 'CUSTO_VALOR_INVALIDO')
+  }
+}
+
+async function custoAtual(db, tenantId, id, lock = false) {
+  const { rows } = await db.query(
+    `SELECT ${CUSTO_COLS
+      .replace('descricao, valor,', 'descricao, valor::text AS valor,')
+      .replace('valor_pago,', 'valor_pago::text AS valor_pago,')
+      .replace('id,', 'id, tenant_id,')}
+       FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid${lock ? ' FOR UPDATE' : ''}`,
+    [id, tenantId],
+  )
+  return rows[0] ?? null
+}
+
+async function totalLiquidoCanonico(db, tenantId, id) {
+  const { rows } = await db.query(
+    `SELECT COALESCE(SUM(l.valor), 0)::text AS liquidado,
+            COALESCE(SUM(e.total), 0)::text AS estornado
+       FROM financeiro_liquidacoes l
+       LEFT JOIN LATERAL (
+         SELECT SUM(valor) AS total FROM financeiro_estornos
+          WHERE tenant_id = l.tenant_id AND liquidacao_id = l.id
+       ) e ON true
+      WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'custo' AND l.origem_id = $2::uuid`,
+    [tenantId, id],
+  )
+  return centsCusto(rows[0].liquidado, 'liquidado') - centsCusto(rows[0].estornado, 'estornado')
+}
+
+/**
+ * Baixa de custo no contrato legado: valorPago é o TOTAL acumulado, enquanto
+ * FIN-03A recebe somente o delta. Todas as comparações monetárias são em
+ * centavos e a compatibilidade com valor_pago é confirmada sob lock.
+ */
+export async function pagarCusto(db, {
+  tenantId, id: rawId, valorPago, dataPagamento, hoje, ator,
+  chaveOperacao = randomUUID(),
+} = {}) {
+  let id = rawId
+  const virtual = parseIdVirtual(rawId)
+  if (virtual) id = await materializarVirtual(db, { tenantId, ...virtual })
+  if (!id) throw erroCustoNaoEncontrado()
+
+  const atual = await custoAtual(db, tenantId, id)
+  if (!atual) throw erroCustoNaoEncontrado()
+  if (atual.cancelado_em) throw erroCustoCancelado()
+
+  const previsto = centsCusto(atual.valor, 'valor')
+  const pagoAtual = centsCusto(atual.valor_pago ?? '0', 'valor_pago')
+  const liquidoAtual = await totalLiquidoCanonico(db, tenantId, id)
+  if (liquidoAtual !== pagoAtual) throw erroCustoDivergente()
+
+  const { rows: anteriores } = await db.query(
+    `SELECT valor::text AS valor, to_char(data_liquidacao, 'YYYY-MM-DD') AS data,
+            idempotencia_payload
+       FROM financeiro_liquidacoes
+      WHERE tenant_id = $1::uuid AND idempotencia_chave = $2`,
+    [tenantId, chaveOperacao],
+  )
+  const anterior = anteriores[0]
+  const alvo = valorPago == null ? previsto : centsCusto(valorPago, 'valor_pago')
+  if (alvo > previsto) throw erroCusto('valor_pago excede o valor previsto', 409, 'CUSTO_VALOR_EXCEDENTE')
+  const delta = anterior ? centsCusto(anterior.valor, 'valor') : alvo - pagoAtual
+  if (!anterior && delta <= 0n) throw erroCusto('Custo já pago neste valor', 409, 'CUSTO_SEM_SALDO')
+  const data = dataPagamento ?? anterior?.data ?? hoje
+  const motivo = JSON.stringify({ alvo: centsToExactMoney(alvo), operacao: 'baixa_total_legada' })
+
+  await registrarLiquidacao(db, {
+    tenantId, origemTipo: 'custo', origemId: id, valor: centsToExactMoney(delta), data,
+    ator, idempotenciaChave: chaveOperacao, comandoOrigem: 'custos.pagar', motivo,
+    validarOrigemParaUpdate: async (tx) => {
+      const custo = await custoAtual(tx, tenantId, id, true)
+      if (!custo) return null
+      if (custo.cancelado_em) throw erroCustoCancelado()
+      const valor = centsCusto(custo.valor, 'valor')
+      const pago = centsCusto(custo.valor_pago ?? '0', 'valor_pago')
+      const liquido = await totalLiquidoCanonico(tx, tenantId, id)
+      if (liquido !== pago) throw erroCustoDivergente()
+      if (alvo !== pago + delta) {
+        throw erroCusto('valor_pago mudou durante a baixa; tente novamente', 409, 'CUSTO_PAGAMENTO_CONCORRENTE')
+      }
+      const saldo = valor - pago
+      if (saldo <= 0n) throw erroCusto('Custo sem saldo disponível', 409, 'CUSTO_SEM_SALDO')
+      return { tenantId: custo.tenant_id, natureza: 'custo', saldoElegivel: centsToExactMoney(saldo) }
+    },
+    aplicarProjecao: async (tx, evento) => {
+      await tx.query(
+        `UPDATE custos SET valor_pago = COALESCE(valor_pago, 0) + $3::numeric,
+                data_pagamento = $4::date, atualizado_em = NOW()
+          WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+        [tenantId, id, evento.valor, data],
+      )
+    },
+  })
+  return custoParaItem(await custoAtual(db, tenantId, id), hoje)
+}
+
+/** Estorno simples: somente uma liquidação ativa equivalente ao total legado. */
+export async function desfazerBaixaCusto(db, {
+  tenantId, id: rawId, hoje, ator, chaveOperacao = randomUUID(),
+} = {}) {
+  let id = rawId
+  const virtual = parseIdVirtual(rawId)
+  if (virtual) id = await materializarVirtual(db, { tenantId, ...virtual })
+  if (!id) throw erroCustoNaoEncontrado()
+  const atual = await custoAtual(db, tenantId, id)
+  if (!atual) throw erroCustoNaoEncontrado()
+
+  const { rows: estornosAnteriores } = await db.query(
+    `SELECT liquidacao_id, valor::text AS valor, to_char(data_estorno, 'YYYY-MM-DD') AS data
+       FROM financeiro_estornos WHERE tenant_id = $1::uuid AND idempotencia_chave = $2`,
+    [tenantId, chaveOperacao],
+  )
+  const anterior = estornosAnteriores[0]
+  if (!anterior) {
+    const { rows: fatos } = await db.query(
+      `SELECT l.id, (l.valor - COALESCE(SUM(e.valor), 0))::text AS saldo
+         FROM financeiro_liquidacoes l
+         LEFT JOIN financeiro_estornos e ON e.tenant_id = l.tenant_id AND e.liquidacao_id = l.id
+        WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'custo' AND l.origem_id = $2::uuid
+        GROUP BY l.id, l.valor HAVING l.valor > COALESCE(SUM(e.valor), 0)
+        ORDER BY l.id`,
+      [tenantId, id],
+    )
+    const pago = centsCusto(atual.valor_pago ?? '0', 'valor_pago')
+    const total = fatos.reduce((sum, fato) => sum + centsCusto(fato.saldo, 'saldo'), 0n)
+    if (total !== pago) throw erroCustoDivergente()
+    if (fatos.length === 0) return custoParaItem(atual, hoje)
+    if (fatos.length > 1) {
+      throw erroCusto('Múltiplas liquidações exigem estorno granular', 409, 'CUSTO_ESTORNO_GRANULAR_NECESSARIO')
+    }
+    estornosAnteriores[0] = { liquidacao_id: fatos[0].id, valor: fatos[0].saldo, data: hoje }
+  }
+  const fato = estornosAnteriores[0]
+  await registrarEstorno(db, {
+    tenantId, liquidacaoId: fato.liquidacao_id, valor: fato.valor, data: fato.data,
+    ator, idempotenciaChave: chaveOperacao, comandoOrigem: 'custos.desfazer', motivo: 'Desfazer pagamento de custo',
+    aplicarProjecao: async (tx, evento) => {
+      if (evento.natureza !== 'custo' || evento.origemTipo !== 'custo' || evento.origemId !== id) {
+        throw erroCusto('Liquidação não pertence ao custo', 409, 'CUSTO_LIQUIDACAO_DIVERGENTE')
+      }
+      const { rows } = await tx.query(
+        `UPDATE custos SET valor_pago = NULL, data_pagamento = NULL, atualizado_em = NOW()
+          WHERE tenant_id = $1::uuid AND id = $2::uuid AND valor_pago = $3::numeric
+          RETURNING id`,
+        [tenantId, id, evento.valor],
+      )
+      if (!rows[0]) throw erroCusto('Pagamento mudou durante o estorno; revisão necessária', 409, 'CUSTO_ESTORNO_CONCORRENTE')
+    },
+  })
+  return custoParaItem(await custoAtual(db, tenantId, id), hoje)
+}
 
 /** 409 ao pagar custo cancelado. */
 export const erroCustoCancelado = () => erroCusto(

@@ -7,14 +7,15 @@
 //   PATCH  /v1/financeiro/receitas-avulsas/:id        { descricao?, grupo?, valor_previsto?, data_vencimento?,
 //                                                       competencia?, observacao? }
 //   DELETE /v1/financeiro/receitas-avulsas/:id
-//   PATCH  /v1/financeiro/receitas-avulsas/:id/receber   { valor_pago?, data_pagamento? }
-//   PATCH  /v1/financeiro/receitas-avulsas/:id/desfazer
+//   PATCH  /v1/financeiro/receitas-avulsas/:id/receber   { valor_pago?, data_pagamento?, chave_operacao? }
+//   PATCH  /v1/financeiro/receitas-avulsas/:id/desfazer { liquidacao_id?, valor_estorno?, motivo?, chave_operacao? }
 //   PATCH  /v1/financeiro/receitas-avulsas/:id/perder     { motivo (1..300), valor_perda }
 //   PATCH  /v1/financeiro/receitas-avulsas/:id/desperder  { motivo (1..300), valor_reversao }
 //   (receber receita perdida → 409; perder receita 100% recebida → 409)
 //
 // Grupo 'aporte' = entrada de caixa fora da receita operacional (DRE) e da base do imposto.
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { exactMoneyToCents, moneySchema } from '../lib/money.js'
 import { MOTIVO_MAX, STATUS_LANCAMENTO } from '../lib/lancamento-status.js'
@@ -61,9 +62,23 @@ const editarSchema = z.object({
 }).partial().strict().refine((d) => Object.keys(d).length > 0, { message: 'Nada para atualizar' })
 
 const receberSchema = z.object({
-  valor_pago: positivo.optional(),
+  valor_pago: z.union([exactPositiveMoneySchema('valor_pago'), positivo]).optional(),
   data_pagamento: dataSchema.optional(),
+  chave_operacao: UUID.optional(),
 }).strict()
+
+const desfazerSchema = z.object({
+  liquidacao_id: UUID,
+  valor_estorno: exactPositiveMoneySchema('valor_estorno'),
+  data_estorno: dataSchema.optional(),
+  motivo: z.string().trim().min(1).max(MOTIVO_MAX),
+  chave_operacao: UUID,
+}).strict().partial().superRefine((d, ctx) => {
+  if (Object.keys(d).length === 0) return
+  for (const campo of ['liquidacao_id', 'valor_estorno', 'motivo', 'chave_operacao']) {
+    if (d[campo] == null) ctx.addIssue({ code: 'custom', message: `${campo} é obrigatório` })
+  }
+})
 
 function exactPositiveMoneySchema(campo) {
   return z.string().trim().superRefine((valor, ctx) => {
@@ -185,6 +200,8 @@ export async function financeiroReceitasAvulsasRoutes(app) {
       const item = await app.withTenant(tenant_id, (db) => receberReceitaAvulsa(db, {
         tenantId: tenant_id, id: request.params.id, valorPago: parsed.data.valor_pago,
         dataPagamento: parsed.data.data_pagamento, hoje: hojeSaoPaulo(),
+        chaveOperacao: parsed.data.chave_operacao ?? randomUUID(),
+        ator: { tipo: request.viaApiKey ? 'api_key' : 'usuario', id: request.viaApiKey?.id ?? request.user.sub },
       }))
       if (!item) return reply.code(404).send(NAO_ENCONTRADA)
       invalidateTenant(tenant_id)
@@ -197,14 +214,25 @@ export async function financeiroReceitasAvulsasRoutes(app) {
 
   app.patch('/v1/financeiro/receitas-avulsas/:id/desfazer', WRITE, async (request, reply) => {
     if (!UUID.safeParse(request.params.id).success) return reply.code(400).send({ error: 'id inválido' })
+    const parsed = desfazerSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const { tenant_id } = request.user
-    const item = await app.withTenant(tenant_id, (db) => desfazerReceitaAvulsa(db, {
-      tenantId: tenant_id, id: request.params.id, hoje: hojeSaoPaulo(),
-    }))
-    if (!item) return reply.code(404).send(NAO_ENCONTRADA)
-    invalidateTenant(tenant_id)
-    auditar(app, request, 'receita_avulsa.desfazer', item.id, {})
-    return item
+    try {
+      const item = await app.withTenant(tenant_id, (db) => desfazerReceitaAvulsa(db, {
+        tenantId: tenant_id, id: request.params.id, hoje: hojeSaoPaulo(),
+        liquidacaoId: parsed.data.liquidacao_id, valorEstorno: parsed.data.valor_estorno,
+        dataEstorno: parsed.data.data_estorno, motivo: parsed.data.motivo,
+        chaveOperacao: parsed.data.chave_operacao,
+        autoEstorno: Object.keys(parsed.data).length === 0,
+        ator: { tipo: request.viaApiKey ? 'api_key' : 'usuario', id: request.viaApiKey?.id ?? request.user.sub },
+      }))
+      if (!item) return reply.code(404).send(NAO_ENCONTRADA)
+      invalidateTenant(tenant_id)
+      auditar(app, request, 'receita_avulsa.desfazer', item.id, parsed.data)
+      return item
+    } catch (error) {
+      return responderErro(reply, error)
+    }
   })
 
   app.patch('/v1/financeiro/receitas-avulsas/:id/perder', WRITE, async (request, reply) => {

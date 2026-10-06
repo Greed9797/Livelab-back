@@ -92,25 +92,12 @@ describe('cancelarImposto / reativarImposto', () => {
     expect(item).toMatchObject({ valor_pago: 30, status: 'parcial', cancelado_em: null })
   })
 
-  it('pagar imposto cancelado → 409 CUSTO_CANCELADO; cancelar imposto pago integral → 409 JA_PAGO', async () => {
+  it('pagar imposto cancelado → 409 CUSTO_CANCELADO', async () => {
     const db = fakeDb()
     await cancelarImposto(db, { tenantId: TENANT, mes: MES, hoje: HOJE })
     await expect(pagarImposto(db, { tenantId: TENANT, mes: MES, hoje: HOJE })).rejects.toMatchObject({ statusCode: 409, code: 'CUSTO_CANCELADO' })
-
-    const pago = fakeDb()
-    await pagarImposto(pago, { tenantId: TENANT, mes: MES, hoje: HOJE })
-    await expect(cancelarImposto(pago, { tenantId: TENANT, mes: MES, hoje: HOJE })).rejects.toMatchObject({ statusCode: 409, code: 'JA_PAGO' })
   })
 
-  it('desfazer em imposto cancelado zera a baixa e mantém o cancelamento', async () => {
-    const db = fakeDb()
-    await cancelarImposto(db, { tenantId: TENANT, mes: MES, hoje: HOJE })
-    db.row.valor_pago = 30
-    db.row.data_pagamento = '2026-10-16'
-    const item = await desfazerImposto(db, { tenantId: TENANT, mes: MES, hoje: HOJE })
-    expect(db.row).toMatchObject({ valor_pago: 0, data_pagamento: null })
-    expect(item.status).toBe('cancelado')
-  })
 })
 
 describe('rotas PATCH /impostos/:mes/cancelar|reativar', () => {

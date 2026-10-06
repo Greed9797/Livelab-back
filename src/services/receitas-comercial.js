@@ -6,6 +6,8 @@ import '../lib/pg-date-string.js'
 import { marcasCondicaoVigenteMesSql, receitaMarcaMensalSql } from '../lib/receita-marca-sql.js'
 import { normalizarMotivo, saldoEncerrado, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
 import { centsToExactMoney, exactMoneyToCents } from '../lib/money.js'
+import { randomUUID } from 'node:crypto'
+import { registrarEstorno, registrarLiquidacao } from './financeiro-liquidacoes-command.js'
 import { perdaJaRegistrada, requisicaoPerda } from '../lib/perda-idempotencia.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
@@ -421,58 +423,170 @@ async function tituloAtualizado(db, { tenantId, id, hoje }) {
  * (default = valor previsto); `dataPagamento` default = hoje (SP).
  * Aceita id de título materializado (uuid) ou virtual (`calc:<marca>:<AAAA-MM>:<componente>`).
  */
-export async function receberTitulo(db, { tenantId, id, valorPago, dataPagamento, observacao, hoje = hojeSaoPaulo(), actorUserId = null } = {}) {
+export async function receberTitulo(db, {
+  tenantId, id, valorPago, dataPagamento, observacao, hoje = hojeSaoPaulo(),
+  actorUserId = null, actorId = actorUserId, actorType = 'usuario', chaveOperacao = randomUUID(),
+} = {}) {
   const ref = parseIdTitulo(id)
   if (!ref) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
   if (dataPagamento != null && !DATE_RE.test(String(dataPagamento))) {
     throw serviceError('data_pagamento deve estar no formato AAAA-MM-DD', 'INVALID_PAYMENT')
   }
-  await db.query('BEGIN')
-  let tituloId
-  try {
-    await lockReceitas(db, tenantId)
-    const titulo = await buscarTituloParaBaixa(db, { tenantId, ref, actorUserId })
-    if (titulo.perdido_em && titulo.valor_perdido == null) throw erroEncerrado()
-    const perdido = titulo.valor_perdido == null ? 0n : exactMoneyToCents(titulo.valor_perdido)
-    const previsto = exactMoneyToCents(titulo.valor_previsto)
-    const maximoRecebivel = previsto > perdido ? previsto - perdido : 0n
-    if (maximoRecebivel <= exactMoneyToCents(titulo.valor_pago)) throw erroEncerrado()
-    const valor = valorPago == null ? maximoRecebivel : exactMoneyToCents(round2(valorPago).toFixed(2))
-    if (valor <= 0n) throw serviceError('valor_pago deve ser maior que zero', 'INVALID_PAYMENT')
-    if (valor > maximoRecebivel) {
-      throw serviceError('valor_pago excede o saldo após perdas', 'INVALID_PAYMENT', 409)
-    }
-    await db.query(
-      `UPDATE receita_titulos
-          SET valor_pago = $3::numeric, data_pagamento = $4::date,
-              observacao = COALESCE($5, observacao), atualizado_em = NOW()
-        WHERE tenant_id = $1::uuid AND id = $2::uuid`,
-      [tenantId, titulo.id, centsToExactMoney(valor), dataPagamento ?? hoje, observacao ?? null],
+  // O comando exige UUID antes de abrir a transação. Materialize uma referência
+  // virtual primeiro; a validação e a baixa permanecem atômicas no comando.
+  let tituloId = ref.id
+  if (ref.tipo === 'virtual') {
+    const { rows: existentes } = await db.query(
+      `SELECT id FROM receita_titulos WHERE tenant_id = $1::uuid AND marca_id = $2::uuid
+         AND competencia = $3::date AND componente = $4`,
+      [tenantId, ref.marca_id, `${ref.mes}-01`, ref.componente],
     )
-    tituloId = titulo.id
-    await db.query('COMMIT')
-  } catch (error) {
-    await db.query('ROLLBACK').catch(() => {})
-    throw error
+    if (existentes[0]) tituloId = existentes[0].id
+    else {
+      await db.query('BEGIN')
+      try {
+        await lockReceitas(db, tenantId)
+        tituloId = (await buscarTituloParaBaixa(db, { tenantId, ref, actorUserId })).id
+        await db.query('COMMIT')
+      } catch (error) {
+        await db.query('ROLLBACK').catch(() => {})
+        throw error
+      }
+    }
   }
+  const requested = valorPago == null ? null : exactMoneyToCents(String(valorPago))
+  if (requested !== null && requested <= 0n) throw serviceError('valor_pago deve ser maior que zero', 'INVALID_PAYMENT')
+  const { rows: previous } = await db.query(
+    `SELECT valor::text AS valor, to_char(data_liquidacao, 'YYYY-MM-DD') AS data_liquidacao,
+            idempotencia_payload
+       FROM financeiro_liquidacoes
+      WHERE tenant_id = $1::uuid AND idempotencia_chave = $2`, [tenantId, chaveOperacao],
+  )
+  const prior = previous[0]
+  const data = dataPagamento ?? prior?.data_liquidacao ?? hoje
+  const alvo = requested == null ? 'saldo' : centsToExactMoney(requested)
+  const motivo = JSON.stringify({ alvo, observacao: observacao ?? null })
+  // Replay usa o incremento original; a comparação do payload canônico detecta
+  // a mesma chave com alvo, data, ator ou origem diferentes.
+  const current = prior ? null : await db.query(
+    `SELECT valor_pago::text AS valor_pago, valor_previsto::text AS valor_previsto,
+            valor_perdido::text AS valor_perdido
+       FROM receita_titulos WHERE tenant_id = $1::uuid AND id = $2::uuid`, [tenantId, tituloId],
+  )
+  if (!prior && !current.rows[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+  const row = current?.rows[0]
+  const maximo = row && exactMoneyToCents(row.valor_previsto) - exactMoneyToCents(row.valor_perdido ?? '0')
+  const target = requested ?? maximo
+  if (!prior && target > maximo) throw serviceError('valor_pago excede o saldo após perdas', 'INVALID_PAYMENT', 409)
+  const delta = prior ? prior.valor : centsToExactMoney(target - exactMoneyToCents(row.valor_pago))
+  if (!prior && target <= exactMoneyToCents(row.valor_pago)) throw serviceError('Título já recebido neste valor', 'INVALID_PAYMENT', 409)
+  await registrarLiquidacao(db, {
+    tenantId, origemTipo: 'receita_titulo', origemId: tituloId, valor: delta, data,
+    ator: { tipo: actorType, id: actorId ?? 'sistema' }, idempotenciaChave: chaveOperacao,
+    comandoOrigem: 'receitas-comercial.receber', motivo,
+    validarOrigemParaUpdate: async (tx) => {
+      const { rows } = await tx.query(
+        `SELECT tenant_id, valor_previsto::text AS valor_previsto, valor_pago::text AS valor_pago,
+                valor_perdido::text AS valor_perdido, perdido_em
+           FROM receita_titulos WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE`,
+        [tenantId, tituloId],
+      )
+      const titulo = rows[0]
+      if (!titulo) return null
+      if (titulo.perdido_em && titulo.valor_perdido == null) throw erroEncerrado()
+      const { rows: totals } = await tx.query(
+        `SELECT COALESCE(SUM(l.valor), 0)::text AS liquidado,
+                COALESCE(SUM(e.total), 0)::text AS estornado
+           FROM financeiro_liquidacoes l
+           LEFT JOIN LATERAL (
+             SELECT SUM(valor) AS total FROM financeiro_estornos
+              WHERE tenant_id = l.tenant_id AND liquidacao_id = l.id
+           ) e ON true
+          WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'receita_titulo' AND l.origem_id = $2::uuid`,
+        [tenantId, tituloId],
+      )
+      const liquido = exactMoneyToCents(totals[0].liquidado) - exactMoneyToCents(totals[0].estornado)
+      if (liquido !== exactMoneyToCents(titulo.valor_pago)) {
+        throw serviceError('Baixa legada sem fatos equivalentes; revisão necessária', 'RECEITA_LIQUIDACAO_DIVERGENTE', 409)
+      }
+      const saldo = exactMoneyToCents(titulo.valor_previsto) - exactMoneyToCents(titulo.valor_perdido ?? '0') - exactMoneyToCents(titulo.valor_pago)
+      if (saldo <= 0n) throw serviceError('Título sem saldo disponível', 'INVALID_PAYMENT', 409)
+      if (requested == null && saldo !== exactMoneyToCents(delta)) {
+        throw serviceError('Saldo mudou durante a baixa; tente novamente', 'INVALID_PAYMENT', 409)
+      }
+      if (requested != null && requested !== exactMoneyToCents(titulo.valor_pago) + exactMoneyToCents(delta)) {
+        throw serviceError('valor_pago mudou durante a baixa; tente novamente', 'INVALID_PAYMENT', 409)
+      }
+      return { tenantId: titulo.tenant_id, natureza: 'receita', saldoElegivel: centsToExactMoney(saldo) }
+    },
+    aplicarProjecao: async (tx, evento) => {
+      await tx.query(
+        `UPDATE receita_titulos SET valor_pago = valor_pago + $3::numeric,
+                data_pagamento = $4::date, observacao = COALESCE($5, observacao), atualizado_em = NOW()
+          WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+        [tenantId, tituloId, evento.valor, data, observacao ?? null],
+      )
+    },
+  })
   return tituloAtualizado(db, { tenantId, id: tituloId, hoje })
 }
 
 /** Desfaz a baixa: zera valor_pago e data_pagamento (o título volta a ser derivado). */
-export async function desfazerRecebimento(db, { tenantId, id, hoje = hojeSaoPaulo() } = {}) {
+export async function desfazerRecebimento(db, {
+  tenantId, id, hoje = hojeSaoPaulo(), actorId = 'sistema', actorType = 'sistema', chaveOperacao = randomUUID(),
+} = {}) {
   const ref = parseIdTitulo(id)
   if (!ref || ref.tipo !== 'materializado') throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
   const { rows } = await db.query(
-    `UPDATE receita_titulos
-        SET valor_pago = 0, data_pagamento = NULL,
-            perdido_em = CASE WHEN valor_perdido IS NOT NULL AND valor_perdido < valor_previsto
-                              THEN NULL ELSE perdido_em END,
-            atualizado_em = NOW()
-      WHERE tenant_id = $1::uuid AND id = $2::uuid
-      RETURNING id`,
-    [tenantId, ref.id],
+    `SELECT id, valor_pago::text AS valor_pago FROM receita_titulos
+      WHERE tenant_id = $1::uuid AND id = $2::uuid`, [tenantId, ref.id],
   )
   if (!rows[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
+  const { rows: facts } = await db.query(
+    `SELECT l.id, (l.valor - COALESCE(SUM(e.valor), 0))::text AS saldo
+       FROM financeiro_liquidacoes l
+       LEFT JOIN financeiro_estornos e ON e.tenant_id = l.tenant_id AND e.liquidacao_id = l.id
+      WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'receita_titulo' AND l.origem_id = $2::uuid
+      GROUP BY l.id, l.valor HAVING l.valor > COALESCE(SUM(e.valor), 0)
+      ORDER BY l.id`, [tenantId, ref.id],
+  )
+  const total = facts.reduce((sum, fact) => sum + exactMoneyToCents(fact.saldo), 0n)
+  if (total !== exactMoneyToCents(rows[0].valor_pago)) {
+    throw serviceError('Baixa legada sem fatos equivalentes; revisão necessária', 'RECEITA_LIQUIDACAO_DIVERGENTE', 409)
+  }
+  if (facts.length > 1) {
+    // Cada registrarEstorno possui sua própria transação. Até existir comando
+    // granular, falhar fechado evita desfazer apenas parte do recebimento.
+    throw serviceError('Múltiplas liquidações exigem estorno granular', 'RECEITA_ESTORNO_GRANULAR_NECESSARIO', 409)
+  }
+  const { rows: chaveAnterior } = await db.query(
+    `SELECT id FROM financeiro_estornos
+      WHERE tenant_id = $1::uuid AND left(idempotencia_chave, length($2)) = $2`,
+    [tenantId, `${chaveOperacao}:`],
+  )
+  if (facts.length && chaveAnterior.length) {
+    throw serviceError('Chave idempotente já usada em desfazer anterior', 'FINANCEIRO_IDEMPOTENCIA_CONFLITO', 409)
+  }
+  for (const fact of facts) {
+    await registrarEstorno(db, {
+      tenantId, liquidacaoId: fact.id, valor: fact.saldo, data: hoje,
+      ator: { tipo: actorType, id: actorId }, idempotenciaChave: `${chaveOperacao}:${fact.id}`,
+      comandoOrigem: 'receitas-comercial.desfazer', motivo: 'Desfazer recebimento',
+      aplicarProjecao: async (tx, evento) => {
+        const { rows: updated } = await tx.query(
+          `UPDATE receita_titulos SET valor_pago = valor_pago - $3::numeric,
+                  data_pagamento = CASE WHEN valor_pago = $3::numeric THEN NULL ELSE data_pagamento END,
+                  perdido_em = CASE WHEN valor_perdido IS NOT NULL AND valor_perdido < valor_previsto
+                                    AND valor_pago = $3::numeric THEN NULL ELSE perdido_em END,
+                  atualizado_em = NOW()
+            WHERE tenant_id = $1::uuid AND id = $2::uuid AND valor_pago = $3::numeric
+            RETURNING id`,
+          [tenantId, ref.id, evento.valor],
+        )
+        if (!updated[0]) throw serviceError('Recebimento mudou durante o estorno', 'RECEITA_ESTORNO_CONCORRENTE', 409)
+      },
+    })
+  }
   return tituloAtualizado(db, { tenantId, id: ref.id, hoje })
 }
 

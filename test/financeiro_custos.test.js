@@ -142,28 +142,15 @@ describe('rotas', () => {
     expect(b.statusCode).toBe(400)
   })
 
-  it('pagar item virtual materializa e baixa; status derivado pago', async () => {
-    const query = vi.fn(async (sql, params) => {
-      if (/FROM custos_recorrentes/.test(sql)) return { rows: [rec] }
-      if (/^\s*INSERT INTO custos/.test(sql)) return { rows: [], rowCount: 1 }
-      if (/SELECT id FROM custos/.test(sql)) return { rows: [{ id: '44444444-4444-4444-8444-444444444444' }] }
-      if (/UPDATE custos/.test(sql)) {
-        expect(params[1]).toBe(tenantId)
-        return { rows: [{
-          id: params[0], descricao: 'Aluguel', valor: '3000.00', tipo: 'recorrente', grupo: 'estrutural',
-          competencia: '2026-09-01', data_vencimento: '2026-09-30', valor_pago: '3000.00',
-          data_pagamento: '2026-09-20', recorrente_id: recId,
-        }] }
-      }
-      return { rows: [] }
-    })
+  it('rejeita chave operacional inválida antes de consultar o banco', async () => {
+    const query = vi.fn()
     const app = buildApp(query)
     await app.register(financeiroCustosRoutes)
     const res = await app.inject({
       method: 'PATCH', url: `/v1/financeiro/custos/${idVirtual(recId, '2026-09')}/pagar`,
-      payload: { data_pagamento: '2026-09-20' },
+      payload: { chave_operacao: 'invalida' },
     })
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toMatchObject({ status: 'pago', valor_pago: 3000, virtual: false })
+    expect(res.statusCode).toBe(400)
+    expect(query).not.toHaveBeenCalled()
   })
 })

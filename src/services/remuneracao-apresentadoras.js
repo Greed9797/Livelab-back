@@ -294,6 +294,7 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
           va.id, va.data::text AS data, va.origem,
           (${officialLineGmvExpr('va')}) AS gmv,
           (${officialLineCommissionExpr('va', 'comissao_apresentadora')}) AS comissao_apresentadora,
+          ROUND(COALESCE(SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}) OVER (), 0), 2) AS total_variavel,
           ${officialLinePctExpr('va')} AS pct_aplicado,
           m.nome AS marca_nome,
           month_gmv.gmv_mes AS base_gmv_mes,
@@ -373,7 +374,11 @@ export async function buscarHistoricoLivesApresentadora(db, { tenantId, apresent
       },
       fim_de_semana: Boolean(row.fim_de_semana),
     }))
-    const totalVariavelCentavos = memoria.reduce((total, row) => total + centavosDoBanco(row.comissao_apresentadora), 0)
+    // O fechamento arredonda a soma no banco. Somar valores já arredondados por
+    // venda cria diferença de centavos e bloqueia o PDF de algumas apresentadoras.
+    const totalVariavelCentavos = memoriaQ.rows[0]
+      ? centavosDoBanco(memoriaQ.rows[0].total_variavel)
+      : 0
     const horasLive = lives.reduce((total, live) => total + live.horas_atribuidas, 0)
     const gmvLives = lives.reduce((total, live) => total + live.gmv_atribuido, 0)
     return {

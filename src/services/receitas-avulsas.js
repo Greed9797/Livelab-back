@@ -9,9 +9,11 @@
 // Grupo 'aporte' é entrada de caixa separada: fica fora da receita operacional do
 // DRE e da base do imposto (ver financeiro-agregador.js).
 
+import { randomUUID } from 'node:crypto'
 import { normalizarMotivo, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
 import { centsToExactMoney, exactMoneyToCents } from '../lib/money.js'
 import { perdaJaRegistrada, requisicaoPerda } from '../lib/perda-idempotencia.js'
+import { registrarEstorno, registrarLiquidacao } from './financeiro-liquidacoes-command.js'
 
 export const GRUPOS_RECEITA_AVULSA = Object.freeze(['aporte', 'servico', 'reembolso', 'outros'])
 
@@ -172,9 +174,77 @@ const erroPerdida = () => erro(
   'Receita dada como perdida. Desfaça a perda/cancelamento antes de receber.', 409, 'RECEITA_PERDIDA',
 )
 
+async function temLiquidacoesCanonicas(db, tenantId, id) {
+  // Ambientes legados e fixtures anteriores à migration 180 não têm a tabela.
+  const { rows: rel } = await db.query(
+    `SELECT to_regclass('public.financeiro_liquidacoes') AS rel
+       FROM (SELECT $1::uuid AS tenant_id) AS scope WHERE tenant_id = $1::uuid`,
+    [tenantId],
+  )
+  if (!rel[0]?.rel) return false
+  const { rows } = await db.query(
+    `SELECT 1 FROM financeiro_liquidacoes
+      WHERE tenant_id = $1::uuid AND origem_tipo = 'receita_avulsa' AND origem_id = $2::uuid LIMIT 1`,
+    [tenantId, id],
+  )
+  return !!rows[0]
+}
+
 /** Baixa: valor_pago default = saldo recebível após perdas. */
-export async function receberReceitaAvulsa(db, { tenantId, id, valorPago, dataPagamento, hoje = hojeSaoPaulo() }) {
+export async function receberReceitaAvulsa(db, { tenantId, id, valorPago, dataPagamento, hoje = hojeSaoPaulo(), ator, chaveOperacao }) {
   if (!RE_UUID.test(String(id ?? ''))) return null
+  if (chaveOperacao) {
+    // O comando possui a transação. Chamadores legados em conciliação usam o
+    // caminho abaixo até fornecerem identidade de operação e ator próprios.
+    const { rows: atuais } = await db.query(
+      `SELECT valor_previsto::text AS previsto, valor_pago::text AS pago,
+              COALESCE(valor_perdido, 0)::text AS perdido, perdido_em
+         FROM receitas_avulsas WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+      [id, tenantId],
+    )
+    if (!atuais[0]) return null
+    const { rows: anteriores } = await db.query(
+      `SELECT valor::text AS valor, to_char(data_liquidacao, 'YYYY-MM-DD') AS data
+         FROM financeiro_liquidacoes
+        WHERE tenant_id = $1::uuid AND idempotencia_chave = $2 AND origem_tipo = 'receita_avulsa' AND origem_id = $3::uuid`,
+      [tenantId, chaveOperacao, id],
+    )
+    if (atuais[0].perdido_em && !anteriores[0]) throw erroPerdida()
+    let cents
+    try {
+      cents = valorPago == null
+        ? (anteriores[0] ? exactMoneyToCents(anteriores[0].valor)
+          : exactMoneyToCents(atuais[0].previsto) - exactMoneyToCents(atuais[0].pago) - exactMoneyToCents(atuais[0].perdido))
+        : exactMoneyToCents(String(valorPago))
+    } catch {
+      throw erro('valor_pago deve ser decimal com até duas casas', 400, 'INVALID_RECEITA_AVULSA')
+    }
+    const data = dataPagamento ?? anteriores[0]?.data ?? hoje
+    await registrarLiquidacao(db, {
+      tenantId, origemTipo: 'receita_avulsa', origemId: id, valor: centsToExactMoney(cents), data,
+      ator, idempotenciaChave: chaveOperacao, comandoOrigem: 'receita_avulsa.receber',
+      validarOrigemParaUpdate: async (tx) => {
+        const row = await buscarReceitaAvulsaParaUpdate(tx, { tenantId, id })
+        if (!row) throw erro('Receita avulsa não encontrada', 404, 'RECEITA_AVULSA_NOT_FOUND')
+        if (row.perdido_em) throw erroPerdida()
+        const saldo = exactMoneyToCents(row.valor_previsto) - exactMoneyToCents(row.valor_pago) - exactMoneyToCents(row.valor_perdido ?? '0')
+        if (saldo <= 0n) throw erro('Receita avulsa sem saldo recebível', 409, 'RECEITA_SEM_SALDO')
+        return { tenantId, natureza: 'receita', saldoElegivel: centsToExactMoney(saldo) }
+      },
+      aplicarProjecao: async (tx, evento) => {
+        await tx.query(
+          `UPDATE receitas_avulsas SET valor_pago = valor_pago + $3::numeric,
+                  data_pagamento = $4::date, atualizado_em = NOW()
+            WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+          [id, tenantId, evento.valor, evento.data],
+        )
+      },
+    })
+    return buscarReceitaAvulsa(db, { tenantId, id, hoje })
+  }
+  if (await temLiquidacoesCanonicas(db, tenantId, id)) {
+    throw erro('Receita com liquidações registradas exige chave de operação', 409, 'RECEITA_EXIGE_COMANDO')
+  }
   if (valorPago != null && !(r2(valorPago) > 0)) throw erro('valor_pago deve ser maior que zero')
   validarPagamento(valorPago, dataPagamento)
   // A conciliação Asaas já abre transação. SAVEPOINT mantém sua atomicidade;
@@ -403,8 +473,81 @@ export async function desperderReceitaAvulsa(db, {
   } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error }
 }
 
-export async function desfazerReceitaAvulsa(db, { tenantId, id, hoje = hojeSaoPaulo() }) {
+export async function desfazerReceitaAvulsa(db, { tenantId, id, hoje = hojeSaoPaulo(), liquidacaoId, valorEstorno, dataEstorno, ator, motivo, chaveOperacao, autoEstorno = false }) {
   if (!RE_UUID.test(String(id ?? ''))) return null
+  if (autoEstorno) {
+    const atual = await buscarReceitaAvulsa(db, { tenantId, id, hoje })
+    if (!atual) return null
+    const { rows: fatos } = await db.query(
+      `SELECT l.id, (l.valor - COALESCE(SUM(e.valor), 0))::text AS ativo
+         FROM financeiro_liquidacoes l
+         LEFT JOIN financeiro_estornos e ON e.tenant_id = l.tenant_id AND e.liquidacao_id = l.id
+        WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'receita_avulsa' AND l.origem_id = $2::uuid
+        GROUP BY l.id HAVING l.valor - COALESCE(SUM(e.valor), 0) > 0`,
+      [tenantId, id],
+    )
+    if (fatos.length !== 1 || exactMoneyToCents(fatos[0].ativo) !== exactMoneyToCents(atual.valor_pago.toFixed(2))) {
+      throw erro('Pagamento legado ou múltiplas liquidações: informe liquidacao_id e valor_estorno para estorno explícito', 409, 'RECEITA_ESTORNO_EXPLICITO')
+    }
+    liquidacaoId = fatos[0].id
+    valorEstorno = fatos[0].ativo
+    dataEstorno = hoje
+    motivo = 'Desfazer recebimento'
+    chaveOperacao = randomUUID()
+  }
+  if (liquidacaoId || chaveOperacao) {
+    if (!liquidacaoId || !chaveOperacao) throw erro('liquidacaoId e chaveOperacao são obrigatórios')
+    const atual = await buscarReceitaAvulsa(db, { tenantId, id, hoje })
+    if (!atual) return null
+    const { rows: originais } = await db.query(
+      `SELECT origem_tipo, origem_id FROM financeiro_liquidacoes
+        WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+      [tenantId, liquidacaoId],
+    )
+    if (!originais[0]) throw erro('Liquidação não encontrada', 404, 'FINANCEIRO_LIQUIDACAO_NAO_ENCONTRADA')
+    if (originais[0].origem_tipo !== 'receita_avulsa' || originais[0].origem_id !== id) {
+      throw erro('Liquidação não pertence à receita avulsa', 409, 'RECEITA_LIQUIDACAO_DIVERGENTE')
+    }
+    const { rows: estornosAnteriores } = await db.query(
+      `SELECT to_char(data_estorno, 'YYYY-MM-DD') AS data
+         FROM financeiro_estornos WHERE tenant_id = $1::uuid AND idempotencia_chave = $2`,
+      [tenantId, chaveOperacao],
+    )
+    await registrarEstorno(db, {
+      tenantId, liquidacaoId, valor: String(valorEstorno), data: dataEstorno ?? estornosAnteriores[0]?.data ?? hoje,
+      ator, motivo, idempotenciaChave: chaveOperacao, comandoOrigem: 'receita_avulsa.desfazer',
+      aplicarProjecao: async (tx, evento) => {
+        if (evento.origemTipo !== 'receita_avulsa' || evento.origemId !== id || evento.natureza !== 'receita') {
+          throw erro('Liquidação não pertence à receita avulsa', 409, 'RECEITA_LIQUIDACAO_DIVERGENTE')
+        }
+        if (autoEstorno) {
+          const { rows: ativos } = await tx.query(
+            `SELECT l.id FROM financeiro_liquidacoes l
+               LEFT JOIN financeiro_estornos e ON e.tenant_id = l.tenant_id AND e.liquidacao_id = l.id AND e.id <> $3::uuid
+              WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'receita_avulsa' AND l.origem_id = $2::uuid
+              GROUP BY l.id HAVING l.valor - COALESCE(SUM(e.valor), 0) > 0`,
+            [tenantId, id, evento.id],
+          )
+          if (ativos.length !== 1 || ativos[0].id !== liquidacaoId) {
+            throw erro('Múltiplas liquidações: informe o estorno explícito', 409, 'RECEITA_ESTORNO_EXPLICITO')
+          }
+        }
+        const { rows } = await tx.query(
+          `UPDATE receitas_avulsas SET valor_pago = valor_pago - $3::numeric,
+                  data_pagamento = CASE WHEN valor_pago = $3::numeric THEN NULL ELSE data_pagamento END,
+                  atualizado_em = NOW()
+            WHERE id = $1::uuid AND tenant_id = $2::uuid AND valor_pago ${autoEstorno ? '=' : '>='} $3::numeric
+            RETURNING id`,
+          [id, tenantId, evento.valor],
+        )
+        if (!rows[0]) throw erro('Estorno excede o recebido', 409, 'RECEITA_ESTORNO_EXCEDENTE')
+      },
+    })
+    return buscarReceitaAvulsa(db, { tenantId, id, hoje })
+  }
+  if (await temLiquidacoesCanonicas(db, tenantId, id)) {
+    throw erro('Informe a liquidação para estorno explícito', 409, 'RECEITA_EXIGE_ESTORNO')
+  }
   const { rows } = await db.query(
     `UPDATE receitas_avulsas SET valor_pago = 0, data_pagamento = NULL,
         perdido_em = CASE WHEN valor_perdido IS NOT NULL AND valor_perdido < valor_previsto

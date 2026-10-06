@@ -49,6 +49,7 @@ const migrationClient = {
     return { rows: [] }
   },
 }
+await applyMigration(migrationClient, '180_financeiro_liquidacoes_estornos.sql')
 await applyMigration(migrationClient, '181_financeiro_perdas_reversoes.sql')
 
 const db = {
@@ -59,6 +60,7 @@ const db = {
   },
 }
 const opts = { tenantId, actorUserId: userId, actorId: userId, actorType: 'usuario', hoje: '2026-10-05' }
+const { rows: [{ data_registro: dataRegistroInicio }] } = await pg.query('SELECT CURRENT_DATE::text AS data_registro')
 
 const tituloPerda = await perderTitulo(db, { ...opts, id: tituloId, motivo: 'saldo parcial', valorPerda: '25.01', chaveOperacao: id(11) })
 assert.equal(tituloPerda.item.valor_perdido, 25.01)
@@ -87,6 +89,8 @@ assert.equal(avulsaReversao.item.valor_perdido, 20)
 assert.equal(avulsaReversao.item.status, 'atrasado')
 assert.equal((await desperderReceitaAvulsa(db, { ...opts, id: avulsaId, motivo: 'novo acordo', valorReversao: '5.01', chaveOperacao: id(14) })).item.valor_perdido, 20)
 
+const { rows: [{ data_registro: dataRegistroFim }] } = await pg.query('SELECT CURRENT_DATE::text AS data_registro')
+const datasRegistroEsperadas = new Set([dataRegistroInicio, dataRegistroFim])
 const { rows: events } = await pg.query(`
   SELECT tipo, origem_tipo, valor::text AS valor, motivo, ator_tipo, ator_id,
          competencia_obrigacao::text AS competencia, perda_original_id,
@@ -101,8 +105,8 @@ for (const origem of ['receita_titulo', 'receita_avulsa']) {
   assert.equal(reversao.valor, '5.01')
   assert.equal(reversao.perda_original_id, perda.id)
   assert.equal(perda.competencia, '2026-09-01')
-  assert.equal(perda.data_registro, '2026-10-05')
-  assert.equal(reversao.data_registro, '2026-10-05')
+  assert.ok(datasRegistroEsperadas.has(perda.data_registro))
+  assert.ok(datasRegistroEsperadas.has(reversao.data_registro))
   assert.equal(perda.ator_tipo, 'usuario')
   assert.equal(perda.ator_id, userId)
 }

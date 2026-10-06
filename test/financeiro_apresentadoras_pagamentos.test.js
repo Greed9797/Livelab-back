@@ -1,5 +1,31 @@
 import Fastify from 'fastify'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+// O fluxo de eventos possui sua própria cobertura SQL em
+// financeiro_liquidacoes_apresentadoras.pglite.mjs. Aqui isolamos as regras
+// de pagamento, rota e cancelamento, fazendo o comando aplicar a projeção.
+const comando = vi.hoisted(() => ({
+  registrarLiquidacao: vi.fn(),
+  registrarEstorno: vi.fn(),
+}))
+vi.mock('../src/services/financeiro-liquidacoes-command.js', () => ({
+  registrarLiquidacao: comando.registrarLiquidacao.mockImplementation(async (db, args) => {
+    await args.aplicarProjecao(db, { valor: args.valor })
+    return { id: 'liq', ...args }
+  }),
+  registrarEstorno: comando.registrarEstorno.mockImplementation(async (db, args) => {
+    await args.aplicarProjecao(db, {
+      valor: args.valor,
+      natureza: 'custo', origemTipo: 'apresentadora_pagamento', origemId: 'x',
+    })
+    return { id: 'est', ...args }
+  }),
+}))
+
+beforeEach(() => {
+  comando.registrarLiquidacao.mockClear()
+  comando.registrarEstorno.mockClear()
+})
 
 import { financeiroApresentadorasPagamentosRoutes } from '../src/routes/financeiro_apresentadoras_pagamentos.js'
 import {
@@ -15,12 +41,26 @@ const CFG = { fixo_dia: 10, fixo_offset: 0, variavel_dia: 15, variavel_offset: 1
 // Roteia as queries do serviço por trecho de SQL.
 function fakeDb({ pagos = [], config = CFG, fixo = '2700.00', comissao = '160.00', adicionais = [] } = {}) {
   const calls = []
+  const pagamentosAtuais = [...pagos]
   const query = vi.fn(async (sql, params) => {
     calls.push({ sql: String(sql), params })
     const s = String(sql)
+    if (s.includes('UPDATE apresentadora_pagamentos SET valor_pago = valor_pago +')) {
+      pagamentosAtuais.splice(0, pagamentosAtuais.length, {
+        id: 'x', apresentadora_id: apId, competencia: '2026-09-01', componente: 'fixo',
+        valor_pago: params[2], data_pagamento: params[3], cancelado_em: null,
+      })
+      return { rows: [{ id: 'x' }] }
+    }
+    if (s.includes('UPDATE apresentadora_pagamentos SET valor_pago = valor_pago -')) return { rows: [{ id: 'x' }] }
+    if (s.includes('FROM financeiro_liquidacoes l LEFT JOIN financeiro_estornos')) return { rows: [{ id: 'x', saldo: '10.00' }] }
+    if (s.includes('FROM financeiro_estornos WHERE tenant_id')) return { rows: [] }
     if (s.includes('DELETE FROM apresentadora_pagamentos')) return { rowCount: 1, rows: [{ id: 'x' }] }
     if (s.includes('FROM tenants')) return { rows: [config] }
-    if (s.includes('FROM apresentadora_pagamentos')) return { rows: pagos }
+    if (s.includes('FROM apresentadora_pagamentos')) {
+      if (s.startsWith('SELECT id, apresentadora_id')) return { rows: pagamentosAtuais }
+      return { rows: pagos }
+    }
     if (s.includes('apresentadora_remuneracao_adicionais')) return { rows: adicionais }
     if (s.includes('FROM vendas_atribuidas')) return { rows: [{ apresentadora_id: apId, nome: 'Ana', valor: comissao }] }
     if (s.includes('FROM apresentadoras a') && s.includes('prorate') === false && s.includes('a.ativo')) return { rows: [{ apresentadora_id: apId, nome: 'Ana', valor: fixo }] }
@@ -124,12 +164,10 @@ describe('listarPagamentosApresentadoras', () => {
 
 describe('registrar/desfazer por componente', () => {
   it('default = previsto do componente (variável = comissão + adicionais)', async () => {
-    const db = fakeDb()
-    await registrarPagamentoApresentadora(db, { tenantId, apresentadoraId: apId, mes: '2026-09', componente: 'variavel' })
-    await registrarPagamentoApresentadora(db, { tenantId, apresentadoraId: apId, mes: '2026-09', componente: 'fixo' })
-    const ins = db.calls.filter((c) => c.sql.includes('INSERT INTO apresentadora_pagamentos'))
-    expect(ins.map((c) => [c.params[3], c.params[4]])).toEqual([['variavel', 160], ['fixo', 2700]])
-    expect(ins[0].sql).toContain('ON CONFLICT (tenant_id, apresentadora_id, competencia, componente)')
+    await registrarPagamentoApresentadora(fakeDb(), { tenantId, apresentadoraId: apId, mes: '2026-09', componente: 'variavel' })
+    await registrarPagamentoApresentadora(fakeDb(), { tenantId, apresentadoraId: apId, mes: '2026-09', componente: 'fixo' })
+    expect(comando.registrarLiquidacao.mock.calls.map(([, args]) => args.valor)).toEqual(['160.00', '2700.00'])
+    expect(comando.registrarLiquidacao).toHaveBeenCalledTimes(2)
   })
   it('componente inválido lança TypeError; desfazer filtra por componente', async () => {
     await expect(registrarPagamentoApresentadora(fakeDb(), { tenantId, apresentadoraId: apId, mes: '2026-09', componente: 'x' })).rejects.toThrow(TypeError)
@@ -150,33 +188,28 @@ describe('rotas', () => {
     return app
   }
   const B = `/v1/financeiro/apresentadoras-pagamentos/${apId}/2026-09`
-  const ins = (db) => db.calls.find((c) => c.sql.includes('INSERT INTO apresentadora_pagamentos'))
-
   it('pagar fixo sem corpo paga o previsto do fixo', async () => {
     const db = fakeDb()
     const res = await buildApp(db).inject({ method: 'PATCH', url: `${B}/fixo/pagar`, payload: {} })
     expect(res.statusCode).toBe(200)
-    expect(ins(db).params.slice(0, 5)).toEqual([tenantId, apId, '2026-09-01', 'fixo', 2700])
+    expect(comando.registrarLiquidacao.mock.calls[0][1].valor).toBe('2700.00')
     expect(res.headers.deprecation).toBeUndefined()
   })
 
   it('pagar variável sem corpo paga comissão + adicionais; parcial grava o informado', async () => {
     const db = fakeDb()
     expect((await buildApp(db).inject({ method: 'PATCH', url: `${B}/variavel/pagar`, payload: {} })).statusCode).toBe(200)
-    expect(ins(db).params[3]).toBe('variavel')
-    expect(ins(db).params[4]).toBe(160)
+    expect(comando.registrarLiquidacao.mock.calls[0][1].valor).toBe('160.00')
     const db2 = fakeDb()
     await buildApp(db2).inject({ method: 'PATCH', url: `${B}/variavel/pagar`, payload: { valor_pago: '100,50', data_pagamento: '2026-10-15' } })
-    expect(ins(db2).params[4]).toBe(100.5)
-    expect(ins(db2).params[5]).toBe('2026-10-15')
+    expect(comando.registrarLiquidacao.mock.calls[1][1]).toMatchObject({ valor: '100.50', data: '2026-10-15' })
   })
 
   it('rota legada (sem componente) = fixo com valor do FIXO (não o total) + header Deprecation', async () => {
     const db = fakeDb()
     const res = await buildApp(db).inject({ method: 'PATCH', url: `${B}/pagar`, payload: {} })
     expect(res.statusCode).toBe(200)
-    expect(ins(db).params[3]).toBe('fixo')
-    expect(ins(db).params[4]).toBe(2700)
+    expect(comando.registrarLiquidacao.mock.calls[0][1].valor).toBe('2700.00')
     expect(res.headers.deprecation).toBe('true')
   })
 
@@ -189,12 +222,11 @@ describe('rotas', () => {
   })
 
   it('desfazer remove só o componente pedido (e a legada desfaz o fixo)', async () => {
-    const db = fakeDb()
+    const db = fakeDb({ pagos: [{ id: 'x', apresentadora_id: apId, competencia: '2026-09-01', componente: 'fixo', valor_pago: '10.00', data_pagamento: '2026-09-05' }] })
     const app = buildApp(db)
     expect((await app.inject({ method: 'PATCH', url: `${B}/variavel/desfazer` })).statusCode).toBe(200)
     expect((await app.inject({ method: 'PATCH', url: `${B}/desfazer` })).statusCode).toBe(200)
-    const dels = db.calls.filter((c) => c.sql.includes('DELETE FROM apresentadora_pagamentos'))
-    expect(dels.map((c) => c.params[3])).toEqual(['variavel', 'fixo'])
+    expect(comando.registrarEstorno).toHaveBeenCalledTimes(2)
   })
 
   it('GET/PATCH config devolvem {fixo, variavel}; valida limites; plano legado vai para o fixo', async () => {
@@ -224,7 +256,7 @@ describe('cancelamento (migration 177)', () => {
     const base = fakeDb(opts)
     const query = vi.fn(async (sql, params) => {
       const s = String(sql)
-      if (s.startsWith('SELECT valor_pago') || s.startsWith('SELECT cancelado_em')) { base.calls.push({ sql: s, params }); return { rows: linha ? [linha] : [] } }
+      if (s.startsWith('SELECT valor_pago') || s.startsWith('SELECT cancelado_em') || s.startsWith('SELECT id, apresentadora_id')) { base.calls.push({ sql: s, params }); return { rows: linha ? [{ id: 'x', apresentadora_id: apId, competencia: `${mes}-01`, componente: 'fixo', valor_pago: linha.valor_pago ?? '0', data_pagamento: null, ...linha }] : [] } }
       return base.query(sql, params)
     })
     return { query, calls: base.calls }
@@ -289,11 +321,11 @@ describe('cancelamento (migration 177)', () => {
   })
 
   it('desfazer em linha cancelada zera a baixa e mantém o cancelamento (sem DELETE)', async () => {
-    const db = fakeDb()
+    const db = fakeDb({ pagos: [{ id: 'x', apresentadora_id: apId, competencia: '2026-09-01', componente: 'fixo', valor_pago: '10.00', data_pagamento: '2026-09-05', cancelado_em: '2026-09-20T10:00:00.000Z' }] })
     const q = db.query
     db.query = vi.fn(async (sql, p) => (String(sql).startsWith('UPDATE apresentadora_pagamentos') ? (db.calls.push({ sql: String(sql), params: p }), { rowCount: 1, rows: [{ id: 'x' }] }) : q(sql, p)))
     expect(await desfazerPagamentoApresentadora(db, arg)).toBe(true)
-    expect(db.calls[0].sql).toMatch(/SET valor_pago = 0, data_pagamento = NULL[\s\S]*cancelado_em IS NOT NULL/)
+    expect(comando.registrarEstorno).toHaveBeenCalledTimes(1)
     expect(db.calls.some((c) => c.sql.includes('DELETE'))).toBe(false)
   })
 
@@ -353,7 +385,7 @@ describe('cancelamento (migration 177)', () => {
 
       const canc = fakeDb()
       const q2 = canc.query
-      canc.query = vi.fn(async (sql, p) => (String(sql).startsWith('SELECT cancelado_em') ? { rows: [{ cancelado_em: 'x' }] } : q2(sql, p)))
+      canc.query = vi.fn(async (sql, p) => (String(sql).startsWith('SELECT id, apresentadora_id') ? { rows: [{ id: 'x', apresentadora_id: apId, competencia: '2026-09-01', componente: 'fixo', valor_pago: '0', data_pagamento: null, cancelado_em: 'x' }] } : q2(sql, p)))
       const r3 = await buildApp(canc).inject({ method: 'PATCH', url: `${B}/pagar`, payload: {} })
       expect(r3.statusCode).toBe(409)
       expect(r3.json().code).toBe('CUSTO_CANCELADO')

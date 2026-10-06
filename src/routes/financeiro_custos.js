@@ -17,12 +17,13 @@
 // (src/lib/custo-classe.js; migration 171). null = volta à regra derivada.
 
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
 import { CLASSES_CUSTO } from '../lib/custo-classe.js'
 import {
   CUSTO_COLS, GRUPOS_CUSTO, RECORRENTE_COLS, cancelarCusto, custoParaItem, erroCustoCancelado,
-  gerarCustosDoMes, listarCustos, materializarVirtual, mesValido, parseIdVirtual, planejarParcelas,
+  desfazerBaixaCusto, gerarCustosDoMes, listarCustos, materializarVirtual, mesValido, pagarCusto, parseIdVirtual, planejarParcelas,
   primeiroDia, r2, reativarCusto,
 } from '../services/custos-plano.js'
 import { MOTIVO_MAX } from '../lib/lancamento-status.js'
@@ -76,6 +77,11 @@ const parceladoSchema = z.object({
 const pagarSchema = z.object({
   valor_pago: moneySchema.refine((v) => v > 0, 'valor_pago deve ser positivo').optional(),
   data_pagamento: dataSchema.optional(),
+  chave_operacao: z.string().uuid('chave_operacao deve ser UUID válido').optional(),
+}).default({})
+
+const desfazerSchema = z.object({
+  chave_operacao: z.string().uuid('chave_operacao deve ser UUID válido').optional(),
 }).default({})
 
 const recorrenteSchema = z.object({
@@ -364,42 +370,40 @@ export async function financeiroCustosRoutes(app) {
   app.patch('/v1/financeiro/custos/:id/pagar', WRITE, async (request, reply) => {
     const parsed = pagarSchema.safeParse(request.body ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
-    const { tenant_id } = request.user
+    const { tenant_id, sub } = request.user
     const hoje = hojeSaoPaulo()
     return app.withTenant(tenant_id, async (db) => {
-      const id = await resolverId(db, tenant_id, request.params.id)
-      if (!id) return reply.code(404).send({ error: 'Custo não encontrado' })
-      const r = await db.query(
-        `UPDATE custos
-            SET valor_pago = COALESCE($3::numeric, valor),
-                data_pagamento = COALESCE($4::date, $5::date),
-                atualizado_em = NOW()
-          WHERE id = $1::uuid AND tenant_id = $2::uuid AND cancelado_em IS NULL
-          RETURNING ${CUSTO_COLS}`,
-        [id, tenant_id, parsed.data.valor_pago ?? null, parsed.data.data_pagamento ?? null, hoje],
-      )
-      if (!r.rows[0]) {
-        if (await carregar(db, tenant_id, id)) return responderErro(reply, erroCustoCancelado())
-        return reply.code(404).send({ error: 'Custo não encontrado' })
+      try {
+        const item = await pagarCusto(db, {
+          tenantId: tenant_id, id: request.params.id, valorPago: parsed.data.valor_pago,
+          dataPagamento: parsed.data.data_pagamento, hoje,
+          chaveOperacao: parsed.data.chave_operacao ?? randomUUID(),
+          ator: { tipo: request.viaApiKey ? 'api_key' : 'usuario', id: request.viaApiKey?.id ?? sub },
+        })
+        auditar(app, request, 'financeiro.custo_pagar', 'custo', item.id, parsed.data)
+        return item
+      } catch (error) {
+        return responderErro(reply, error)
       }
-      auditar(app, request, 'financeiro.custo_pagar', 'custo', id, parsed.data)
-      return custoParaItem(r.rows[0], hoje)
     })
   })
 
   app.patch('/v1/financeiro/custos/:id/desfazer', WRITE, async (request, reply) => {
-    const { tenant_id } = request.user
+    const parsed = desfazerSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const { tenant_id, sub } = request.user
     return app.withTenant(tenant_id, async (db) => {
-      const id = await resolverId(db, tenant_id, request.params.id)
-      if (!id) return reply.code(404).send({ error: 'Custo não encontrado' })
-      const r = await db.query(
-        `UPDATE custos SET valor_pago = NULL, data_pagamento = NULL, atualizado_em = NOW()
-          WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING ${CUSTO_COLS}`,
-        [id, tenant_id],
-      )
-      if (!r.rows[0]) return reply.code(404).send({ error: 'Custo não encontrado' })
-      auditar(app, request, 'financeiro.custo_desfazer', 'custo', id)
-      return custoParaItem(r.rows[0], hojeSaoPaulo())
+      try {
+        const item = await desfazerBaixaCusto(db, {
+          tenantId: tenant_id, id: request.params.id, hoje: hojeSaoPaulo(),
+          chaveOperacao: parsed.data.chave_operacao ?? randomUUID(),
+          ator: { tipo: request.viaApiKey ? 'api_key' : 'usuario', id: request.viaApiKey?.id ?? sub },
+        })
+        auditar(app, request, 'financeiro.custo_desfazer', 'custo', item.id, parsed.data)
+        return item
+      } catch (error) {
+        return responderErro(reply, error)
+      }
     })
   })
 

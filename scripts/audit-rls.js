@@ -19,6 +19,11 @@ const CRITICAL_TABLES = [
   'leads', 'apresentadoras', 'pacotes', 'tenant_contact_history',
 ]
 
+const FINANCEIRO_FORCE_TABLES = [
+  'custos_recorrentes', 'apresentadora_pagamentos', 'gateway_transacoes',
+  'financeiro_liquidacoes', 'financeiro_estornos',
+]
+
 const ALLOWED_BYPASS_TAGS = ['// MASTER:', '// PUBLIC:', '// WEBHOOK:', '// SYSTEM:', '// AUTH:']
 
 let failed = false
@@ -65,6 +70,57 @@ async function checkRls(pool) {
         p.qual && p.qual.includes('app.tenant_id'))
       if (!hasTenantPolicy) fail(`Tabela ${table_name}: policies não filtram por app.tenant_id`)
       else ok(`${table_name}: RLS + policy OK`)
+    }
+  }
+}
+
+async function checkFinanceiroForce(pool) {
+  console.log('\n[Financeiro] FORCE RLS, policies e papel efetivo:')
+  const role = await pool.query(`
+    SELECT current_user AS usuario, r.rolsuper, r.rolbypassrls
+      FROM pg_roles r WHERE r.rolname = current_user
+  `)
+  const current = role.rows[0]
+  if (!current || current.rolsuper || current.rolbypassrls) {
+    fail('Papel da conexão contorna RLS; audite usando o papel efetivo da API')
+  } else {
+    ok(`Papel ${current.usuario}: sem SUPERUSER/BYPASSRLS`)
+  }
+
+  const relations = await pool.query(`
+    SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
+           pg_get_userbyid(c.relowner) AS owner
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+       AND c.relname = ANY($1::text[])
+  `, [FINANCEIRO_FORCE_TABLES])
+  const byName = new Map(relations.rows.map((row) => [row.relname, row]))
+  const policies = await pool.query(`
+    SELECT tablename, policyname, permissive, cmd, qual, with_check
+      FROM pg_policies
+     WHERE schemaname = 'public' AND tablename = ANY($1::text[])
+  `, [FINANCEIRO_FORCE_TABLES])
+
+  for (const table of FINANCEIRO_FORCE_TABLES) {
+    const relation = byName.get(table)
+    if (!relation) { fail(`${table}: tabela ausente`); continue }
+    if (!relation.relrowsecurity || !relation.relforcerowsecurity) {
+      fail(`${table}: ENABLE/FORCE ROW LEVEL SECURITY incompleto (owner ${relation.owner})`)
+    } else {
+      ok(`${table}: ENABLE + FORCE (owner ${relation.owner})`)
+    }
+    const tablePolicies = policies.rows.filter((policy) => policy.tablename === table)
+    if (!tablePolicies.length) { fail(`${table}: nenhuma policy`); continue }
+    for (const policy of tablePolicies) {
+      if (policy.permissive !== 'PERMISSIVE') continue
+      const using = policy.qual ?? ''
+      const check = policy.with_check ?? using
+      const needsUsing = ['ALL', 'SELECT', 'UPDATE', 'DELETE'].includes(policy.cmd)
+      const needsCheck = ['ALL', 'INSERT', 'UPDATE'].includes(policy.cmd)
+      if ((needsUsing && !using.includes('app.tenant_id')) ||
+          (needsCheck && !check.includes('app.tenant_id'))) {
+        fail(`${table}/${policy.policyname}: policy permissiva sem filtro de tenant em USING/WITH CHECK`)
+      }
     }
   }
 }
@@ -144,6 +200,7 @@ async function main() {
   })
   try {
     await checkRls(pool)
+    await checkFinanceiroForce(pool)
     await checkOrphans(pool)
     await checkNotNull(pool)
     await checkRouteBypass()

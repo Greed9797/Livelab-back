@@ -3,6 +3,9 @@
 // baixa persistida em apresentadora_pagamentos; status derivado (lancamento-status.js).
 import { normalizarMotivo, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
 import { buscarFechamentoApresentadoras, dinheiroEmCentavos, ultimoDiaDoMes } from './remuneracao-apresentadoras.js'
+import { createHash, randomUUID } from 'node:crypto'
+import { centsToExactMoney } from '../lib/money.js'
+import { registrarEstorno, registrarLiquidacao } from './financeiro-liquidacoes-command.js'
 
 export const COMPONENTES = Object.freeze(['fixo', 'variavel'])
 // Padrões por componente: fixo vence dia 10 do próprio mês; variável (comissão + adicionais) dia 15 do mês seguinte.
@@ -80,6 +83,62 @@ const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100
 const chavePg = (apId, mes, comp) => `${apId}|${mes}|${comp}`
 const NOME_COMPONENTE = { fixo: 'fixo', variavel: 'variável' }
 
+const erroFinanceiro = (message, code, statusCode = 409) => Object.assign(new Error(message), { code, statusCode })
+const cents = (valor, campo = 'valor_pago') => {
+  const valorEmCentavos = dinheiroEmCentavos(valor)
+  if (valorEmCentavos == null) throw new TypeError(`${campo} inválido`)
+  return BigInt(valorEmCentavos)
+}
+const uuidDaLinha = (tenantId, apresentadoraId, mes, componente) => {
+  const hex = createHash('sha256').update(`apresentadora-pagamento:${tenantId}:${apresentadoraId}:${mes}:${componente}`).digest('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${(Number.parseInt(hex[16], 16) & 0x3 | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`
+}
+
+async function totaisCanonicos(tx, tenantId, linhaId) {
+  const { rows } = await tx.query(
+    `SELECT COALESCE(SUM(l.valor), 0)::text AS liquidado,
+            COALESCE(SUM(e.total), 0)::text AS estornado
+       FROM financeiro_liquidacoes l
+       LEFT JOIN (
+         SELECT liquidacao_id, SUM(valor) AS total FROM financeiro_estornos
+          WHERE tenant_id = $1::uuid GROUP BY liquidacao_id
+       ) e ON e.liquidacao_id = l.id
+      WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'apresentadora_pagamento' AND l.origem_id = $2::uuid`,
+    [tenantId, linhaId],
+  )
+  return cents(rows[0]?.liquidado ?? '0', 'liquidado') - cents(rows[0]?.estornado ?? '0', 'estornado')
+}
+
+async function linhaParaUpdate(tx, { tenantId, apresentadoraId, mes, componente, linhaId }) {
+  await tx.query(
+    `INSERT INTO apresentadora_pagamentos
+       (id, tenant_id, apresentadora_id, competencia, componente, valor_pago, data_pagamento)
+     SELECT $1::uuid, $2::uuid, $3::uuid, $4::date, $5::text, 0, NULL
+      WHERE EXISTS (SELECT 1 FROM apresentadoras WHERE id = $3::uuid AND tenant_id = $2::uuid)
+     ON CONFLICT (tenant_id, apresentadora_id, competencia, componente) DO NOTHING`,
+    [linhaId, tenantId, apresentadoraId, `${mes}-01`, componente],
+  )
+  const { rows } = await tx.query(
+    `SELECT id, tenant_id, valor_pago::text AS valor_pago, cancelado_em
+       FROM apresentadora_pagamentos
+      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date AND componente = $4::text
+      FOR UPDATE`,
+    [tenantId, apresentadoraId, `${mes}-01`, componente],
+  )
+  return rows[0] ?? null
+}
+
+async function pagamentoAtual(db, { tenantId, apresentadoraId, mes, componente }) {
+  const { rows } = await db.query(
+    `SELECT id, apresentadora_id, competencia::text AS competencia, componente, valor_pago::text AS valor_pago,
+            data_pagamento::text AS data_pagamento, observacao, cancelado_em
+       FROM apresentadora_pagamentos
+      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date AND componente = $4::text`,
+    [tenantId, apresentadoraId, `${mes}-01`, componente],
+  )
+  return rows[0] ?? null
+}
+
 // Previsto do componente a partir de uma linha do fechamento. variável = comissão + adicionais.
 export function previstoDoComponente(ap, componente) {
   if (componente === 'fixo') return r2(ap?.fixo)
@@ -156,50 +215,102 @@ export async function listarPagamentosApresentadoras(db, { tenantId, inicio, fim
 
 // Baixa de UM componente: default = previsto do componente. Retorna null se a apresentadora não existe no tenant.
 // Upsert pela UNIQUE (tenant, apresentadora, competência, componente): repetir não gera baixa dupla.
-export async function registrarPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, componente = 'fixo', valorPago, dataPagamento, observacao, userId }) {
+export async function registrarPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, componente = 'fixo', valorPago, dataPagamento, observacao, userId, chaveOperacao = randomUUID() }) {
   if (!ehComponente(componente)) throw new TypeError('componente inválido')
   const ap = await db.query('SELECT id FROM apresentadoras WHERE id = $1::uuid AND tenant_id = $2::uuid', [apresentadoraId, tenantId])
   if (!ap.rows[0]) return null
   let valor = valorPago
   if (valor == null) {
-    const f = await buscarFechamentoApresentadoras(db, { tenantId, mes, apresentadoraId })
-    valor = previstoDoComponente(f.apresentadoras[0], componente)
+    const fechamento = await buscarFechamentoApresentadoras(db, { tenantId, mes, apresentadoraId })
+    const previsto = previstoDoComponente(fechamento.apresentadoras[0], componente)
+    valor = previsto
   } else {
-    const cents = dinheiroEmCentavos(valor)
-    if (cents == null) throw new TypeError('valor_pago inválido')
-    valor = cents / 100
+    const valorEmCentavos = dinheiroEmCentavos(valor)
+    if (valorEmCentavos == null) throw new TypeError('valor_pago inválido')
+    valor = valorEmCentavos / 100
   }
-  const atual = await db.query(
-    `SELECT cancelado_em FROM apresentadora_pagamentos
-      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date AND componente = $4::text`,
-    [tenantId, apresentadoraId, `${mes}-01`, componente])
-  if (atual.rows[0]?.cancelado_em) {
-    throw erroRegra('Pagamento cancelado. Reative antes de pagar.', 'CUSTO_CANCELADO')
-  }
-  const r = await db.query(`
-    INSERT INTO apresentadora_pagamentos (tenant_id, apresentadora_id, competencia, componente, valor_pago, data_pagamento, observacao, criado_por)
-    VALUES ($1::uuid, $2::uuid, $3::date, $4::text, $5::numeric, COALESCE($6::date, (now() AT TIME ZONE 'America/Sao_Paulo')::date), $7, $8::uuid)
-    ON CONFLICT (tenant_id, apresentadora_id, competencia, componente)
-    DO UPDATE SET valor_pago = EXCLUDED.valor_pago, data_pagamento = EXCLUDED.data_pagamento,
-                  observacao = EXCLUDED.observacao, atualizado_em = now()
-    RETURNING id, apresentadora_id, competencia::text AS competencia, componente, valor_pago, data_pagamento::text AS data_pagamento, observacao`,
-  [tenantId, apresentadoraId, `${mes}-01`, componente, valor, dataPagamento ?? null, observacao ?? null, userId ?? null])
-  return r.rows[0]
+  const alvo = cents(valor)
+  if (alvo <= 0n) throw new TypeError('valor_pago inválido')
+  const existente = await pagamentoAtual(db, { tenantId, apresentadoraId, mes, componente })
+  if (existente?.cancelado_em) throw erroRegra('Pagamento cancelado. Reative antes de pagar.', 'CUSTO_CANCELADO')
+  const linhaId = existente?.id ?? uuidDaLinha(tenantId, apresentadoraId, mes, componente)
+  const { rows: anteriores } = await db.query(
+    `SELECT valor::text AS valor, to_char(data_liquidacao, 'YYYY-MM-DD') AS data
+       FROM financeiro_liquidacoes WHERE tenant_id = $1::uuid AND idempotencia_chave = $2`,
+    [tenantId, chaveOperacao],
+  )
+  const anterior = anteriores[0]
+  const projetadoAntes = cents(existente?.valor_pago ?? '0')
+  const delta = anterior ? cents(anterior.valor) : alvo - projetadoAntes
+  if (!anterior && delta <= 0n) throw erroFinanceiro('Pagamento já registrado neste valor', 'APRESENTADORA_SEM_SALDO')
+  const data = dataPagamento ?? anterior?.data ?? hojeSaoPaulo()
+  await registrarLiquidacao(db, {
+    tenantId, origemTipo: 'apresentadora_pagamento', origemId: linhaId, valor: centsToExactMoney(delta), data,
+    ator: { tipo: 'usuario', id: userId ?? 'sistema' }, idempotenciaChave: chaveOperacao,
+    comandoOrigem: 'apresentadoras.pagar', motivo: JSON.stringify({ alvo: centsToExactMoney(alvo), observacao: observacao ?? null }),
+    validarOrigemParaUpdate: async (tx) => {
+      const linha = await linhaParaUpdate(tx, { tenantId, apresentadoraId, mes, componente, linhaId })
+      if (!linha) return null
+      if (linha.id !== linhaId) throw erroFinanceiro('Linha de pagamento mudou durante a baixa', 'APRESENTADORA_PAGAMENTO_CONCORRENTE')
+      if (linha.cancelado_em) throw erroRegra('Pagamento cancelado. Reative antes de pagar.', 'CUSTO_CANCELADO')
+      const projetado = cents(linha.valor_pago)
+      const liquido = await totaisCanonicos(tx, tenantId, linhaId)
+      if (liquido !== projetado) throw erroFinanceiro('Baixa legada sem fatos equivalentes; revisão necessária', 'APRESENTADORA_LIQUIDACAO_DIVERGENTE')
+      if (alvo <= projetado) throw erroFinanceiro('Pagamento já registrado neste valor', 'APRESENTADORA_SEM_SALDO')
+      // O contrato legado recebe o total acumulado; com valor explícito ele
+      // não impunha teto do fechamento. O writer canônico recebe o delta.
+      return { tenantId: linha.tenant_id, natureza: 'custo', saldoElegivel: centsToExactMoney(alvo - projetado) }
+    },
+    aplicarProjecao: async (tx, evento) => {
+      const { rows } = await tx.query(
+        `UPDATE apresentadora_pagamentos SET valor_pago = valor_pago + $3::numeric, data_pagamento = $4::date,
+                observacao = $5::text, criado_por = COALESCE(criado_por, $6::uuid), atualizado_em = NOW()
+          WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING id`,
+        [linhaId, tenantId, evento.valor, data, observacao ?? null, userId ?? null],
+      )
+      if (!rows[0]) throw erroFinanceiro('Pagamento mudou durante a baixa; revisão necessária', 'APRESENTADORA_PAGAMENTO_CONCORRENTE')
+    },
+  })
+  return pagamentoAtual(db, { tenantId, apresentadoraId, mes, componente })
 }
 
-export async function desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, componente = 'fixo' }) {
-  // Linha cancelada mantém o cancelamento: só zera a baixa (data_pagamento é nullable desde a 177).
-  const u = await db.query(
-    `UPDATE apresentadora_pagamentos SET valor_pago = 0, data_pagamento = NULL, atualizado_em = now()
-      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date AND componente = $4::text
-        AND cancelado_em IS NOT NULL RETURNING id`,
-    [tenantId, apresentadoraId, `${mes}-01`, componente])
-  if (u.rowCount > 0) return true
-  const r = await db.query(
-    `DELETE FROM apresentadora_pagamentos
-      WHERE tenant_id = $1::uuid AND apresentadora_id = $2::uuid AND competencia = $3::date AND componente = $4::text RETURNING id`,
-    [tenantId, apresentadoraId, `${mes}-01`, componente])
-  return r.rowCount > 0
+export async function desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, componente = 'fixo', hoje = hojeSaoPaulo(), userId, chaveOperacao = randomUUID() }) {
+  const linha = await pagamentoAtual(db, { tenantId, apresentadoraId, mes, componente })
+  if (!linha) return false
+  const { rows: anterior } = await db.query(
+    `SELECT liquidacao_id, valor::text AS valor, to_char(data_estorno, 'YYYY-MM-DD') AS data
+       FROM financeiro_estornos WHERE tenant_id = $1::uuid AND idempotencia_chave = $2`, [tenantId, chaveOperacao])
+  let fato = anterior[0]
+  if (!fato) {
+    const { rows: fatos } = await db.query(
+      `SELECT l.id, (l.valor - COALESCE(SUM(e.valor), 0))::text AS saldo
+         FROM financeiro_liquidacoes l LEFT JOIN financeiro_estornos e ON e.tenant_id = l.tenant_id AND e.liquidacao_id = l.id
+        WHERE l.tenant_id = $1::uuid AND l.origem_tipo = 'apresentadora_pagamento' AND l.origem_id = $2::uuid
+        GROUP BY l.id, l.valor HAVING l.valor > COALESCE(SUM(e.valor), 0) ORDER BY l.id`, [tenantId, linha.id])
+    const total = fatos.reduce((soma, item) => soma + cents(item.saldo, 'saldo'), 0n)
+    if (total !== cents(linha.valor_pago)) throw erroFinanceiro('Baixa legada sem fatos equivalentes; revisão necessária', 'APRESENTADORA_LIQUIDACAO_DIVERGENTE')
+    if (!fatos.length) return false
+    if (fatos.length > 1) throw erroFinanceiro('Múltiplas liquidações exigem estorno granular', 'APRESENTADORA_ESTORNO_GRANULAR_NECESSARIO')
+    fato = { liquidacao_id: fatos[0].id, valor: fatos[0].saldo, data: hoje }
+  }
+  await registrarEstorno(db, {
+    tenantId, liquidacaoId: fato.liquidacao_id, valor: fato.valor, data: fato.data,
+    ator: { tipo: 'usuario', id: userId ?? 'sistema' }, idempotenciaChave: chaveOperacao,
+    comandoOrigem: 'apresentadoras.desfazer', motivo: 'Desfazer pagamento de apresentadora',
+    aplicarProjecao: async (tx, evento) => {
+      if (evento.natureza !== 'custo' || evento.origemTipo !== 'apresentadora_pagamento' || evento.origemId !== linha.id) {
+        throw erroFinanceiro('Liquidação não pertence ao pagamento da apresentadora', 'APRESENTADORA_LIQUIDACAO_DIVERGENTE')
+      }
+      const { rows } = await tx.query(
+        `UPDATE apresentadora_pagamentos SET valor_pago = valor_pago - $3::numeric,
+                data_pagamento = CASE WHEN valor_pago = $3::numeric THEN NULL ELSE data_pagamento END, atualizado_em = NOW()
+          WHERE id = $1::uuid AND tenant_id = $2::uuid AND valor_pago >= $3::numeric RETURNING id`,
+        [linha.id, tenantId, evento.valor],
+      )
+      if (!rows[0]) throw erroFinanceiro('Pagamento mudou durante o estorno; revisão necessária', 'APRESENTADORA_ESTORNO_CONCORRENTE')
+    },
+  })
+  return true
 }
 
 // Item normalizado (status 'cancelado' aplicado) de um componente; resposta de cancelar/reativar.

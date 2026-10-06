@@ -152,14 +152,15 @@ describe('criarClienteAsaas', () => {
 
 // ─── Rotas (Fastify inject + db fake + fetch global mockado) ─────────
 const TENANT = '00000000-0000-4000-8000-000000000001'
-const TX_ID = '11111111-1111-1111-1111-111111111111'
-const RECEITA_ID = '22222222-2222-2222-2222-222222222222'
+const TX_ID = '11111111-1111-4111-8111-111111111111'
+const RECEITA_ID = '22222222-2222-4222-8222-222222222222'
+const USER_ID = '33333333-3333-4333-8333-333333333333'
 
 function buildApp({ papel = 'franqueado', tabelasExistem = true, onQuery = () => ({ rows: [] }) } = {}) {
   const app = Fastify()
   const queries = []
   app.decorate('authenticate', async (request) => {
-    request.user = { tenant_id: TENANT, papel, sub: '33333333-3333-3333-3333-333333333333' }
+    request.user = { tenant_id: TENANT, papel, sub: USER_ID }
   })
   app.decorate('requirePapel', (papeis) => async (request, reply) => {
     if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
@@ -340,7 +341,7 @@ describe('rotas /v1/asaas', () => {
     expect(res.statusCode).toBe(409)
   })
 
-  const CUSTO_ID = '44444444-4444-4444-4444-444444444444'
+  const CUSTO_ID = '44444444-4444-4444-8444-444444444444'
 
   it('POST /conciliar: custo — baixa + vínculo na mesma transação, com tenant_id', async () => {
     let custoPago = false
@@ -363,7 +364,7 @@ describe('rotas /v1/asaas', () => {
           return { rows: [{
             id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', tenant_id: TENANT, natureza: 'custo', origem_tipo: 'custo', origem_id: CUSTO_ID,
             valor: '250.00', data_liquidacao: '2026-03-20', comando_origem: 'custos.pagar', ator_tipo: 'usuario',
-            ator_id: '33333333-3333-3333-3333-333333333333', motivo: null, idempotencia_chave: TX_ID, idempotencia_payload: '{}',
+            ator_id: USER_ID, motivo: null, idempotencia_chave: TX_ID, idempotencia_payload: '{}',
           }] }
         }
         if (/UPDATE custos/.test(sql)) { custoPago = true; return { rows: [] } }
@@ -385,10 +386,10 @@ describe('rotas /v1/asaas', () => {
     expect(iVinculo).toBeGreaterThan(iBaixa)
     expect(iCommit).toBeGreaterThan(iVinculo)
     expect(queries[iBaixa].params.slice(0, 5)).toEqual([TENANT, 'custo', 'custo', CUSTO_ID, '250.00'])
-    expect(queries[iVinculo].params).toEqual([TX_ID, TENANT, 'custo', CUSTO_ID, '33333333-3333-3333-3333-333333333333', true])
+    expect(queries[iVinculo].params).toEqual([TX_ID, TENANT, 'custo', CUSTO_ID, USER_ID, true])
   })
 
-  const AVULSA_ID = '55555555-5555-5555-5555-555555555555'
+  const AVULSA_ID = '55555555-5555-4555-8555-555555555555'
 
   it('POST /conciliar: avulsa — baixa a receita avulsa e vincula na mesma transação', async () => {
     let avulsaPaga = false
@@ -408,7 +409,7 @@ describe('rotas /v1/asaas', () => {
           return { rows: [{
             id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', tenant_id: TENANT, natureza: 'receita', origem_tipo: 'receita_avulsa', origem_id: AVULSA_ID,
             valor: '800.00', data_liquidacao: '2026-03-21', comando_origem: 'receita_avulsa.receber', ator_tipo: 'usuario',
-            ator_id: '33333333-3333-3333-3333-333333333333', motivo: null, idempotencia_chave: TX_ID, idempotencia_payload: '{}',
+            ator_id: USER_ID, motivo: null, idempotencia_chave: TX_ID, idempotencia_payload: '{}',
           }] }
         }
         if (/UPDATE receitas_avulsas/.test(sql)) { avulsaPaga = true; return { rows: [] } }

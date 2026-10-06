@@ -22,6 +22,7 @@ import { financeiroRoutes } from './routes/financeiro.js'
 import { financeiroConsultaRoutes } from './routes/financeiro_consulta.js'
 import { financeiroAgingRoutes } from './routes/financeiro_aging.js'
 import { financeiroOverviewRoutes } from './routes/financeiro_overview.js'
+import { financeiroHistoricoRoutes } from './routes/financeiro_historico.js'
 import { remuneracaoApresentadorasRoutes } from './routes/remuneracao_apresentadoras.js'
 import { financeiroReceitasRoutes } from './routes/financeiro_receitas.js'
 import { financeiroReceitasAvulsasRoutes } from './routes/financeiro_receitas_avulsas.js'
@@ -353,6 +354,7 @@ export async function buildApp(opts = {}) {
   await app.register(financeiroConsultaRoutes)
   await app.register(financeiroAgingRoutes)
   await app.register(financeiroOverviewRoutes)
+  await app.register(financeiroHistoricoRoutes)
   await app.register(remuneracaoApresentadorasRoutes)
   await app.register(financeiroReceitasRoutes)
   await app.register(financeiroReceitasAvulsasRoutes)

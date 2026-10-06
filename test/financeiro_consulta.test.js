@@ -148,6 +148,19 @@ describe('FIN-04 consulta', () => {
     await app.close()
   })
 
+  it('localiza uma obrigação por origem e ID para abrir a exceção correta', async () => {
+    listarLancamentos.mockResolvedValue([
+      item('same', { origem: 'avulsa', valor_previsto: 10 }),
+      item('same', { origem: 'marca_fixo', valor_previsto: 20 }),
+      item('other', { origem: 'avulsa', valor_previsto: 30 }),
+    ])
+    const app = await appFor()
+    const response = (await app.inject({ method: 'GET', url: `${ROOT}&origem=avulsa&id=same` })).json()
+    expect(response.itens.map((row) => [row.id, row.origem])).toEqual([['same', 'avulsa']])
+    expect(response.totais.previsto).toBe('10.00')
+    await app.close()
+  })
+
   it('faz rollback se a seleção falhar', async () => {
     listarLancamentos.mockRejectedValue(new Error('read failed'))
     const app = await appFor()

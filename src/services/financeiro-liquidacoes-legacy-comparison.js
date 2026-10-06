@@ -4,11 +4,11 @@ const MAX_ORIGENS = 100
 // Somente identificadores fixos entram no SQL. Imposto divide a tabela custos
 // com as demais despesas, mas é uma origem canônica distinta.
 const FONTES = Object.freeze({
-  receita_titulo: { tabela: 'receita_titulos', filtro: '', natureza: 'receita', componente: 't.componente' },
-  receita_avulsa: { tabela: 'receitas_avulsas', filtro: '', natureza: 'receita', componente: 'NULL::text' },
-  custo: { tabela: 'custos', filtro: "AND tipo IS DISTINCT FROM 'imposto'", natureza: 'custo', componente: 'NULL::text' },
-  apresentadora_pagamento: { tabela: 'apresentadora_pagamentos', filtro: '', natureza: 'custo', componente: 't.componente' },
-  imposto: { tabela: 'custos', filtro: "AND tipo = 'imposto'", natureza: 'custo', componente: 'NULL::text' },
+  receita_titulo: { tabela: 'receita_titulos', filtro: '', natureza: 'receita', componente: 't.componente', categoria: "CASE WHEN t.componente = 'fixo' THEN 'marca_fixo' ELSE 'marca_comissao' END" },
+  receita_avulsa: { tabela: 'receitas_avulsas', filtro: '', natureza: 'receita', componente: 'NULL::text', categoria: "'avulsa'::text" },
+  custo: { tabela: 'custos', filtro: "AND tipo IS DISTINCT FROM 'imposto'", natureza: 'custo', componente: 'NULL::text', categoria: "CASE WHEN t.parcela_grupo_id IS NOT NULL THEN 'parcela' WHEN t.recorrente_id IS NOT NULL THEN 'recorrente' ELSE 'manual' END" },
+  apresentadora_pagamento: { tabela: 'apresentadora_pagamentos', filtro: '', natureza: 'custo', componente: 't.componente', categoria: "'apresentadora'::text" },
+  imposto: { tabela: 'custos', filtro: "AND tipo = 'imposto'", natureza: 'custo', componente: 'NULL::text', categoria: "'imposto'::text" },
 })
 
 /**
@@ -33,6 +33,7 @@ export async function compararLiquidacoesLegado(db, { tenantId, origemTipo, orig
       SELECT DISTINCT unnest($3::uuid[]) AS id
     ), legado AS (
       SELECT t.id, ${fonte.componente} AS componente,
+             ${fonte.categoria} AS origem_categoria,
              COALESCE(t.valor_pago, 0::numeric)::numeric(15,2) AS valor
         FROM ${fonte.tabela} t
         JOIN escopo s ON s.id = t.id
@@ -56,7 +57,7 @@ export async function compararLiquidacoesLegado(db, { tenantId, origemTipo, orig
        GROUP BY l.origem_id
     )
     SELECT $2::text AS origem_tipo, COALESCE(g.id, c.id) AS origem_id,
-           g.componente,
+           g.componente, g.origem_categoria,
            g.valor::text AS valor_legado, c.valor::text AS valor_canonico,
            COALESCE(c.natureza_incorreta, 0)::int AS natureza_incorreta,
            (COALESCE(c.valor, 0::numeric) - COALESCE(g.valor, 0::numeric))::numeric(15,2)::text AS diferenca,

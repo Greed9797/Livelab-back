@@ -46,10 +46,10 @@ Migrações são aditivas e idempotentes; registrar cada uma em `MIGRATIONS_LIST
 
 ## Implementado neste corte local
 
-- FIN-03B: comparação por obrigação em uma instrução SQL/snapshot, incluindo componente da origem quando existe, natureza, estornos, ausência em cada lado e valores decimais exatos. CLI por tenant em transação `REPEATABLE READ READ ONLY`. O script observa diferenças; não executa replay ou troca de leitor.
-- FIN-04: API única de consulta e CSV com filtro, ordenação estável, paginação e totais antes da paginação; valores em texto decimal e erro para dados monetários ausentes. Abas Receber/Pagar usam o mesmo contrato e preservam filtros na URL.
+- FIN-03B: comparação por obrigação em uma instrução SQL/snapshot, incluindo categoria/componente da origem quando existe, natureza, estornos, ausência em cada lado e valores decimais exatos. CLI por tenant em transação `REPEATABLE READ READ ONLY`. O script observa diferenças; não executa replay ou troca de leitor.
+- FIN-04: API única de consulta e CSV com filtro, ordenação estável, paginação e totais antes da paginação; valores em texto decimal e erro para dados monetários ausentes. O CSV identifica recorte e data de referência antes do cabeçalho dos lançamentos. Abas Receber/Pagar usam o mesmo contrato e preservam filtros na URL. O detalhe lê liquidações/estornos canônicos e mostra aviso quando a comparação com o legado não fecha.
 - FIN-06A: aging por vencimento contratual, faixas disjuntas explícitas e omissão de obrigações ambíguas. A data esperada e o histórico de observações ainda exigem contrato de permissões e migration aprovados.
-- FIN-05: visão geral e fila de exceções derivadas da consulta FIN-04, com estado `incompleto` ou `vazio` sem publicar um saldo zero enganoso. Novo painel exibe esses estados.
+- FIN-05: visão geral e fila de exceções derivadas da consulta FIN-04, com estado `incompleto` ou `vazio` sem publicar um saldo zero enganoso. O painel abre a obrigação pela identidade composta ou a lista correspondente quando a identidade está ausente.
 - FIN-07: painel de versões do fechamento já existente. O saldo controlado da conta Asaas depende da conta, data/hora, saldo inicial verificável e integração de extrato; não foi calculado a partir do caixa legado.
 
 ## Gates observados e pendências de publicação

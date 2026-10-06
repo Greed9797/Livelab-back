@@ -14,7 +14,7 @@ try {
     INSERT INTO tenants VALUES ('${tenantA}'), ('${tenantB}');
     CREATE TABLE receita_titulos (id uuid, tenant_id uuid, componente text, valor_pago numeric(15,2));
     CREATE TABLE receitas_avulsas (id uuid, tenant_id uuid, valor_pago numeric(15,2));
-    CREATE TABLE custos (id uuid, tenant_id uuid, tipo text, valor_pago numeric(15,2));
+    CREATE TABLE custos (id uuid, tenant_id uuid, tipo text, valor_pago numeric(15,2), recorrente_id uuid, parcela_grupo_id uuid);
     CREATE TABLE apresentadora_pagamentos (id uuid, tenant_id uuid, componente text, valor_pago numeric(15,2));
   `)
   await db.exec(await readFile(new URL('../migrations/180_financeiro_liquidacoes_estornos.sql', import.meta.url), 'utf8'))
@@ -88,6 +88,7 @@ try {
   assert.equal(rows[5].valor_canonico, '9007199254740.91')
   assert.equal(rows[6].natureza_incorreta, 1, 'natureza errada nunca é matching mesmo com valor igual')
   assert.equal(rows[0].componente, 'fixo', 'o componente da obrigação acompanha a evidência de diferença')
+  assert.equal(rows[0].origem_categoria, 'marca_fixo')
 
   const outroTenant = await compararLiquidacoesLegado(db, {
     tenantId: tenantB, origemTipo: 'receita_titulo', origemIds: [id(10), id(11)],
@@ -107,7 +108,14 @@ try {
     })
     assert.deepEqual(result.map((r) => [r.classificacao, r.valor_legado, r.valor_canonico]),
       [['matching', valor, valor]])
+    assert.equal(result[0].origem_categoria, tipo === 'custo' ? 'manual' : tipo === 'imposto' ? 'imposto' : tipo === 'receita_avulsa' ? 'avulsa' : 'apresentadora')
   }
+  await db.query('UPDATE custos SET recorrente_id = $1 WHERE id = $2 AND tenant_id = $3', [id(55), id(21), tenantA])
+  assert.equal((await compararLiquidacoesLegado(db, { tenantId: tenantA, origemTipo: 'custo', origemIds: [id(21)] }))[0].origem_categoria, 'recorrente')
+  await legado('custos', tenantA, id(24), '5.00', 'parcelado')
+  await db.query('UPDATE custos SET parcela_grupo_id = $1 WHERE id = $2 AND tenant_id = $3', [id(56), id(24), tenantA])
+  await liquidacao(tenantA, 'custo', id(24), '5.00')
+  assert.equal((await compararLiquidacoesLegado(db, { tenantId: tenantA, origemTipo: 'custo', origemIds: [id(24)] }))[0].origem_categoria, 'parcela')
   assert.deepEqual(await compararLiquidacoesLegado(db, {
     tenantId: tenantA, origemTipo: 'custo', origemIds: [id(23)],
   }), [], 'imposto não pode aparecer como custo comum')

@@ -52,14 +52,14 @@ function integer(value, name, fallback, max) {
  * eixo=competencia|vencimento|pagamento, inicio/fim=AAAA-MM (inclusive),
  * competencia_inicio/competencia_fim=AAAA-MM (obrigatórios nos eixos vencimento/pagamento;
  * delimitam as competências carregadas pelo agregador), natureza=receita|custo,
- * origem, componente, contraparte (texto), status, q (texto),
+ * origem, id da obrigação, componente, contraparte (texto), status, q (texto),
  * valor_min/valor_max (valor_previsto decimal positivo),
  * ordenar=data|valor, direcao=asc|desc, pagina (1..1000000), limite (1..200).
  * O CSV aceita os mesmos parâmetros, mas ignora pagina/limite. Ambos os intervalos
  * são limitados a 36 meses para impedir leitura ilimitada em memória.
  */
 export function parseConsultaQuery(query = {}) {
-  const allowed = new Set(['eixo', 'inicio', 'fim', 'competencia_inicio', 'competencia_fim', 'natureza', 'origem', 'componente', 'contraparte', 'status', 'q', 'valor_min', 'valor_max', 'ordenar', 'direcao', 'pagina', 'limite'])
+  const allowed = new Set(['eixo', 'inicio', 'fim', 'competencia_inicio', 'competencia_fim', 'natureza', 'origem', 'id', 'componente', 'contraparte', 'status', 'q', 'valor_min', 'valor_max', 'ordenar', 'direcao', 'pagina', 'limite'])
   for (const key of Object.keys(query)) if (!allowed.has(key)) throw invalid(`Filtro desconhecido: ${key}`)
   for (const [key, value] of Object.entries(query)) if (typeof value !== 'string') throw invalid(`${key} deve ser único`)
   const { eixo, inicio, fim } = query
@@ -83,6 +83,7 @@ export function parseConsultaQuery(query = {}) {
   }
   if (query.natureza !== undefined && !['receita', 'custo'].includes(query.natureza)) throw invalid('natureza inválida')
   if (query.origem !== undefined && !ORIGENS.includes(query.origem)) throw invalid('origem inválida')
+  if (query.id !== undefined && (query.id.length < 1 || query.id.length > 200)) throw invalid('id deve ter entre 1 e 200 caracteres')
   if (query.status !== undefined && !STATUS.includes(query.status)) throw invalid('status inválido')
   if (query.componente !== undefined && (query.componente.trim().length < 1 || query.componente.length > 80)) throw invalid('componente deve ter entre 1 e 80 caracteres')
   if (query.contraparte !== undefined && (query.contraparte.trim().length < 1 || query.contraparte.length > 120)) throw invalid('contraparte deve ter entre 1 e 120 caracteres')
@@ -98,7 +99,8 @@ export function parseConsultaQuery(query = {}) {
   return {
     filtros: {
       eixo, inicio, fim, competencia_inicio, competencia_fim,
-      natureza: query.natureza ?? null, origem: query.origem ?? null, status: query.status ?? null,
+      natureza: query.natureza ?? null, origem: query.origem ?? null, id: query.id ?? null,
+      status: query.status ?? null,
       q: query.q?.trim() ?? null, componente: query.componente?.trim() ?? null,
       contraparte: query.contraparte?.trim() ?? null,
       valor_min: query.valor_min ?? null, valor_max: query.valor_max ?? null,
@@ -127,6 +129,7 @@ export async function selecionarConsulta(db, { tenantId, filtros, hoje = hojeSao
   const contraparte = filtros.contraparte ? normalizeText(filtros.contraparte) : null
   const componente = filtros.componente ? normalizeText(filtros.componente) : null
   const itens = filtrarLancamentos(itensBase, filtros).filter((item) => {
+    if (filtros.id && String(item.id) !== filtros.id) return false
     if (componente && normalizeText(item.componente) !== componente) return false
     if (contraparte && !normalizeText([
       item.cliente_nome, item.marca_nome, item.apresentadora_nome,

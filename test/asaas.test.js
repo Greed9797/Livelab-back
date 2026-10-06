@@ -502,6 +502,23 @@ describe('rotas /v1/asaas', () => {
     expect(queries.map((q) => q.sql)).toContain('ROLLBACK')
   })
 
+  it('DELETE /conciliacao: schema financeiro ausente retorna 409 e mantém vínculo', async () => {
+    const { app, queries } = buildApp({
+      onQuery: (sql) => {
+        if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
+          return { rows: [{ id: TX_ID, conciliado_com_tipo: 'custo', conciliado_com_id: CUSTO_ID, conciliado_baixa: true }] }
+        }
+        if (/FROM financeiro_liquidacoes l/.test(sql)) throw Object.assign(new Error('relation does not exist'), { code: '42P01' })
+        return { rows: [] }
+      },
+    })
+    const res = await app.inject({ method: 'DELETE', url: `/v1/asaas/conciliacao/${TX_ID}` })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().error).toBe('Módulo financeiro ainda não migrado')
+    expect(queries.some((q) => /UPDATE gateway_transacoes/.test(q.sql))).toBe(false)
+    expect(queries.map((q) => q.sql)).toContain('ROLLBACK')
+  })
+
   it('DELETE /conciliacao: baixa manual (conciliado_baixa=false) NÃO é desfeita', async () => {
     const { app, queries } = buildApp({
       onQuery: (sql) => (/FOR UPDATE/.test(sql)

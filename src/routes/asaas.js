@@ -437,6 +437,9 @@ export async function asaasRoutes(app) {
               transacaoId: tx.id, userId: userId ?? null,
             })
           } catch (err) {
+            if (erroSchemaAusente(err)) {
+              return fim(db, 409, { error: 'Módulo financeiro ainda não migrado' })
+            }
             const status = err instanceof ConciliacaoError ? err.status : (err?.status ?? err?.statusCode)
             if (Number.isInteger(status) && status >= 400 && status < 500) {
               return fim(db, status, { error: err.message, codigo: err.codigo ?? err.code })

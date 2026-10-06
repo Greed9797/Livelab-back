@@ -52,13 +52,14 @@ function integer(value, name, fallback, max) {
  * eixo=competencia|vencimento|pagamento, inicio/fim=AAAA-MM (inclusive),
  * competencia_inicio/competencia_fim=AAAA-MM (obrigatórios nos eixos vencimento/pagamento;
  * delimitam as competências carregadas pelo agregador), natureza=receita|custo,
- * origem, status, q (texto), valor_min/valor_max (valor_previsto decimal positivo),
+ * origem, componente, contraparte (texto), status, q (texto),
+ * valor_min/valor_max (valor_previsto decimal positivo),
  * ordenar=data|valor, direcao=asc|desc, pagina (1..1000000), limite (1..200).
  * O CSV aceita os mesmos parâmetros, mas ignora pagina/limite. Ambos os intervalos
  * são limitados a 36 meses para impedir leitura ilimitada em memória.
  */
 export function parseConsultaQuery(query = {}) {
-  const allowed = new Set(['eixo', 'inicio', 'fim', 'competencia_inicio', 'competencia_fim', 'natureza', 'origem', 'status', 'q', 'valor_min', 'valor_max', 'ordenar', 'direcao', 'pagina', 'limite'])
+  const allowed = new Set(['eixo', 'inicio', 'fim', 'competencia_inicio', 'competencia_fim', 'natureza', 'origem', 'componente', 'contraparte', 'status', 'q', 'valor_min', 'valor_max', 'ordenar', 'direcao', 'pagina', 'limite'])
   for (const key of Object.keys(query)) if (!allowed.has(key)) throw invalid(`Filtro desconhecido: ${key}`)
   for (const [key, value] of Object.entries(query)) if (typeof value !== 'string') throw invalid(`${key} deve ser único`)
   const { eixo, inicio, fim } = query
@@ -83,6 +84,8 @@ export function parseConsultaQuery(query = {}) {
   if (query.natureza !== undefined && !['receita', 'custo'].includes(query.natureza)) throw invalid('natureza inválida')
   if (query.origem !== undefined && !ORIGENS.includes(query.origem)) throw invalid('origem inválida')
   if (query.status !== undefined && !STATUS.includes(query.status)) throw invalid('status inválido')
+  if (query.componente !== undefined && (query.componente.trim().length < 1 || query.componente.length > 80)) throw invalid('componente deve ter entre 1 e 80 caracteres')
+  if (query.contraparte !== undefined && (query.contraparte.trim().length < 1 || query.contraparte.length > 120)) throw invalid('contraparte deve ter entre 1 e 120 caracteres')
   if (query.q !== undefined && (query.q.trim().length < 1 || query.q.length > 120)) throw invalid('q deve ter entre 1 e 120 caracteres')
   if (query.ordenar !== undefined && !ORDENACOES.includes(query.ordenar)) throw invalid('ordenar inválido')
   if (query.direcao !== undefined && !['asc', 'desc'].includes(query.direcao)) throw invalid('direcao inválida')
@@ -96,7 +99,9 @@ export function parseConsultaQuery(query = {}) {
     filtros: {
       eixo, inicio, fim, competencia_inicio, competencia_fim,
       natureza: query.natureza ?? null, origem: query.origem ?? null, status: query.status ?? null,
-      q: query.q?.trim() ?? null, valor_min: query.valor_min ?? null, valor_max: query.valor_max ?? null,
+      q: query.q?.trim() ?? null, componente: query.componente?.trim() ?? null,
+      contraparte: query.contraparte?.trim() ?? null,
+      valor_min: query.valor_min ?? null, valor_max: query.valor_max ?? null,
       ordenar: query.ordenar ?? 'data', direcao: query.direcao ?? 'asc',
     },
     pagina, limite,
@@ -107,6 +112,10 @@ function compareText(a, b) {
   return a < b ? -1 : a > b ? 1 : 0
 }
 
+function normalizeText(value) {
+  return String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('pt-BR')
+}
+
 /** Seleção única para JSON e CSV: filtrar, ordenar e totalizar antes da paginação. */
 export async function selecionarConsulta(db, { tenantId, filtros, hoje = hojeSaoPaulo() }) {
   const itensBase = await listarLancamentos(db, {
@@ -115,7 +124,14 @@ export async function selecionarConsulta(db, { tenantId, filtros, hoje = hojeSao
   const campoData = { competencia: 'competencia', vencimento: 'data_vencimento', pagamento: 'data_pagamento' }[filtros.eixo]
   const min = filtros.valor_min === null ? null : cents(filtros.valor_min)
   const max = filtros.valor_max === null ? null : cents(filtros.valor_max)
+  const contraparte = filtros.contraparte ? normalizeText(filtros.contraparte) : null
+  const componente = filtros.componente ? normalizeText(filtros.componente) : null
   const itens = filtrarLancamentos(itensBase, filtros).filter((item) => {
+    if (componente && normalizeText(item.componente) !== componente) return false
+    if (contraparte && !normalizeText([
+      item.cliente_nome, item.marca_nome, item.apresentadora_nome,
+      item.fornecedor_nome,
+    ].filter(Boolean).join(' ')).includes(contraparte)) return false
     const data = dateText(item[campoData])
     if (!data || data.slice(0, 7) < filtros.inicio || data.slice(0, 7) > filtros.fim) return false
     const valor = cents(item.valor_previsto)

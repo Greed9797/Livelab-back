@@ -126,6 +126,24 @@ describe('FIN-04 consulta', () => {
     await app.close()
   })
 
+  it('filtra contraparte e componente no mesmo recorte do CSV', async () => {
+    listarLancamentos.mockResolvedValue([
+      item('fixed', { cliente_nome: 'Árvore Comércio', componente: 'fixo', valor_previsto: 10 }),
+      item('variable', { cliente_nome: 'Árvore Comércio', componente: 'comissao', valor_previsto: 20 }),
+      item('other', { cliente_nome: 'Outra Marca', componente: 'fixo', valor_previsto: 30 }),
+    ])
+    const app = await appFor()
+    const filtro = `${ROOT}&contraparte=arvore&componente=fixo`
+    const response = (await app.inject({ method: 'GET', url: filtro })).json()
+    expect(response.itens.map((row) => row.id)).toEqual(['fixed'])
+    expect(response.totais.previsto).toBe('10.00')
+    const csv = await app.inject({ method: 'GET', url: filtro.replace('/consulta?', '/consulta.csv?') })
+    expect(csv.body).toContain('"fixed"')
+    expect(csv.body).not.toContain('"variable"')
+    expect(csv.body).not.toContain('"other"')
+    await app.close()
+  })
+
   it('faz rollback se a seleção falhar', async () => {
     listarLancamentos.mockRejectedValue(new Error('read failed'))
     const app = await appFor()

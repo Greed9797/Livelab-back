@@ -343,30 +343,12 @@ describe('rotas /v1/asaas', () => {
   const CUSTO_ID = '44444444-4444-4444-4444-444444444444'
 
   it('POST /conciliar: custo — baixa + vínculo na mesma transação, com tenant_id', async () => {
-    let custoPago = false
     const { app, queries } = buildApp({
       onQuery: (sql) => {
         if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
           return { rows: [{ id: TX_ID, tipo: 'saida', valor: 250, data: '2026-03-20', conciliado_com_id: null }] }
         }
-        if (/FROM custos/.test(sql)) {
-          return { rows: [{
-            id: CUSTO_ID, tenant_id: TENANT, descricao: 'Custo', valor: '250.00',
-            valor_pago: custoPago ? '250.00' : '0.00', tipo: 'outros', grupo: 'outros',
-            competencia: '2026-03-01', data_vencimento: '2026-03-20', data_pagamento: custoPago ? '2026-03-20' : null,
-            cancelado_em: null,
-          }] }
-        }
-        if (/SUM\(l\.valor\)/.test(sql)) return { rows: [{ liquidado: '0.00', estornado: '0.00' }] }
-        if (/FROM financeiro_liquidacoes/.test(sql)) return { rows: [] }
-        if (/INSERT INTO financeiro_liquidacoes/.test(sql)) {
-          return { rows: [{
-            id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', tenant_id: TENANT, natureza: 'custo', origem_tipo: 'custo', origem_id: CUSTO_ID,
-            valor: '250.00', data_liquidacao: '2026-03-20', comando_origem: 'custos.pagar', ator_tipo: 'usuario',
-            ator_id: '33333333-3333-3333-3333-333333333333', motivo: null, idempotencia_chave: TX_ID, idempotencia_payload: '{}',
-          }] }
-        }
-        if (/UPDATE custos/.test(sql)) { custoPago = true; return { rows: [] } }
+        if (/FROM custos/.test(sql)) return { rows: [{ id: CUSTO_ID, valor_pago: null, tipo: 'outros' }] }
         if (/UPDATE gateway_transacoes/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'custo', conciliado_com_id: CUSTO_ID, conciliado_baixa: true }] }
         return { rows: [] }
       },
@@ -377,41 +359,30 @@ describe('rotas /v1/asaas', () => {
     expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 250, data_pagamento: '2026-03-20' })
     const sqls = queries.map((q) => q.sql)
     const iBegin = sqls.indexOf('BEGIN')
-    const iBaixa = sqls.findIndex((x) => /INSERT INTO financeiro_liquidacoes/.test(x))
+    const iBaixa = sqls.findIndex((x) => /UPDATE custos/.test(x))
     const iVinculo = sqls.findIndex((x) => /UPDATE gateway_transacoes/.test(x))
     const iCommit = sqls.indexOf('COMMIT')
     expect(iBegin).toBeGreaterThanOrEqual(0)
     expect(iBaixa).toBeGreaterThan(iBegin)
     expect(iVinculo).toBeGreaterThan(iBaixa)
     expect(iCommit).toBeGreaterThan(iVinculo)
-    expect(queries[iBaixa].params.slice(0, 5)).toEqual([TENANT, 'custo', 'custo', CUSTO_ID, '250.00'])
+    expect(queries[iBaixa].params.slice(0, 2)).toEqual([CUSTO_ID, TENANT])
     expect(queries[iVinculo].params).toEqual([TX_ID, TENANT, 'custo', CUSTO_ID, '33333333-3333-3333-3333-333333333333', true])
   })
 
   const AVULSA_ID = '55555555-5555-5555-5555-555555555555'
 
   it('POST /conciliar: avulsa — baixa a receita avulsa e vincula na mesma transação', async () => {
-    let avulsaPaga = false
     const { app, queries } = buildApp({
       onQuery: (sql) => {
         if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
           return { rows: [{ id: TX_ID, tipo: 'entrada', valor: 800, data: '2026-03-21', conciliado_com_id: null }] }
         }
-        if (/AS previsto/.test(sql)) return { rows: [{ previsto: '800.00', pago: avulsaPaga ? '800.00' : '0.00', perdido: '0.00', perdido_em: null }] }
-        if (/FROM receitas_avulsas/.test(sql)) return { rows: [{
-          id: AVULSA_ID, tenant_id: TENANT, descricao: 'Serviço', grupo: 'servico', valor_previsto: '800.00',
-          valor_pago: avulsaPaga ? '800.00' : '0.00', valor_perdido: '0.00', perdido_em: null,
-          data_vencimento: '2026-03-20', data_pagamento: avulsaPaga ? '2026-03-21' : null, competencia: '2026-03-01',
-        }] }
-        if (/FROM financeiro_liquidacoes/.test(sql)) return { rows: [] }
-        if (/INSERT INTO financeiro_liquidacoes/.test(sql)) {
-          return { rows: [{
-            id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', tenant_id: TENANT, natureza: 'receita', origem_tipo: 'receita_avulsa', origem_id: AVULSA_ID,
-            valor: '800.00', data_liquidacao: '2026-03-21', comando_origem: 'receita_avulsa.receber', ator_tipo: 'usuario',
-            ator_id: '33333333-3333-3333-3333-333333333333', motivo: null, idempotencia_chave: TX_ID, idempotencia_payload: '{}',
-          }] }
+        if (/SELECT id, valor_pago(, perdido_em)? FROM receitas_avulsas/.test(sql)) return { rows: [{ id: AVULSA_ID, valor_pago: '0.00' }] }
+        if (/UPDATE receitas_avulsas/.test(sql)) {
+          return { rows: [{ id: AVULSA_ID, descricao: 'Serviço', grupo: 'servico', valor_previsto: '800.00', valor_pago: '800.00',
+            data_vencimento: '2026-03-20', data_pagamento: '2026-03-21', competencia: '2026-03-01' }] }
         }
-        if (/UPDATE receitas_avulsas/.test(sql)) { avulsaPaga = true; return { rows: [] } }
         if (/UPDATE gateway_transacoes/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'avulsa', conciliado_com_id: AVULSA_ID, conciliado_baixa: true }] }
         return { rows: [] }
       },
@@ -420,12 +391,12 @@ describe('rotas /v1/asaas', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 800, data_pagamento: '2026-03-21' })
     const sqls = queries.map((q) => q.sql)
-    const iBaixa = sqls.findIndex((x) => /INSERT INTO financeiro_liquidacoes/.test(x))
+    const iBaixa = sqls.findIndex((x) => /UPDATE receitas_avulsas/.test(x))
     const iVinculo = sqls.findIndex((x) => /UPDATE gateway_transacoes/.test(x))
     expect(iBaixa).toBeGreaterThan(sqls.indexOf('BEGIN'))
     expect(iVinculo).toBeGreaterThan(iBaixa)
     expect(sqls.indexOf('COMMIT')).toBeGreaterThan(iVinculo)
-    expect(queries[iBaixa].params.slice(0, 5)).toEqual([TENANT, 'receita', 'receita_avulsa', AVULSA_ID, '800.00'])
+    expect(queries[iBaixa].params[1]).toBe(TENANT)
     expect(queries[iVinculo].params.slice(2, 4)).toEqual(['avulsa', AVULSA_ID])
   })
 

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { invalidateTenant } from '../lib/dashboard-cache.js'
 import { DATA_RE, dataEhValida, MES_RE } from '../services/remuneracao-apresentadoras.js'
@@ -11,12 +12,13 @@ const pagarSchema = z.object({
   valor_pago: z.union([z.string(), z.number()]).optional(),
   data_pagamento: z.string().regex(DATA_RE).refine(dataEhValida, 'data_pagamento inválida').optional(),
   observacao: z.string().trim().max(500).optional(),
+  chave_operacao: z.string().uuid().optional(),
 }).strict()
 
 const cancelarSchema = z.object({ motivo: z.string().trim().max(300).optional() }).strict()
 
 // Erros de regra do serviço (409 CANCELAMENTO_INVALIDO / CUSTO_CANCELADO) e motivo > 300 (400).
-const CODIGOS_409 = new Set(['CANCELAMENTO_INVALIDO', 'CUSTO_CANCELADO'])
+const CODIGOS_409 = new Set(['CANCELAMENTO_INVALIDO', 'CUSTO_CANCELADO', 'APRESENTADORA_LIQUIDACAO_DIVERGENTE', 'APRESENTADORA_SEM_SALDO', 'APRESENTADORA_VALOR_EXCEDENTE', 'APRESENTADORA_PAGAMENTO_CONCORRENTE', 'APRESENTADORA_ESTORNO_GRANULAR_NECESSARIO', 'APRESENTADORA_ESTORNO_CONCORRENTE', 'FINANCEIRO_IDEMPOTENCIA_CONFLITO', 'FINANCEIRO_SALDO_INSUFICIENTE'])
 const erroDeRegra = (err) => CODIGOS_409.has(err?.code) || err?.code === 'INVALID_MOTIVO'
 
 const componenteCfg = z.object({
@@ -101,6 +103,7 @@ export async function financeiroApresentadorasPagamentosRoutes(app) {
       const pg = await app.withTenant(tenantId, (db) => registrarPagamentoApresentadora(db, {
         tenantId, apresentadoraId: p.id, mes: p.mes, componente: p.componente, valorPago: parsed.data.valor_pago,
         dataPagamento: parsed.data.data_pagamento, observacao: parsed.data.observacao, userId: request.user.sub,
+        chaveOperacao: parsed.data.chave_operacao ?? randomUUID(),
       }))
       if (!pg) return reply.code(404).send({ error: 'Apresentadora não encontrada nesta unidade.' })
       // Trilha da baixa — inclusive quando quem paga é a chave de API financeira
@@ -121,7 +124,12 @@ export async function financeiroApresentadorasPagamentosRoutes(app) {
   async function desfazer(request, reply) {
     const p = validarParams(request, reply); if (!p) return
     const tenantId = request.user.tenant_id
-    const ok = await app.withTenant(tenantId, (db) => desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId: p.id, mes: p.mes, componente: p.componente }))
+    const chaveOperacao = request.body?.chave_operacao
+    if (chaveOperacao != null && !uuid.safeParse(chaveOperacao).success) return reply.code(400).send({ error: 'chave_operacao inválida' })
+    const ok = await app.withTenant(tenantId, (db) => desfazerPagamentoApresentadora(db, {
+      tenantId, apresentadoraId: p.id, mes: p.mes, componente: p.componente, userId: request.user.sub,
+      chaveOperacao: chaveOperacao ?? randomUUID(),
+    }))
     if (!ok) return reply.code(404).send({ error: 'Nenhum pagamento registrado para esta competência.' })
     auditar(request, 'financeiro.apresentadora_desfazer', null, { apresentadora_id: p.id, mes: p.mes, componente: p.componente })
     invalidateTenant(tenantId)

@@ -797,9 +797,16 @@ const recorrente = {
 }
 
 function custosDb(custos = []) {
-  const rows = new Map(custos.map((c) => [c.id, { ...c }]))
+  const rows = new Map(custos.map((c) => [c.id, { tenant_id: tenantId, ...c }]))
   const query = vi.fn(async (sql, params = []) => {
     const text = String(sql)
+    if (/^(BEGIN|COMMIT|ROLLBACK)$/.test(text.trim())) return { rows: [] }
+    if (text.includes('COALESCE(SUM(l.valor), 0)::text AS liquidado')) return { rows: [{ liquidado: '0.00', estornado: '0.00' }] }
+    if (text.includes('FROM financeiro_liquidacoes') && text.includes('idempotencia_chave')) return { rows: [] }
+    if (text.includes('INSERT INTO financeiro_liquidacoes')) return { rows: [{
+      id: '99999999-9999-4999-8999-999999999999', tenant_id: params[0], natureza: params[1], origem_tipo: params[2], origem_id: params[3],
+      valor: params[4], data_liquidacao: params[5], comando_origem: params[6], ator_tipo: params[7], ator_id: params[8], motivo: params[9], idempotencia_chave: params[10], idempotencia_payload: JSON.parse(params[11]),
+    }] }
     if (text.includes('FROM custos_recorrentes')) return { rows: [recorrente] }
     if (/^\s*INSERT INTO custos/.test(text)) {
       expect(params[0]).toBe(tenantId)
@@ -826,6 +833,13 @@ function custosDb(custos = []) {
       return { rows: r ? [{ ...r }] : [] }
     }
     if (text.includes('UPDATE custos')) {
+      if (text.includes('valor_pago = COALESCE(valor_pago, 0) + $3::numeric')) {
+        expect(params[0]).toBe(tenantId)
+        const r = rows.get(params[1])
+        if (!r) return { rows: [] }
+        r.valor_pago = String(Number(r.valor_pago ?? 0) + Number(params[2])); r.data_pagamento = params[3]
+        return { rows: [{ ...r }] }
+      }
       expect(params[1]).toBe(tenantId)
       const r = rows.get(params[0])
       if (!r) return { rows: [] }

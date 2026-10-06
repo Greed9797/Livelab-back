@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
 import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
@@ -43,6 +44,11 @@ const baixaImpostoSchema = z.object({
   valor_pago: moneySchema.refine((v) => v > 0, 'valor_pago deve ser positivo').optional(),
   data_pagamento: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato: YYYY-MM-DD').optional(),
   observacao: z.string().trim().max(500).optional(),
+  chave_operacao: z.string().uuid('chave_operacao deve ser UUID válido').optional(),
+}).strict()
+
+const desfazerImpostoSchema = z.object({
+  chave_operacao: z.string().uuid('chave_operacao deve ser UUID válido').optional(),
 }).strict()
 
 // PATCH /config aceita qualquer subconjunto (ao menos um campo).
@@ -865,6 +871,8 @@ export async function financeiroRoutes(app) {
       const item = await app.withTenant(tenant_id, (db) => pagarImposto(db, {
         tenantId: tenant_id, mes, valorPago: parsed.data.valor_pago,
         dataPagamento: parsed.data.data_pagamento, observacao: parsed.data.observacao, hoje: hojeSaoPaulo(),
+        chaveOperacao: parsed.data.chave_operacao ?? randomUUID(),
+        ator: { tipo: request.viaApiKey ? 'api_key' : 'usuario', id: request.viaApiKey?.id ?? request.user.sub ?? 'financeiro' },
       }))
       invalidateTenant(tenant_id)
       app.audit?.log?.(request, { action: 'financeiro.imposto_pagar', entity_type: 'imposto', entity_id: item.custo_id, metadata: { mes, ...parsed.data } })
@@ -879,9 +887,14 @@ export async function financeiroRoutes(app) {
   app.patch('/v1/financeiro/impostos/:mes/desfazer', { preHandler: app.requirePapel(WRITE_FINANCEIRO) }, async (request, reply) => {
     const { mes } = request.params
     if (!MES_RE.test(mes)) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
+    const parsed = desfazerImpostoSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const { tenant_id } = request.user
     try {
-      const item = await app.withTenant(tenant_id, (db) => desfazerImposto(db, { tenantId: tenant_id, mes, hoje: hojeSaoPaulo() }))
+      const item = await app.withTenant(tenant_id, (db) => desfazerImposto(db, {
+        tenantId: tenant_id, mes, hoje: hojeSaoPaulo(), chaveOperacao: parsed.data.chave_operacao ?? randomUUID(),
+        ator: { tipo: request.viaApiKey ? 'api_key' : 'usuario', id: request.viaApiKey?.id ?? request.user.sub ?? 'financeiro' },
+      }))
       invalidateTenant(tenant_id)
       app.audit?.log?.(request, { action: 'financeiro.imposto_desfazer', entity_type: 'imposto', entity_id: null, metadata: { mes } })
         ?.catch?.((err) => app.log.error({ err }, 'audit log failed'))

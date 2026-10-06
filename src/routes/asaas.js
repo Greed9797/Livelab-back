@@ -374,6 +374,7 @@ export async function asaasRoutes(app) {
         try {
           baixa = await darBaixaConciliacao(db, {
             tenantId: tenant_id, transacao: tx, tipo, alvoId: id, userId: userId ?? null,
+            chaveOperacao: tx.id,
           })
         } catch (err) {
           if (err instanceof ConciliacaoError) return fim(db, err.status, { error: err.message, codigo: err.codigo })

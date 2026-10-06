@@ -167,7 +167,11 @@ export async function selecionarConsulta(db, { tenantId, filtros, hoje = hojeSao
       inconsistente: aberto < 0n,
     }
   })
-  return { itens: itensComSaldo, total_registros: itensComSaldo.length, totais: Object.fromEntries(Object.entries(totaisCentavos).map(([key, value]) => [key, decimal(value)])), filtros }
+  return {
+    itens: itensComSaldo, total_registros: itensComSaldo.length,
+    totais: Object.fromEntries(Object.entries(totaisCentavos).map(([key, value]) => [key, decimal(value)])),
+    filtros, data_referencia: hoje,
+  }
 }
 
 export function paginarConsulta(selecao, { pagina, limite }) {
@@ -187,9 +191,16 @@ function csvCell(value, kind) {
   return `"${text.replaceAll('"', '""')}"`
 }
 
-/** CSV UTF-8, separador ;, datas ISO AAAA-MM-DD e decimal com ponto. */
+/** CSV UTF-8, separador ;, escopo/referência no cabeçalho e decimal com ponto. */
 export function consultaCsv(selecao) {
-  const rows = [CSV_COLUMNS.join(';')]
+  const scope = new URLSearchParams(Object.entries(selecao.filtros)
+    .filter(([, value]) => value !== null && value !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b)))
+  const rows = [
+    [csvCell('consulta', 'text'), csvCell(scope.toString(), 'text')].join(';'),
+    [csvCell('data_referencia', 'text'), csvCell(selecao.data_referencia, 'date')].join(';'),
+    CSV_COLUMNS.join(';'),
+  ]
   for (const item of selecao.itens) {
     rows.push(CSV_COLUMNS.map((key) => csvCell(item[key], key.startsWith('valor_') || key === 'saldo_aberto' ? 'money' : ['competencia', 'data_vencimento', 'data_pagamento'].includes(key) ? 'date' : 'text')).join(';'))
   }

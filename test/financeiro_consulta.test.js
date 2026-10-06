@@ -78,7 +78,11 @@ describe('FIN-04 consulta', () => {
     expect(csv.body).toContain('"1.23"')
     expect(csv.body).toContain('saldo_aberto')
     expect(csv.body).toContain('"1.00"')
-    expect(csv.body.split('\r\n')).toHaveLength(4)
+    expect(csv.body).toContain('"consulta";"')
+    expect(csv.body).toContain('eixo=competencia')
+    expect(csv.body).toContain('status=pendente')
+    expect(csv.body).toMatch(/"data_referencia";"\d{4}-\d{2}-\d{2}"/)
+    expect(csv.body.split('\r\n')).toHaveLength(6)
     await app.close()
   })
 

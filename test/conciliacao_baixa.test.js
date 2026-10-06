@@ -20,16 +20,11 @@ vi.mock('../src/services/apresentadoras-pagamentos.js', async (orig) => {
   const real = await orig()
   return { ...real, registrarPagamentoApresentadora: vi.fn() }
 })
-vi.mock('../src/services/custos-plano.js', async (orig) => {
-  const real = await orig()
-  return { ...real, pagarCusto: vi.fn() }
-})
 
 import * as receitas from '../src/services/receitas-comercial.js'
 import * as agregador from '../src/services/financeiro-agregador.js'
 import * as avulsas from '../src/services/receitas-avulsas.js'
 import * as apres from '../src/services/apresentadoras-pagamentos.js'
-import * as custos from '../src/services/custos-plano.js'
 import {
   comSavepoints,
   darBaixaConciliacao,
@@ -110,12 +105,12 @@ describe('darBaixaConciliacao — receita', () => {
 describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
   const SAIDA = { tipo: 'saida', valor: 300, data: '2026-03-20' }
 
-  it('custo: usa o escritor canônico com a chave da transação', async () => {
-    custos.pagarCusto.mockResolvedValue({ valor_pago: 300, data_pagamento: '2026-03-20' })
+  it('custo: UPDATE valor_pago/data_pagamento com tenant_id', async () => {
     const db = fakeDb((sql) => (/FROM custos/.test(sql) ? { rows: [{ id: CUSTO, valor_pago: null, tipo: 'outros' }] } : null))
-    const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'custo', alvoId: CUSTO, chaveOperacao: PG })
+    const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'custo', alvoId: CUSTO })
     expect(r).toMatchObject({ aplicada: true, alvo_id: CUSTO, valor_pago: 300, data_pagamento: '2026-03-20' })
-    expect(custos.pagarCusto).toHaveBeenCalledWith(db, expect.objectContaining({ tenantId: T, id: CUSTO, valorPago: 300, dataPagamento: '2026-03-20', chaveOperacao: PG }))
+    const upd = db.queries.find((q) => /UPDATE custos/.test(q.sql))
+    expect(upd.params).toEqual([CUSTO, T, 300, '2026-03-20'])
   })
 
   it('custo já pago: não sobrescreve', async () => {
@@ -147,9 +142,9 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
       return null
     })
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'imposto', alvoId: 'imposto:2026-03' })
-    expect(agregador.pagarImposto).toHaveBeenCalledWith(db, expect.objectContaining({
+    expect(agregador.pagarImposto).toHaveBeenCalledWith(db, {
       tenantId: T, mes: '2026-03', valorPago: SAIDA.valor, dataPagamento: SAIDA.data,
-    }))
+    })
     expect(r).toMatchObject({ aplicada: true, alvo_tipo: 'imposto', alvo_id: CUSTO, valor_pago: SAIDA.valor, data_pagamento: SAIDA.data })
   })
 

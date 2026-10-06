@@ -318,7 +318,7 @@ export function comSavepoints(db) {
 
 const jaPago = (v) => Number(v ?? 0) > 0
 
-async function baixarReceita(db, { tenantId, tx, alvoId, userId, chaveOperacao }) {
+async function baixarReceita(db, { tenantId, tx, alvoId, userId }) {
   const mod = await import('./receitas-comercial.js')
   const ref = mod.parseIdTitulo(alvoId)
   if (!ref) throw naoEncontrado('Título de receita não encontrado')
@@ -346,7 +346,6 @@ async function baixarReceita(db, { tenantId, tx, alvoId, userId, chaveOperacao }
     const item = await mod.receberTitulo(comSavepoints(db), {
       tenantId, id: alvoId, valorPago: tx.valor, dataPagamento: tx.data, actorUserId: userId ?? null,
       observacao: 'Baixa via conciliação Asaas',
-      chaveOperacao,
     })
     return { aplicada: true, alvo_id: item.id, valor_pago: item.valor_pago, data_pagamento: item.data_pagamento }
   } catch (err) {
@@ -363,7 +362,7 @@ async function resolverCustoId(db, tenantId, alvoId) {
   return custos.materializarVirtual(db, { tenantId, recorrente_id: v.recorrente_id, mes: v.mes })
 }
 
-async function baixarCustoPorId(db, { tenantId, tx, id, tipoEsperado, chaveOperacao, ator }) {
+async function baixarCustoPorId(db, { tenantId, tx, id, tipoEsperado }) {
   const r = await db.query(
     'SELECT id, valor_pago, tipo, cancelado_em FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
     [id, tenantId],
@@ -374,21 +373,21 @@ async function baixarCustoPorId(db, { tenantId, tx, id, tipoEsperado, chaveOpera
   }
   if (row.cancelado_em) throw encerradoErro('custo')
   if (jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
-  const { pagarCusto } = await import('./custos-plano.js')
-  const item = await pagarCusto(db, {
-    tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data,
-    chaveOperacao, ator,
-  })
-  return { aplicada: true, alvo_id: row.id, valor_pago: Number(item.valor_pago), data_pagamento: item.data_pagamento }
+  await db.query(
+    `UPDATE custos SET valor_pago = $3::numeric, data_pagamento = $4::date, atualizado_em = NOW()
+      WHERE id = $1::uuid AND tenant_id = $2::uuid`,
+    [row.id, tenantId, tx.valor, tx.data],
+  )
+  return { aplicada: true, alvo_id: row.id, valor_pago: Number(tx.valor), data_pagamento: tx.data }
 }
 
-async function baixarCusto(db, { tenantId, tx, alvoId, chaveOperacao, ator }) {
+async function baixarCusto(db, { tenantId, tx, alvoId }) {
   const id = await resolverCustoId(db, tenantId, alvoId)
   if (!id) throw naoEncontrado('Custo não encontrado')
-  return baixarCustoPorId(db, { tenantId, tx, id, chaveOperacao, ator })
+  return baixarCustoPorId(db, { tenantId, tx, id })
 }
 
-async function baixarApresentadora(db, { tenantId, tx, alvoId, userId, chaveOperacao }) {
+async function baixarApresentadora(db, { tenantId, tx, alvoId, userId }) {
   const m = RE_APRES.exec(alvoId)
   if (!m) throw naoEncontrado('Pagamento de apresentadora não encontrado (use apresentadora:<id>:<AAAA-MM>:<fixo|variavel>)')
   const [, apresentadoraId, mes] = m
@@ -406,7 +405,6 @@ async function baixarApresentadora(db, { tenantId, tx, alvoId, userId, chaveOper
   const reg = await pg.registrarPagamentoApresentadora(db, {
     tenantId, apresentadoraId, mes, componente, valorPago: tx.valor, dataPagamento: tx.data,
     observacao: 'Baixa via conciliação Asaas', userId: userId ?? null,
-    chaveOperacao,
   })
   if (!reg) throw naoEncontrado('Apresentadora não encontrada')
   const r = await db.query(
@@ -418,7 +416,7 @@ async function baixarApresentadora(db, { tenantId, tx, alvoId, userId, chaveOper
 }
 
 // Receita avulsa: alvo = receitas_avulsas.id (UUID). Baixa via serviço receitas-avulsas.js.
-async function baixarAvulsa(db, { tenantId, tx, alvoId, chaveOperacao }) {
+async function baixarAvulsa(db, { tenantId, tx, alvoId }) {
   if (!UUID_RE.test(alvoId)) throw naoEncontrado('Receita avulsa não encontrada')
   const ex = await db.query(
     'SELECT id, valor_pago, perdido_em FROM receitas_avulsas WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
@@ -429,14 +427,14 @@ async function baixarAvulsa(db, { tenantId, tx, alvoId, chaveOperacao }) {
   if (row.perdido_em) throw encerradoErro('receita')
   if (jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
   const avulsas = await import('./receitas-avulsas.js')
-  const item = await avulsas.receberReceitaAvulsa(db, { tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data, chaveOperacao })
+  const item = await avulsas.receberReceitaAvulsa(db, { tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data })
   if (!item) throw naoEncontrado('Receita avulsa não encontrada')
   return { aplicada: true, alvo_id: item.id, valor_pago: item.valor_pago, data_pagamento: item.data_pagamento }
 }
 
 // Imposto: custos tipo 'imposto' materializado na baixa; id virtual `imposto:<AAAA-MM>`.
 // Virtual => `pagarImposto` (financeiro-agregador) materializa e baixa com o valor/data da transação.
-async function baixarImposto(db, { tenantId, tx, alvoId, chaveOperacao, ator }) {
+async function baixarImposto(db, { tenantId, tx, alvoId }) {
   let id = UUID_RE.test(alvoId) ? alvoId : null
   if (!id) {
     const m = RE_IMPOSTO.exec(alvoId)
@@ -451,7 +449,7 @@ async function baixarImposto(db, { tenantId, tx, alvoId, chaveOperacao, ator }) 
     if (!id) {
       const { pagarImposto } = await import('./financeiro-agregador.js')
       try {
-        await pagarImposto(db, { tenantId, mes, valorPago: tx.valor, dataPagamento: tx.data, chaveOperacao, ator })
+        await pagarImposto(db, { tenantId, mes, valorPago: tx.valor, dataPagamento: tx.data })
       } catch (err) {
         if (err?.status && !(err instanceof ConciliacaoError)) throw new ConciliacaoError(err.message, err.status, err.code ?? 'IMPOSTO_INVALIDO')
         throw err
@@ -465,7 +463,7 @@ async function baixarImposto(db, { tenantId, tx, alvoId, chaveOperacao, ator }) 
       return { aplicada: true, alvo_id: id, valor_pago: tx.valor, data_pagamento: tx.data }
     }
   }
-  return baixarCustoPorId(db, { tenantId, tx, id, tipoEsperado: 'imposto', chaveOperacao, ator })
+  return baixarCustoPorId(db, { tenantId, tx, id, tipoEsperado: 'imposto' })
 }
 
 /**
@@ -474,11 +472,11 @@ async function baixarImposto(db, { tenantId, tx, alvoId, chaveOperacao, ator }) 
  * Lança ConciliacaoError (404/409/400) quando o alvo não existe / módulo ausente.
  * `transacao` = { valor, data, tipo } (gateway_transacoes).
  */
-export async function darBaixaConciliacao(db, { tenantId, transacao, tipo, alvoId, userId, chaveOperacao } = {}) {
+export async function darBaixaConciliacao(db, { tenantId, transacao, tipo, alvoId, userId } = {}) {
   const tx = { valor: Number(transacao?.valor), data: String(transacao?.data ?? '').slice(0, 10) }
   if (!(tx.valor > 0) || !isData(tx.data)) throw new ConciliacaoError('Transação sem valor/data válidos', 400, 'TRANSACAO_INVALIDA')
   const id = String(alvoId ?? '')
-  const args = { tenantId, tx, alvoId: id, userId, chaveOperacao, ator: { tipo: 'usuario', id: userId ?? 'asaas-conciliacao' } }
+  const args = { tenantId, tx, alvoId: id, userId }
   let r
   try {
     if (tipo === 'receita') r = await baixarReceita(db, args)

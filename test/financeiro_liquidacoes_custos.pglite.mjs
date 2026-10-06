@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { PGlite } from '@electric-sql/pglite'
+import Fastify from 'fastify'
 
 import { desfazerBaixaCusto, idVirtual, pagarCusto } from '../src/services/custos-plano.js'
+import { darBaixaConciliacao, desfazerBaixaConciliacao } from '../src/services/conciliacao.js'
+import { asaasRoutes } from '../src/routes/asaas.js'
 
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 const [tenant, outroTenant, custo, legado, cancelado, multi, ator, recorrente] = [1, 2, 3, 4, 5, 6, 7, 8].map(id)
@@ -123,6 +126,104 @@ assert.equal(virtual.valor_pago, 3000)
 assert.equal(virtual.virtual, false)
 assert.equal((await pg.query(`SELECT count(*)::int AS n FROM custos WHERE recorrente_id = $1::uuid`, [recorrente])).rows[0].n, 1)
 assert.equal((await pg.query(`SELECT count(*)::int AS n FROM financeiro_liquidacoes WHERE origem_id = $1::uuid`, [virtual.id])).rows[0].n, 1)
+
+// A conciliação já possui BEGIN externo. O comando canônico usa savepoint e
+// só persiste quando o vínculo externo também confirma a transação.
+const custoAsaas = id(70)
+const transacaoAsaas = id(71)
+await pg.query(
+  `INSERT INTO custos (id, tenant_id, descricao, valor, competencia, data_vencimento)
+   VALUES ($1::uuid, $2::uuid, 'Custo Asaas', 42.00, '2026-10-01', '2026-10-05')`,
+  [custoAsaas, tenant],
+)
+const conciliacao = {
+  tenantId: tenant, tipo: 'custo', alvoId: custoAsaas,
+  transacao: { id: transacaoAsaas, valor: '42.00', data: '2026-10-05' },
+  userId: ator,
+}
+await pg.query('BEGIN')
+assert.equal((await darBaixaConciliacao(pg, conciliacao)).aplicada, true)
+assert.equal((await pg.query('SELECT count(*)::int AS n FROM financeiro_liquidacoes WHERE origem_id = $1::uuid', [custoAsaas])).rows[0].n, 1)
+await pg.query('ROLLBACK')
+assert.equal((await pg.query('SELECT count(*)::int AS n FROM financeiro_liquidacoes WHERE origem_id = $1::uuid', [custoAsaas])).rows[0].n, 0)
+assert.equal((await pg.query('SELECT valor_pago::text AS valor FROM custos WHERE id = $1::uuid', [custoAsaas])).rows[0].valor, null)
+await pg.query('BEGIN')
+assert.equal((await darBaixaConciliacao(pg, conciliacao)).aplicada, true)
+await pg.query('COMMIT')
+assert.equal((await pg.query('SELECT valor_pago::text AS valor FROM custos WHERE id = $1::uuid', [custoAsaas])).rows[0].valor, '42.00')
+await pg.query('BEGIN')
+assert.equal((await desfazerBaixaConciliacao(pg, {
+  tenantId: tenant, tipo: 'custo', alvoId: custoAsaas, transacaoId: transacaoAsaas, userId: ator,
+})).desfeita, true)
+await pg.query('ROLLBACK')
+assert.equal((await pg.query('SELECT valor_pago::text AS valor FROM custos WHERE id = $1::uuid', [custoAsaas])).rows[0].valor, '42.00')
+await pg.query('BEGIN')
+assert.equal((await desfazerBaixaConciliacao(pg, {
+  tenantId: tenant, tipo: 'custo', alvoId: custoAsaas, transacaoId: transacaoAsaas, userId: ator,
+})).desfeita, true)
+await pg.query('COMMIT')
+assert.equal((await pg.query('SELECT valor_pago::text AS valor FROM custos WHERE id = $1::uuid', [custoAsaas])).rows[0].valor, null)
+assert.equal((await pg.query(`SELECT count(*)::int AS n FROM financeiro_estornos WHERE liquidacao_id IN (
+  SELECT id FROM financeiro_liquidacoes WHERE origem_id = $1::uuid
+)`, [custoAsaas])).rows[0].n, 1)
+
+// A rota real escreve vínculo + fato na mesma conexão. Uma falha do vínculo
+// depois da baixa precisa devolver ambos ao estado anterior.
+const custoRota = id(72)
+const txRota = id(73)
+const custoFalha = id(74)
+const txFalha = id(75)
+await pg.exec(`
+  RESET ROLE;
+  CREATE TABLE gateway_transacoes (
+    id uuid PRIMARY KEY, tenant_id uuid NOT NULL REFERENCES tenants(id),
+    tipo text NOT NULL, valor numeric(15,2) NOT NULL, data date NOT NULL,
+    conciliado_com_tipo text, conciliado_com_id uuid, conciliado_em timestamptz,
+    conciliado_por uuid, conciliado_baixa boolean NOT NULL DEFAULT false,
+    CONSTRAINT falha_vinculo_teste CHECK (id <> '${txFalha}'::uuid OR conciliado_com_id IS NULL)
+  );
+  ALTER TABLE gateway_transacoes ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE gateway_transacoes FORCE ROW LEVEL SECURITY;
+  CREATE POLICY gateway_tenant_test ON gateway_transacoes
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+  GRANT SELECT, UPDATE ON gateway_transacoes TO fin03_custos;
+  INSERT INTO gateway_transacoes (id, tenant_id, tipo, valor, data) VALUES
+    ('${txRota}', '${tenant}', 'saida', 19.00, '2026-10-05'),
+    ('${txFalha}', '${tenant}', 'saida', 19.00, '2026-10-05');
+  INSERT INTO custos (id, tenant_id, descricao, valor, competencia, data_vencimento) VALUES
+    ('${custoRota}', '${tenant}', 'Rota Asaas', 19.00, '2026-10-01', '2026-10-05'),
+    ('${custoFalha}', '${tenant}', 'Rota falha', 19.00, '2026-10-01', '2026-10-05');
+  SET ROLE fin03_custos;
+`)
+const app = Fastify()
+app.decorate('authenticate', async (request) => {
+  request.user = { tenant_id: tenant, papel: 'franqueado', sub: ator }
+})
+app.decorate('requirePapel', () => async () => {})
+app.decorate('withTenant', async (_tenantId, work) => work(pg))
+await app.register(asaasRoutes)
+const respostaRota = await app.inject({
+  method: 'POST', url: '/v1/asaas/conciliar',
+  payload: { transacao_id: txRota, tipo: 'custo', id: custoRota },
+})
+assert.equal(respostaRota.statusCode, 200, respostaRota.body)
+assert.equal((await pg.query('SELECT count(*)::int AS n FROM financeiro_liquidacoes WHERE origem_id = $1::uuid', [custoRota])).rows[0].n, 1)
+assert.equal((await pg.query('SELECT conciliado_com_id FROM gateway_transacoes WHERE id = $1::uuid', [txRota])).rows[0].conciliado_com_id, custoRota)
+const desfazerRota = await app.inject({ method: 'DELETE', url: `/v1/asaas/conciliacao/${txRota}` })
+assert.equal(desfazerRota.statusCode, 200, desfazerRota.body)
+assert.equal((await pg.query('SELECT conciliado_com_id FROM gateway_transacoes WHERE id = $1::uuid', [txRota])).rows[0].conciliado_com_id, null)
+assert.equal((await pg.query(`SELECT count(*)::int AS n FROM financeiro_estornos e
+  JOIN financeiro_liquidacoes l ON l.id = e.liquidacao_id WHERE l.origem_id = $1::uuid`, [custoRota])).rows[0].n, 1)
+const respostaFalha = await app.inject({
+  method: 'POST', url: '/v1/asaas/conciliar',
+  payload: { transacao_id: txFalha, tipo: 'custo', id: custoFalha },
+})
+assert.equal(respostaFalha.statusCode, 500)
+assert.equal((await pg.query('SELECT valor_pago::text AS valor FROM custos WHERE id = $1::uuid', [custoFalha])).rows[0].valor, null)
+assert.equal((await pg.query('SELECT count(*)::int AS n FROM financeiro_liquidacoes WHERE origem_id = $1::uuid', [custoFalha])).rows[0].n, 0)
+assert.equal((await pg.query('SELECT conciliado_com_id FROM gateway_transacoes WHERE id = $1::uuid', [txFalha])).rows[0].conciliado_com_id, null)
+await app.close()
 
 await pg.exec(`SELECT set_config('app.tenant_id', '${outroTenant}', false)`)
 assert.equal((await pg.query(`SELECT count(*)::int AS n FROM financeiro_liquidacoes WHERE origem_id = $1::uuid`, [custo])).rows[0].n, 0)

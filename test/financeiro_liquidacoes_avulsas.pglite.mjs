@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { PGlite } from '@electric-sql/pglite'
 import Fastify from 'fastify'
 import { receberReceitaAvulsa, desfazerReceitaAvulsa } from '../src/services/receitas-avulsas.js'
+import { darBaixaConciliacao, desfazerBaixaConciliacao } from '../src/services/conciliacao.js'
 import { financeiroReceitasAvulsasRoutes } from '../src/routes/financeiro_receitas_avulsas.js'
 
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -12,6 +13,7 @@ const avulsaId = id(3)
 const simplesId = id(5)
 const legadoId = id(6)
 const rotaId = id(7)
+const asaasId = id(70)
 const db = new PGlite()
 
 try {
@@ -42,7 +44,8 @@ try {
     INSERT INTO receitas_avulsas (id, tenant_id, descricao, grupo, valor_previsto, data_vencimento, competencia)
       VALUES ('${avulsaId}', '${tenantId}', 'Aporte', 'aporte', 100.00, '2026-10-05', '2026-10-01'),
              ('${simplesId}', '${tenantId}', 'Serviço', 'servico', 30.00, '2026-10-05', '2026-10-01'),
-             ('${rotaId}', '${tenantId}', 'UI antiga', 'servico', 40.00, '2026-10-05', '2026-10-01');
+             ('${rotaId}', '${tenantId}', 'UI antiga', 'servico', 40.00, '2026-10-05', '2026-10-01'),
+             ('${asaasId}', '${tenantId}', 'Conciliação Asaas', 'servico', 50.00, '2026-10-05', '2026-10-01');
     INSERT INTO receitas_avulsas (id, tenant_id, descricao, grupo, valor_previsto, valor_pago, data_vencimento, data_pagamento, competencia)
       VALUES ('${legadoId}', '${tenantId}', 'Legado', 'servico', 20.00, 20.00, '2026-10-05', '2026-10-05', '2026-10-01');
     SELECT set_config('app.tenant_id', '${tenantId}', false);
@@ -108,6 +111,28 @@ try {
   await assert.rejects(desfazerReceitaAvulsa(db, { ...estorno, valorEstorno: '15.01', chaveOperacao: id(21) }),
     (e) => e.code === 'FINANCEIRO_ESTORNO_EXCEDENTE')
   assert.equal((await db.query('SELECT valor_pago::text AS pago FROM receitas_avulsas WHERE id = $1', [avulsaId])).rows[0].pago, '89.99')
+
+  const txAsaas = id(71)
+  const conciliarAsaas = {
+    tenantId, tipo: 'avulsa', alvoId: asaasId, userId: id(4),
+    transacao: { id: txAsaas, valor: '50.00', data: '2026-10-05' },
+  }
+  await db.query('BEGIN')
+  assert.equal((await darBaixaConciliacao(db, conciliarAsaas)).aplicada, true)
+  await db.query('ROLLBACK')
+  assert.equal((await db.query('SELECT valor_pago::text AS pago FROM receitas_avulsas WHERE id = $1::uuid', [asaasId])).rows[0].pago, '0.00')
+  await db.query('BEGIN')
+  assert.equal((await darBaixaConciliacao(db, conciliarAsaas)).aplicada, true)
+  await db.query('COMMIT')
+  assert.equal((await db.query('SELECT valor_pago::text AS pago FROM receitas_avulsas WHERE id = $1::uuid', [asaasId])).rows[0].pago, '50.00')
+  await db.query('BEGIN')
+  assert.equal((await desfazerBaixaConciliacao(db, {
+    tenantId, tipo: 'avulsa', alvoId: asaasId, transacaoId: txAsaas, userId: id(4),
+  })).desfeita, true)
+  await db.query('COMMIT')
+  assert.equal((await db.query('SELECT valor_pago::text AS pago FROM receitas_avulsas WHERE id = $1::uuid', [asaasId])).rows[0].pago, '0.00')
+  assert.equal((await db.query(`SELECT count(*)::int AS n FROM financeiro_estornos e
+    JOIN financeiro_liquidacoes l ON l.id = e.liquidacao_id WHERE l.origem_id = $1::uuid`, [asaasId])).rows[0].n, 1)
 
   await db.exec(`SELECT set_config('app.tenant_id', '${otherTenant}', false)`)
   assert.equal(await receberReceitaAvulsa(db, { ...base, tenantId: otherTenant, chaveOperacao: id(30) }), null)

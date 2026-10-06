@@ -1,4 +1,4 @@
-// Lógica PURA de conciliação Asaas ↔ financeiro (sem I/O, sem banco, sem rede).
+// Lógica de conciliação Asaas ↔ financeiro.
 //
 // Entradas:
 //   - transação normalizada (ver normalizarTransacaoAsaas):
@@ -11,6 +11,10 @@
 //
 // Datas trafegam como string 'YYYY-MM-DD' (convenção do projeto) — nunca Date,
 // pra não sofrer com fuso.
+
+import { randomUUID } from 'node:crypto'
+import { centsToExactMoney, exactMoneyToCents } from '../lib/money.js'
+import { hojeSaoPaulo } from './receitas-comercial.js'
 
 const RE_DATA = /^\d{4}-\d{2}-\d{2}$/
 const RE_MES = /^\d{4}-\d{2}$/
@@ -288,6 +292,13 @@ const encerradoErro = (tipo) => new ConciliacaoError(
   409, tipo === 'custo' ? 'ALVO_CANCELADO' : 'ALVO_PERDIDO',
 )
 const indisponivel = (msg) => new ConciliacaoError(msg, 409, 'MODULO_INDISPONIVEL')
+const revisarBaixa = () => new ConciliacaoError(
+  'Baixa da conciliação sem fato canônico único equivalente; revisão necessária', 409, 'CONCILIACAO_BAIXA_AMBIGUA',
+)
+const atorConciliacao = (userId) => userId
+  ? { tipo: 'usuario', id: userId }
+  : { tipo: 'sistema', id: 'asaas.conciliacao' }
+const chaveConciliacao = (transacaoId) => `asaas:${transacaoId}:${randomUUID()}`
 
 // Serviços como receberTitulo abrem BEGIN/COMMIT próprios; dentro de uma transação já aberta
 // isso commitaria o vínculo antes da hora. Este wrapper converte em SAVEPOINT/RELEASE/ROLLBACK TO,
@@ -318,7 +329,7 @@ export function comSavepoints(db) {
 
 const jaPago = (v) => Number(v ?? 0) > 0
 
-async function baixarReceita(db, { tenantId, tx, alvoId, userId }) {
+async function baixarReceita(db, { tenantId, tx, alvoId, userId, chaveOperacao }) {
   const mod = await import('./receitas-comercial.js')
   const ref = mod.parseIdTitulo(alvoId)
   if (!ref) throw naoEncontrado('Título de receita não encontrado')
@@ -345,7 +356,7 @@ async function baixarReceita(db, { tenantId, tx, alvoId, userId }) {
   try {
     const item = await mod.receberTitulo(comSavepoints(db), {
       tenantId, id: alvoId, valorPago: tx.valor, dataPagamento: tx.data, actorUserId: userId ?? null,
-      observacao: 'Baixa via conciliação Asaas',
+      observacao: 'Baixa via conciliação Asaas', chaveOperacao,
     })
     return { aplicada: true, alvo_id: item.id, valor_pago: item.valor_pago, data_pagamento: item.data_pagamento }
   } catch (err) {
@@ -362,32 +373,30 @@ async function resolverCustoId(db, tenantId, alvoId) {
   return custos.materializarVirtual(db, { tenantId, recorrente_id: v.recorrente_id, mes: v.mes })
 }
 
-async function baixarCustoPorId(db, { tenantId, tx, id, tipoEsperado }) {
+async function baixarCustoPorId(db, { tenantId, tx, id, chaveOperacao, userId }) {
   const r = await db.query(
     'SELECT id, valor_pago, tipo, cancelado_em FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
     [id, tenantId],
   )
   const row = r.rows[0]
-  if (!row || (tipoEsperado && row.tipo !== tipoEsperado)) {
-    throw naoEncontrado(tipoEsperado === 'imposto' ? 'Imposto não encontrado' : 'Custo não encontrado')
-  }
+  if (!row || row.tipo === 'imposto') throw naoEncontrado('Custo não encontrado')
   if (row.cancelado_em) throw encerradoErro('custo')
   if (jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
-  await db.query(
-    `UPDATE custos SET valor_pago = $3::numeric, data_pagamento = $4::date, atualizado_em = NOW()
-      WHERE id = $1::uuid AND tenant_id = $2::uuid`,
-    [row.id, tenantId, tx.valor, tx.data],
-  )
-  return { aplicada: true, alvo_id: row.id, valor_pago: Number(tx.valor), data_pagamento: tx.data }
+  const { pagarCusto } = await import('./custos-plano.js')
+  const item = await pagarCusto(comSavepoints(db), {
+    tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data,
+    hoje: hojeSaoPaulo(), ator: atorConciliacao(userId), chaveOperacao,
+  })
+  return { aplicada: true, alvo_id: row.id, valor_pago: item.valor_pago, data_pagamento: item.data_pagamento }
 }
 
-async function baixarCusto(db, { tenantId, tx, alvoId }) {
+async function baixarCusto(db, { tenantId, tx, alvoId, chaveOperacao, userId }) {
   const id = await resolverCustoId(db, tenantId, alvoId)
   if (!id) throw naoEncontrado('Custo não encontrado')
-  return baixarCustoPorId(db, { tenantId, tx, id })
+  return baixarCustoPorId(db, { tenantId, tx, id, chaveOperacao, userId })
 }
 
-async function baixarApresentadora(db, { tenantId, tx, alvoId, userId }) {
+async function baixarApresentadora(db, { tenantId, tx, alvoId, userId, chaveOperacao }) {
   const m = RE_APRES.exec(alvoId)
   if (!m) throw naoEncontrado('Pagamento de apresentadora não encontrado (use apresentadora:<id>:<AAAA-MM>:<fixo|variavel>)')
   const [, apresentadoraId, mes] = m
@@ -402,9 +411,9 @@ async function baixarApresentadora(db, { tenantId, tx, alvoId, userId }) {
     return { aplicada: false, motivo: 'ja_baixado', alvo_id: ex.rows[0].id }
   }
   const pg = await import('./apresentadoras-pagamentos.js')
-  const reg = await pg.registrarPagamentoApresentadora(db, {
+  const reg = await pg.registrarPagamentoApresentadora(comSavepoints(db), {
     tenantId, apresentadoraId, mes, componente, valorPago: tx.valor, dataPagamento: tx.data,
-    observacao: 'Baixa via conciliação Asaas', userId: userId ?? null,
+    observacao: 'Baixa via conciliação Asaas', userId: userId ?? null, chaveOperacao,
   })
   if (!reg) throw naoEncontrado('Apresentadora não encontrada')
   const r = await db.query(
@@ -416,7 +425,7 @@ async function baixarApresentadora(db, { tenantId, tx, alvoId, userId }) {
 }
 
 // Receita avulsa: alvo = receitas_avulsas.id (UUID). Baixa via serviço receitas-avulsas.js.
-async function baixarAvulsa(db, { tenantId, tx, alvoId }) {
+async function baixarAvulsa(db, { tenantId, tx, alvoId, userId, chaveOperacao }) {
   if (!UUID_RE.test(alvoId)) throw naoEncontrado('Receita avulsa não encontrada')
   const ex = await db.query(
     'SELECT id, valor_pago, perdido_em FROM receitas_avulsas WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
@@ -427,56 +436,60 @@ async function baixarAvulsa(db, { tenantId, tx, alvoId }) {
   if (row.perdido_em) throw encerradoErro('receita')
   if (jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
   const avulsas = await import('./receitas-avulsas.js')
-  const item = await avulsas.receberReceitaAvulsa(db, { tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data })
+  const item = await avulsas.receberReceitaAvulsa(comSavepoints(db), {
+    tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data,
+    ator: atorConciliacao(userId), chaveOperacao,
+  })
   if (!item) throw naoEncontrado('Receita avulsa não encontrada')
   return { aplicada: true, alvo_id: item.id, valor_pago: item.valor_pago, data_pagamento: item.data_pagamento }
 }
 
 // Imposto: custos tipo 'imposto' materializado na baixa; id virtual `imposto:<AAAA-MM>`.
 // Virtual => `pagarImposto` (financeiro-agregador) materializa e baixa com o valor/data da transação.
-async function baixarImposto(db, { tenantId, tx, alvoId }) {
-  let id = UUID_RE.test(alvoId) ? alvoId : null
-  if (!id) {
-    const m = RE_IMPOSTO.exec(alvoId)
-    if (!m) throw naoEncontrado('Imposto não encontrado (use imposto:<AAAA-MM>)')
-    const mes = m[1]
-    const existente = await db.query(
-      `SELECT id FROM custos WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date
-        ORDER BY criado_em LIMIT 1`,
-      [tenantId, `${mes}-01`],
-    )
-    id = existente.rows[0]?.id ?? null
-    if (!id) {
-      const { pagarImposto } = await import('./financeiro-agregador.js')
-      try {
-        await pagarImposto(db, { tenantId, mes, valorPago: tx.valor, dataPagamento: tx.data })
-      } catch (err) {
-        if (err?.status && !(err instanceof ConciliacaoError)) throw new ConciliacaoError(err.message, err.status, err.code ?? 'IMPOSTO_INVALIDO')
-        throw err
-      }
-      const criado = await db.query(
-        `SELECT id FROM custos WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date LIMIT 1`,
-        [tenantId, `${mes}-01`],
-      )
-      id = criado.rows[0]?.id ?? null
-      if (!id) throw indisponivel('Imposto do mês não pôde ser materializado')
-      return { aplicada: true, alvo_id: id, valor_pago: tx.valor, data_pagamento: tx.data }
-    }
-  }
-  return baixarCustoPorId(db, { tenantId, tx, id, tipoEsperado: 'imposto' })
+async function baixarImposto(db, { tenantId, tx, alvoId, userId, chaveOperacao }) {
+  const m = RE_IMPOSTO.exec(alvoId)
+  if (!m && !UUID_RE.test(alvoId)) throw naoEncontrado('Imposto não encontrado (use imposto:<AAAA-MM>)')
+  const filtro = m ? 'competencia = $2::date' : 'id = $2::uuid'
+  const ref = m ? `${m[1]}-01` : alvoId
+  const { rows } = await db.query(
+    `SELECT id, valor_pago, cancelado_em, to_char(competencia, 'YYYY-MM') AS mes
+       FROM custos WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND ${filtro} FOR UPDATE`,
+    [tenantId, ref],
+  )
+  const row = rows[0]
+  if (!m && !row) throw naoEncontrado('Imposto não encontrado')
+  if (row?.cancelado_em) throw encerradoErro('custo')
+  if (row && jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
+  const mes = m?.[1] ?? row.mes
+  const { pagarImposto } = await import('./financeiro-agregador.js')
+  await pagarImposto(comSavepoints(db), {
+    tenantId, mes, valorPago: tx.valor, dataPagamento: tx.data,
+    ator: atorConciliacao(userId), chaveOperacao,
+  })
+  const { rows: criados } = await db.query(
+    `SELECT id FROM custos WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND competencia = $2::date`,
+    [tenantId, `${mes}-01`],
+  )
+  const id = criados[0]?.id
+  if (!id || (row && id !== row.id)) throw indisponivel('Imposto do mês não pôde ser materializado')
+  return { aplicada: true, alvo_id: id, valor_pago: Number(tx.valor), data_pagamento: tx.data }
 }
 
 /**
  * Dá baixa no alvo da conciliação. Retorna
  *   { aplicada, motivo?, alvo_tipo, alvo_id (UUID real), valor_pago?, data_pagamento? }
  * Lança ConciliacaoError (404/409/400) quando o alvo não existe / módulo ausente.
- * `transacao` = { valor, data, tipo } (gateway_transacoes).
+ * `transacao` = { id, valor, data, tipo } (gateway_transacoes).
  */
 export async function darBaixaConciliacao(db, { tenantId, transacao, tipo, alvoId, userId } = {}) {
-  const tx = { valor: Number(transacao?.valor), data: String(transacao?.data ?? '').slice(0, 10) }
-  if (!(tx.valor > 0) || !isData(tx.data)) throw new ConciliacaoError('Transação sem valor/data válidos', 400, 'TRANSACAO_INVALIDA')
+  let centavosTx
+  try { centavosTx = exactMoneyToCents(String(transacao?.valor)) } catch { /* rejeitada abaixo */ }
+  const tx = { valor: centavosTx > 0n ? centsToExactMoney(centavosTx) : null, data: String(transacao?.data ?? '').slice(0, 10) }
+  if (!tx.valor || !isData(tx.data) || !UUID_RE.test(String(transacao?.id ?? ''))) {
+    throw new ConciliacaoError('Transação sem id/valor/data válidos', 400, 'TRANSACAO_INVALIDA')
+  }
   const id = String(alvoId ?? '')
-  const args = { tenantId, tx, alvoId: id, userId }
+  const args = { tenantId, tx, alvoId: id, userId, chaveOperacao: chaveConciliacao(transacao.id) }
   let r
   try {
     if (tipo === 'receita') r = await baixarReceita(db, args)
@@ -487,6 +500,10 @@ export async function darBaixaConciliacao(db, { tenantId, transacao, tipo, alvoI
     else throw new ConciliacaoError('tipo deve ser receita, avulsa, custo, apresentadora ou imposto')
   } catch (err) {
     if (err?.code === '42P01' || err?.code === '42703') throw indisponivel('Módulo financeiro ainda não migrado')
+    const status = err?.status ?? err?.statusCode
+    if (!(err instanceof ConciliacaoError) && Number.isInteger(status) && status >= 400 && status < 500) {
+      throw new ConciliacaoError(err.message, status, err.code ?? 'CONCILIACAO_INVALIDA')
+    }
     throw err
   }
   return { alvo_tipo: tipo, ...r }
@@ -494,51 +511,80 @@ export async function darBaixaConciliacao(db, { tenantId, transacao, tipo, alvoI
 
 /**
  * Desfaz a baixa gerada por uma conciliação (só chamar se gateway_transacoes.conciliado_baixa).
- * `vinculo` = { tipo, id } com o UUID real guardado no vínculo.
+ * O id da transação identifica a liquidação canônica criada pela conciliação.
+ * Vínculos antigos sem fato identificável exigem revisão e permanecem vinculados.
  */
-export async function desfazerBaixaConciliacao(db, { tenantId, tipo, alvoId } = {}) {
+export async function desfazerBaixaConciliacao(db, { tenantId, tipo, alvoId, transacaoId, userId } = {}) {
+  if (!UUID_RE.test(String(transacaoId ?? '')) || !UUID_RE.test(String(alvoId ?? ''))) throw revisarBaixa()
+  const origens = {
+    receita: 'receita_titulo', avulsa: 'receita_avulsa', custo: 'custo',
+    apresentadora: 'apresentadora_pagamento', imposto: 'imposto',
+  }
+  if (!origens[tipo]) throw revisarBaixa()
+  // O vínculo antigo só guarda o alvo, não a liquidação. O prefixo da chave
+  // identifica o fato criado por ESTA transação; sem ele, uma baixa manual
+  // posterior poderia ser estornada por engano. Links legados falham fechados.
+  const { rows: fatos } = await db.query(
+    `SELECT l.id, l.origem_tipo, l.origem_id,
+            (l.valor - COALESCE(SUM(e.valor), 0))::text AS saldo
+       FROM financeiro_liquidacoes l
+       LEFT JOIN financeiro_estornos e ON e.tenant_id = l.tenant_id AND e.liquidacao_id = l.id
+      WHERE l.tenant_id = $1::uuid AND l.idempotencia_chave LIKE $2
+      GROUP BY l.id, l.origem_tipo, l.origem_id, l.valor
+     HAVING l.valor > COALESCE(SUM(e.valor), 0)`,
+    [tenantId, `asaas:${transacaoId}:%`],
+  )
+  if (fatos.length !== 1 || fatos[0].origem_tipo !== origens[tipo] || fatos[0].origem_id !== alvoId) {
+    throw revisarBaixa()
+  }
+  const chaveOperacao = `asaas:desfazer:${transacaoId}:${randomUUID()}`
   if (tipo === 'receita') {
     const mod = await import('./receitas-comercial.js')
-    try {
-      await mod.desfazerRecebimento(db, { tenantId, id: alvoId })
-    } catch (err) {
-      if (err?.code === 'RECEITA_NOT_FOUND' || err?.status === 404) return { desfeita: false, motivo: 'alvo_inexistente' }
-      throw err
-    }
+    await mod.desfazerRecebimento(comSavepoints(db), {
+      tenantId, id: alvoId, actorId: userId ?? 'asaas.conciliacao',
+      actorType: userId ? 'usuario' : 'sistema', chaveOperacao,
+    })
     return { desfeita: true }
   }
   if (tipo === 'avulsa') {
     const avulsas = await import('./receitas-avulsas.js')
-    const item = await avulsas.desfazerReceitaAvulsa(db, { tenantId, id: alvoId })
-    return item ? { desfeita: true } : { desfeita: false, motivo: 'alvo_inexistente' }
+    const item = await avulsas.desfazerReceitaAvulsa(comSavepoints(db), {
+      tenantId, id: alvoId, autoEstorno: true, ator: atorConciliacao(userId),
+    })
+    if (!item) throw revisarBaixa()
+    return { desfeita: true }
   }
-  if (tipo === 'custo' || tipo === 'imposto') {
-    const r = await db.query(
-      `UPDATE custos SET valor_pago = NULL, data_pagamento = NULL, atualizado_em = NOW()
-        WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING id`,
-      [alvoId, tenantId],
-    )
-    return r.rows[0] ? { desfeita: true } : { desfeita: false, motivo: 'alvo_inexistente' }
+  if (tipo === 'custo') {
+    const { desfazerBaixaCusto } = await import('./custos-plano.js')
+    await desfazerBaixaCusto(comSavepoints(db), {
+      tenantId, id: alvoId, hoje: hojeSaoPaulo(), ator: atorConciliacao(userId), chaveOperacao,
+    })
+    return { desfeita: true }
   }
   if (tipo === 'apresentadora') {
-    // Linha cancelada mantém o cancelamento (decisão 3): só zera a baixa; senão apaga a linha.
-    const u = await db.query(
-      `UPDATE apresentadora_pagamentos SET valor_pago = 0, data_pagamento = NULL, atualizado_em = now()
-        WHERE id = $1::uuid AND tenant_id = $2::uuid AND cancelado_em IS NOT NULL RETURNING id`,
-      [alvoId, tenantId],
+    const { rows } = await db.query(
+      `SELECT apresentadora_id, to_char(competencia, 'YYYY-MM') AS mes, componente
+         FROM apresentadora_pagamentos WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE`,
+      [tenantId, alvoId],
     )
-    if (u.rows[0]) return { desfeita: true }
-    // Linha cancelada mantém o cancelamento (decisão 3): só zera a baixa; sem cancelamento, apaga.
-    const zerada = await db.query(
-      `UPDATE apresentadora_pagamentos SET valor_pago = 0, data_pagamento = NULL, atualizado_em = now()
-        WHERE id = $1::uuid AND tenant_id = $2::uuid AND cancelado_em IS NOT NULL RETURNING id`,
-      [alvoId, tenantId],
-    )
-    const r = zerada.rows[0] ? zerada : await db.query(
-      'DELETE FROM apresentadora_pagamentos WHERE id = $1::uuid AND tenant_id = $2::uuid RETURNING id',
-      [alvoId, tenantId],
-    )
-    return r.rows[0] ? { desfeita: true } : { desfeita: false, motivo: 'alvo_inexistente' }
+    if (!rows[0]) throw revisarBaixa()
+    const { desfazerPagamentoApresentadora } = await import('./apresentadoras-pagamentos.js')
+    const ok = await desfazerPagamentoApresentadora(comSavepoints(db), {
+      tenantId, apresentadoraId: rows[0].apresentadora_id, mes: rows[0].mes,
+      componente: rows[0].componente, userId: userId ?? null, chaveOperacao,
+    })
+    if (!ok) throw revisarBaixa()
+    return { desfeita: true }
   }
-  return { desfeita: false, motivo: 'tipo_desconhecido' }
+  const { rows } = await db.query(
+    `SELECT to_char(competencia, 'YYYY-MM') AS mes FROM custos
+      WHERE tenant_id = $1::uuid AND id = $2::uuid AND tipo = 'imposto' FOR UPDATE`,
+    [tenantId, alvoId],
+  )
+  if (!rows[0]) throw revisarBaixa()
+  const { desfazerImposto } = await import('./financeiro-agregador.js')
+  await desfazerImposto(comSavepoints(db), {
+    tenantId, mes: rows[0].mes, ator: atorConciliacao(userId), chaveOperacao,
+  })
+  return { desfeita: true }
 }

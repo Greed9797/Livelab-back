@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { PGlite } from '@electric-sql/pglite'
 
 import { desfazerPagamentoApresentadora, registrarPagamentoApresentadora } from '../src/services/apresentadoras-pagamentos.js'
+import { darBaixaConciliacao, desfazerBaixaConciliacao } from '../src/services/conciliacao.js'
 
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 const [tenant, outroTenant, apresentadora, legado, multi, ator] = [1, 2, 3, 4, 5, 6].map(id)
@@ -80,6 +81,29 @@ await assert.rejects(
   desfazerPagamentoApresentadora(pg, { ...base, apresentadoraId: multi, chaveOperacao: id(42), hoje: '2026-10-06' }),
   (error) => error.code === 'APRESENTADORA_ESTORNO_GRANULAR_NECESSARIO' && error.statusCode === 409,
 )
+
+const txAsaas = id(70)
+const refAsaas = `apresentadora:${apresentadora}:${mes}:variavel`
+const conciliarAsaas = {
+  tenantId: tenant, tipo: 'apresentadora', alvoId: refAsaas, userId: ator,
+  transacao: { id: txAsaas, valor: '12.00', data: '2026-10-05' },
+}
+await pg.query('BEGIN')
+assert.equal((await darBaixaConciliacao(pg, conciliarAsaas)).aplicada, true)
+await pg.query('ROLLBACK')
+assert.equal((await pg.query(`SELECT count(*)::int AS n FROM financeiro_liquidacoes
+  WHERE idempotencia_chave LIKE $1`, [`asaas:${txAsaas}:%`])).rows[0].n, 0)
+await pg.query('BEGIN')
+const baixaAsaas = await darBaixaConciliacao(pg, conciliarAsaas)
+await pg.query('COMMIT')
+assert.equal(baixaAsaas.aplicada, true)
+assert.equal((await pg.query('SELECT valor_pago::text AS valor FROM apresentadora_pagamentos WHERE id = $1::uuid', [baixaAsaas.alvo_id])).rows[0].valor, '12.00')
+await pg.query('BEGIN')
+assert.equal((await desfazerBaixaConciliacao(pg, {
+  tenantId: tenant, tipo: 'apresentadora', alvoId: baixaAsaas.alvo_id, transacaoId: txAsaas, userId: ator,
+})).desfeita, true)
+await pg.query('COMMIT')
+assert.equal((await pg.query('SELECT valor_pago::text AS valor FROM apresentadora_pagamentos WHERE id = $1::uuid', [baixaAsaas.alvo_id])).rows[0].valor, '0.00')
 
 await pg.exec(`SELECT set_config('app.tenant_id', '${outroTenant}', false)`)
 await assert.rejects(

@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { PGlite } from '@electric-sql/pglite'
 
 import { desfazerImposto, pagarImposto } from '../src/services/financeiro-agregador.js'
+import { darBaixaConciliacao, desfazerBaixaConciliacao } from '../src/services/conciliacao.js'
 
 const id = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 const [tenant, outroTenant, ator] = [1, 2, 3].map(id)
@@ -103,6 +104,32 @@ await assert.rejects(
   /imposto_rollback_test/,
 )
 assert.equal((await pg.query(`SELECT count(*)::int AS n FROM financeiro_liquidacoes WHERE idempotencia_chave = $1`, [id(35)])).rows[0].n, 0)
+
+const txAsaas = id(70)
+const { rows: impostosAsaas } = await pg.query(
+  `INSERT INTO custos (tenant_id, descricao, valor, tipo, grupo, competencia, data_vencimento)
+   VALUES ($1::uuid, 'Imposto Asaas', 80.00, 'imposto', 'outros', '2026-05-01', '2026-05-20')
+   RETURNING id`, [tenant],
+)
+const impostoAsaas = impostosAsaas[0].id
+const conciliarAsaas = {
+  tenantId: tenant, tipo: 'imposto', alvoId: impostoAsaas, userId: ator,
+  transacao: { id: txAsaas, valor: '80.00', data: '2026-05-20' },
+}
+await pg.query('BEGIN')
+assert.equal((await darBaixaConciliacao(pg, conciliarAsaas)).aplicada, true)
+await pg.query('ROLLBACK')
+assert.equal((await pg.query('SELECT valor_pago::text AS pago FROM custos WHERE id = $1::uuid', [impostoAsaas])).rows[0].pago, null)
+await pg.query('BEGIN')
+assert.equal((await darBaixaConciliacao(pg, conciliarAsaas)).aplicada, true)
+await pg.query('COMMIT')
+assert.equal((await pg.query('SELECT valor_pago::text AS pago FROM custos WHERE id = $1::uuid', [impostoAsaas])).rows[0].pago, '80.00')
+await pg.query('BEGIN')
+assert.equal((await desfazerBaixaConciliacao(pg, {
+  tenantId: tenant, tipo: 'imposto', alvoId: impostoAsaas, transacaoId: txAsaas, userId: ator,
+})).desfeita, true)
+await pg.query('COMMIT')
+assert.equal((await pg.query('SELECT valor_pago::text AS pago FROM custos WHERE id = $1::uuid', [impostoAsaas])).rows[0].pago, '0.00')
 
 await pg.exec(`SELECT set_config('app.tenant_id', '${outroTenant}', false)`)
 assert.equal((await pg.query(`SELECT count(*)::int AS n FROM financeiro_liquidacoes WHERE tenant_id = $1::uuid`, [tenant])).rows[0].n, 0)

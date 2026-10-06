@@ -201,7 +201,7 @@ describe('conciliação', () => {
 
   it('baixa em título perdido → 409 (não chama receberTitulo)', async () => {
     const db = fakeDb({ id: T_ID, valor_pago: '400', perdido_em: PERDIDO_EM })
-    await expect(darBaixaConciliacao(db, { tenantId: TENANT, transacao: { valor: 600, data: '2026-10-12' }, tipo: 'receita', alvoId: T_ID }))
+    await expect(darBaixaConciliacao(db, { tenantId: TENANT, transacao: { id: T_ID, valor: 600, data: '2026-10-12' }, tipo: 'receita', alvoId: T_ID }))
       .rejects.toMatchObject({ status: 409, codigo: 'ALVO_PERDIDO', message: 'Desfaça a perda/cancelamento antes' })
     expect(receitas.receberTitulo).not.toHaveBeenCalled()
   })
@@ -209,17 +209,17 @@ describe('conciliação', () => {
   it('baixa em título virtual cuja linha materializada está perdida → 409', async () => {
     const db = fakeDb({ id: T_ID, valor_pago: null, perdido_em: PERDIDO_EM })
     await expect(darBaixaConciliacao(db, {
-      tenantId: TENANT, transacao: { valor: 1000, data: '2026-10-12' }, tipo: 'receita', alvoId: `calc:${C_ID}:2026-10:fixo`,
+      tenantId: TENANT, transacao: { id: T_ID, valor: 1000, data: '2026-10-12' }, tipo: 'receita', alvoId: `calc:${C_ID}:2026-10:fixo`,
     })).rejects.toMatchObject({ status: 409 })
   })
 
   it('baixa em avulsa perdida e em custo cancelado → 409 (sem UPDATE)', async () => {
     const dbAv = fakeDb({ id: T_ID, valor_pago: null, perdido_em: PERDIDO_EM })
-    await expect(darBaixaConciliacao(dbAv, { tenantId: TENANT, transacao: { valor: 200, data: '2026-10-12' }, tipo: 'avulsa', alvoId: T_ID }))
+    await expect(darBaixaConciliacao(dbAv, { tenantId: TENANT, transacao: { id: T_ID, valor: 200, data: '2026-10-12' }, tipo: 'avulsa', alvoId: T_ID }))
       .rejects.toMatchObject({ status: 409 })
     expect(avulsasMod.receberReceitaAvulsa).not.toHaveBeenCalled()
     const dbC = fakeDb({ id: C_ID, valor_pago: null, tipo: 'outros', cancelado_em: PERDIDO_EM })
-    await expect(darBaixaConciliacao(dbC, { tenantId: TENANT, transacao: { valor: 300, data: '2026-10-12' }, tipo: 'custo', alvoId: C_ID }))
+    await expect(darBaixaConciliacao(dbC, { tenantId: TENANT, transacao: { id: T_ID, valor: 300, data: '2026-10-12' }, tipo: 'custo', alvoId: C_ID }))
       .rejects.toMatchObject({ status: 409, codigo: 'ALVO_CANCELADO' })
     expect(dbC.query.mock.calls.some(([sql]) => /UPDATE custos/.test(String(sql)))).toBe(false)
   })

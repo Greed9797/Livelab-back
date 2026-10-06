@@ -10,7 +10,11 @@ vi.mock('../src/services/receitas-comercial.js', async (orig) => {
 })
 vi.mock('../src/services/financeiro-agregador.js', async (orig) => {
   const real = await orig()
-  return { ...real, pagarImposto: vi.fn() }
+  return { ...real, pagarImposto: vi.fn(), desfazerImposto: vi.fn() }
+})
+vi.mock('../src/services/custos-plano.js', async (orig) => {
+  const real = await orig()
+  return { ...real, pagarCusto: vi.fn(), desfazerBaixaCusto: vi.fn() }
 })
 vi.mock('../src/services/receitas-avulsas.js', async (orig) => {
   const real = await orig()
@@ -18,11 +22,12 @@ vi.mock('../src/services/receitas-avulsas.js', async (orig) => {
 })
 vi.mock('../src/services/apresentadoras-pagamentos.js', async (orig) => {
   const real = await orig()
-  return { ...real, registrarPagamentoApresentadora: vi.fn() }
+  return { ...real, registrarPagamentoApresentadora: vi.fn(), desfazerPagamentoApresentadora: vi.fn() }
 })
 
 import * as receitas from '../src/services/receitas-comercial.js'
 import * as agregador from '../src/services/financeiro-agregador.js'
+import * as custos from '../src/services/custos-plano.js'
 import * as avulsas from '../src/services/receitas-avulsas.js'
 import * as apres from '../src/services/apresentadoras-pagamentos.js'
 import {
@@ -37,7 +42,8 @@ const TITULO = '22222222-2222-2222-2222-222222222222'
 const CUSTO = '33333333-3333-3333-3333-333333333333'
 const APRES = '44444444-4444-4444-4444-444444444444'
 const PG = '55555555-5555-5555-5555-555555555555'
-const TX = { tipo: 'entrada', valor: 1500.5, data: '2026-03-12' }
+const GATEWAY = '77777777-7777-7777-7777-777777777777'
+const TX = { id: GATEWAY, tipo: 'entrada', valor: 1500.5, data: '2026-03-12' }
 
 function fakeDb(responder = () => ({ rows: [] })) {
   const queries = []
@@ -78,7 +84,8 @@ describe('darBaixaConciliacao — receita', () => {
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: TX, tipo: 'receita', alvoId: `calc:${MARCA}:2026-03:fixo`, userId: 'u1' })
     expect(r).toMatchObject({ aplicada: true, alvo_tipo: 'receita', alvo_id: TITULO, valor_pago: 1500.5 })
     const args = receitas.receberTitulo.mock.calls[0][1]
-    expect(args).toMatchObject({ tenantId: T, id: `calc:${MARCA}:2026-03:fixo`, valorPago: 1500.5, dataPagamento: '2026-03-12' })
+    expect(args).toMatchObject({ tenantId: T, id: `calc:${MARCA}:2026-03:fixo`, valorPago: '1500.50', dataPagamento: '2026-03-12' })
+    expect(args.chaveOperacao).toMatch(new RegExp(`^asaas:${GATEWAY}:`))
     const sqls = db.queries.map((q) => q.sql)
     expect(sqls).not.toContain('COMMIT')
     expect(sqls.some((x) => x.startsWith('SAVEPOINT'))).toBe(true)
@@ -103,24 +110,34 @@ describe('darBaixaConciliacao — receita', () => {
 })
 
 describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
-  const SAIDA = { tipo: 'saida', valor: 300, data: '2026-03-20' }
+  const SAIDA = { id: GATEWAY, tipo: 'saida', valor: 300, data: '2026-03-20' }
 
-  it('custo: UPDATE valor_pago/data_pagamento com tenant_id', async () => {
+  it('custo: chama comando canônico por savepoint e marca operação Asaas', async () => {
+    custos.pagarCusto.mockImplementation(async (tx) => {
+      await tx.query('BEGIN'); await tx.query('COMMIT')
+      return { valor_pago: 300, data_pagamento: '2026-03-20' }
+    })
     const db = fakeDb((sql) => (/FROM custos/.test(sql) ? { rows: [{ id: CUSTO, valor_pago: null, tipo: 'outros' }] } : null))
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'custo', alvoId: CUSTO })
     expect(r).toMatchObject({ aplicada: true, alvo_id: CUSTO, valor_pago: 300, data_pagamento: '2026-03-20' })
-    const upd = db.queries.find((q) => /UPDATE custos/.test(q.sql))
-    expect(upd.params).toEqual([CUSTO, T, 300, '2026-03-20'])
+    expect(custos.pagarCusto.mock.calls[0][1]).toMatchObject({
+      tenantId: T, id: CUSTO, valorPago: '300.00', dataPagamento: '2026-03-20',
+    })
+    expect(custos.pagarCusto.mock.calls[0][1].chaveOperacao).toMatch(new RegExp(`^asaas:${GATEWAY}:`))
+    expect(db.queries.map((q) => q.sql)).toContain('SAVEPOINT conc_sp_1')
+    expect(db.queries.map((q) => q.sql)).toContain('RELEASE SAVEPOINT conc_sp_1')
+    expect(db.queries.some((q) => /UPDATE custos/.test(q.sql))).toBe(false)
   })
 
   it('custo já pago: não sobrescreve', async () => {
     const db = fakeDb((sql) => (/FROM custos/.test(sql) ? { rows: [{ id: CUSTO, valor_pago: '300', tipo: 'outros' }] } : null))
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'custo', alvoId: CUSTO })
     expect(r).toMatchObject({ aplicada: false, motivo: 'ja_baixado' })
-    expect(db.queries.some((q) => /UPDATE custos/.test(q.sql))).toBe(false)
+    expect(custos.pagarCusto).not.toHaveBeenCalled()
   })
 
   it('custo recorrente virtual é materializado antes da baixa', async () => {
+    custos.pagarCusto.mockResolvedValue({ valor_pago: 300, data_pagamento: '2026-03-20' })
     const db = fakeDb((sql) => {
       if (/FROM custos_recorrentes/.test(sql)) {
         return { rows: [{ id: APRES, nome: 'Aluguel', valor: 300, grupo: 'estrutural', dia_vencimento: 5, mes_offset: 0, inicio: '2026-01-01', fim: null, ativo: true }] }
@@ -142,24 +159,27 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
       return null
     })
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'imposto', alvoId: 'imposto:2026-03' })
-    expect(agregador.pagarImposto).toHaveBeenCalledWith(db, {
-      tenantId: T, mes: '2026-03', valorPago: SAIDA.valor, dataPagamento: SAIDA.data,
+    expect(agregador.pagarImposto.mock.calls[0][0]).toHaveProperty('query')
+    expect(agregador.pagarImposto.mock.calls[0][1]).toMatchObject({
+      tenantId: T, mes: '2026-03', valorPago: '300.00', dataPagamento: SAIDA.data,
     })
     expect(r).toMatchObject({ aplicada: true, alvo_tipo: 'imposto', alvo_id: CUSTO, valor_pago: SAIDA.valor, data_pagamento: SAIDA.data })
   })
 
   it('imposto já materializado em custos (tipo imposto) recebe a baixa', async () => {
+    agregador.pagarImposto.mockResolvedValue({})
     const db = fakeDb((sql) => {
-      if (/tipo = 'imposto'/.test(sql)) return { rows: [{ id: CUSTO }] }
+      if (/tipo = 'imposto'/.test(sql)) return { rows: [{ id: CUSTO, valor_pago: null, mes: '2026-03' }] }
       if (/FROM custos/.test(sql)) return { rows: [{ id: CUSTO, valor_pago: null, tipo: 'imposto' }] }
       return null
     })
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'imposto', alvoId: 'imposto:2026-03' })
     expect(r).toMatchObject({ aplicada: true, alvo_tipo: 'imposto', alvo_id: CUSTO })
+    expect(agregador.pagarImposto).toHaveBeenCalledTimes(1)
   })
 
   it('imposto: id uuid de custo que não é tipo imposto → 404', async () => {
-    const db = fakeDb((sql) => (/FROM custos/.test(sql) ? { rows: [{ id: CUSTO, valor_pago: null, tipo: 'outros' }] } : null))
+    const db = fakeDb((sql) => (/FROM custos/.test(sql) && !/tipo = 'imposto'/.test(sql) ? { rows: [{ id: CUSTO, valor_pago: null, tipo: 'outros' }] } : null))
     await expect(darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'imposto', alvoId: CUSTO }))
       .rejects.toMatchObject({ status: 404 })
   })
@@ -174,7 +194,7 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'apresentadora', alvoId: `apresentadora:${APRES}:2026-02`, userId: 'u1' })
     expect(r).toMatchObject({ aplicada: true, alvo_id: PG, valor_pago: 300 })
     expect(apres.registrarPagamentoApresentadora.mock.calls[0][1]).toMatchObject({
-      tenantId: T, apresentadoraId: APRES, mes: '2026-02', componente: 'fixo', valorPago: 300, dataPagamento: '2026-03-20',
+      tenantId: T, apresentadoraId: APRES, mes: '2026-02', componente: 'fixo', valorPago: '300.00', dataPagamento: '2026-03-20',
     })
   })
 
@@ -233,7 +253,8 @@ describe('darBaixaConciliacao — avulsa', () => {
     const db = fakeDb((sql) => (/FROM receitas_avulsas/.test(sql) ? { rows: [{ id: AV, valor_pago: '0.00' }] } : null))
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: TX, tipo: 'avulsa', alvoId: AV })
     expect(r).toMatchObject({ aplicada: true, alvo_tipo: 'avulsa', alvo_id: AV, valor_pago: 1500.5, data_pagamento: '2026-03-12' })
-    expect(avulsas.receberReceitaAvulsa.mock.calls[0][1]).toEqual({ tenantId: T, id: AV, valorPago: 1500.5, dataPagamento: '2026-03-12' })
+    expect(avulsas.receberReceitaAvulsa.mock.calls[0][1]).toMatchObject({ tenantId: T, id: AV, valorPago: '1500.50', dataPagamento: '2026-03-12' })
+    expect(avulsas.receberReceitaAvulsa.mock.calls[0][1].chaveOperacao).toMatch(new RegExp(`^asaas:${GATEWAY}:`))
     expect(db.queries[0].sql).toMatch(/FOR UPDATE/)
     expect(db.queries[0].params).toEqual([AV, T])
   })
@@ -248,35 +269,55 @@ describe('darBaixaConciliacao — avulsa', () => {
 })
 
 describe('desfazerBaixaConciliacao', () => {
-  it('avulsa → desfazerReceitaAvulsa', async () => {
-    avulsas.desfazerReceitaAvulsa.mockResolvedValueOnce({ id: 'x' }).mockResolvedValueOnce(null)
-    expect(await desfazerBaixaConciliacao(fakeDb(), { tenantId: T, tipo: 'avulsa', alvoId: TITULO })).toEqual({ desfeita: true })
-    expect(avulsas.desfazerReceitaAvulsa.mock.calls[0][1]).toEqual({ tenantId: T, id: TITULO })
-    expect(await desfazerBaixaConciliacao(fakeDb(), { tenantId: T, tipo: 'avulsa', alvoId: TITULO })).toMatchObject({ desfeita: false })
+  const origem = { receita: 'receita_titulo', avulsa: 'receita_avulsa', custo: 'custo', apresentadora: 'apresentadora_pagamento', imposto: 'imposto' }
+  const dbComFato = (tipo, alvoId, extra = () => null) => fakeDb((sql, params) => {
+    if (/FROM financeiro_liquidacoes l/.test(sql)) {
+      expect(params).toEqual([T, `asaas:${GATEWAY}:%`])
+      return { rows: [{ id: TITULO, origem_tipo: origem[tipo], origem_id: alvoId, saldo: '300.00' }] }
+    }
+    return extra(sql, params)
   })
-  it('receita → desfazerRecebimento', async () => {
+  const args = (tipo, alvoId) => ({ tenantId: T, tipo, alvoId, transacaoId: GATEWAY })
+
+  it('avulsa usa estorno canônico e não a limpeza legada', async () => {
+    avulsas.desfazerReceitaAvulsa.mockResolvedValue({ id: TITULO })
+    const db = dbComFato('avulsa', TITULO)
+    expect(await desfazerBaixaConciliacao(db, args('avulsa', TITULO))).toEqual({ desfeita: true })
+    expect(avulsas.desfazerReceitaAvulsa.mock.calls[0][1]).toMatchObject({ tenantId: T, id: TITULO, autoEstorno: true })
+    expect(avulsas.desfazerReceitaAvulsa.mock.calls[0][0]).toHaveProperty('query')
+    expect(db.queries.some((q) => /UPDATE receitas_avulsas/.test(q.sql))).toBe(false)
+  })
+  it('receita só desfaz o fato associado à transação', async () => {
     receitas.desfazerRecebimento.mockResolvedValue({})
-    expect(await desfazerBaixaConciliacao(fakeDb(), { tenantId: T, tipo: 'receita', alvoId: TITULO })).toEqual({ desfeita: true })
+    expect(await desfazerBaixaConciliacao(dbComFato('receita', TITULO), args('receita', TITULO))).toEqual({ desfeita: true })
     expect(receitas.desfazerRecebimento.mock.calls[0][1]).toMatchObject({ tenantId: T, id: TITULO })
   })
-  it('custo/imposto zera valor_pago e data', async () => {
-    const db = fakeDb((sql) => (/UPDATE custos/.test(sql) ? { rows: [{ id: CUSTO }] } : null))
-    expect(await desfazerBaixaConciliacao(db, { tenantId: T, tipo: 'imposto', alvoId: CUSTO })).toEqual({ desfeita: true })
-    expect(db.queries[0].params).toEqual([CUSTO, T])
+  it('custo e imposto usam comandos canônicos', async () => {
+    custos.desfazerBaixaCusto.mockResolvedValue({ id: CUSTO })
+    agregador.desfazerImposto.mockResolvedValue({ id: CUSTO })
+    expect(await desfazerBaixaConciliacao(dbComFato('custo', CUSTO), args('custo', CUSTO))).toEqual({ desfeita: true })
+    expect(custos.desfazerBaixaCusto.mock.calls[0][1]).toMatchObject({ tenantId: T, id: CUSTO })
+    const dbTax = dbComFato('imposto', CUSTO, (sql) => (/FROM custos/.test(sql) ? { rows: [{ mes: '2026-03' }] } : null))
+    expect(await desfazerBaixaConciliacao(dbTax, args('imposto', CUSTO))).toEqual({ desfeita: true })
+    expect(agregador.desfazerImposto.mock.calls[0][1]).toMatchObject({ tenantId: T, mes: '2026-03' })
+    expect(dbTax.queries.some((q) => /UPDATE custos/.test(q.sql))).toBe(false)
   })
-  it('apresentadora remove a linha de pagamento', async () => {
-    const db = fakeDb((sql) => (/DELETE FROM apresentadora_pagamentos/.test(sql) ? { rows: [{ id: PG }] } : null))
-    expect(await desfazerBaixaConciliacao(db, { tenantId: T, tipo: 'apresentadora', alvoId: PG })).toEqual({ desfeita: true })
+  it('apresentadora conserva a linha e usa estorno canônico por componente', async () => {
+    apres.desfazerPagamentoApresentadora.mockResolvedValue(true)
+    const db = dbComFato('apresentadora', PG, (sql) => (/FROM apresentadora_pagamentos/.test(sql)
+      ? { rows: [{ apresentadora_id: APRES, mes: '2026-02', componente: 'variavel' }] } : null))
+    expect(await desfazerBaixaConciliacao(db, args('apresentadora', PG))).toEqual({ desfeita: true })
+    expect(apres.desfazerPagamentoApresentadora.mock.calls[0][1]).toMatchObject({
+      tenantId: T, apresentadoraId: APRES, mes: '2026-02', componente: 'variavel',
+    })
+    expect(db.queries.some((q) => /DELETE|UPDATE apresentadora_pagamentos/.test(q.sql))).toBe(false)
   })
-  it('apresentadora cancelada: zera a baixa e mantém o cancelamento (sem DELETE)', async () => {
-    const db = fakeDb((sql) => (/^\s*UPDATE apresentadora_pagamentos/.test(sql) ? { rows: [{ id: PG }] } : null))
-    expect(await desfazerBaixaConciliacao(db, { tenantId: T, tipo: 'apresentadora', alvoId: PG })).toEqual({ desfeita: true })
-    expect(db.queries[0].sql).toMatch(/valor_pago = 0, data_pagamento = NULL[\s\S]*cancelado_em IS NOT NULL/)
-    expect(db.queries.some((q) => /DELETE/.test(q.sql))).toBe(false)
-  })
-  it('apresentadora cancelada: zera a baixa e mantém o cancelamento (sem DELETE)', async () => {
-    const db = fakeDb((sql) => (/UPDATE apresentadora_pagamentos SET valor_pago = 0/.test(sql) && /cancelado_em IS NOT NULL/.test(sql) ? { rows: [{ id: PG }] } : null))
-    expect(await desfazerBaixaConciliacao(db, { tenantId: T, tipo: 'apresentadora', alvoId: PG })).toEqual({ desfeita: true })
-    expect(db.queries.some((q) => /DELETE FROM apresentadora_pagamentos/.test(q.sql))).toBe(false)
+  it('link legado, fato de outro alvo ou vários fatos exigem revisão', async () => {
+    await expect(desfazerBaixaConciliacao(fakeDb(), args('custo', CUSTO)))
+      .rejects.toMatchObject({ status: 409, codigo: 'CONCILIACAO_BAIXA_AMBIGUA' })
+    const trocado = fakeDb((sql) => (/FROM financeiro_liquidacoes l/.test(sql)
+      ? { rows: [{ id: TITULO, origem_tipo: 'custo', origem_id: PG, saldo: '300.00' }] } : null))
+    await expect(desfazerBaixaConciliacao(trocado, args('custo', CUSTO))).rejects.toMatchObject({ status: 409 })
+    expect(custos.desfazerBaixaCusto).not.toHaveBeenCalled()
   })
 })

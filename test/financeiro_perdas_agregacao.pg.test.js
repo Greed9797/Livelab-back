@@ -186,7 +186,7 @@ describe.skipIf(!url)('financeiro: perdas e cancelamentos na agregação (Postgr
       for (const [tipo, alvoId] of casos) {
         await client.query('BEGIN')
         try {
-          await expect(darBaixaConciliacao(client, { tenantId: t, transacao: { valor: 100, data: '2026-10-12' }, tipo, alvoId }))
+          await expect(darBaixaConciliacao(client, { tenantId: t, transacao: { id: t, valor: 100, data: '2026-10-12' }, tipo, alvoId }))
             .rejects.toMatchObject({ status: 409, message: 'Desfaça a perda/cancelamento antes' })
         } finally {
           await client.query('ROLLBACK')

@@ -171,8 +171,8 @@ describe('remuneração de apresentadoras', () => {
       expect(sql).toContain("l_oficial.status = 'encerrada'")
       expect(sql).toContain('l_oficial.arquivada_em IS NULL')
       return { rows: [
-        { id: 'v-live', data: '2026-09-06', origem: 'live', marca_nome: 'Marca A', gmv: '500', comissao_apresentadora: '20.25', pct_aplicado: '4.05', base_gmv_mes: '550', faixa_gmv_inicio: '0', faixa_gmv_fim: null, faixa_pct: '4.05', fim_de_semana: true },
-        { id: 'v-video', data: '2026-09-07', origem: 'video', marca_nome: 'Marca A', gmv: '50', comissao_apresentadora: '2.75', pct_aplicado: '5.5', base_gmv_mes: '550', faixa_gmv_inicio: null, faixa_gmv_fim: null, faixa_pct: null, fim_de_semana: false },
+        { id: 'v-live', data: '2026-09-06', origem: 'live', marca_nome: 'Marca A', gmv: '500', comissao_apresentadora: '20.25', total_variavel: '23.00', pct_aplicado: '4.05', base_gmv_mes: '550', faixa_gmv_inicio: '0', faixa_gmv_fim: null, faixa_pct: '4.05', fim_de_semana: true },
+        { id: 'v-video', data: '2026-09-07', origem: 'video', marca_nome: 'Marca A', gmv: '50', comissao_apresentadora: '2.75', total_variavel: '23.00', pct_aplicado: '5.5', base_gmv_mes: '550', faixa_gmv_inicio: null, faixa_gmv_fim: null, faixa_pct: null, fim_de_semana: false },
       ] }
     })
 
@@ -187,6 +187,34 @@ describe('remuneração de apresentadoras', () => {
     expect(historico.memoria[1]).toMatchObject({ origem: 'video', comissao_apresentadora: 2.75, faixa: null })
     expect(query.mock.calls.map(([sql]) => sql)).toContain('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
     expect(query.mock.calls.map(([sql]) => sql)).toContain('COMMIT')
+  })
+
+  it('usa o arredondamento do total no banco, sem somar centavos de cada venda', async () => {
+    const query = vi.fn(async (sql) => {
+      if (sql.startsWith('BEGIN') || sql === 'COMMIT') return { rows: [] }
+      if (sql.includes('WITH lives_atendidas')) return { rows: [] }
+      expect(sql).toContain('SUM(')
+      expect(sql).toContain('OVER ()')
+      return { rows: [
+        { id: 'v1', data: '2026-09-01', origem: 'video', gmv: '1', comissao_apresentadora: '0.004', total_variavel: '0.01', pct_aplicado: '0.4', base_gmv_mes: '2', faixa_pct: null, fim_de_semana: false },
+        { id: 'v2', data: '2026-09-02', origem: 'video', gmv: '1', comissao_apresentadora: '0.004', total_variavel: '0.01', pct_aplicado: '0.4', base_gmv_mes: '2', faixa_pct: null, fim_de_semana: false },
+      ] }
+    })
+
+    const historico = await buscarHistoricoLivesApresentadora({ query }, { tenantId, apresentadoraId: presenterId, mes: '2026-09' })
+
+    expect(historico.total_variavel).toBe(0.01)
+  })
+
+  it('confirma no Postgres que o arredondamento ocorre depois da soma', async () => {
+    const db = new PGlite()
+    const { rows } = await db.query(`
+      SELECT ROUND(COALESCE(SUM(valor) OVER (), 0), 2)::text AS total
+      FROM (VALUES (0.004::numeric), (0.004::numeric)) AS vendas(valor)
+    `)
+
+    expect(rows).toEqual([{ total: '0.01' }, { total: '0.01' }])
+    await db.close()
   })
 
   it('valida competência e apresentadora antes de consultar o histórico financeiro', async () => {

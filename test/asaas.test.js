@@ -151,7 +151,7 @@ describe('criarClienteAsaas', () => {
 })
 
 // ─── Rotas (Fastify inject + db fake + fetch global mockado) ─────────
-const TENANT = '00000000-0000-0000-0000-000000000001'
+const TENANT = '00000000-0000-4000-8000-000000000001'
 const TX_ID = '11111111-1111-1111-1111-111111111111'
 const RECEITA_ID = '22222222-2222-2222-2222-222222222222'
 
@@ -372,7 +372,7 @@ describe('rotas /v1/asaas', () => {
       },
     })
     const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'custo', id: CUSTO_ID } })
-    expect(res.statusCode, res.body).toBe(200)
+    expect(res.statusCode).toBe(200)
     expect(res.json().conciliado_com_id).toBe(CUSTO_ID)
     expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 250, data_pagamento: '2026-03-20' })
     const sqls = queries.map((q) => q.sql)
@@ -417,7 +417,7 @@ describe('rotas /v1/asaas', () => {
       },
     })
     const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'avulsa', id: AVULSA_ID } })
-    expect(res.statusCode, res.body).toBe(200)
+    expect(res.statusCode).toBe(200)
     expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 800, data_pagamento: '2026-03-21' })
     const sqls = queries.map((q) => q.sql)
     const iBaixa = sqls.findIndex((x) => /INSERT INTO financeiro_liquidacoes/.test(x))

@@ -372,7 +372,7 @@ describe('rotas /v1/asaas', () => {
       },
     })
     const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'custo', id: CUSTO_ID } })
-    expect(res.statusCode, res.body).toBe(200)
+    expect(res.statusCode).toBe(200)
     expect(res.json().conciliado_com_id).toBe(CUSTO_ID)
     expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 250, data_pagamento: '2026-03-20' })
     const sqls = queries.map((q) => q.sql)
@@ -417,7 +417,7 @@ describe('rotas /v1/asaas', () => {
       },
     })
     const res = await app.inject({ method: 'POST', url: '/v1/asaas/conciliar', payload: { transacao_id: TX_ID, tipo: 'avulsa', id: AVULSA_ID } })
-    expect(res.statusCode, res.body).toBe(200)
+    expect(res.statusCode).toBe(200)
     expect(res.json().baixa).toMatchObject({ aplicada: true, valor_pago: 800, data_pagamento: '2026-03-21' })
     const sqls = queries.map((q) => q.sql)
     const iBaixa = sqls.findIndex((x) => /INSERT INTO financeiro_liquidacoes/.test(x))

@@ -261,7 +261,7 @@ describe('consultarReceitaMensal / rota GET /v1/financeiro/receita', () => {
     const vig = query.mock.calls.find(([sql]) => String(sql).includes('ORDER BY m.nome'))
     expect(vig[1]).toEqual(['2026-10-01', '2026-10-31', tenantId])
     const avul = query.mock.calls.find(([sql]) => String(sql).includes('FROM receitas_avulsas'))
-    expect(avul[1]).toEqual([tenantId, '2025-10-01', '2027-10-01'])
+    expect(avul[1]).toEqual([tenantId, '2026-10-01', '2026-10-01', '2026-10-31', '2026-10-01'])
   })
 
   function buildApp(query, papel = 'financeiro_readonly') {

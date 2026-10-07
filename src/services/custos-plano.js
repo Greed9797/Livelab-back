@@ -229,7 +229,7 @@ export async function listarCustos(db, { tenantId, inicio, fim, hoje, vencimento
       `SELECT ${CUSTO_COLS}
          FROM custos
         WHERE tenant_id = $1::uuid
-          AND ((competencia >= $2::date AND competencia <= $3::date)${vencimentoAte ? ' OR data_vencimento <= $4::date' : ''})
+          AND ${vencimentoAte ? '((competencia >= $2::date AND competencia <= $3::date) OR data_vencimento <= $4::date)' : 'competencia >= $2::date AND competencia <= $3::date'}
         ORDER BY data_vencimento NULLS LAST, competencia, criado_em`,
       params,
     ),

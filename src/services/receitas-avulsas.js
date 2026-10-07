@@ -90,13 +90,13 @@ export async function listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje = 
     params.push(vencimentoAte)
     let vencimento = 'data_vencimento <= $4::date'
     if (vencimentoDe) { params.push(vencimentoDe); vencimento += ' AND data_vencimento >= $5::date' }
-    periodo = `(${periodo}) OR (${vencimento})`
+    periodo = `((${periodo}) OR (${vencimento}))`
   }
   const { rows } = await db.query(
     `SELECT ${RECEITA_AVULSA_COLS}
        FROM receitas_avulsas
       WHERE tenant_id = $1::uuid
-        AND (${periodo})
+        AND ${periodo}
       ORDER BY data_vencimento, criado_em`,
     params,
   )

@@ -14,6 +14,7 @@
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { exactMoneyToCents, moneySchema } from '../lib/money.js'
+import { detalhesReconciliacao } from '../lib/financeiro-error-details.js'
 import { MOTIVO_MAX, STATUS_LANCAMENTO } from '../lib/lancamento-status.js'
 import { lerSnapshotFinanceiro } from '../services/financeiro-read-snapshot.js'
 import {
@@ -84,7 +85,7 @@ const desperderSchema = z.object({
 
 function erro(reply, error) {
   if (error?.statusCode && error.statusCode < 500) {
-    return reply.code(error.statusCode).send({ code: error.code, error: error.message })
+    return reply.code(error.statusCode).send({ code: error.code, error: error.message, ...detalhesReconciliacao(error) })
   }
   throw error
 }

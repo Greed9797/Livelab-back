@@ -162,7 +162,7 @@ describe('imposto', () => {
     const query = vi.fn(async (sql) => {
       const s = String(sql)
       if (s.includes('aliquota_imposto_pct')) return { rows: [{ aliquota_imposto_pct: '10.00' }] }
-      if (s.includes('FROM receita_titulos') && s.includes('SUM(valor_pago)')) return { rows: [{ mes: '2026-08', total: '2000' }] }
+      if (s.includes('WITH origens AS')) return { rows: [{ data: '2026-08-05', valor: '2000', natureza: 'receita', origem: 'marca_fixo', origem_tipo: 'receita_titulo' }] }
       if (s.includes('WITH comissao_marca')) {
         // fixo 3000 vencendo em 2026-10 (competência 09 + offset 1)
         return { rows: [{ marca_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', competencia: '2026-09-01', comissao: 0, gmv: 0, fixo: 3000, fixo_cheio: 3000, fator_meses: 1, marca_nome: 'A', tipo_cobranca: 'fixo_mais_comissao', fixo_vencimento_dia: 5, fixo_vencimento_mes_offset: 1, comissao_vencimento_dia: 5, comissao_vencimento_mes_offset: 1 }] }
@@ -231,7 +231,11 @@ describe('fluxo de caixa', () => {
       custo({ id: 'sem', data_vencimento: null, competencia: '2026-09-01', valor_previsto: 50 }),
       receita({ id: 'out', data_vencimento: '2026-10-05', valor_previsto: 700 }),
     ]
-    const f = montarFluxoCaixa({ mes: '2026-09', itens, saldoInicial: 100 })
+    const movimentos = [
+      { natureza: 'receita', data: '2026-09-04', valor: 1000 },
+      { natureza: 'custo', grupo: 'cartao', data: '2026-09-12', valor: 200 },
+    ]
+    const f = montarFluxoCaixa({ mes: '2026-09', itens, movimentos, saldoInicial: 100 })
     const linha = (k) => f.linhas.find((l) => l.chave === k)
     expect(linha('5')).toMatchObject({ entradas: { previsto: 1000, realizado: 1000 }, saidas: { previsto: 0, realizado: 0 }, acumulado: { previsto: 1100, realizado: 1100 } })
     expect(linha('10')).toMatchObject({ saidas: { previsto: 300, realizado: 0 }, acumulado: { previsto: 800, realizado: 1100 } })

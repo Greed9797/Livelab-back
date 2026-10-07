@@ -42,16 +42,15 @@ WITH origens AS (
  FROM financeiro_estornos e JOIN financeiro_liquidacoes l ON l.tenant_id=e.tenant_id AND l.id=e.liquidacao_id
  WHERE e.tenant_id=$1::uuid
 ), cobertura AS (
- SELECT origem_tipo,origem_id,COUNT(*) AS quantidade,SUM(valor) AS liquido
+ SELECT origem_tipo,origem_id,COUNT(*) AS quantidade,SUM(valor) AS liquido,
+        ARRAY_AGG(DISTINCT natureza) AS naturezas
  FROM eventos GROUP BY origem_tipo,origem_id
 ), movimentos AS (
  SELECT e.*,o.origem,o.grupo,o.componente,o.competencia,o.data_vencimento,o.descricao,
         o.marca_id,o.marca_nome,o.cliente_id,o.cliente_nome,o.apresentadora_id,o.apresentadora_nome,
         o.classe_custo,o.classe_custo_recorrente,
-        CASE WHEN o.id IS NULL THEN 'origem_ausente' WHEN o.natureza<>e.natureza THEN 'natureza_divergente'
-             WHEN COALESCE(o.valor_pago,0)<>c.liquido THEN 'saldo_divergente' END AS inconsistencia
+        NULL::text AS inconsistencia
  FROM eventos e LEFT JOIN origens o ON o.origem_tipo=e.origem_tipo AND o.id=e.origem_id
- JOIN cobertura c ON c.origem_tipo=e.origem_tipo AND c.origem_id=e.origem_id
  WHERE e.data BETWEEN $2::date AND $3::date AND ($4::date IS NULL OR e.data >= $4::date)
  UNION ALL
  SELECT ('legado:'||o.origem_tipo||':'||o.id),'liquidacao',o.origem_tipo,o.id,o.natureza,
@@ -68,6 +67,21 @@ WITH origens AS (
         'pagamento_sem_data'
  FROM origens o WHERE o.valor_pago>0 AND o.data_pagamento IS NULL
        AND NOT EXISTS (SELECT 1 FROM cobertura c WHERE c.origem_tipo=o.origem_tipo AND c.origem_id=o.id)
+ UNION ALL
+ -- Coverage is all-time, independently of the date filter above. One undated
+ -- review row per inconsistent obligation prevents a partial legacy balance
+ -- from silently disappearing when its canonical events fall outside the period.
+ SELECT ('reconciliacao:'||c.origem_tipo||':'||c.origem_id),'revisao',c.origem_tipo,c.origem_id,
+        o.natureza,NULL::date,0,'canonico',o.origem,o.grupo,o.componente,o.competencia,o.data_vencimento,
+        o.descricao,o.marca_id,o.marca_nome,o.cliente_id,o.cliente_nome,o.apresentadora_id,o.apresentadora_nome,
+        o.classe_custo,o.classe_custo_recorrente,r.inconsistencia
+ FROM cobertura c LEFT JOIN origens o ON o.origem_tipo=c.origem_tipo AND o.id=c.origem_id
+ CROSS JOIN LATERAL (
+   SELECT CASE WHEN o.id IS NULL THEN 'origem_ausente'
+               WHEN c.naturezas IS DISTINCT FROM ARRAY[o.natureza] THEN 'natureza_divergente'
+               WHEN COALESCE(o.valor_pago,0)<>c.liquido THEN 'saldo_divergente' END AS inconsistencia
+ ) r
+ WHERE r.inconsistencia IS NOT NULL
 )
 SELECT *,valor::text AS valor,to_char(data,'YYYY-MM-DD') AS data,
        to_char(competencia,'YYYY-MM-DD') AS competencia,to_char(data_vencimento,'YYYY-MM-DD') AS data_vencimento

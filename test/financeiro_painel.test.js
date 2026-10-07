@@ -177,7 +177,7 @@ describe('calcularPainelMes (banco mockado)', () => {
     })
     const p = await calcularPainelMes(db, { tenantId: TENANT, mes: '2026-10', hoje: HOJE })
     const calls = db.query.mock.calls.filter(([s]) => String(s).includes('FROM receitas_avulsas\n      WHERE'))
-    expect(calls[0][1]).toEqual([TENANT, '2025-10-01', '2026-10-01', '2026-10-31'])
+    expect(calls[0][1]).toEqual([TENANT, '2025-10-01', '2026-10-01', '2026-10-31', '0001-01-01'])
     expect(p.a_receber).toMatchObject({ atrasado_anterior: 100, total: 100, qtd: 1 })
     for (const [, params] of db.query.mock.calls) expect(params).toContain(TENANT)
   })
@@ -306,9 +306,8 @@ describe('rotas: painel, dre e cache do agregador', () => {
   it('GET /dre em competência preserva leitura legada de saldo_inicio_mes e zero configurado', async () => {
     const db = mockDb({
       financeiro_data_corte: () => ({ rows: [{ aliquota_imposto_pct: 10, data_corte: '2026-02-15', saldo_abertura: '0' }] }),
-      'WITH meses AS': () => ({ rows: [
-        { mes: '2026-02', saldo_inicio_mes: '0' },
-        { mes: '2026-03', saldo_inicio_mes: '125.50' },
+      'WITH origens AS': () => ({ rows: [
+        { data: '2026-02-20', valor: '125.50', natureza: 'receita', origem: 'marca_fixo', origem_tipo: 'receita_titulo' },
       ] }),
     })
     const app = buildApp(db)
@@ -320,7 +319,7 @@ describe('rotas: painel, dre e cache do agregador', () => {
       ['2026-02', { saldo_inicio_mes: 0 }],
       ['2026-03', { saldo_inicio_mes: 125.5 }],
     ])
-    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes('WITH meses AS'))).toHaveLength(1)
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes('WITH origens AS'))).toHaveLength(2)
     await app.close()
   })
 

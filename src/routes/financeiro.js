@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { moneySchema } from '../lib/money.js'
+import { detalhesReconciliacao } from '../lib/financeiro-error-details.js'
 import { liveGmvSql, liveOrdersSql } from '../lib/metric-sql.js'
 import { officialLineCommissionExpr, officialLineGmvExpr } from '../lib/sale-gmv-sql.js'
 import { marcaResolveLateralSql, MARCA_RESOLVE_PREDICATE } from '../lib/marca-sql.js'
@@ -71,7 +72,7 @@ const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 
 // Erros de serviço (statusCode 4xx) viram resposta; o resto sobe para o error handler.
 function responderErro(reply, error) {
-  if (error?.statusCode && error.statusCode < 500) return reply.code(error.statusCode).send(error.code ? { error: error.message, code: error.code } : { error: error.message })
+  if (error?.statusCode && error.statusCode < 500) return reply.code(error.statusCode).send(error.code ? { error: error.message, code: error.code, ...detalhesReconciliacao(error) } : { error: error.message })
   throw error
 }
 
@@ -163,7 +164,9 @@ export async function financeiroRoutes(app) {
       namespace: AGREGADOR_NAMESPACE,
       key: buildCacheKey(tenantId, params),
       ttlMs: FINANCEIRO_AGREGADOR_CACHE_TTL_MS,
-      computeFn: () => params.regime === 'caixa_vencimento'
+      // Cash intervals and their obligations must share one snapshot: a partial
+      // settlement committed between reads must not disappear or count twice.
+      computeFn: () => params.regime === 'caixa_vencimento' || ['caixa', 'painel', 'fluxo-caixa', 'lancamentos'].includes(params.rota)
         ? app.withTenant(tenantId, (db) => lerSnapshotFinanceiro(db, computeFn))
         : lerAgregador(tenantId, computeFn),
     })

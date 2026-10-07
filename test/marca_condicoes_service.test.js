@@ -58,11 +58,14 @@ describe('serviço transacional de condições comerciais', () => {
     expect(db.calls.some((call) => call.sql.startsWith('INSERT') || call.sql.startsWith('UPDATE'))).toBe(false)
   })
 
-  it('rejeita período fechado e desfaz a transação inteira', async () => {
+  it('permite retificação histórica preservando os movimentos fechados', async () => {
     const db = fakeDb({ closed: true })
-    await expect(confirmarCondicaoMarca(db, { tenantId, marcaId, proposta: proposal, expectedRevision: 1, idempotencyKey: 'closed-1' })).rejects.toMatchObject({ code: 'FINANCIAL_PERIOD_CLOSED', statusCode: 409 })
-    expect(db.calls.map((call) => call.sql)).toContain('ROLLBACK')
-    expect(db.calls.some((call) => call.sql.startsWith('INSERT INTO marca_condicoes'))).toBe(false)
+    const result = await confirmarCondicaoMarca(db, { tenantId, marcaId, proposta: proposal, expectedRevision: 1, idempotencyKey: 'closed-1' })
+    expect(result.preview.impacto.movimentos_fechados).toBe(1)
+    expect(result.preview.bloqueada).toBe(false)
+    expect(db.calls.map((call) => call.sql)).toContain('COMMIT')
+    const livesUpdate = db.calls.find(call => call.sql.includes('UPDATE lives l'))
+    expect(livesUpdate.sql).toContain('l.faturado_em IS NULL')
   })
 
   it('rollbacka falha intermediária e não deixa condição parcial', async () => {

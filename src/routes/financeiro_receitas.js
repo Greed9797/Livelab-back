@@ -15,6 +15,7 @@ import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import { exactMoneyToCents, moneySchema } from '../lib/money.js'
 import { MOTIVO_MAX, STATUS_LANCAMENTO } from '../lib/lancamento-status.js'
+import { lerSnapshotFinanceiro } from '../services/financeiro-read-snapshot.js'
 import {
   COMPONENTES_RECEITA,
   consultarReceitaMensal,
@@ -100,7 +101,7 @@ export async function financeiroReceitasRoutes(app) {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
       try {
-        return await consultarReceitaMensal(db, { tenantId: tenant_id, mes, hoje })
+        return await lerSnapshotFinanceiro(db, (tx) => consultarReceitaMensal(tx, { tenantId: tenant_id, mes, hoje }))
       } catch (error) {
         return erro(reply, error)
       }

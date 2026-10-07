@@ -66,6 +66,7 @@ function marcaOperacional(info) {
 }
 
 export function franquiaDaLinha(info, { presenterBands, defaultBands, gmvMes }) {
+  if (info.sem_cobranca) return 0
   const gmv = numOrNull(info.gmv_declarado) ?? 0
   const condicao = numOrNull(info.condicao_pct)
   if (condicao != null && condicao > 0) return comissaoValorFromPct(gmv, condicao)
@@ -119,7 +120,7 @@ function contextoSql() {
              m.comissao_franqueadora_pct AS marca_franqueadora_pct,
              (cl.id IS NOT NULL) AS cliente_encontrado,
              cl.status AS cliente_status,
-             mc.id AS marca_condicao_id,
+             mc.id AS marca_condicao_id, mc.cancelled_at IS NOT NULL AS sem_cobranca,
              mc.comissao_franquia_pct AS condicao_pct,
              mc.comissao_franqueadora_pct AS condicao_franqueadora_pct,
              EXISTS (
@@ -140,12 +141,11 @@ function contextoSql() {
         LEFT JOIN marcas m ON m.id = s.marca_id AND m.tenant_id = s.tenant_id
         LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = m.tenant_id
         LEFT JOIN LATERAL (
-          SELECT c.id, c.comissao_franquia_pct, c.comissao_franqueadora_pct
+          SELECT c.id, c.cancelled_at, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franqueadora_pct ELSE 0 END AS comissao_franqueadora_pct
             FROM marca_condicoes_comerciais c
            WHERE c.tenant_id = s.tenant_id AND c.marca_id = s.marca_id
              AND c.inicio_vigencia <= (s.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date
-             AND c.cancelled_at IS NULL
-           ORDER BY c.inicio_vigencia DESC
+           ORDER BY c.inicio_vigencia DESC, (c.cancelled_at IS NULL) DESC
            LIMIT 1
         ) mc ON true
         LEFT JOIN LATERAL (
@@ -433,7 +433,8 @@ export async function aprovarLoteNaSessao({
 
     const mes = saoPauloDateInput(info.iniciado_em)?.slice(0, 7) ?? null
     const gmvBase = gmvMes.has(info.apresentadora_id) ? gmvMes.get(info.apresentadora_id) : numOrNull(info.gmv_mes) ?? 0
-    const gmv = numOrNull(info.gmv_declarado) ?? 0
+    if (info.sem_cobranca) return 0
+  const gmv = numOrNull(info.gmv_declarado) ?? 0
     const presenterBands = [...(faixas.get(info.apresentadora_id) ?? [])].sort((a, b) => numOrNull(b.gmv_inicio) - numOrNull(a.gmv_inicio))
     const defaultBands = [...faixasTenant].sort((a, b) => numOrNull(b.gmv_inicio) - numOrNull(a.gmv_inicio))
     const franquia = franquiaDaLinha(info, { presenterBands, defaultBands, gmvMes: gmvBase + gmv })

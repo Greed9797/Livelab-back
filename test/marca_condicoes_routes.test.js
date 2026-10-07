@@ -358,3 +358,32 @@ describe('rotas de condições comerciais', () => {
     await app.close()
   })
 })
+
+describe('CRUD de condições — fronteira HTTP', () => {
+  const condicaoId = '00000000-0000-4000-8000-000000000005'
+  const url = `/v1/marcas/${marcaId}/condicoes/${condicaoId}`
+  it('PATCH e DELETE exigem chave idempotente e motivo antes de consultar o banco', async () => {
+    const query = vi.fn(async () => ({ rows: [] }))
+    const app = buildApp(query)
+    await app.register(marcasRoutes)
+    for (const method of ['PATCH', 'DELETE']) {
+      const missingKey = await app.inject({ method, url, payload: { expected_revision: 1, motivo: 'Retificação' } })
+      expect(missingKey.statusCode).toBe(400)
+      expect(missingKey.json().code).toBe('IDEMPOTENCY_KEY_REQUIRED')
+      const missingReason = await app.inject({ method, url, headers: { 'idempotency-key': 'test' }, payload: { expected_revision: 1 } })
+      expect(missingReason.statusCode).toBe(400)
+      expect(missingReason.json().code).toBe('REASON_REQUIRED')
+    }
+    expect(query).not.toHaveBeenCalled()
+    await app.close()
+  })
+  it('preview recusa operação desconhecida e identificação inválida', async () => {
+    const query = vi.fn(async () => ({ rows: [] }))
+    const app = buildApp(query)
+    await app.register(marcasRoutes)
+    expect((await app.inject({ method: 'POST', url: `${url}/preview`, payload: { operacao: 'apagar', motivo: 'Teste' } })).json().code).toBe('INVALID_OPERATION')
+    expect((await app.inject({ method: 'POST', url: `/v1/marcas/${marcaId}/condicoes/not-uuid/preview`, payload: { operacao: 'excluir', motivo: 'Teste' } })).statusCode).toBe(404)
+    expect(query).not.toHaveBeenCalled()
+    await app.close()
+  })
+})

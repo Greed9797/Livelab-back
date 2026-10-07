@@ -28,14 +28,13 @@ export function cadastroFromSql(tenantParam = '$1') {
     LEFT JOIN users u
       ON u.id = c.user_id AND u.tenant_id = c.tenant_id AND u.papel = 'cliente_parceiro'
     LEFT JOIN LATERAL (
-      SELECT id, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
+      SELECT * FROM (SELECT id, cancelled_at, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
              fixo_confirmado, comissao_confirmada, origem
         FROM marca_condicoes_comerciais
        WHERE tenant_id = ${tenantParam}::uuid AND marca_id = m.id
          AND inicio_vigencia <= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
-         AND cancelled_at IS NULL
        ORDER BY inicio_vigencia DESC, revision DESC
-       LIMIT 1
+       LIMIT 1) latest WHERE latest.cancelled_at IS NULL
     ) mcc ON true
     LEFT JOIN LATERAL (
       SELECT json_agg(json_build_object(

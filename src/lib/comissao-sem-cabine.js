@@ -5,7 +5,8 @@
  * marcas.comissao_franquia_pct quando foi de fato informado (> 0) e, se essa
  * fonte não existe, a faixa da apresentadora (própria, senão padrão do tenant).
  *
- * Zero não entra. A coluna nasce com DEFAULT 0, e a role do portal não pode
+ * Cancelamento comercial explícito retorna zero e encerra a cascata.
+ * Nos registros legados, zero não entra. A coluna nasce com DEFAULT 0, e a role do portal não pode
  * ler comissao_confirmada (revogada na migration 156) — selecioná-la no aprovar
  * estoura 42501. Fonte ausente devolve null. Não devolve 0 para inventar comissão.
  * comissao_franqueadora (royalty) fica de fora — o placeholder 0 dela não entra aqui.
@@ -40,16 +41,15 @@ async function marcaFranquiaPct(db, { tenantId, marcaId, data }) {
          WHEN mc.comissao_franquia_pct > 0 THEN mc.comissao_franquia_pct
          ELSE NULL
        END AS condicao_pct,
-       m.comissao_franquia_pct AS marca_pct
+       m.comissao_franquia_pct AS marca_pct, mc.cancelled_at IS NOT NULL AS sem_cobranca
      FROM marcas m
      LEFT JOIN LATERAL (
-       SELECT c.comissao_franquia_pct
+       SELECT c.cancelled_at, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct
          FROM marca_condicoes_comerciais c
         WHERE c.tenant_id = m.tenant_id
           AND c.marca_id = m.id
           AND c.inicio_vigencia <= COALESCE($3::date, (NOW() AT TIME ZONE 'America/Sao_Paulo')::date)
-          AND c.cancelled_at IS NULL
-        ORDER BY c.inicio_vigencia DESC
+        ORDER BY c.inicio_vigencia DESC, (c.cancelled_at IS NULL) DESC
         LIMIT 1
      ) mc ON true
      WHERE m.id = $1::uuid
@@ -58,6 +58,7 @@ async function marcaFranquiaPct(db, { tenantId, marcaId, data }) {
   )
   const row = result.rows[0]
   if (!row) return null
+  if (row.sem_cobranca) return 0
   if (row.condicao_pct != null && row.condicao_pct !== '') return Number(row.condicao_pct)
   // DEFAULT 0 da coluna é placeholder, não percentual negociado.
   // Um valor acima de zero na marca é fonte real mesmo sem a flag da condição.

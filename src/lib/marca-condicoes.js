@@ -151,13 +151,14 @@ export function normalizarMarcaCondicao(input = {}, options = {}) {
   }
 }
 
-/** Última condição ativa no mês da data, em horário civil de São Paulo. */
+/** Resolve a última fronteira temporal; cancelamento inicia um intervalo sem cobrança. */
 export function resolveMarcaCondicao(conditions = [], factDate) {
   const date = dateOnly(factDate)
-  return conditions
-    .filter((condition) => condition?.cancelled_at == null)
+  const boundary = conditions
+    .filter(Boolean)
     .filter((condition) => String(condition.inicio_vigencia).slice(0, 10) <= date)
-    .sort((a, b) => String(b.inicio_vigencia).localeCompare(String(a.inicio_vigencia)))[0] ?? null
+    .sort((a, b) => String(b.inicio_vigencia).localeCompare(String(a.inicio_vigencia)) || Number(b.revision ?? 1) - Number(a.revision ?? 1))[0]
+  return boundary?.cancelled_at == null ? boundary ?? null : null
 }
 
 export const resolveConditionAt = resolveMarcaCondicao
@@ -210,14 +211,13 @@ export function marcaCondicaoAtSql({
   dateSql = 'l.iniciado_em AT TIME ZONE \'America/Sao_Paulo\'',
 } = {}) {
   return `LEFT JOIN LATERAL (
-    SELECT ${alias}.*
+    SELECT * FROM (SELECT ${alias}.*
       FROM marca_condicoes_comerciais ${alias}
      WHERE ${alias}.tenant_id = ${tenantSql}::uuid
        AND ${alias}.marca_id = ${marcaSql}
        AND ${alias}.inicio_vigencia <= (${dateSql})::date
-       AND ${alias}.cancelled_at IS NULL
-     ORDER BY ${alias}.inicio_vigencia DESC
-     LIMIT 1
+     ORDER BY ${alias}.inicio_vigencia DESC, ${alias}.revision DESC
+     LIMIT 1) latest WHERE latest.cancelled_at IS NULL
   ) ${alias} ON true`
 }
 

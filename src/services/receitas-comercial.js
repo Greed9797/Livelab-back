@@ -11,6 +11,7 @@ import { registrarEstorno, registrarLiquidacao } from './financeiro-liquidacoes-
 import { perdaJaRegistrada, requisicaoPerda } from '../lib/perda-idempotencia.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
+import { lerMovimentosFinanceirosPeriodo, resumirRecebimentos } from './financeiro-movimentos-periodo.js'
 // Ciclo estático intencional (o agregador importa este módulo): só usado em tempo de
 // chamada, nunca no topo do módulo.
 import { aplicarCorte, buscarConfigFinanceiro, dentroDoCorte, vencimentoEfetivo } from './financeiro-agregador.js'
@@ -186,11 +187,13 @@ export function parseIdTitulo(id) {
 function tituloPublico({ stored, calc, hoje }) {
   const src = stored ?? calc
   const competencia = dateKey(stored?.competencia ?? calc.competencia)
-  const valorPrevisto = round2(stored ? stored.valor_previsto : calc.valor)
+  const valorOriginal = round2(stored ? stored.valor_previsto : calc.valor)
   const valorPago = round2(stored?.valor_pago ?? 0)
   const valorPerdido = stored?.valor_perdido == null
-    ? (stored?.perdido_em ? round2(Math.max(0, valorPrevisto - valorPago)) : 0)
+    ? (stored?.perdido_em ? round2(Math.max(0, valorOriginal - valorPago)) : 0)
     : round2(stored.valor_perdido)
+  const suspenso = stored?.suspensao_comercial?.ativa === true
+  const valorPrevisto = suspenso ? round2(valorPago + valorPerdido) : valorOriginal
   const dataVencimento = dateKey(stored?.data_vencimento ?? calc.data_vencimento)
   const dataPagamento = dateKey(stored?.data_pagamento ?? null)
   const tipoCobranca = calc?.tipo_cobranca ?? stored?.tipo_cobranca ?? 'fixo_mais_comissao'
@@ -205,6 +208,8 @@ function tituloPublico({ stored, calc, hoje }) {
     competencia,
     data_vencimento: dataVencimento,
     valor_previsto: valorPrevisto,
+    valor_previsto_original: valorOriginal,
+    suspensao_comercial: stored?.suspensao_comercial ?? null,
     valor_pago: valorPago,
     valor_perdido: valorPerdido,
     data_pagamento: dataPagamento,
@@ -226,6 +231,7 @@ function tituloPublico({ stored, calc, hoje }) {
     perdido_por: stored?.perdido_por ?? null,
   }
   item.status = statusLancamento(item, hoje)
+  if (suspenso) item.status = 'cancelado'
   if (stored?.valor_perdido != null && !stored.perdido_em && exactMoneyToCents(String(stored.valor_perdido)) > 0n &&
       exactMoneyToCents(String(stored.valor_pago)) + exactMoneyToCents(String(stored.valor_perdido)) >= exactMoneyToCents(String(stored.valor_previsto))) {
     item.status = 'perdido'
@@ -233,22 +239,23 @@ function tituloPublico({ stored, calc, hoje }) {
   return item
 }
 
-async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId = null, componente = null, id = null }) {
+async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId = null, componente = null, id = null, vencimentoDe = null, vencimentoAte = null }) {
   const { rows } = await db.query(
     `SELECT rt.id, rt.tenant_id, rt.marca_id, rt.cliente_id, rt.competencia, rt.componente,
             rt.valor_previsto, rt.valor_pago, rt.data_vencimento, rt.data_pagamento, rt.observacao,
-            rt.perdido_em, rt.perdido_motivo, rt.perdido_por, rt.valor_perdido,
+            rt.perdido_em, rt.perdido_motivo, rt.perdido_por, rt.valor_perdido, rt.suspensao_comercial,
             m.nome AS marca_nome, m.tipo AS marca_tipo, cl.nome AS cliente_nome, m.tipo_cobranca
        FROM receita_titulos rt
        JOIN marcas m ON m.id = rt.marca_id AND m.tenant_id = rt.tenant_id
        LEFT JOIN clientes cl ON cl.id = rt.cliente_id AND cl.tenant_id = rt.tenant_id
       WHERE rt.tenant_id = $1::uuid
-        AND ($2::date IS NULL OR rt.competencia >= $2::date)
-        AND ($3::date IS NULL OR rt.competencia <= $3::date)
+        AND ((($2::date IS NULL OR rt.competencia >= $2::date)
+        AND ($3::date IS NULL OR rt.competencia <= $3::date))
+        OR ($7::date IS NOT NULL AND rt.data_vencimento BETWEEN $7::date AND $8::date))
         AND ($4::uuid IS NULL OR rt.marca_id = $4::uuid)
         AND ($5::text IS NULL OR rt.componente = $5::text)
         AND ($6::uuid IS NULL OR rt.id = $6::uuid)`,
-    [tenantId, startDate, endDate, marcaId, componente, id],
+    [tenantId, startDate, endDate, marcaId, componente, id, vencimentoDe, vencimentoAte],
   )
   return rows
 }
@@ -259,11 +266,11 @@ async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId 
  * o valor recalculado fica em `valor_calculado` (+ `divergente`).
  * Filtros opcionais: status, marca_id, cliente_id, componente.
  */
-export async function listarTitulosReceita(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), status, marca_id: marcaId, cliente_id: clienteId, componente } = {}) {
+export async function listarTitulosReceita(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), status, marca_id: marcaId, cliente_id: clienteId, componente, vencimentoDe, vencimentoAte } = {}) {
   const { startDate, endDate } = resolverPeriodoCompetencia(inicio, fim)
   const [calculados, materializados] = await Promise.all([
     calcularReceitasComerciais(db, { tenantId, inicio: startDate, fim: endDate }),
-    listarMaterializados(db, { tenantId, startDate, endDate }),
+    listarMaterializados(db, { tenantId, startDate, endDate, vencimentoDe, vencimentoAte }),
   ])
   const porChave = new Map(calculados.map((c) => [chave(c.marca_id, c.competencia, c.componente), c]))
   const itens = []
@@ -337,6 +344,7 @@ async function upsertTitulo(db, { tenantId, calc, actorUserId }) {
            atualizado_em = NOW()
        WHERE receita_titulos.perdido_em IS NULL
          AND receita_titulos.valor_perdido IS NULL
+         AND receita_titulos.suspensao_comercial IS NULL
      RETURNING id, (xmax = 0) AS inserido`,
     [tenantId, calc.marca_id, calc.cliente_id, calc.competencia, calc.componente, calc.valor, calc.data_vencimento, actorUserId ?? null],
   )
@@ -383,6 +391,7 @@ export async function gerarTitulosReceita(db, { tenantId, mes, actorUserId = nul
         WHERE tenant_id = $1::uuid AND competencia = $2::date
           AND valor_pago = 0 AND data_pagamento IS NULL AND perdido_em IS NULL
           AND valor_perdido IS NULL
+          AND suspensao_comercial IS NULL
           AND NOT ((marca_id::text || ':' || componente) = ANY($3::text[]))`,
       [tenantId, `${mes}-01`, manter],
     )
@@ -472,11 +481,12 @@ export async function receberTitulo(db, {
   // a mesma chave com alvo, data, ator ou origem diferentes.
   const current = prior ? null : await db.query(
     `SELECT valor_pago::text AS valor_pago, valor_previsto::text AS valor_previsto,
-            valor_perdido::text AS valor_perdido
+            valor_perdido::text AS valor_perdido, suspensao_comercial
        FROM receita_titulos WHERE tenant_id = $1::uuid AND id = $2::uuid`, [tenantId, tituloId],
   )
   if (!prior && !current.rows[0]) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
   const row = current?.rows[0]
+  if (row?.suspensao_comercial?.ativa) throw serviceError('Cobrança suspensa pela exclusão da competência. Cadastre uma nova condição antes de receber.', 'RECEITA_SUSPENSA_COMERCIAL', 409)
   const maximo = row && exactMoneyToCents(row.valor_previsto) - exactMoneyToCents(row.valor_perdido ?? '0')
   const target = requested ?? maximo
   if (!prior && target > maximo) throw serviceError('valor_pago excede o saldo após perdas', 'INVALID_PAYMENT', 409)
@@ -489,12 +499,13 @@ export async function receberTitulo(db, {
     validarOrigemParaUpdate: async (tx) => {
       const { rows } = await tx.query(
         `SELECT tenant_id, valor_previsto::text AS valor_previsto, valor_pago::text AS valor_pago,
-                valor_perdido::text AS valor_perdido, perdido_em
+                valor_perdido::text AS valor_perdido, perdido_em, suspensao_comercial
            FROM receita_titulos WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE`,
         [tenantId, tituloId],
       )
       const titulo = rows[0]
       if (!titulo) return null
+      if (titulo.suspensao_comercial?.ativa) throw serviceError('Cobrança suspensa pela exclusão da competência.', 'RECEITA_SUSPENSA_COMERCIAL', 409)
       if (titulo.perdido_em && titulo.valor_perdido == null) throw erroEncerrado()
       const { rows: totals } = await tx.query(
         `SELECT COALESCE(SUM(l.valor), 0)::text AS liquidado,
@@ -710,6 +721,7 @@ export async function perderTitulo(db, {
       return { item: await tituloAtualizado(db, { tenantId, id, hoje }), ja_perdido: true }
     }
     const titulo = await buscarTituloParaBaixa(db, { tenantId, ref, actorUserId })
+    if (titulo.suspensao_comercial?.ativa) throw serviceError('Cobrança suspensa pela exclusão da competência não pode ser dada como perdida.', 'RECEITA_SUSPENSA_COMERCIAL', 409)
     const { previsto, pago } = centsTitulo(titulo)
     if (pago >= previsto) {
       throw serviceError('Título já recebido integralmente não pode ser dado como perdido', 'RECEITA_PAGA', 409)
@@ -990,10 +1002,12 @@ export function montarReceitaMensal({
   for (const c of listaClientes) c.marcas.sort((a, b) => porNome(a.marca_nome, b.marca_nome))
 
   // ── vencimento ──
-  const itensVenc = aplicarCorte([
+  // A previsão usa o vencimento; recebimentos têm corte próprio por evento.
+  const itensVenc = [
     ...titulosMes,
     ...avulsas,
-  ].filter((i) => mesDeData(vencimentoEfetivo(i)) === mes), corte)
+  ].filter((i) => mesDeData(vencimentoEfetivo(i)) === mes
+    && (!corte || String(vencimentoEfetivo(i)).slice(0, 10) >= String(corte).slice(0, 10)))
     .map((i) => ({
       ...i,
       tipo: i.origem === 'avulsa' ? (ehAporte(i) ? 'aporte' : 'avulsa') : 'titulo',
@@ -1033,16 +1047,17 @@ export async function consultarReceitaMensal(db, { tenantId, mes, hoje = hojeSao
   let corte = dataCorte
   if (corte === undefined) corte = (await buscarConfigFinanceiro(db, tenantId)).data_corte
   const { startDate, endDate } = resolverPeriodoCompetencia(mes, mes)
-  const [titulos, avulsas, linhas, vigentes] = await Promise.all([
+  const [titulos, avulsas, linhas, vigentes, movimentos] = await Promise.all([
     // vencimento = competência + offset (0|1) → competências mes-1 e mes
-    listarTitulosReceita(db, { tenantId, inicio: addMes(mes, -1), fim: mes, hoje }),
+    listarTitulosReceita(db, { tenantId, inicio: addMes(mes, -1), fim: mes, hoje, vencimentoDe: startDate, vencimentoAte: endDate }),
     // competência no mês ou vencimento dentro do mês; o corte segue em aplicarCorte.
     listarReceitasAvulsas(db, { tenantId, inicio: mes, fim: mes, vencimentoDe: startDate, vencimentoAte: endDate, hoje }),
     db.query(receitaMarcaMensalSql(), [startDate, endDate, tenantId]),
     db.query(marcasCondicaoVigenteMesSql(), [startDate, endDate, tenantId]),
+    lerMovimentosFinanceirosPeriodo(db, { tenantId, de: startDate, ate: endDate, dataCorte: corte ?? null }),
   ])
-  return montarReceitaMensal({
+  return { ...montarReceitaMensal({
     mes, hoje, dataCorte: corte ?? null,
     titulos, avulsas, linhasMarca: linhas.rows, marcasVigentes: vigentes.rows,
-  })
+  }), recebimentos_mes: resumirRecebimentos(movimentos.itens), reconciliacao: movimentos.reconciliacao }
 }

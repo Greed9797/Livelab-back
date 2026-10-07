@@ -24,6 +24,7 @@ await pg.exec(`
     VALUES ('${titulo}', '${tenant}', '${marca}', '2026-09-01', 'fixo', 100.00, '2026-10-05');
 `)
 await pg.exec(await readFile(new URL('../migrations/180_financeiro_liquidacoes_estornos.sql', import.meta.url), 'utf8'))
+await pg.exec(await readFile(new URL('../migrations/184_receita_titulos_suspensao_comercial.sql', import.meta.url), 'utf8'))
 await pg.exec(`
   ALTER TABLE receita_titulos ENABLE ROW LEVEL SECURITY;
   ALTER TABLE receita_titulos FORCE ROW LEVEL SECURITY;

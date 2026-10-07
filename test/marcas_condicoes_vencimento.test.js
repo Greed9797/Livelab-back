@@ -8,7 +8,7 @@ const condicaoId = '00000000-0000-4000-8000-000000000005'
 
 function dbMock() {
   return {
-    query: vi.fn(async (sql) => (/^\s*UPDATE marca_condicoes_comerciais/.test(sql)
+    query: vi.fn(async (sql) => (/FROM marcas[\s\S]*FOR UPDATE/.test(sql) ? { rows: [{ id: marcaId }] } : /^\s*UPDATE marca_condicoes_comerciais/.test(sql)
       ? { rows: [{ id: condicaoId, marca_id: marcaId, inicio_vigencia: '2026-09-01', comissao_janela_inicio_dia: 16 }] }
       : { rows: [] })),
   }
@@ -23,6 +23,8 @@ describe('atualizarVencimentoCondicao com janela', () => {
     expect(update[1][7]).toBe(16)
     expect(update[1].slice(3, 7)).toEqual([null, null, null, null])
     expect(out.comissao_janela_inicio_dia).toBe(16)
+    expect(db.query.mock.calls.some(([sql]) => sql.includes('pg_advisory_xact_lock'))).toBe(true)
+    expect(update[0]).toContain('MAX(revision)')
   })
 
   it('rejeita janela fora de 1..28 sem tocar o banco', async () => {
@@ -37,6 +39,7 @@ describe('atualizarVencimentoCondicao — janela retroativa', () => {
   function db(tem) {
     return {
       query: vi.fn(async (sql) => {
+        if (/FROM marcas[\s\S]*FOR UPDATE/.test(sql)) return { rows: [{ id: marcaId }] }
         if (/SELECT EXISTS/.test(sql)) return { rows: [{ tem }] }
         if (/^\s*UPDATE marca_condicoes_comerciais/.test(sql)) return { rows: [{ id: condicaoId, marca_id: marcaId, inicio_vigencia: '2026-09-01', comissao_janela_inicio_dia: 16 }] }
         return { rows: [] }

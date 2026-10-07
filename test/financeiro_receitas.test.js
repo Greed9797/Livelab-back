@@ -286,6 +286,7 @@ describe('rota PATCH /v1/marcas/:id/condicoes/:condicaoId/vencimento', () => {
   it('valida e atualiza só o vencimento, movendo títulos em aberto', async () => {
     const query = vi.fn(async (sql, params) => {
       const text = String(sql)
+      if (text.includes('FROM marcas') && text.includes('FOR UPDATE')) return { rows: [{ id: marcaId }] }
       if (text.startsWith('UPDATE marca_condicoes_comerciais')) {
         expect(params.slice(0, 3)).toEqual([tenantId, marcaId, condicaoId])
         return { rows: [{ id: condicaoId, inicio_vigencia: '2026-09-01', fixo_mensal: '100', fixo_vencimento_dia: params[3], fixo_vencimento_mes_offset: 1, comissao_vencimento_dia: 5, comissao_vencimento_mes_offset: params[6] }] }
@@ -312,7 +313,9 @@ describe('rota PATCH /v1/marcas/:id/condicoes/:condicaoId/vencimento', () => {
   })
 
   it('condição inexistente → 404', async () => {
-    const app = marcasApp(vi.fn(async () => ({ rows: [], rowCount: 0 })))
+    const app = marcasApp(vi.fn(async (sql) => String(sql).includes('FROM marcas') && String(sql).includes('FOR UPDATE')
+      ? { rows: [{ id: marcaId }] }
+      : { rows: [], rowCount: 0 }))
     await app.register(marcasRoutes)
     const res = await app.inject({ method: 'PATCH', url: `/v1/marcas/${marcaId}/condicoes/${condicaoId}/vencimento`, payload: { fixo_vencimento_dia: 10 } })
     expect(res.statusCode).toBe(404)

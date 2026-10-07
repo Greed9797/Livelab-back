@@ -51,6 +51,7 @@ const migrationClient = {
 }
 await applyMigration(migrationClient, '180_financeiro_liquidacoes_estornos.sql')
 await applyMigration(migrationClient, '181_financeiro_perdas_reversoes.sql')
+await applyMigration(migrationClient, '184_receita_titulos_suspensao_comercial.sql')
 
 const db = {
   query(sql, params) {

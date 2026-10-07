@@ -25,7 +25,7 @@ export async function ensureClienteMarca(
             EXISTS (
               SELECT 1 FROM marca_condicoes_comerciais c
                WHERE c.tenant_id = marcas.tenant_id AND c.marca_id = marcas.id
-                 AND c.inicio_vigencia = DATE '1900-01-01' AND c.cancelled_at IS NULL
+                 AND c.inicio_vigencia = DATE '1900-01-01'
             ) AS has_baseline_condition
        FROM marcas
       WHERE tenant_id = $1::uuid
@@ -37,6 +37,7 @@ export async function ensureClienteMarca(
   )
   const marca = existing.rows[0]
   if (marca) {
+    // A canceled baseline is still a deliberate commercial boundary; never recreate it automatically.
     if (marca.has_baseline_condition === false) {
       await db.query(
         `INSERT INTO marca_condicoes_comerciais (

@@ -61,6 +61,8 @@ await db.exec(await readFile(new URL('../migrations/165_receita_titulos_vencimen
 await db.exec(await readFile(new URL('../migrations/179_condicoes_comissao_janela.sql', import.meta.url), 'utf8'))
 await db.query(`SELECT set_config('app.tenant_id',$1,false)`, [tenant])
 
+await db.exec('ALTER TABLE receita_titulos ADD COLUMN valor_perdido numeric(15,2) DEFAULT 0, ADD COLUMN perdido_em timestamptz, ADD COLUMN suspensao_comercial jsonb')
+
 const preview = await preverCondicaoMarca(db, { tenantId: tenant, marcaId: marca, proposta: proposal })
 assert.equal(preview.bloqueada, false)
 assert.equal(preview.fim_vigencia_exclusivo, '2026-11-01')
@@ -76,7 +78,7 @@ const protectedPreview = await preverCondicaoMarca(db, {
   tenantId: tenant, marcaId: marca,
   proposta: { ...proposal, inicio_vigencia: '2026-07' },
 })
-assert.equal(protectedPreview.bloqueada, true)
+assert.equal(protectedPreview.bloqueada, false)
 assert.equal(protectedPreview.impacto.movimentos_fechados, 2)
 assert.equal(confirmed.idempotent, false)
 const conditionId = confirmed.condition.id
@@ -99,17 +101,15 @@ const retry = await confirmarCondicaoMarca(db, {
 })
 assert.equal(retry.idempotent, true)
 
-// Closed live is detected before insertion and rolls back.
+// Historical creation preserves the closed live and approved movement snapshots.
 await db.query(`UPDATE lives SET faturado_em=NOW() WHERE id=$1`, [id(5)])
-await assert.rejects(
-  confirmarCondicaoMarca(db, {
-    tenantId: tenant, marcaId: marca,
-    proposta: { ...proposal, inicio_vigencia: '2026-10' },
-    expectedRevision: 2, idempotencyKey: 'pglite-contract-closed',
-  }),
-  (error) => error.code === 'FINANCIAL_PERIOD_CLOSED' && error.statusCode === 409,
-)
-assert.equal((await db.query(`SELECT count(*)::int AS total FROM marca_condicoes_comerciais WHERE inicio_vigencia='2026-10-01'`)).rows[0].total, 0)
+await confirmarCondicaoMarca(db, {
+  tenantId: tenant, marcaId: marca,
+  proposta: { ...proposal, inicio_vigencia: '2026-10', comissao_franquia_pct: 3 },
+  expectedRevision: 2, idempotencyKey: 'pglite-contract-closed',
+})
+assert.equal((await db.query(`SELECT comissao_calculada FROM lives WHERE id=$1`, [id(5)])).rows[0].comissao_calculada, '160.00')
+assert.equal((await db.query(`SELECT count(*)::int AS total FROM marca_condicoes_comerciais WHERE inicio_vigencia='2026-10-01'`)).rows[0].total, 1)
 
-console.log('PASS: real preview/confirm, open recalc, projection, idempotent retry and closed rollback')
+console.log('PASS: real preview/confirm, open recalc, projection, idempotent retry and closed snapshot preservation')
 await db.close()

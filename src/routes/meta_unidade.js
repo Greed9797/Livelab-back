@@ -5,6 +5,7 @@
 // Audit: metas.unidade.update
 import { countWeekdaysInMonth } from '../lib/dias_uteis.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
+import { assertCurrentGoalMonth } from '../lib/operational-goals.js'
 
 const ANO_MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 
@@ -77,6 +78,11 @@ export async function metaUnidadeRoutes(app) {
     const mes = ano_mes || saoPauloDateInput(new Date()).slice(0, 7)
     if (!ANO_MES_RE.test(mes)) {
       return reply.code(400).send({ error: 'ano_mes deve ter o formato YYYY-MM.' })
+    }
+    try {
+      assertCurrentGoalMonth(mes)
+    } catch (error) {
+      return reply.code(error.statusCode ?? 409).send({ error: error.message })
     }
     const hasMetaGmv = hasOwn(body, 'meta_gmv')
     const hasMetaHoras = hasOwn(body, 'meta_horas_live')

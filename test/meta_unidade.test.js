@@ -24,13 +24,15 @@ afterEach(() => vi.useRealTimers())
 
 describe('metas mensais da unidade', () => {
   it('preserva a meta GMV existente ao atualizar somente horas e GMV/h', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-07T15:00:00.000Z'))
     const queryMock = vi.fn(async (sql, params) => {
       expect(sql).toContain('ON CONFLICT (tenant_id, ano_mes) DO UPDATE')
       expect(sql).toContain('CASE WHEN $6::boolean')
       expect(sql).toContain('CASE WHEN $7::boolean')
       expect(sql).toContain('CASE WHEN $8::boolean')
-      expect(params).toEqual([tenantId, '2026-09', null, 1100, 550, false, true, true])
-      return { rows: [{ ano_mes: '2026-09', meta_gmv: '85000', meta_horas_live: '1100', meta_gmv_hora: '550' }] }
+      expect(params).toEqual([tenantId, '2026-10', null, 1100, 550, false, true, true])
+      return { rows: [{ ano_mes: '2026-10', meta_gmv: '85000', meta_horas_live: '1100', meta_gmv_hora: '550' }] }
     })
     const app = buildApp(queryMock)
     await app.register(metaUnidadeRoutes)
@@ -38,28 +40,30 @@ describe('metas mensais da unidade', () => {
     const res = await app.inject({
       method: 'PUT',
       url: '/v1/meta-unidade',
-      payload: { ano_mes: '2026-09', meta_horas_live: 1100, meta_gmv_hora: 550 },
+      payload: { ano_mes: '2026-10', meta_horas_live: 1100, meta_gmv_hora: 550 },
     })
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toMatchObject({
-      ano_mes: '2026-09', meta_gmv: 85000, meta_horas_live: 1100, meta_gmv_hora: 550,
+      ano_mes: '2026-10', meta_gmv: 85000, meta_horas_live: 1100, meta_gmv_hora: 550,
     })
     expect(app.audit.log).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      metadata: { ano_mes: '2026-09', meta_horas_live: 1100, meta_gmv_hora: 550 },
+      metadata: { ano_mes: '2026-10', meta_horas_live: 1100, meta_gmv_hora: 550 },
     }))
     await app.close()
   })
 
   it('permite limpar explicitamente apenas uma das metas novas', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-07T15:00:00.000Z'))
     const queryMock = vi.fn(async (_sql, params) => {
-      expect(params).toEqual([tenantId, '2026-09', null, null, null, false, true, false])
-      return { rows: [{ ano_mes: '2026-09', meta_gmv: '85000', meta_horas_live: null, meta_gmv_hora: '550' }] }
+      expect(params).toEqual([tenantId, '2026-10', null, null, null, false, true, false])
+      return { rows: [{ ano_mes: '2026-10', meta_gmv: '85000', meta_horas_live: null, meta_gmv_hora: '550' }] }
     })
     const app = buildApp(queryMock)
     await app.register(metaUnidadeRoutes)
 
-    const res = await app.inject({ method: 'PUT', url: '/v1/meta-unidade', payload: { ano_mes: '2026-09', meta_horas_live: null } })
+    const res = await app.inject({ method: 'PUT', url: '/v1/meta-unidade', payload: { ano_mes: '2026-10', meta_horas_live: null } })
 
     expect(res.statusCode).toBe(200)
     expect(res.json()).toMatchObject({ meta_gmv: 85000, meta_horas_live: null, meta_gmv_hora: 550 })
@@ -67,18 +71,32 @@ describe('metas mensais da unidade', () => {
   })
 
   it('aceita números JavaScript válidos com duas casas, apesar do ruído binário', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-07T15:00:00.000Z'))
     const queryMock = vi.fn(async (_sql, params) => {
-      expect(params).toEqual([tenantId, '2026-09', 9876543.21, null, 0.29, true, false, true])
-      return { rows: [{ ano_mes: '2026-09', meta_gmv: '9876543.21', meta_horas_live: null, meta_gmv_hora: '0.29' }] }
+      expect(params).toEqual([tenantId, '2026-10', 9876543.21, null, 0.29, true, false, true])
+      return { rows: [{ ano_mes: '2026-10', meta_gmv: '9876543.21', meta_horas_live: null, meta_gmv_hora: '0.29' }] }
     })
     const app = buildApp(queryMock)
     await app.register(metaUnidadeRoutes)
 
-    const res = await app.inject({ method: 'PUT', url: '/v1/meta-unidade', payload: { ano_mes: '2026-09', meta_gmv: 9876543.21, meta_gmv_hora: 0.29 } })
+    const res = await app.inject({ method: 'PUT', url: '/v1/meta-unidade', payload: { ano_mes: '2026-10', meta_gmv: 9876543.21, meta_gmv_hora: 0.29 } })
 
     expect(res.statusCode).toBe(200)
     expect(res.json().meta_gmv).toBe(9876543.21)
     expect(res.json().meta_gmv_hora).toBe(0.29)
+    await app.close()
+  })
+
+  it('bloqueia alteração retroativa das metas da unidade', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-07T15:00:00.000Z'))
+    const queryMock=vi.fn()
+    const app=buildApp(queryMock)
+    await app.register(metaUnidadeRoutes)
+    const res=await app.inject({method:'PUT',url:'/v1/meta-unidade',payload:{ano_mes:'2026-09',meta_gmv:600000}})
+    expect(res.statusCode).toBe(409)
+    expect(queryMock).not.toHaveBeenCalled()
     await app.close()
   })
 

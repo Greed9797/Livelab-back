@@ -4,6 +4,10 @@
 // Audit: metas.apresentadora.update, metas.supervisor.update, metas.marca_hora.update
 
 import { anoMesRange, anoMesToDate, parseAnoMes } from '../lib/ano-mes.js'
+import { saoPauloDateInput } from '../lib/timezone.js'
+import { assertCurrentGoalMonth } from '../lib/operational-goals.js'
+
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 
 /**
  * Lê e valida ?mes (formato 'YYYY-MM'). Devolve null quando malformado, já
@@ -75,8 +79,11 @@ export async function metasRoutes(app) {
     if (gmv_meta == null || isNaN(Number(gmv_meta))) {
       return reply.code(400).send({ error: 'gmv_meta é obrigatório e deve ser numérico.' })
     }
+    try { assertCurrentGoalMonth(mes) } catch (error) { return reply.code(error.statusCode ?? 409).send({ error: error.message }) }
 
     const result = await app.withTenant(tenant_id, async (db) => {
+      const owner = await db.query('SELECT id FROM apresentadoras WHERE tenant_id=$1 AND id=$2 AND ativo=true AND arquivada=false LIMIT 1', [tenant_id, id])
+      if (!owner.rows[0]) return null
       const r = await db.query(`
         INSERT INTO metas_apresentadora
           (tenant_id, apresentadora_id, mes_referencia, gmv_meta, criado_por)
@@ -89,6 +96,7 @@ export async function metasRoutes(app) {
 
       return r.rows[0]
     })
+    if (!result) return reply.code(404).send({ error: 'Apresentadora não encontrada nesta unidade.' })
 
     await app.audit.log(request, {
       action: 'metas.apresentadora.update',
@@ -148,6 +156,7 @@ export async function metasRoutes(app) {
     if (gmv_meta_total == null || isNaN(Number(gmv_meta_total))) {
       return reply.code(400).send({ error: 'gmv_meta_total é obrigatório e deve ser numérico.' })
     }
+    try { assertCurrentGoalMonth(mes) } catch (error) { return reply.code(error.statusCode ?? 409).send({ error: error.message }) }
 
     const result = await app.withTenant(tenant_id, async (db) => {
       const r = await db.query(`
@@ -183,7 +192,7 @@ export async function metasRoutes(app) {
     preHandler: app.requirePapel(['franqueado', 'gerente']),
   }, async (request) => {
     const { tenant_id } = request.user
-    const anoMes = request.query.ano_mes || new Date().toISOString().slice(0, 7)
+    const anoMes = request.query.ano_mes || saoPauloDateInput(new Date()).slice(0, 7)
 
     return app.withTenant(tenant_id, async (db) => {
       const r = await db.query(`
@@ -217,14 +226,23 @@ export async function metasRoutes(app) {
   }, async (request, reply) => {
     const { tenant_id, sub: user_id } = request.user
     const { marcaId } = request.params
-    const anoMes = request.query.ano_mes || new Date().toISOString().slice(0, 7)
+    const anoMes = request.query.ano_mes || saoPauloDateInput(new Date()).slice(0, 7)
     const { meta_gmv_hora } = request.body ?? {}
+
+    if (!MONTH_RE.test(anoMes)) return reply.code(400).send({ error:'ano_mes deve ter o formato YYYY-MM.' })
+    try {
+      assertCurrentGoalMonth(anoMes)
+    } catch (error) {
+      return reply.code(error.statusCode ?? 409).send({error:error.message})
+    }
 
     if (meta_gmv_hora == null || isNaN(Number(meta_gmv_hora)) || Number(meta_gmv_hora) < 0) {
       return reply.code(400).send({ error: 'meta_gmv_hora é obrigatório e deve ser numérico >= 0.' })
     }
 
     const result = await app.withTenant(tenant_id, async (db) => {
+      const owner = await db.query('SELECT id FROM marcas WHERE tenant_id=$1 AND id=$2 AND status=\'ativa\' LIMIT 1', [tenant_id, marcaId])
+      if (!owner.rows[0]) return null
       const r = await db.query(`
         INSERT INTO marca_metas_hora
           (tenant_id, marca_id, ano_mes, meta_gmv_hora, criado_por)
@@ -237,6 +255,7 @@ export async function metasRoutes(app) {
 
       return r.rows[0]
     })
+    if (!result) return reply.code(404).send({ error: 'Marca não encontrada nesta unidade.' })
 
     await app.audit.log(request, {
       action: 'metas.marca_hora.update',

@@ -16,6 +16,7 @@ import { auditLogPlugin } from './plugins/audit_log.js'
 import { authRoutes } from './routes/auth.js'
 import { homeRoutes, invalidateHomeDashboard } from './routes/home.js'
 import { analyticsRoutes } from './routes/analytics.js'
+import { analyticsOperacionalRoutes } from './routes/analytics-operacional.js'
 import { clientesRoutes } from './routes/clientes.js'
 import { contratosRoutes } from './routes/contratos.js'
 import { financeiroRoutes } from './routes/financeiro.js'
@@ -348,6 +349,7 @@ export async function buildApp(opts = {}) {
   await app.register(authRoutes)
   await app.register(homeRoutes)
   await app.register(analyticsRoutes)
+  await app.register(analyticsOperacionalRoutes)
   await app.register(clientesRoutes)
   await app.register(contratosRoutes)
   await app.register(financeiroRoutes)

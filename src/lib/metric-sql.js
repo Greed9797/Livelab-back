@@ -80,15 +80,16 @@ export function apresentadoraHorasSql({ live = 'l', rateio = 'ap_v2' } = {}) {
  *      linha na live já prova presença, então credita-se a live inteira.
  * Sem linha nenhuma sobra a live inteira: é o caso mono-apresentadora, igual à régua de cima.
  */
-export function apresentadoraHorasPresencaSql({ live = 'l', rateio = 'ap_v2', turno = 'turno' } = {}) {
+export function apresentadoraHorasPresencaSql({ live = 'l', rateio = 'ap_v2', turno = 'turno', end = null } = {}) {
+  const fim = end ?? `COALESCE(${live}.encerrado_em, ${live}.previsto_fim)`
   // Duração blindada, diferente da régua de produtividade: o CASE devolve 0 quando a live não
   // tem fim conhecido ou tem fim ANTES do início. Sem ele, `LEAST(NULL, 24.0)` é 24.0 no
   // Postgres (LEAST ignora NULL) e uma live sem encerrado_em creditaria 24h; e encerrado_em
   // corrompido (migration 107 documenta o caso em produção) creditaria hora negativa, que
   // subtrai as horas de outra live do mesmo dia e fabrica vermelho.
   const duracaoCapada = `CASE
-              WHEN COALESCE(${live}.encerrado_em, ${live}.previsto_fim) > ${live}.iniciado_em
-                THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(${live}.encerrado_em, ${live}.previsto_fim) - ${live}.iniciado_em)) / 3600.0, 24.0)
+              WHEN ${fim} > ${live}.iniciado_em
+                THEN LEAST(EXTRACT(EPOCH FROM (${fim} - ${live}.iniciado_em)) / 3600.0, 24.0)
               ELSE 0 END`
   return `CASE
           WHEN ${rateio}.apresentadora_id IS NOT NULL

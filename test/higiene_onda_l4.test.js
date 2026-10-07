@@ -309,4 +309,21 @@ describe('L4-4 — formato ano_mes', () => {
     const response = await app.inject({ method: 'GET', url: '/v1/metas/supervisor' })
     expect(response.statusCode).toBe(200)
   })
+
+  it('default mensal usa o mês de São Paulo antes da meia-noite UTC', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-01T00:30:00.000Z')) // 21:30 de 31/10 em São Paulo
+    try {
+      const queryMock = vi.fn().mockResolvedValue({ rows: [] })
+      const app = buildApp(queryMock)
+      await app.register(metasRoutes)
+      const response = await app.inject({ method: 'PUT', url: '/v1/metas/supervisor', payload: { gmv_meta_total: 5000 } })
+      expect(response.statusCode).toBe(200)
+      expect(queryMock.mock.calls[0][1]).toContain('2026-10-01')
+      vi.useRealTimers()
+      await app.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

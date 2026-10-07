@@ -162,7 +162,7 @@ describe('caixa e fluxo', () => {
   })
 
   it('fluxo: previsto de entradas sem perdidos, saídas sem cancelados; realizado inalterado', () => {
-    const f = montarFluxoCaixa({ mes: '2026-10', itens: cenario(), saldoInicial: 0 })
+    const f = montarFluxoCaixa({ mes: '2026-10', itens: cenario(), movimentos: [{ natureza: 'receita', data: '2026-10-05', valor: 400 }], saldoInicial: 0 })
     // entradas previstas: r1 conta só o pago (400) + comissão 500; avulsa perdida 0
     expect(f.totais.entradas).toEqual({ previsto: 900, realizado: 400 })
     expect(f.totais.saidas).toEqual({ previsto: 100, realizado: 0 })

@@ -133,10 +133,9 @@ describe('imposto com corte', () => {
   it('base filtra recebimentos >= data_corte e exclui aporte; outubro (M-1 fechado antes do corte) sai 0', async () => {
     const db = mockDb({
       'financeiro_data_corte': () => ({ rows: [{ aliquota_imposto_pct: 10, data_corte: CORTE, saldo_abertura: '0' }] }),
-      'FROM receita_titulos': (s, p) => {
+      'WITH origens AS': (s, p) => {
         // o corte vai como parâmetro do SQL; o banco filtraria tudo de setembro
         expect(s).toContain('data_pagamento >= $4::date')
-        expect(s).toContain("grupo <> 'aporte'")
         expect(p[3]).toBe(CORTE)
         return { rows: [] }
       },
@@ -201,9 +200,11 @@ describe('config e caixa (banco mockado)', () => {
   it('calcularCaixa com corte: abertura + realizado; tenant em toda query', async () => {
     const db = mockDb({
       'SELECT aliquota_imposto_pct': () => ({ rows: [{ aliquota_imposto_pct: 10, data_corte: CORTE, saldo_abertura: '10000' }] }),
-      'FROM apresentadora_pagamentos\n         WHERE tenant_id = $1::uuid AND valor_pago > 0': (_s, p) => ({ rows: [
-        p[1] === CORTE ? { receitas: '0', avulsas: '200', aportes: '5000', custos: '300', imposto: '0', apresentadoras: '0' } : {},
-      ] }),
+      'WITH origens AS': (_s, p) => ({ rows: p[1] === CORTE ? [
+        { natureza: 'receita', origem: 'avulsa', origem_tipo: 'receita_avulsa', grupo: 'servico', data: CORTE, valor: '200' },
+        { natureza: 'receita', origem: 'avulsa', origem_tipo: 'receita_avulsa', grupo: 'aporte', data: CORTE, valor: '5000' },
+        { natureza: 'custo', origem: 'manual', origem_tipo: 'custo', data: CORTE, valor: '300' },
+      ] : [] }),
     })
     const c = await calcularCaixa(db, { tenantId: TENANT, ate: '2026-10-01', hoje: HOJE })
     expect(c).toMatchObject({ configurado: true, saldo_abertura: 10000, entradas_realizadas: 5200, saidas_realizadas: 300, saldo_atual: 14900 })

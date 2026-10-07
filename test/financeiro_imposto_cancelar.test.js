@@ -23,7 +23,11 @@ function fakeDb() {
     async query(sql, params = []) {
       calls.push(sql)
       if (sql.includes('FROM tenants')) return { rows: [{ aliquota_imposto_pct: 10, data_corte: null, saldo_abertura: 0 }] }
-      if (sql.includes('date_trunc')) return { rows: [{ mes: '2026-09', total: 800 }] }
+      if (sql.includes('WITH origens AS')) return { rows: [{
+        id: 'recebimento-setembro', origem_tipo: 'receita_titulo', origem_id: 'titulo-setembro',
+        natureza: 'receita', origem: 'marca_fixo', tipo: 'liquidacao', fonte: 'canonico',
+        data: '2026-09-10', valor: '800.00',
+      }] }
       if (sql.includes("SELECT id, valor, valor_pago")) {
         return { rows: row ? [{ ...row, competencia: `${MES}-01`, data_vencimento: `${MES}-20` }] : [] }
       }

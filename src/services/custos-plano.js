@@ -216,19 +216,22 @@ export const RECORRENTE_COLS = `
  * Custos do período (meses 'YYYY-MM' ou datas; usa os 7 primeiros chars):
  * materializados (manuais, parcelas, recorrentes já geradas) + recorrentes virtuais.
  */
-export async function listarCustos(db, { tenantId, inicio, fim, hoje }) {
+export async function listarCustos(db, { tenantId, inicio, fim, hoje, vencimentoAte }) {
   const mi = mesDe(inicio)
   const mf = mesDe(fim ?? inicio)
   if (!mesValido(mi) || !mesValido(mf) || mf < mi) throw new Error('período inválido')
+  if (vencimentoAte && !/^\d{4}-\d{2}-\d{2}$/.test(vencimentoAte)) throw new Error('vencimento inválido')
+  const params = [tenantId, primeiroDia(mi), ultimoDia(mf)]
+  if (vencimentoAte) params.push(vencimentoAte)
 
   const [custos, recs] = await Promise.all([
     db.query(
       `SELECT ${CUSTO_COLS}
          FROM custos
         WHERE tenant_id = $1::uuid
-          AND competencia >= $2::date AND competencia <= $3::date
+          AND ${vencimentoAte ? '((competencia >= $2::date AND competencia <= $3::date) OR data_vencimento <= $4::date)' : 'competencia >= $2::date AND competencia <= $3::date'}
         ORDER BY data_vencimento NULLS LAST, competencia, criado_em`,
-      [tenantId, primeiroDia(mi), ultimoDia(mf)],
+      params,
     ),
     db.query(
       `SELECT ${RECORRENTE_COLS}

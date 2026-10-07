@@ -142,6 +142,25 @@ describe('montarReceitaMensal — vencimento e a receber', () => {
     expect(r.a_receber_mes).toBe(550)
     expect(r.vencimento.itens[1]).toMatchObject({ cliente_nome: 'Cliente Alfa', marca_nome: 'Alfa', descricao: expect.any(String) })
   })
+
+  it('segue o saldo canônico para perda parcial, perda total, cancelamento e quitação', () => {
+    const avulsaCom = (id, extra) => ({
+      ...avulsa({ id, valor: extra.valor_previsto, competencia: '2026-09-01', venc: '2026-09-20', pago: extra.valor_pago ?? 0 }),
+      ...extra,
+    })
+    const r = montarReceitaMensal({
+      mes: '2026-09', hoje: HOJE,
+      avulsas: [
+        avulsaCom(U(31), { valor_previsto: 100, valor_pago: 10, valor_perdido: 40, status: 'atrasado' }),
+        avulsaCom(U(32), { valor_previsto: 50, perdido_em: '2026-09-14T10:00:00.000Z', status: 'perdido' }),
+        avulsaCom(U(33), { valor_previsto: 30, cancelado_em: '2026-09-14T10:00:00.000Z', status: 'cancelado' }),
+        avulsaCom(U(34), { valor_previsto: 70, valor_pago: 70, perdido_em: '2026-09-14T10:00:00.000Z', status: 'pago' }),
+      ],
+    })
+    expect(r.competencia.total).toEqual({ previsto: 250, pago: 80, aberto: 50, perdido: 120 })
+    expect(r.vencimento.total).toEqual({ previsto: 250, pago: 80, aberto: 50, perdido: 120 })
+    expect(r.a_receber_mes).toBe(50)
+  })
 })
 
 describe('montarReceitaMensal — corte', () => {
@@ -242,7 +261,7 @@ describe('consultarReceitaMensal / rota GET /v1/financeiro/receita', () => {
     const vig = query.mock.calls.find(([sql]) => String(sql).includes('ORDER BY m.nome'))
     expect(vig[1]).toEqual(['2026-10-01', '2026-10-31', tenantId])
     const avul = query.mock.calls.find(([sql]) => String(sql).includes('FROM receitas_avulsas'))
-    expect(avul[1]).toEqual([tenantId, '2025-10-01', '2027-10-01'])
+    expect(avul[1]).toEqual([tenantId, '2026-10-01', '2026-10-01', '2026-10-31', '2026-10-01'])
   })
 
   function buildApp(query, papel = 'financeiro_readonly') {

@@ -28,6 +28,7 @@ const AGREGADOR_NAMESPACE = 'financeiro:agregador'
 
 // Filtros de GET /lancamentos e payloads de baixa/config (onda 2).
 const lancamentosQuerySchema = z.object({
+  vencimento_ate: z.string().refine(dataValida, 'Vencimento inválido').optional(),
   natureza: z.enum(['receita', 'custo']).optional(),
   status: z.enum(['previsto', 'pendente', 'atrasado', 'parcial', 'pago', 'perdido', 'cancelado']).optional(),
   grupo: z.string().trim().min(1).max(40).optional(),
@@ -805,10 +806,10 @@ export async function financeiroRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     try {
       const { inicio, fim } = resolverPeriodoMeses(request.query ?? {}, hoje)
-      const { natureza, status, grupo, classe, origem, q } = parsed.data
-      return await agregadorCache(reply, tenant_id, { rota: 'lancamentos', hoje, inicio, fim, natureza, status, grupo, classe, origem, q },
+      const { natureza, status, grupo, classe, origem, q, vencimento_ate: vencimentoAte } = parsed.data
+      return await agregadorCache(reply, tenant_id, { rota: 'lancamentos', hoje, inicio, fim, natureza, status, grupo, classe, origem, q, vencimentoAte },
         (db) => consultarLancamentos(db, {
-          tenantId: tenant_id, inicio, fim, hoje, filtros: { natureza, status, grupo, classe, origem, q },
+          tenantId: tenant_id, inicio, fim, hoje, vencimentoAte, filtros: { natureza, status, grupo, classe, origem, q },
         }))
     } catch (error) {
       return responderErro(reply, error)

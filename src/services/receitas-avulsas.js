@@ -73,20 +73,32 @@ export function receitaAvulsaParaItem(row, hoje = hojeSaoPaulo()) {
 }
 
 /** Receitas avulsas cuja COMPETÊNCIA está em [inicio, fim] (YYYY-MM ou YYYY-MM-DD). */
-export async function listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), grupo, status } = {}) {
+export async function listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), grupo, status, vencimentoDe, vencimentoAte } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   const mi = String(inicio ?? '').slice(0, 7)
   const mf = String(fim ?? inicio ?? '').slice(0, 7)
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mi) || !/^\d{4}-(0[1-9]|1[0-2])$/.test(mf) || mf < mi) {
     throw erro('Período inválido (use AAAA-MM)', 400, 'INVALID_PERIOD')
   }
+  if ((vencimentoDe && !/^\d{4}-\d{2}-\d{2}$/.test(vencimentoDe)) || (vencimentoAte && !/^\d{4}-\d{2}-\d{2}$/.test(vencimentoAte)) || (vencimentoDe && !vencimentoAte)) {
+    throw erro('Período de vencimento inválido', 400, 'INVALID_PERIOD')
+  }
+  // Competência e vencimento são independentes: não limitar obrigações por uma janela de competências.
+  const params = [tenantId, `${mi}-01`, `${mf}-01`]
+  let periodo = 'competencia >= $2::date AND competencia <= $3::date'
+  if (vencimentoAte) {
+    params.push(vencimentoAte)
+    let vencimento = 'data_vencimento <= $4::date'
+    if (vencimentoDe) { params.push(vencimentoDe); vencimento += ' AND data_vencimento >= $5::date' }
+    periodo = `((${periodo}) OR (${vencimento}))`
+  }
   const { rows } = await db.query(
     `SELECT ${RECEITA_AVULSA_COLS}
        FROM receitas_avulsas
       WHERE tenant_id = $1::uuid
-        AND competencia >= $2::date AND competencia <= $3::date
+        AND ${periodo}
       ORDER BY data_vencimento, criado_em`,
-    [tenantId, `${mi}-01`, `${mf}-01`],
+    params,
   )
   return rows
     .map((r) => receitaAvulsaParaItem(r, hoje))

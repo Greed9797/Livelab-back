@@ -75,6 +75,14 @@ describe('totais com perdidos', () => {
     expect(t.por_status).toMatchObject({ perdido: 200 })
   })
 
+  it('totaliza saldo item a item para não compensar sobrepagamento com outro título aberto', () => {
+    const t = totalizarTitulos([
+      { natureza: 'receita', valor_previsto: 100, valor_pago: 110, status: 'pago' },
+      { natureza: 'receita', valor_previsto: 100, valor_pago: 0, status: 'pendente' },
+    ])
+    expect(t).toMatchObject({ valor_previsto: 200, valor_pago: 110, em_aberto: 100, perdido: 0 })
+  })
+
   it('montarReceitaMensal: previsto da competência inalterado; aberto/a_receber sem perdidos; total.perdido', () => {
     const t = (componente, valor, pago, status, extra = {}) => ({
       id: `calc:${marcaId}:2026-09:${componente}`, natureza: 'receita', origem: 'comercial', componente,

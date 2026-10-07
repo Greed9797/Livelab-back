@@ -39,9 +39,35 @@ export function lancamentoEncerrado(item) {
   return STATUS_ENCERRADOS.includes(item?.status)
 }
 
+const saldoPendente = (item) => Math.max(0, r2(r2(item?.valor_previsto) - r2(item?.valor_pago)))
+const quitado = (item) => Number(item?.valor_pago) > 0 && Number(item.valor_pago) >= Number(item.valor_previsto)
+
+/**
+ * Perda/cancelamento encerra o saldo, exceto para título quitado. Também reconhece
+ * a marcação persistida, pois alguns consumidores ainda não derivaram o status.
+ */
+export function encerrado(item) {
+  if (!item || quitado(item)) return false
+  return lancamentoEncerrado(item) || Boolean(item.perdido_em) || Boolean(item.cancelado_em)
+}
+
 /** Saldo encerrado pela perda/cancelamento: previsto − pago (0 se o item não está encerrado). */
 export function saldoEncerrado(item) {
-  return lancamentoEncerrado(item) ? Math.max(0, r2(r2(item.valor_previsto) - r2(item.valor_pago))) : 0
+  return lancamentoEncerrado(item) ? saldoPendente(item) : 0
+}
+
+/** Perda parcial registrada, ou todo o saldo de lançamento encerrado. */
+export function valorEncerrado(item) {
+  const saldo = saldoPendente(item)
+  if (item?.natureza === 'receita' && item.valor_perdido != null) {
+    return Math.min(saldo, Math.max(0, r2(item.valor_perdido)))
+  }
+  return encerrado(item) ? saldo : 0
+}
+
+/** Saldo após pagamento e perda/cancelamento, inclusive perda parcial. */
+export function saldoAberto(item) {
+  return Math.max(0, r2(r2(item?.valor_previsto) - r2(item?.valor_pago) - valorEncerrado(item)))
 }
 
 /** TIMESTAMPTZ do pg (Date) ou string → ISO string; null se vazio. */

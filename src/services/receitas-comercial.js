@@ -4,7 +4,7 @@
 // (materializados/baixados). Status é sempre derivado (lib/lancamento-status.js).
 import '../lib/pg-date-string.js'
 import { marcasCondicaoVigenteMesSql, receitaMarcaMensalSql } from '../lib/receita-marca-sql.js'
-import { normalizarMotivo, saldoEncerrado, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
+import { normalizarMotivo, saldoAberto, statusLancamento, timestampIso, valorEncerrado } from '../lib/lancamento-status.js'
 import { centsToExactMoney, exactMoneyToCents } from '../lib/money.js'
 import { randomUUID } from 'node:crypto'
 import { registrarEstorno, registrarLiquidacao } from './financeiro-liquidacoes-command.js'
@@ -299,17 +299,19 @@ export function totalizarTitulos(itens = []) {
   const porStatus = {}
   let previsto = 0
   let pago = 0
+  let aberto = 0
   let perdido = 0
   for (const item of itens) {
     previsto += item.valor_previsto
     pago += item.valor_pago
-    perdido += item.valor_perdido ?? saldoEncerrado(item)
+    perdido += valorEncerrado(item)
+    aberto += saldoAberto(item)
     porStatus[item.status] = round2((porStatus[item.status] ?? 0) + item.valor_previsto)
   }
   return {
     valor_previsto: round2(previsto),
     valor_pago: round2(pago),
-    em_aberto: round2(Math.max(0, previsto - pago - perdido)),
+    em_aberto: round2(aberto),
     perdido: round2(perdido),
     quantidade: itens.length,
     por_status: porStatus,
@@ -887,9 +889,8 @@ const somaPrevistoPago = (itens) => {
   for (const i of itens) {
     previsto += toNum(i.valor_previsto)
     pago += toNum(i.valor_pago)
-    const saldo = Math.max(0, round2(i.valor_previsto) - round2(i.valor_pago))
-    if (i.status === 'perdido') perdido += saldo
-    else aberto += saldo
+    perdido += valorEncerrado(i)
+    aberto += saldoAberto(i)
   }
   return { previsto: round2(previsto), pago: round2(pago), aberto: round2(aberto), perdido: round2(perdido) }
 }
@@ -1035,8 +1036,8 @@ export async function consultarReceitaMensal(db, { tenantId, mes, hoje = hojeSao
   const [titulos, avulsas, linhas, vigentes] = await Promise.all([
     // vencimento = competência + offset (0|1) → competências mes-1 e mes
     listarTitulosReceita(db, { tenantId, inicio: addMes(mes, -1), fim: mes, hoje }),
-    // avulsa pode ter competência ≠ mês do vencimento: janela larga
-    listarReceitasAvulsas(db, { tenantId, inicio: addMes(mes, -12), fim: addMes(mes, 12), hoje }),
+    // competência no mês ou vencimento dentro do mês; o corte segue em aplicarCorte.
+    listarReceitasAvulsas(db, { tenantId, inicio: mes, fim: mes, vencimentoDe: startDate, vencimentoAte: endDate, hoje }),
     db.query(receitaMarcaMensalSql(), [startDate, endDate, tenantId]),
     db.query(marcasCondicaoVigenteMesSql(), [startDate, endDate, tenantId]),
   ])

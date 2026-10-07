@@ -231,6 +231,15 @@ describe.skipIf(!temPython)('cli/livelab.py', () => {
     })
   })
 
+  it('lancamentos aceita status cancelado para consultar despesas encerradas', async () => {
+    const r = await cli(['lancamentos', '--mes', '2026-09', '--status', 'cancelado'])
+    expect(r.status).toBe(0)
+    expect(ultima()).toMatchObject({
+      method: 'GET',
+      url: '/v1/financeiro/lancamentos?mes=2026-09&status=cancelado',
+    })
+  })
+
   it('caixa chama GET /v1/financeiro/caixa com ate opcional', async () => {
     const vazio = await cli(['caixa'])
     expect(vazio.status).toBe(0)

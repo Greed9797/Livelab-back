@@ -349,7 +349,8 @@ def montar_parser():
                             help='GET /v1/financeiro/lancamentos (somente leitura)')
     p_lanc.add_argument('--mes', help='competência AAAA-MM')
     p_lanc.add_argument('--tenant', help='filtro de tenant, se a API aceitar')
-    p_lanc.add_argument('--status', help='previsto|pendente|atrasado|parcial|pago')
+    p_lanc.add_argument('--status', choices=['previsto', 'pendente', 'atrasado', 'parcial', 'pago', 'perdido', 'cancelado'],
+                        help='previsto|pendente|atrasado|parcial|pago|perdido|cancelado')
     p_lanc.set_defaults(func=cmd_lancamentos)
 
     p_caixa = sub.add_parser('caixa', parents=[comum],

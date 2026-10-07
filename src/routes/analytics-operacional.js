@@ -5,7 +5,7 @@ import { presenterFanoutSql, presenterGmvShareSql, notArchivedSql } from '../lib
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { countWeekdaysInMonth } from '../lib/dias_uteis.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
-import { assertCurrentGoalMonth, buildOperationalGoals, shiftProgress, validateOperationalConfig } from '../lib/operational-goals.js'
+import { assertCurrentGoalMonth, buildOperationalGoals, buildOperationalRange, shiftProgress, validateOperationalConfig } from '../lib/operational-goals.js'
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
@@ -21,9 +21,17 @@ const configSchema = z.object({
 export async function analyticsOperacionalRoutes(app) {
   app.get('/v1/analytics/operacao', {
     preHandler: app.requirePapel(READ_ANALYTICS),
-    schema: { querystring: { type: 'object', required: ['data'], properties: { data: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' } }, additionalProperties: false } },
+    // Validate before AJV can remove unknown properties (Fastify's default).
+    preValidation: async (request, reply) => {
+      const parsed = parseOperationalQuery(request.query)
+      if (parsed.error) return reply.code(400).send({ error: parsed.error })
+    },
   }, async (request, reply) => {
-    const day = request.query.data
+    const range = request.query.from != null
+    if (range && (request.query.from !== request.query.to || request.query.marca_id || request.query.apresentadora_id)) {
+      return readOperationalRange(app, request)
+    }
+    const day = request.query.data ?? request.query.from
     if (!DATE_RE.test(day) || new Date(day + 'T12:00:00Z').toISOString().slice(0, 10) !== day) return reply.code(400).send({ error: 'data deve ser uma data válida no formato YYYY-MM-DD.' })
     const today = saoPauloDateInput(new Date())
     if (day > today) return reply.code(400).send({ error: 'O painel operacional não consulta datas futuras.' })
@@ -176,4 +184,99 @@ export async function analyticsOperacionalRoutes(app) {
     await app.audit.log(request,{action:'analytics.operacao.consolidar_dia',entity_type:'tenant',entity_id:tenantId,metadata:{data}})
     return result
   })
+}
+
+async function readOperationalRange(app, request) {
+  const { from, to: day, marca_id = null, apresentadora_id = null } = request.query
+  const tenantId = request.user.tenant_id, month = day.slice(0, 7)
+  // Include the final month's beginning for the separate, unfiltered monthly context.
+  const start = from.slice(0, 7) + '-01'
+  return app.withTenant(tenantId, async db => {
+      const result = await db.query(
+        'SELECT meta_gmv,meta_horas_live,meta_gmv_hora,configuracao_operacional FROM meta_unidade WHERE tenant_id=$1 AND ano_mes=$2 LIMIT 1',
+        [tenantId, month],
+      )
+      const fallback = await db.query('SELECT meta_diaria_gmv FROM tenants WHERE id=$1 LIMIT 1', [tenantId])
+      const presenters = await db.query(
+        'SELECT a.id,a.nome,a.ativo,ma.meta_gmv_hora FROM apresentadoras a LEFT JOIN metas_apresentadora ma ON ma.tenant_id=a.tenant_id AND ma.apresentadora_id=a.id AND ma.mes_referencia=$2::date WHERE a.tenant_id=$1 AND a.arquivada=false ORDER BY a.nome',
+        [tenantId, month + '-01'],
+      )
+      const brands = await db.query(
+        'SELECT m.id,m.nome,m.status,mmh.meta_gmv_hora FROM marcas m LEFT JOIN marca_metas_hora mmh ON mmh.tenant_id=m.tenant_id AND mmh.marca_id=m.id AND mmh.ano_mes=$2 WHERE m.tenant_id=$1 ORDER BY m.nome',
+        [tenantId, month],
+      )
+      const lives = await db.query(
+        'SELECT l.id,l.status,l.marca_id,m.nome AS marca_nome,c.numero::text AS cabine_nome,(l.iniciado_em AT TIME ZONE \'America/Sao_Paulo\')::date::text AS dia,' +
+        liveGmvSql('l') + ' AS gmv,(l.ads_gmv IS NULL AND l.manual_gmv IS NULL AND l.fat_gerado IS NULL) AS gmv_incompleto,' +
+        "CASE WHEN COALESCE(l.encerrado_em,CASE WHEN l.status='em_andamento' THEN NOW() ELSE l.previsto_fim END)>l.iniciado_em THEN LEAST(GREATEST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em,CASE WHEN l.status='em_andamento' THEN NOW() ELSE l.previsto_fim END)-l.iniciado_em))/3600.0,0),24) ELSE 0 END AS horas," +
+        "(l.status='encerrada' AND (l.encerrado_em IS NULL OR l.encerrado_em<=l.iniciado_em)) AS tempo_incompleto FROM lives l " +
+        'LEFT JOIN marcas m ON m.id=l.marca_id AND m.tenant_id=l.tenant_id LEFT JOIN cabines c ON c.id=l.cabine_id AND c.tenant_id=l.tenant_id ' +
+        'WHERE l.tenant_id=current_setting(\'app.tenant_id\',true)::uuid AND ' + activeLiveSql('l') + ' AND ' + notArchivedSql('l') +
+        " AND l.status IN ('encerrada','em_andamento') AND l.iniciado_em>=($1::timestamp AT TIME ZONE 'America/Sao_Paulo') AND l.iniciado_em<(($2::timestamp+INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo') ORDER BY dia,l.iniciado_em",
+        [start, day],
+      )
+      const credits = await db.query(
+        'SELECT l.id AS live_id,ap_v2.apresentadora_id,a.nome AS apresentadora_nome,' +
+        apresentadoraHorasPresencaSql({ end:"CASE WHEN l.status='em_andamento' THEN NOW() ELSE COALESCE(l.encerrado_em,l.previsto_fim) END" }) + ' AS horas_presenca,' + presenterGmvShareSql('l','ap_v2') + ' AS gmv ' +
+        'FROM lives l ' + presenterFanoutSql({ live:'l', rateio:'ap_v2' }) +
+        ' JOIN apresentadoras a ON a.id=ap_v2.apresentadora_id AND a.tenant_id=l.tenant_id ' +
+        'LEFT JOIN LATERAL (SELECT SUM(EXTRACT(EPOCH FROM (aea.data_fim-aea.data_inicio))/3600.0) AS horas_turno FROM agenda_evento_apresentadoras aea WHERE aea.agenda_evento_id=l.agenda_evento_id AND aea.tenant_id=l.tenant_id AND aea.apresentadora_id=ap_v2.apresentadora_id) turno ON true ' +
+        'WHERE l.tenant_id=current_setting(\'app.tenant_id\',true)::uuid AND ' + activeLiveSql('l') + ' AND ' + notArchivedSql('l') +
+        " AND l.status IN ('encerrada','em_andamento') AND l.iniciado_em>=($1::timestamp AT TIME ZONE 'America/Sao_Paulo') AND l.iniciado_em<(($2::timestamp+INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo') ORDER BY l.iniciado_em,a.nome",
+        [start, day],
+      )
+      const videos = await db.query(
+        "SELECT va.data::text AS dia,va.marca_id,va.apresentadora_id,CASE WHEN COUNT(va.gmv)=COUNT(*) THEN SUM(va.gmv) ELSE NULL END AS gmv,va.status_aprovacao FROM vendas_atribuidas va WHERE va.tenant_id=current_setting('app.tenant_id',true)::uuid AND va.origem='video' AND va.status_aprovacao IN ('aprovada','fechada','faturada') AND va.data >= $1::date AND va.data < ($2::date+INTERVAL '1 day') GROUP BY va.data,va.marca_id,va.apresentadora_id,va.status_aprovacao ORDER BY va.data",
+        [start, day],
+      )
+      const pendingVideos = await db.query(
+        "SELECT va.data::text AS dia,va.marca_id,va.apresentadora_id FROM vendas_atribuidas va WHERE va.tenant_id=current_setting('app.tenant_id',true)::uuid AND va.origem='video' AND COALESCE(va.status_aprovacao,'pendente_aprovacao')='pendente_aprovacao' AND va.data >= $1::date AND va.data <= $2::date",
+        [start, day],
+      )
+      const pending = await db.query(
+        "SELECT s.id,s.live_oficial_id,s.apresentadora_id,s.marca_id,s.gmv_declarado,(s.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date::text AS dia FROM apresentadora_live_submissoes s WHERE s.tenant_id=current_setting('app.tenant_id',true)::uuid AND s.status='pendente' AND s.iniciado_em >= ($1::timestamp AT TIME ZONE 'America/Sao_Paulo') AND s.iniciado_em < (($2::timestamp+INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo')",
+        [start, day],
+      )
+      const cabins = await db.query("SELECT COUNT(*)::int AS total FROM cabines WHERE tenant_id=current_setting('app.tenant_id',true)::uuid AND status<>'manutencao'")
+
+    const competencies = await db.query(
+      'SELECT ano_mes,configuracao_operacional FROM meta_unidade WHERE tenant_id=$1 AND ano_mes >= $2 AND ano_mes <= $3 ORDER BY ano_mes',
+      [tenantId, from.slice(0,7), month],
+    )
+    const raw = result.rows[0] ?? {}
+    const businessDays = countWeekdaysInMonth(Number(month.slice(0,4)), Number(month.slice(5,7)))
+    const legacyDaily = Number(fallback.rows[0]?.meta_diaria_gmv ?? 0)
+    const goals = {
+      meta_gmv: Number(raw.meta_gmv) > 0 ? Number(raw.meta_gmv) : legacyDaily > 0 ? legacyDaily * businessDays : null,
+      meta_horas_live: raw.meta_horas_live == null ? null : Number(raw.meta_horas_live),
+      meta_gmv_hora: raw.meta_gmv_hora == null ? null : Number(raw.meta_gmv_hora),
+    }
+    const canManage = ['franqueador_master','franqueado','gerente'].includes(request.user.papel)
+    const payload = buildOperationalRange({
+      from, to:day, marcaId:marca_id, apresentadoraId:apresentadora_id,
+      goals, config:raw.configuracao_operacional ?? null, competencies:competencies.rows,
+      presenters:presenters.rows, brands:brands.rows, lives:lives.rows, credits:credits.rows, videos:videos.rows,
+      pending:[...pending.rows,...pendingVideos.rows.map(v=>({...v,tipo:'video'}))], canManage,
+    })
+    payload.contexto_mensal.dados.capacidade.cabines_ativas = Number(cabins.rows[0]?.total ?? 0)
+    return payload
+  })
+}
+
+export function parseOperationalQuery(query, now = new Date()) {
+  const keys = Object.keys(query ?? {})
+  const legacy = keys.includes('data')
+  const allowed = legacy ? ['data'] : ['from','to','marca_id','apresentadora_id']
+  if (keys.some(key => !allowed.includes(key))) return { error:'Parâmetros de período inválidos.' }
+  const validDate = value => typeof value === 'string' && DATE_RE.test(value) &&
+    Number.isFinite(Date.parse(value + 'T12:00:00Z')) && new Date(value + 'T12:00:00Z').toISOString().slice(0,10) === value
+  const from = legacy ? query.data : query?.from, to = legacy ? query.data : query?.to
+  if (!validDate(from) || !validDate(to)) return { error:'Informe datas válidas no formato YYYY-MM-DD.' }
+  if (from > to) return { error:'A data inicial deve ser anterior ou igual à final.' }
+  if (to > saoPauloDateInput(now)) return { error:'O painel operacional não consulta datas futuras.' }
+  if ((Date.parse(to)-Date.parse(from))/86400000 >= 366) return { error:'O intervalo máximo é de 366 dias.' }
+  for (const key of ['marca_id','apresentadora_id']) {
+    if (query[key] !== undefined && (typeof query[key] !== 'string' || !UUID_RE.test(query[key]))) return { error:'Filtro de entidade inválido.' }
+  }
+  return { from, to, legacy }
 }

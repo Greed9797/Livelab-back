@@ -118,3 +118,84 @@ export function buildOperationalGoals({ day, goals = {}, config = null, presente
     capacidade: { horas_apresentadores: hoursTarget == null ? null : roundGoal(hoursTarget), horas_operacao: roundGoal(progress.horas_operacao), horas_cabines: usableConfig ? roundGoal(usableConfig.cabines_consideradas*progress.horas_operacao) : null, horas_cabines_realizadas: roundGoal(cabinHours), gmv_hora_operacao_necessario: dailyGmv != null && progress.horas_operacao > 0 ? roundGoal(dailyGmv/progress.horas_operacao) : null },
     serie: series, apresentadoras: presenterEntities, marcas: brandEntities }
 }
+
+// Interval results deliberately have no inferred target or negative classification.
+// Monthly goals remain an unfiltered context with their own competence and cutoff.
+export function buildOperationalRange({ from, to, marcaId = null, apresentadoraId = null, goals = {}, config = null, competencies = [], presenters = [], brands = [], lives = [], credits = [], videos = [], pending = [], canManage = false, now = new Date() }) {
+  const inRange = row => row.dia >= from && row.dia <= to
+  const matches = row => (!marcaId || row.marca_id === marcaId) && (!apresentadoraId || row.apresentadora_id === apresentadoraId)
+  const finite = value => value != null && Number.isFinite(Number(value))
+  const sum = (rows, key) => rows.some(row => !finite(row[key])) ? null : rows.reduce((n, row) => n + Number(row[key]), 0)
+  const round = value => value == null ? null : roundGoal(value)
+  const add = (a,b) => a == null || b == null ? null : a+b
+  const liveById = new Map(lives.filter(l => inRange(l) && ['encerrada','em_andamento'].includes(l.status) && (!marcaId || l.marca_id === marcaId)).map(l => [l.id,l]))
+  const selectedCredits = credits.filter(c => liveById.has(c.live_id) && (!apresentadoraId || c.apresentadora_id === apresentadoraId))
+  const creditedIds = new Set(selectedCredits.map(c => c.live_id))
+  const selectedLives = [...liveById.values()].filter(l => !apresentadoraId || creditedIds.has(l.id))
+  const approved = videos.filter(v => inRange(v) && matches(v) && ['aprovada','fechada','faturada'].includes(v.status_aprovacao))
+  const selectedPending = pending.filter(p => inRange(p) && matches(p))
+  const pendingFlags = rows => ({gmv:rows.length > 0,horas:rows.some(p=>p.tipo!=='video')})
+  const detail = (l,c,ownPending) => ({ id:l.id,dia:l.dia,marca_id:l.marca_id,marca_nome:l.marca_nome,cabine_nome:l.cabine_nome,status:l.status,
+    gmv:l.gmv_incompleto ? null : finite(c ? c.gmv : l.gmv) ? round(c ? c.gmv : l.gmv) : null,
+    horas:l.tempo_incompleto ? null : finite(c ? c.horas_presenca : l.horas) ? round(c ? c.horas_presenca : l.horas) : null,
+    tempo_incompleto:Boolean(l.tempo_incompleto),gmv_incompleto:Boolean(l.gmv_incompleto),
+    dados_incompletos:{
+      gmv:Boolean(l.gmv_incompleto) || !finite(c ? c.gmv : l.gmv) || l.status==='em_andamento' || ownPending.some(p=>p.live_oficial_id===l.id),
+      horas:Boolean(l.tempo_incompleto) || !finite(c ? c.horas_presenca : l.horas) || l.status==='em_andamento' || ownPending.some(p=>p.tipo!=='video' && p.live_oficial_id===l.id),
+    } })
+  function totals(rows, ownCredits, ownVideos, ownPending) {
+    const pendingData = pendingFlags(ownPending)
+    const active = rows.some(l=>l.status==='em_andamento')
+    const missingGmv = rows.some(l => l.gmv_incompleto)
+    const missingHours = rows.length === 0 || rows.some(l => l.tempo_incompleto || !ownCredits.some(c => c.live_id === l.id))
+    const liveGmv = missingGmv ? null : sum(apresentadoraId ? ownCredits : rows,'gmv')
+    const videoGmv = sum(ownVideos,'gmv')
+    const hours = missingHours ? null : sum(ownCredits,'horas_presenca')
+    const cabin = rows.some(l => l.tempo_incompleto) ? null : sum(rows,'horas')
+    return { gmv:round(add(liveGmv,videoGmv)),gmv_lives:round(liveGmv),gmv_videos:round(videoGmv),horas_apresentadoras:round(hours),horas_cabines:round(cabin),
+      gmv_hora:liveGmv != null && hours > 0 ? round(liveGmv/hours) : null,lives:rows.length,status:'indisponivel',
+      dados_incompletos:{gmv:liveGmv == null || videoGmv == null || pendingData.gmv || active,horas:hours == null || cabin == null || pendingData.horas || active},
+    }
+  }
+  const resumo = totals(selectedLives,selectedCredits,approved,selectedPending)
+  const entities = (catalog,kind) => catalog.filter(entity => kind === 'apresentadora' ? (!apresentadoraId || entity.id === apresentadoraId) && (entity.ativo || selectedCredits.some(c=>c.apresentadora_id===entity.id)) : (!marcaId || entity.id === marcaId) && (entity.status === 'ativa' || selectedLives.some(l=>l.marca_id===entity.id))).map(entity => {
+    const ownCredits = selectedCredits.filter(c => kind === 'apresentadora' ? c.apresentadora_id === entity.id : liveById.get(c.live_id)?.marca_id === entity.id)
+    const ownIds = new Set(ownCredits.map(c=>c.live_id))
+    const rows = selectedLives.filter(l => kind === 'apresentadora' ? ownIds.has(l.id) : l.marca_id === entity.id)
+    const ownPending = selectedPending.filter(p=>p[`${kind}_id`]===entity.id)
+    const pendingData = pendingFlags(ownPending)
+    const useCredits = kind === 'apresentadora' || Boolean(apresentadoraId)
+    const gmv = rows.some(l=>l.gmv_incompleto) ? null : sum(useCredits ? ownCredits : rows,'gmv')
+    const hours = rows.length === 0 || rows.some(l=>l.tempo_incompleto) || (useCredits && rows.some(l => !ownCredits.some(c => c.live_id === l.id))) ? null : sum(useCredits ? ownCredits : rows,useCredits ? 'horas_presenca' : 'horas')
+    return { id:entity.id,nome:entity.nome,gmv:round(gmv),horas:round(hours),gmv_hora:gmv != null && hours > 0 ? round(gmv/hours) : null,status:'indisponivel',
+      dados_incompletos:{gmv:gmv == null || pendingData.gmv || rows.some(l=>l.status==='em_andamento'),horas:hours == null || pendingData.horas || rows.some(l=>l.status==='em_andamento')},
+      lives:rows.map(l=>detail(l,useCredits ? ownCredits.find(c=>c.live_id===l.id) : null,ownPending)) }
+  })
+  const dates = []
+  for (let date = new Date(from+'T12:00:00Z'); date.toISOString().slice(0,10) <= to; date.setUTCDate(date.getUTCDate()+1)) dates.push(date.toISOString().slice(0,10))
+  const serie = dates.map(dia => {
+    const rows = selectedLives.filter(l=>l.dia===dia), ids = new Set(rows.map(l=>l.id))
+    return {dia,...totals(rows,selectedCredits.filter(c=>ids.has(c.live_id)),approved.filter(v=>v.dia===dia),selectedPending.filter(p=>p.dia===dia))}
+  })
+  const month = to.slice(0,7), monthLives = lives.filter(l=>l.dia?.slice(0,7)===month && l.dia<=to), monthIds = new Set(monthLives.map(l=>l.id))
+  const context = buildOperationalGoals({day:to,goals,config,presenters,brands,lives:monthLives,credits:credits.filter(c=>monthIds.has(c.live_id)),videos:videos.filter(v=>v.dia?.slice(0,7)===month && v.dia<=to),pending:pending.filter(p=>p.dia?.slice(0,7)===month && p.dia<=to),now})
+  context.pode_editar = canManage
+  if (!canManage) {
+    context.editavel=false
+    context.configuracao=null
+    for (const key of ['meta','esperado_agora','faltante','status']) context.horas[key]=key==='status'?'sem_permissao':null
+    for (const key of ['meta_diaria','meta_mensal','esperado_agora','faltante_dia','esperado_mes','faltante_mes','necessario_dia','status']) context.gmv[key]=key==='status'?'sem_permissao':null
+    for (const key of ['piso','necessario','potencial_mensal_piso','piso_sustenta_meta']) context.produtividade[key]=null
+    context.capacidade.gmv_hora_operacao_necessario=null
+    for (const entity of [...context.apresentadoras,...context.marcas]) {
+      entity.meta_horas=null; entity.piso=null; entity.desvio=null; entity.status='sem_permissao'
+      entity.status_horas=entity.status_horas == null ? null : 'sem_permissao'
+    }
+  }
+  const months = [...new Set(dates.map(d=>d.slice(0,7)))].map(ano_mes=>({ ano_mes,from:dates.find(d=>d.startsWith(ano_mes)),to:dates.findLast(d=>d.startsWith(ano_mes)),configurado:validateOperationalConfig(competencies.find(c=>c.ano_mes===ano_mes)?.configuracao_operacional) }))
+  return {tipo:'intervalo',from,to,filtros:{marca_id:marcaId,apresentadora_id:apresentadoraId},resumo,
+    pendencias:{submissoes:selectedPending.filter(p=>p.tipo!=='video').length,videos:selectedPending.filter(p=>p.tipo==='video').length,lives_abertas:selectedLives.filter(l=>l.status==='em_andamento').length,tempos_incompletos:selectedLives.filter(l=>l.tempo_incompleto).length,gmv_incompletos:selectedLives.filter(l=>l.gmv_incompleto).length},
+    serie,apresentadoras:entities(presenters,'apresentadora'),marcas:entities(brands,'marca'),competencias:months,
+    contexto_mensal:{ano_mes:month,corte:to,escopo:'unidade',dados:context},pode_editar:canManage,editavel:false,consolidavel:false,
+  }
+}

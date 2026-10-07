@@ -19,6 +19,7 @@ export async function limparTitulosFuturosMarca(db, { tenantId, where, params = 
         AND t.tenant_id = m.tenant_id AND t.marca_id = m.id
         AND m.data_fim IS NOT NULL
         AND t.valor_pago = 0 AND t.perdido_em IS NULL
+        AND t.suspensao_comercial IS NULL
         AND t.competencia > date_trunc('month', m.data_fim::timestamp)::date`,
     [tenantId, ...params],
   )

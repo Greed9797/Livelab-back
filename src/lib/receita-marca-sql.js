@@ -17,10 +17,14 @@ import { prorateFatorSql } from './financeiro-remuneracao.js'
 import { activeLiveSql } from './live-merge-sql.js'
 import { notArchivedSql, saoPauloInclusiveRangeSql } from './live-count-sql.js'
 
-/** Condição comercial vigente no mês `mesExpr` (1º dia) para a marca `marcaExpr`. */
+/**
+ * Latest temporal boundary, including cancellations. Retain the canceled row/id
+ * with zero monetary fields: filtering it out would revive a previous condition
+ * or the legacy brand fallback. A recreation at the same month wins by revision.
+ */
 export function condicaoVigenteLateralSql({ alias = 'mc', marcaExpr = 'm.id', mesExpr, tenantParam = '$3' }) {
   return `LEFT JOIN LATERAL (
-        SELECT c.id, c.fixo_mensal, c.tipo_cobranca, c.comissao_franquia_pct,
+        SELECT c.id, c.cancelled_at, CASE WHEN c.cancelled_at IS NULL THEN c.fixo_mensal ELSE 0 END AS fixo_mensal, c.tipo_cobranca, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct,
                c.fixo_vencimento_dia, c.fixo_vencimento_mes_offset,
                c.comissao_vencimento_dia, c.comissao_vencimento_mes_offset,
                c.comissao_janela_inicio_dia
@@ -28,8 +32,7 @@ export function condicaoVigenteLateralSql({ alias = 'mc', marcaExpr = 'm.id', me
          WHERE c.tenant_id = ${tenantParam}::uuid
            AND c.marca_id = ${marcaExpr}
            AND c.inicio_vigencia <= (${mesExpr})::date
-           AND c.cancelled_at IS NULL
-         ORDER BY c.inicio_vigencia DESC
+         ORDER BY c.inicio_vigencia DESC, c.revision DESC
          LIMIT 1
       ) ${alias} ON true`
 }
@@ -88,13 +91,12 @@ export function marcaFixoMensalAtividadeSql() {
       ) am2
       JOIN marcas m ON m.id = am2.marca_id AND m.tenant_id = $3::uuid
       LEFT JOIN LATERAL (
-        SELECT c.fixo_mensal, c.tipo_cobranca
+        SELECT CASE WHEN c.cancelled_at IS NULL THEN c.fixo_mensal ELSE 0 END AS fixo_mensal, c.tipo_cobranca
           FROM marca_condicoes_comerciais c
          WHERE c.tenant_id = $3::uuid
            AND c.marca_id = m.id
            AND c.inicio_vigencia <= am2.mes::date
-           AND c.cancelled_at IS NULL
-         ORDER BY c.inicio_vigencia DESC
+         ORDER BY c.inicio_vigencia DESC, c.revision DESC
          LIMIT 1
       ) mc ON true
      WHERE m.tenant_id = $3::uuid AND m.tipo = 'cliente'`
@@ -110,7 +112,7 @@ export function inicioContratoSql(marca = 'm') {
       ${marca}.data_inicio,
       (SELECT MIN(c0.inicio_vigencia) FROM marca_condicoes_comerciais c0
         WHERE c0.tenant_id = ${marca}.tenant_id AND c0.marca_id = ${marca}.id
-          AND c0.cancelled_at IS NULL AND c0.inicio_vigencia > DATE '1900-01-01'),
+          AND c0.inicio_vigencia > DATE '1900-01-01'),
       date_trunc('month', ${marca}.criado_em AT TIME ZONE 'America/Sao_Paulo')::date
     )`
 }
@@ -179,11 +181,11 @@ export function comissaoMarcaMensalSql() {
                COALESCE(SUM(va.gmv), 0) AS gmv
           FROM vendas_atribuidas va
           LEFT JOIN LATERAL (
-            SELECT c.id, c.comissao_franquia_pct, c.comissao_janela_inicio_dia
+            SELECT c.id, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct, c.comissao_janela_inicio_dia
               FROM marca_condicoes_comerciais c
              WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
-               AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
-             ORDER BY c.inicio_vigencia DESC LIMIT 1
+               AND c.inicio_vigencia <= va.data
+             ORDER BY c.inicio_vigencia DESC, c.revision DESC LIMIT 1
           ) vc ON true
          WHERE va.tenant_id = $3::uuid AND va.origem = 'video'
            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
@@ -261,7 +263,7 @@ export function marcasCondicaoVigenteMesSql() {
       LEFT JOIN clientes cl ON cl.id = m.cliente_id AND cl.tenant_id = m.tenant_id
       ${condicaoVigenteLateralSql({ alias: 'mc', marcaExpr: 'm.id', mesExpr: '$1::date' })}
      WHERE m.tenant_id = $3::uuid AND ${marcaGeraReceitaSql('m')}
-       AND mc.id IS NOT NULL
+       AND mc.id IS NOT NULL AND mc.cancelled_at IS NULL
        AND m.status = 'ativa'
        AND ${inicioContratoSql('m')} <= $2::date
        AND (m.data_fim IS NULL OR m.data_fim >= $1::date)

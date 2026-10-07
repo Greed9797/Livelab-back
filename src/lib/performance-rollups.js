@@ -176,13 +176,12 @@ export async function getPerformanceRanking(db, {
           LIMIT 1
         ) ap_v2 ON true
         LEFT JOIN LATERAL (
-          SELECT c.id, c.comissao_franquia_pct, c.comissao_franqueadora_pct
+          SELECT c.id, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franqueadora_pct ELSE 0 END AS comissao_franqueadora_pct
             FROM marca_condicoes_comerciais c
            WHERE c.tenant_id = l.tenant_id
              AND c.marca_id = l.marca_id
              AND c.inicio_vigencia <= (l.iniciado_em AT TIME ZONE '${ANALYTICS_TZ}')::date
-             AND c.cancelled_at IS NULL
-           ORDER BY c.inicio_vigencia DESC
+           ORDER BY c.inicio_vigencia DESC, c.revision DESC
            LIMIT 1
         ) mc ON true
         LEFT JOIN LATERAL (
@@ -265,13 +264,12 @@ export async function getPerformanceRanking(db, {
           FROM combined
           LEFT JOIN marcas m ON m.id = combined.marca_id AND m.tenant_id = $1::uuid
           LEFT JOIN LATERAL (
-            SELECT c.fixo_mensal, c.tipo_cobranca
+            SELECT CASE WHEN c.cancelled_at IS NULL THEN c.fixo_mensal ELSE 0 END AS fixo_mensal, c.tipo_cobranca
               FROM marca_condicoes_comerciais c
              WHERE c.tenant_id = $1::uuid
                AND c.marca_id = combined.marca_id
                AND c.inicio_vigencia <= combined.mes::date
-               AND c.cancelled_at IS NULL
-             ORDER BY c.inicio_vigencia DESC
+             ORDER BY c.inicio_vigencia DESC, c.revision DESC
              LIMIT 1
           ) mc ON true
          WHERE combined.gmv > 0 OR combined.pedidos > 0

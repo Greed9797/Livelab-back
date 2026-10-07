@@ -37,6 +37,7 @@ import { addMeses, diasNoMes, listarCustos, mesesEntre, ultimoDia } from './cust
 import { listarPagamentosApresentadoras } from './apresentadoras-pagamentos.js'
 import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
 import { CLASSES_CUSTO, classeDoItem } from '../lib/custo-classe.js'
+import { lerMovimentosFinanceirosPeriodo } from './financeiro-movimentos-periodo.js'
 
 export { CLASSES_CUSTO, classeDoItem, hojeSaoPaulo }
 
@@ -127,6 +128,7 @@ export function previstoEfetivo(i) {
 
 /** Garante os campos de perda/cancelamento e o status derivado 'perdido'|'cancelado'. */
 export function marcarEncerramento(item) {
+  if (item.suspensao_comercial?.ativa) return { ...item, status: 'cancelado' }
   for (const k of ['perdido_em', 'perdido_motivo', 'cancelado_em', 'cancelado_motivo']) item[k] ??= null
   if (encerrado(item)) item.status = item.natureza === 'custo' ? 'cancelado' : 'perdido'
   return item
@@ -383,7 +385,8 @@ export function montarDre({ meses, itens, eventosPerda = [], impostos = new Map(
       // valor_perdido não nulo identifica uma projeção FIN-02. A trilha de
       // eventos determina o mês do efeito; só o legado fica na competência.
       // Isso independe da ordem das duas consultas quando ocorre escrita concorrente.
-      if (i.valor_perdido == null) linha.perdas.receita.valor += valorEncerrado(i)
+      if (i.perda_dre != null) linha.perdas.receita.valor += i.perda_dre
+      else if (i.valor_perdido == null) linha.perdas.receita.valor += valorEncerrado(i)
     } else {
       addPrCusto((i.classe ?? classeDoItem(i)) === 'fixo' ? linha.custos_fixos : linha.custos_variaveis, i)
       if (i.origem === 'apresentadora') addPrCusto(linha.apresentadoras, i)
@@ -478,7 +481,7 @@ const itemResumo = (i) => ({
   componente: i.componente ?? null,
   previsto: i.natureza === 'custo' ? previstoEfetivo(i) : r2(i.valor_previsto),
   realizado: r2(i.valor_pago),
-  status: i.status,
+  status: i.status_original ?? i.status,
   data_vencimento: i.data_vencimento ?? null,
   virtual: Boolean(i.virtual),
   valor_previsto: r2(i.valor_previsto),
@@ -487,6 +490,8 @@ const itemResumo = (i) => ({
   perdido_motivo: i.perdido_motivo ?? null,
   cancelado_em: i.cancelado_em ?? null,
   cancelado_motivo: i.cancelado_motivo ?? null,
+  competencia_original: i.competencia_original ?? i.competencia,
+  movimentos: i.movimentos ?? [],
 })
 
 /** Custos (exceto apresentadoras e imposto) agrupados por `grupo`, maior previsto primeiro. */
@@ -1167,7 +1172,7 @@ export async function desfazerImposto(db, {
  * e ordenados por vencimento: receitas (marcas + avulsas) + custos + apresentadoras
  * + imposto, com a regra de corte aplicada (dataCorte undefined → lida da config).
  */
-export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, vencimentoAte } = {}) {
+export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, vencimentoDe, vencimentoAte } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   let pct = aliquota
   let corte = dataCorte
@@ -1178,7 +1183,7 @@ export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hoje
   }
   // Receitas/avulsas são carregadas UMA vez e reaproveitadas pela projeção do imposto
   // (antes calcularImpostos refazia as mesmas duas listagens).
-  const pTitulos = listarTitulosReceita(db, { tenantId, inicio, fim, hoje })
+  const pTitulos = listarTitulosReceita(db, { tenantId, inicio, fim, hoje, vencimentoDe, vencimentoAte })
   const pAvulsas = listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje, vencimentoAte })
   const pReceitas = Promise.all([pTitulos, pAvulsas]).then(([titulos, avulsas]) => ({ titulos, avulsas, inicio, fim }))
   pReceitas.catch(() => {}) // se o imposto não precisar dela, a rejeição já é tratada no Promise.all abaixo
@@ -1196,7 +1201,88 @@ export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hoje
     ...custos.filter((c) => c.tipo !== 'imposto').map((c) => normalizarCusto(c, hoje)),
     ...apresentadoras.map((p) => normalizarApresentadora(p, hoje)),
     ...impostos,
+    // A manually moved tax due date may belong to an old competence. Include
+    // that persisted obligation without duplicating taxes calculated above.
+    ...(vencimentoDe ? custos.filter((c) => c.tipo === 'imposto' && !impostos.some((i) => i.custo_id === c.id))
+      .map((c) => normalizarCusto({ ...c, origem: 'imposto', custo_id: c.id }, hoje)) : []),
   ], corte))
+}
+
+export function normalizarRegimeDre(regime = 'caixa_vencimento') {
+  if (!['caixa_vencimento', 'competencia'].includes(regime)) throw erro('regime deve ser caixa_vencimento ou competencia', 400, 'INVALID_DRE_REGIME')
+  return regime
+}
+
+const chaveOrigemDre = (i) => i.origem === 'apresentadora'
+  ? `apresentadora:${i.apresentadora_id}:${mesDe(i.competencia_original ?? i.competencia)}:${i.componente}`
+  : `${i.origem}:${i.custo_id ?? i.origem_id ?? i.id}`
+
+/** One contribution per obligation/month, keeping original competence and facts.
+ * Amounts settled outside the due month never leak into its realized column.
+ */
+export function projetarDreCaixa({ itens, movimentos, inicio, fim, dataCorte = null }) {
+  const porChave = new Map()
+  for (const i of itens) {
+    const data = vencimentoEfetivo(i)
+    const mes = mesDe(data)
+    if (!mes || mes < inicio || mes > fim || (dataCorte && data < dataCorte)) continue
+    const previsto = i.natureza === 'custo' ? previstoEfetivo(i) : r2(i.valor_previsto)
+    const linha = { ...i, competencia_original: i.competencia, competencia: `${mes}-01`,
+      valor_previsto: previsto, valor_pago: 0, data_pagamento: null, movimentos: [],
+      status_original: i.status, status: 'previsto',
+      // Closures already reduced the forecast; do not reduce it twice after
+      // replacing the accumulated payment with the month's event amount.
+      cancelado_em: null, perdido_em: null, valor_perdido: i.natureza === 'receita' ? valorEncerrado(i) : 0,
+      perda_dre: i.natureza === 'receita' ? valorEncerrado(i) : 0,
+    }
+    porChave.set(`${chaveOrigemDre(linha)}:${mes}`, linha)
+  }
+  for (const e of movimentos) {
+    const mes = mesDe(e.data)
+    if (!mes || mes < inicio || mes > fim || (dataCorte && e.data < dataCorte)) continue
+    const chave = `${chaveOrigemDre(e)}:${mes}`
+    if (!porChave.has(chave)) porChave.set(chave, {
+      ...e, id: e.origem_id, competencia_original: e.competencia, competencia: `${mes}-01`,
+      data_pagamento: e.data, valor_previsto: 0, valor_pago: 0, valor_perdido: 0,
+      virtual: false, status: 'pago', movimentos: [], perda_dre: 0,
+      // Facts add money only; their repeated metadata must not add GMV/commission.
+      gmv: 0, comissao: 0, adicionais: 0,
+    })
+    const linha = porChave.get(chave)
+    linha.valor_pago = r2(linha.valor_pago + e.valor)
+    linha.movimentos.push(e)
+  }
+  return [...porChave.values()]
+}
+
+async function selecionarDreCaixa(db, { tenantId, inicio, fim, hoje, config }) {
+  const de = `${inicio}-01`
+  const ate = ultimoDia(fim)
+  const opts = { tenantId, hoje, aliquota: config.aliquota_imposto_pct, dataCorte: null, vencimentoDe: de, vencimentoAte: ate }
+  // The preceding competence covers contractual offsets. Persisted obligations
+  // are independently selected by due date, including debts from older years.
+  const [atuais, anteriores, movimentos] = await Promise.all([
+    listarLancamentos(db, { ...opts, inicio, fim }),
+    listarLancamentos(db, { ...opts, inicio: addMeses(inicio, -1), fim: addMeses(inicio, -1) }),
+    lerMovimentosFinanceirosPeriodo(db, { tenantId, de, ate, dataCorte: config.data_corte }),
+  ])
+  const unicos = [...new Map([...anteriores, ...atuais].map((i) => [chaveOrigemDre(i), i])).values()]
+  return { itens: projetarDreCaixa({ itens: unicos, movimentos: movimentos.itens, inicio, fim, dataCorte: config.data_corte }), reconciliacao: movimentos.reconciliacao }
+}
+
+export async function saldosDreCaixa(db, { tenantId, meses, config }) {
+  const saldos = new Map(meses.map((mes) => [mes, null]))
+  if (!config.data_corte) return saldos
+  const corte = String(config.data_corte).slice(0, 10)
+  const ate = diaAnterior(`${meses.at(-1)}-01`)
+  const movimentos = ate >= corte ? (await lerMovimentosFinanceirosPeriodo(db, { tenantId, de: corte, ate, dataCorte: corte })).itens : []
+  for (const mes of meses) {
+    if (mes < corte.slice(0, 7)) continue
+    const centavos = movimentos.filter((e) => e.data < `${mes}-01`).reduce((sum, e) =>
+      sum + exactMoneyToCents(String(e.valor)) * (e.natureza === 'receita' ? 1n : -1n), exactMoneyToCents(String(config.saldo_abertura ?? 0)))
+    saldos.set(mes, Number(centsToExactMoney(centavos)))
+  }
+  return saldos
 }
 
 /** GET /lancamentos: itens filtrados + totais (dos itens filtrados). */
@@ -1206,20 +1292,25 @@ export async function consultarLancamentos(db, { tenantId, inicio, fim, hoje = h
 }
 
 /** DRE mensal previsto × realizado para [inicio, fim]. */
-export async function calcularDre(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo() } = {}) {
+export async function calcularDre(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), regime = 'caixa_vencimento' } = {}) {
+  normalizarRegimeDre(regime)
   const config = await buscarConfigFinanceiro(db, tenantId)
   const { aliquota_imposto_pct: aliquota, data_corte: dataCorte } = config
-  const [itens, eventosPerda] = await Promise.all([
+  const [competenciaItens, eventosPerdaCompetencia] = regime === 'competencia' ? await Promise.all([
     listarLancamentos(db, { tenantId, inicio, fim, hoje, aliquota, dataCorte }),
     listarEventosPerdaDre(db, { tenantId, inicio, fim }),
-  ])
+  ]) : [[], []]
+  const selecao = regime === 'caixa_vencimento' ? await selecionarDreCaixa(db, { tenantId, inicio, fim, hoje, config }) : null
+  const itens = selecao?.itens ?? competenciaItens
+  const eventosPerda = regime === 'competencia' ? eventosPerdaCompetencia : []
   const impostos = new Map(itens.filter((i) => i.origem === 'imposto')
     .map((i) => [mesDe(i.competencia), { aliquota: i.aliquota, base: i.base }]))
   const meses = mesesEntre(inicio, fim)
   const dre = montarDre({ meses, itens, eventosPerda, impostos, aliquota })
-  const saldos = await saldosCaixaInicioMeses(db, { tenantId, meses, config })
+  const saldos = regime === 'caixa_vencimento' ? await saldosDreCaixa(db, { tenantId, meses, config })
+    : await saldosCaixaInicioMeses(db, { tenantId, meses, config })
   return {
-    inicio, fim, aliquota, data_corte: dataCorte,
+    inicio, fim, regime, aliquota, data_corte: dataCorte, reconciliacao: selecao?.reconciliacao,
     ...dre,
     meses: dre.meses.map((linha) => ({ ...linha, caixa: { saldo_inicio_mes: saldos.get(linha.mes) ?? null } })),
   }
@@ -1229,20 +1320,27 @@ export async function calcularDre(db, { tenantId, inicio, fim, hoje = hojeSaoPau
  * GET /dre/mes: detalhe do DRE de `mes` + comparativo com mes−1. Uma única chamada a
  * listarLancamentos cobre [mes−1, mes] (sem consulta por item/mês). Corte aplicado.
  */
-export async function calcularDreMes(db, { tenantId, mes, hoje = hojeSaoPaulo() } = {}) {
+export async function calcularDreMes(db, { tenantId, mes, hoje = hojeSaoPaulo(), regime = 'caixa_vencimento' } = {}) {
+  normalizarRegimeDre(regime)
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
   const cfg = await buscarConfigFinanceiro(db, tenantId)
   const { aliquota_imposto_pct: aliquota, data_corte: dataCorte } = cfg
   const inicioDre = addMeses(mes, -1)
-  const [itens, eventosPerda] = await Promise.all([
+  const [competenciaItens, eventosPerdaCompetencia] = regime === 'competencia' ? await Promise.all([
     listarLancamentos(db, { tenantId, inicio: inicioDre, fim: mes, hoje, aliquota, dataCorte }),
     listarEventosPerdaDre(db, { tenantId, inicio: inicioDre, fim: mes }),
-  ])
+  ]) : [[], []]
+  const selecao = regime === 'caixa_vencimento' ? await selecionarDreCaixa(db, { tenantId, inicio: inicioDre, fim: mes, hoje, config: cfg }) : null
+  const itens = selecao?.itens ?? competenciaItens
+  const eventosPerda = regime === 'competencia' ? eventosPerdaCompetencia : []
+  const saldoInicio = dataCorte ? (regime === 'caixa_vencimento'
+    ? (await saldosDreCaixa(db, { tenantId, meses: [mes], config: cfg })).get(mes)
+    : await saldoCaixaInicioMes(db, { tenantId, mes, config: cfg })) : 0
   const caixa = dataCorte
-    ? { saldo_inicio_mes: await saldoCaixaInicioMes(db, { tenantId, mes, config: cfg }), saldo_abertura: r2(cfg.saldo_abertura), data_corte: dataCorte, origem: 'caixa' }
+    ? { saldo_inicio_mes: saldoInicio, saldo_abertura: r2(cfg.saldo_abertura), data_corte: dataCorte, origem: 'caixa' }
     : { saldo_inicio_mes: 0, saldo_abertura: 0, data_corte: null, origem: 'padrao' }
-  return { hoje, aliquota, data_corte: dataCorte, caixa, ...montarDreDetalhe({ mes, itens, eventosPerda, aliquota, hoje }) }
+  return { hoje, regime, aliquota, data_corte: dataCorte, caixa, reconciliacao: selecao?.reconciliacao, ...montarDreDetalhe({ mes, itens, eventosPerda, aliquota, hoje }) }
 }
 
 /**

@@ -178,6 +178,7 @@ export const MIGRATIONS_LIST = [
   '181_financeiro_perdas_reversoes.sql',
   '182_financeiro_fechamentos.sql',
   '183_analytics_metas_operacionais.sql',
+  '184_receita_titulos_suspensao_comercial.sql',
 ]
 
 async function ensureMigrationsTable(client) {

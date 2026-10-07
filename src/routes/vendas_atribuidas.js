@@ -53,13 +53,12 @@ export async function calcularComissoesAtribuidas(db, {
             COALESCE(mc.comissao_franqueadora_pct, m.comissao_franqueadora_pct) AS comissao_franqueadora_pct
        FROM marcas m
        LEFT JOIN LATERAL (
-         SELECT c.id, c.comissao_franquia_pct, c.comissao_franqueadora_pct
+         SELECT c.id, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franqueadora_pct ELSE 0 END AS comissao_franqueadora_pct
            FROM marca_condicoes_comerciais c
           WHERE c.tenant_id = $2::uuid
             AND c.marca_id = m.id
             AND c.inicio_vigencia <= $3::date
-            AND c.cancelled_at IS NULL
-          ORDER BY c.inicio_vigencia DESC
+          ORDER BY c.inicio_vigencia DESC, (c.cancelled_at IS NULL) DESC
           LIMIT 1
        ) mc ON true
       WHERE m.id = $1 AND m.tenant_id = $2::uuid`,
@@ -218,13 +217,12 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
        ) va
        LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = $1::uuid
        LEFT JOIN LATERAL (
-         SELECT c.id, c.comissao_franquia_pct, c.comissao_franqueadora_pct
+         SELECT c.id, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franqueadora_pct ELSE 0 END AS comissao_franqueadora_pct
            FROM marca_condicoes_comerciais c
           WHERE c.tenant_id = $1::uuid
             AND c.marca_id = va.marca_id
             AND c.inicio_vigencia <= va.data
-            AND c.cancelled_at IS NULL
-          ORDER BY c.inicio_vigencia DESC
+          ORDER BY c.inicio_vigencia DESC, (c.cancelled_at IS NULL) DESC
           LIMIT 1
        ) mc ON true`,
     params,

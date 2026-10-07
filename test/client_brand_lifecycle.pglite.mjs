@@ -27,9 +27,9 @@ try {
       fixo_mensal numeric DEFAULT 0, comissao_franquia_pct numeric DEFAULT 0,
       comissao_franqueadora_pct numeric DEFAULT 0, tipo_cobranca text DEFAULT 'fixo_mais_comissao',
       fixo_confirmado boolean DEFAULT false, comissao_confirmada boolean DEFAULT false,
-      origem text DEFAULT 'legado_nao_verificado', motivo text, cancelled_at timestamptz,
-      UNIQUE (tenant_id, marca_id, inicio_vigencia)
+      origem text DEFAULT 'legado_nao_verificado', motivo text, cancelled_at timestamptz
     );
+    CREATE UNIQUE INDEX condicoes_ativas ON marca_condicoes_comerciais(tenant_id,marca_id,inicio_vigencia) WHERE cancelled_at IS NULL;
   `)
   await db.query(`INSERT INTO clientes(id, tenant_id, nome, status) VALUES
     ($1,$5,'Cancelado','cancelado'), ($2,$5,'Arquivado','arquivado'), ($3,$5,'Ativo','ativo'), ($4,$5,'Configurado','ativo')`, [cancelled, archived, active, configured, tenant])
@@ -62,6 +62,10 @@ try {
     fixo_mensal: '1200', comissao_franquia_pct: '8', tipo_cobranca: 'fixo_ou_comissao',
     fixo_confirmado: false, comissao_confirmada: false, origem: 'legado_nao_verificado',
   })
+  assert.equal((await db.query(`SELECT count(*)::int AS total FROM marca_condicoes_comerciais`)).rows[0].total, 4)
+  await db.query(`UPDATE marca_condicoes_comerciais c SET cancelled_at=NOW()
+    FROM marcas m WHERE m.id=c.marca_id AND m.cliente_id=$1`, [configured])
+  await ensureClienteMarca(db, { tenantId: tenant, clienteId: configured, baseline: { valor_fixo_minimo: 9999 } })
   assert.equal((await db.query(`SELECT count(*)::int AS total FROM marca_condicoes_comerciais`)).rows[0].total, 4)
   console.log(JSON.stringify({ passed: true, checks: ['cancelled insert inactive', 'archived insert archived', 'archived parent cannot reactivate', 'normal call preserves inactive', 'explicit active reactivates'] }))
 } finally {

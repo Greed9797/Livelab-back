@@ -38,7 +38,7 @@ export async function mudarFechamento(db, {
     if (evento === 'reabertura' && atual.estado !== 'fechado') throw erro('Competência não está fechada')
     const versao = evento === 'fechamento' ? atual.versao_atual + 1 : atual.versao_atual
     const snapshot = evento === 'fechamento'
-      ? await calcular(db, { tenantId, mes, hoje })
+      ? await calcular(db, { tenantId, mes, hoje, regime: 'competencia' })
       : null
     const { rows: [registro] } = await db.query(`
       INSERT INTO financeiro_fechamentos

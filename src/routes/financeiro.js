@@ -14,10 +14,11 @@ import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql.js'
 import { marcaFixoVigenciaSql, marcaGeraReceitaSql } from '../lib/receita-marca-sql.js'
 import { listarCustos } from '../services/custos-plano.js'
+import { lerSnapshotFinanceiro } from '../services/financeiro-read-snapshot.js'
 import {
   atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularDreMes, calcularFluxoCaixa,
   calcularPainelMes, cancelarImposto, consultarLancamentos, dataValida, desfazerImposto, encerrado, hojeSaoPaulo, pagarImposto, previstoEfetivo,
-  reativarImposto, resolverPeriodoMeses,
+  reativarImposto, resolverPeriodoMeses, normalizarRegimeDre,
 } from '../services/financeiro-agregador.js'
 
 const FINANCEIRO_RESUMO_CACHE_TTL_MS = Number(process.env.FINANCEIRO_RESUMO_CACHE_TTL_MS ?? 45_000)
@@ -162,16 +163,18 @@ export async function financeiroRoutes(app) {
       namespace: AGREGADOR_NAMESPACE,
       key: buildCacheKey(tenantId, params),
       ttlMs: FINANCEIRO_AGREGADOR_CACHE_TTL_MS,
-      computeFn: () => lerAgregador(tenantId, computeFn),
+      computeFn: () => params.regime === 'caixa_vencimento'
+        ? app.withTenant(tenantId, (db) => lerSnapshotFinanceiro(db, computeFn))
+        : lerAgregador(tenantId, computeFn),
     })
     setCacheControl(reply, state, startedAt)
     return value
   }
 
   // DRE por período (calcularDre) — compartilhado por /resumo e /dre (mesma chave de cache).
-  const dreCacheado = (reply, tenantId, inicio, fim, hoje) => agregadorCache(
-    reply, tenantId, { rota: 'dre', hoje, inicio, fim },
-    (db) => calcularDre(db, { tenantId, inicio, fim, hoje }),
+  const dreCacheado = (reply, tenantId, inicio, fim, hoje, regime = 'competencia') => agregadorCache(
+    reply, tenantId, { rota: 'dre', hoje, inicio, fim, regime },
+    (db) => calcularDre(db, { tenantId, inicio, fim, hoje, regime }),
   )
 
   // GET /v1/financeiro/resumo?mes=&ano=  OR  ?inicio=YYYY-MM&fim=YYYY-MM
@@ -240,11 +243,11 @@ export async function financeiroRoutes(app) {
             ON va.tenant_id = vr.tenant_id AND va.origem = 'video' AND va.origem_id = vr.id
            AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
           LEFT JOIN LATERAL (
-            SELECT c.id, c.comissao_franquia_pct
+            SELECT c.id, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct
               FROM marca_condicoes_comerciais c
              WHERE c.tenant_id = vr.tenant_id AND c.marca_id = vr.marca_id
-               AND c.inicio_vigencia <= vr.data AND c.cancelled_at IS NULL
-             ORDER BY c.inicio_vigencia DESC LIMIT 1
+               AND c.inicio_vigencia <= vr.data
+             ORDER BY c.inicio_vigencia DESC, c.revision DESC LIMIT 1
           ) mc ON true
           WHERE vr.tenant_id = $3::uuid
             AND vr.data >= $1::date
@@ -273,11 +276,11 @@ export async function financeiroRoutes(app) {
                                    ELSE va.comissao_franquia END), 0) AS comissao
             FROM vendas_atribuidas va
             LEFT JOIN LATERAL (
-              SELECT c.id, c.comissao_franquia_pct
+              SELECT c.id, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct
                 FROM marca_condicoes_comerciais c
                WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
-                 AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
-               ORDER BY c.inicio_vigencia DESC LIMIT 1
+                 AND c.inicio_vigencia <= va.data
+               ORDER BY c.inicio_vigencia DESC, c.revision DESC LIMIT 1
             ) vc ON true
            WHERE va.tenant_id = $3::uuid AND va.origem = 'video'
              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
@@ -433,11 +436,11 @@ export async function financeiroRoutes(app) {
                  vr.gmv_atribuido AS gmv,
                  CASE WHEN NOT (${marcaGeraReceitaSql('m')}) THEN 0 ELSE
                  vr.gmv_atribuido * COALESCE((
-                   SELECT c.comissao_franquia_pct
+                   SELECT CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END
                      FROM marca_condicoes_comerciais c
                     WHERE c.tenant_id = vr.tenant_id AND c.marca_id = vr.marca_id
-                      AND c.inicio_vigencia <= vr.data AND c.cancelled_at IS NULL
-                    ORDER BY c.inicio_vigencia DESC LIMIT 1
+                      AND c.inicio_vigencia <= vr.data
+                    ORDER BY c.inicio_vigencia DESC, c.revision DESC LIMIT 1
                  ), m.comissao_franquia_pct, 0) / 100.0 END AS comissao_franquia,
                  0 AS is_live, 1 AS is_video
           FROM video_registros vr
@@ -543,11 +546,11 @@ export async function financeiroRoutes(app) {
         FROM vendas_atribuidas va
         JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
         LEFT JOIN LATERAL (
-          SELECT c.id, c.comissao_franquia_pct, c.tipo_cobranca
+          SELECT c.id, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct, c.tipo_cobranca
             FROM marca_condicoes_comerciais c
            WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
-             AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
-           ORDER BY c.inicio_vigencia DESC LIMIT 1
+             AND c.inicio_vigencia <= va.data
+           ORDER BY c.inicio_vigencia DESC, c.revision DESC LIMIT 1
         ) vc ON true
         WHERE va.tenant_id = $3::uuid
           AND va.data >= $1::date AND va.data <= $2::date
@@ -825,8 +828,9 @@ export async function financeiroRoutes(app) {
     const mes = request.query?.mes ?? hoje.slice(0, 7)
     if (!MES_RE.test(String(mes))) return reply.code(400).send({ error: 'mes deve ter o formato YYYY-MM' })
     try {
-      return await agregadorCache(reply, tenant_id, { rota: 'dre-mes', hoje, mes },
-        (db) => calcularDreMes(db, { tenantId: tenant_id, mes, hoje }))
+      const regime = normalizarRegimeDre(request.query?.regime)
+      return await agregadorCache(reply, tenant_id, { rota: 'dre-mes', hoje, mes, regime },
+        (db) => calcularDreMes(db, { tenantId: tenant_id, mes, hoje, regime }))
     } catch (error) {
       return responderErro(reply, error)
     }
@@ -839,7 +843,8 @@ export async function financeiroRoutes(app) {
     const hoje = hojeSaoPaulo()
     try {
       const { inicio, fim } = resolverPeriodoMeses(request.query ?? {}, hoje)
-      return await dreCacheado(reply, tenant_id, inicio, fim, hoje)
+      const regime = normalizarRegimeDre(request.query?.regime)
+      return await dreCacheado(reply, tenant_id, inicio, fim, hoje, regime)
     } catch (error) {
       return responderErro(reply, error)
     }

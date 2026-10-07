@@ -1,3 +1,4 @@
+import { preverMutacaoCondicaoMarca, atualizarCondicaoMarca, excluirCondicaoMarca } from '../services/marca-condicoes-mutations.js'
 import { z } from 'zod'
 import { performance } from 'node:perf_hooks'
 import { READ_MARCAS, WRITE_MARCAS } from '../config/role_groups.js'
@@ -293,16 +294,15 @@ export async function marcasRoutes(app) {
          FROM marcas m
          LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
          LEFT JOIN LATERAL (
-           SELECT id, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
+           SELECT * FROM (SELECT id, cancelled_at, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
                   fixo_confirmado, comissao_confirmada, origem,
                   fixo_vencimento_dia, fixo_vencimento_mes_offset,
                   comissao_vencimento_dia, comissao_vencimento_mes_offset
              FROM marca_condicoes_comerciais
             WHERE tenant_id = m.tenant_id AND marca_id = m.id
               AND inicio_vigencia <= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
-              AND cancelled_at IS NULL
             ORDER BY inicio_vigencia DESC, revision DESC
-            LIMIT 1
+            LIMIT 1) latest WHERE latest.cancelled_at IS NULL
          ) mcc ON true
          LEFT JOIN LATERAL (
            SELECT json_agg(json_build_object(
@@ -539,6 +539,37 @@ export async function marcasRoutes(app) {
     })
   })
 
+  app.post('/v1/marcas/:id/condicoes/:condicaoId/preview', { preHandler: writeAccess }, async (request, reply) => {
+    const { tenant_id, sub } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      try {
+        return reply.send(await preverMutacaoCondicaoMarca(db, {
+          tenantId: tenant_id, marcaId: request.params.id, condicaoId: request.params.condicaoId,
+          operacao: request.body?.operacao, proposta: request.body?.proposta,
+          motivo: request.body?.motivo ?? request.body?.proposta?.motivo, actorUserId: sub ?? null,
+        }))
+      } catch (error) { return responderErroCondicao(reply, error) }
+    })
+  })
+
+  for (const [method, mutate] of [['patch', atualizarCondicaoMarca], ['delete', excluirCondicaoMarca]]) {
+    app[method]('/v1/marcas/:id/condicoes/:condicaoId', { preHandler: writeAccess }, async (request, reply) => {
+      const { tenant_id, sub } = request.user
+      return app.withTenant(tenant_id, async (db) => {
+        try {
+          const result = await mutate(db, {
+            tenantId: tenant_id, marcaId: request.params.id, condicaoId: request.params.condicaoId,
+            proposta: method === 'patch' ? request.body ?? {} : {}, motivo: request.body?.motivo,
+            expectedRevision: request.body?.expected_revision, idempotencyKey: request.headers['idempotency-key'],
+            actorUserId: sub ?? null,
+          })
+          invalidateTenant(tenant_id)
+          return reply.send(result)
+        } catch (error) { return responderErroCondicao(reply, error) }
+      })
+    })
+  }
+
   // Ajusta só o vencimento (dia 1-31 e offset 0|1 de fixo e comissão) de uma versão
   // existente. Valores monetários continuam exigindo nova condição com vigência.
   app.patch('/v1/marcas/:id/condicoes/:condicaoId/vencimento', { preHandler: writeAccess }, async (request, reply) => {
@@ -698,16 +729,15 @@ export async function marcasRoutes(app) {
          FROM marcas m
          LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id
          LEFT JOIN LATERAL (
-           SELECT id, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
+           SELECT * FROM (SELECT id, cancelled_at, fixo_mensal, comissao_franquia_pct, tipo_cobranca,
                   fixo_confirmado, comissao_confirmada, origem,
                   fixo_vencimento_dia, fixo_vencimento_mes_offset,
                   comissao_vencimento_dia, comissao_vencimento_mes_offset
              FROM marca_condicoes_comerciais
             WHERE tenant_id = m.tenant_id AND marca_id = m.id
               AND inicio_vigencia <= (NOW() AT TIME ZONE 'America/Sao_Paulo')::date
-              AND cancelled_at IS NULL
             ORDER BY inicio_vigencia DESC, revision DESC
-            LIMIT 1
+            LIMIT 1) latest WHERE latest.cancelled_at IS NULL
          ) mcc ON true
          LEFT JOIN LATERAL (
            SELECT json_agg(json_build_object(

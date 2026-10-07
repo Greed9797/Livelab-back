@@ -303,7 +303,7 @@ describe('rotas: painel, dre e cache do agregador', () => {
     await app.close()
   })
 
-  it('GET /dre inclui caixa.saldo_inicio_mes em cada mês; preserva zero configurado', async () => {
+  it('GET /dre em competência preserva leitura legada de saldo_inicio_mes e zero configurado', async () => {
     const db = mockDb({
       financeiro_data_corte: () => ({ rows: [{ aliquota_imposto_pct: 10, data_corte: '2026-02-15', saldo_abertura: '0' }] }),
       'WITH meses AS': () => ({ rows: [
@@ -313,7 +313,7 @@ describe('rotas: painel, dre e cache do agregador', () => {
     })
     const app = buildApp(db)
     await app.register(financeiroRoutes)
-    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/dre?inicio=2026-01&fim=2026-03' })
+    const res = await app.inject({ method: 'GET', url: '/v1/financeiro/dre?inicio=2026-01&fim=2026-03&regime=competencia' })
     expect(res.statusCode).toBe(200)
     expect(res.json().meses.map((m) => [m.mes, m.caixa])).toEqual([
       ['2026-01', { saldo_inicio_mes: null }],

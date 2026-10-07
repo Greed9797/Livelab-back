@@ -164,6 +164,13 @@ describe('montarReceitaMensal — vencimento e a receber', () => {
 })
 
 describe('montarReceitaMensal — corte', () => {
+  it('previsão por vencimento não muda de período por causa da data da baixa', () => {
+    const r = montarReceitaMensal({
+      mes: '2026-10', hoje: HOJE, dataCorte: '2026-10-01',
+      titulos: [titulo({ marca: A, componente: 'fixo', competencia: '2026-09-01', venc: '2026-10-05', valor: 1000, pago: 1000, dataPagamento: '2026-09-30' })],
+    })
+    expect(r.vencimento.total).toEqual({ previsto: 1000, pago: 1000, aberto: 0, perdido: 0 })
+  })
   it('itens com data efetiva antes do corte saem das duas visões; invariantes continuam', () => {
     const cen = cenarioSetembro()
     const r = montarReceitaMensal({ mes: '2026-09', hoje: HOJE, dataCorte: '2026-10-01', ...cen })
@@ -282,7 +289,7 @@ describe('consultarReceitaMensal / rota GET /v1/financeiro/receita', () => {
     await app.register(financeiroReceitasRoutes)
     const res = await app.inject({ method: 'GET', url: '/v1/financeiro/receita?mes=2026-10' })
     expect(res.statusCode).toBe(200)
-    expect(Object.keys(res.json())).toEqual(['mes', 'hoje', 'corte', 'competencia', 'vencimento', 'a_receber_mes'])
+    expect(Object.keys(res.json())).toEqual(['mes', 'hoje', 'corte', 'competencia', 'vencimento', 'a_receber_mes', 'recebimentos_mes', 'reconciliacao'])
     expect((await app.inject({ method: 'GET', url: '/v1/financeiro/receita?mes=2026-1' })).statusCode).toBe(400)
     await app.close()
 

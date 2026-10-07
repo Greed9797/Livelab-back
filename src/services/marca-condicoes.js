@@ -1,3 +1,4 @@
+import { reconcileCondicaoReceitas } from './competencias-receitas.js'
 import { lockTenantLiveFinance } from '../lib/live-finance-lock.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { vencimentoSql } from '../lib/receita-marca-sql.js'
@@ -13,7 +14,7 @@ import {
 
 const MONTH_DATE_RE = /^\d{4}-\d{2}-01$/
 
-function serviceError(message, code, statusCode = 409, details = {}) {
+export function serviceError(message, code, statusCode = 409, details = {}) {
   const error = new Error(message)
   error.code = code
   error.statusCode = statusCode
@@ -21,11 +22,11 @@ function serviceError(message, code, statusCode = 409, details = {}) {
   return error
 }
 
-function ensureIds({ tenantId, marcaId }) {
+export function ensureIds({ tenantId, marcaId }) {
   if (!tenantId || !marcaId) throw serviceError('tenantId e marcaId são obrigatórios', 'INVALID_SCOPE', 400)
 }
 
-function normalizeRevision(value) {
+export function normalizeRevision(value) {
   if (value == null || !Number.isSafeInteger(Number(value)) || Number(value) < 1) {
     throw serviceError('revisão esperada é obrigatória', 'EXPECTED_REVISION_REQUIRED', 409)
   }
@@ -39,7 +40,7 @@ function monthAfter(monthStart) {
     : `${year}-${String(month + 1).padStart(2, '0')}-01`
 }
 
-function conditionRowToPublic(row) {
+export function conditionRowToPublic(row) {
   if (!row) return null
   const inicioVigencia = row.inicio_vigencia instanceof Date
     ? row.inicio_vigencia.toISOString().slice(0, 10)
@@ -77,7 +78,7 @@ function vencimentoPublico(row = {}) {
 }
 
 /** Shape público da proposta (reais / %), alinhado ao formulário do painel. */
-function proposalToPublic(normalized) {
+export function proposalToPublic(normalized) {
   if (!normalized) return null
   if (normalized.fixo_mensal_cents == null) {
     return {
@@ -105,7 +106,7 @@ function proposalToPublic(normalized) {
   }
 }
 
-async function listRows(db, { tenantId, marcaId, includeCancelled = false }) {
+export async function listRows(db, { tenantId, marcaId, includeCancelled = true }) {
   const result = await db.query(
     `SELECT id, tenant_id, marca_id, inicio_vigencia, fixo_mensal,
             comissao_franquia_pct, comissao_franqueadora_pct, tipo_cobranca,
@@ -123,7 +124,7 @@ async function listRows(db, { tenantId, marcaId, includeCancelled = false }) {
   return result.rows.map(conditionRowToPublic)
 }
 
-async function lockMarca(db, { tenantId, marcaId }) {
+export async function lockMarca(db, { tenantId, marcaId }) {
   const result = await db.query(
     `SELECT id, tenant_id, nome, tipo, valor_fixo_minimo,
             comissao_franquia_pct, comissao_franqueadora_pct, tipo_cobranca
@@ -136,7 +137,7 @@ async function lockMarca(db, { tenantId, marcaId }) {
   return result.rows[0]
 }
 
-async function readImpact(db, { tenantId, marcaId, start, end }) {
+export async function readImpact(db, { tenantId, marcaId, start, end }) {
   const [lives, sales] = await Promise.all([
     db.query(
       `SELECT
@@ -199,7 +200,7 @@ function monthStartFromDate(value) {
 
 // Sem uma sucessora, o intervalo lógico é aberto. Para manter a prévia e o
 // recálculo finitos, materializamos somente até o mês seguinte ao último
-// movimento já existente. Movimentos criados depois dessa confirmação usarão
+// movimento ou título já existente. Movimentos criados depois dessa confirmação usarão
 // o resolver temporal (T9+) e não precisam ser reescritos retroativamente.
 async function movementHorizonEnd(db, { tenantId, marcaId, start }) {
   const result = await db.query(
@@ -216,6 +217,9 @@ async function movementHorizonEnd(db, { tenantId, marcaId, start }) {
           WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
             AND va.data >= $3::date
             AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') NOT IN ('aprovada', 'fechada', 'faturada', 'reprovada')
+         UNION ALL
+         SELECT competencia FROM receita_titulos
+          WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND competencia >= $3::date
        ) movimentos`,
     [tenantId, marcaId, start],
   )
@@ -223,7 +227,7 @@ async function movementHorizonEnd(db, { tenantId, marcaId, start }) {
   return lastMonth ? monthAfter(lastMonth) : monthAfter(start)
 }
 
-async function previewInTransaction(db, { tenantId, marcaId, proposal, conditions }) {
+export async function previewInTransaction(db, { tenantId, marcaId, proposal, conditions }) {
   const nextExisting = conditions
     .filter((condition) => condition.inicio_vigencia > proposal.inicio_vigencia)
     .sort((a, b) => String(a.inicio_vigencia).localeCompare(String(b.inicio_vigencia)))[0]
@@ -244,7 +248,8 @@ async function previewInTransaction(db, { tenantId, marcaId, proposal, condition
     impacto: impact,
     movimentos_abertos: movements,
     requer_confirmacao: true,
-    bloqueada: impact.movimentos_fechados > 0,
+    // Closed facts/snapshots survive historical corrections; only open projections change.
+    bloqueada: false,
   }
 }
 
@@ -276,7 +281,7 @@ export async function preverCondicaoMarca(db, { tenantId, marcaId, proposta, con
       if (!result.rows[0]) throw serviceError('Marca não encontrada', 'MARCA_NOT_FOUND', 404)
     })
     const conditions = await listRows(db, { tenantId, marcaId })
-    const duplicate = conditions.find((row) => row.inicio_vigencia === normalized.inicio_vigencia)
+    const duplicate = conditions.find((row) => !row.cancelled_at && row.inicio_vigencia === normalized.inicio_vigencia)
     if (duplicate) throw serviceError('Já existe condição para esta competência', 'CONDITION_EXISTS', 409)
     return await previewInTransaction(db, { tenantId, marcaId, proposal: normalized, conditions })
   } finally {
@@ -284,25 +289,25 @@ export async function preverCondicaoMarca(db, { tenantId, marcaId, proposta, con
   }
 }
 
-async function recalculateOpenVendas(db, { tenantId, marcaId, start, end }) {
+export async function recalculateOpenVendas(db, { tenantId, marcaId, start, end }) {
   await db.query(
     `WITH recalculated AS (
       SELECT va.id, va.gmv,
-             (SELECT c.id
+             (SELECT CASE WHEN c.cancelled_at IS NULL THEN c.id ELSE NULL END
                 FROM marca_condicoes_comerciais c
                WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
-                 AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
-               ORDER BY c.inicio_vigencia DESC LIMIT 1) AS marca_condicao_id,
-             COALESCE((SELECT c.comissao_franquia_pct
+                 AND c.inicio_vigencia <= va.data
+               ORDER BY c.inicio_vigencia DESC, c.revision DESC LIMIT 1) AS marca_condicao_id,
+             COALESCE((SELECT CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END
                          FROM marca_condicoes_comerciais c
                         WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
-                          AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
-                        ORDER BY c.inicio_vigencia DESC LIMIT 1), 0) AS franquia_pct,
-             COALESCE((SELECT c.comissao_franqueadora_pct
+                          AND c.inicio_vigencia <= va.data
+                        ORDER BY c.inicio_vigencia DESC, c.revision DESC LIMIT 1), 0) AS franquia_pct,
+             COALESCE((SELECT CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franqueadora_pct ELSE 0 END
                          FROM marca_condicoes_comerciais c
                         WHERE c.tenant_id = va.tenant_id AND c.marca_id = va.marca_id
-                          AND c.inicio_vigencia <= va.data AND c.cancelled_at IS NULL
-                        ORDER BY c.inicio_vigencia DESC LIMIT 1), 0) AS franqueadora_pct
+                          AND c.inicio_vigencia <= va.data
+                        ORDER BY c.inicio_vigencia DESC, c.revision DESC LIMIT 1), 0) AS franqueadora_pct
         FROM vendas_atribuidas va
        WHERE va.tenant_id = $1::uuid AND va.marca_id = $2::uuid
          AND va.data >= $3::date AND va.data < $4::date
@@ -319,16 +324,15 @@ async function recalculateOpenVendas(db, { tenantId, marcaId, start, end }) {
   )
 }
 
-async function recalculateOpenLives(db, { tenantId, marcaId, start, end }) {
+export async function recalculateOpenLives(db, { tenantId, marcaId, start, end }) {
   await db.query(
     `WITH recalculated AS (
       SELECT l.id, COALESCE(l.fat_gerado, 0) AS gmv,
-             COALESCE((SELECT c.comissao_franquia_pct
+             COALESCE((SELECT CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END
                          FROM marca_condicoes_comerciais c
                         WHERE c.tenant_id = l.tenant_id AND c.marca_id = l.marca_id
                           AND c.inicio_vigencia <= (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date
-                          AND c.cancelled_at IS NULL
-                        ORDER BY c.inicio_vigencia DESC LIMIT 1), 0) AS franquia_pct
+                        ORDER BY c.inicio_vigencia DESC, c.revision DESC LIMIT 1), 0) AS franquia_pct
         FROM lives l
        WHERE l.tenant_id = $1::uuid AND l.marca_id = $2::uuid
          AND l.iniciado_em >= ($3::date AT TIME ZONE 'America/Sao_Paulo')
@@ -374,7 +378,13 @@ export async function confirmarCondicaoMarca(db, {
   await db.query('BEGIN')
   try {
     await lockTenantLiveFinance(db, tenantId)
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext('receita_titulos:' || $1::text))`, [tenantId])
     await lockMarca(db, { tenantId, marcaId })
+
+    const mutationKey = await db.query(`SELECT id FROM audit_log WHERE tenant_id = $1::uuid
+      AND entity_type = 'marca_condicao' AND metadata->>'marca_id' = $2
+      AND metadata->>'idempotency_key' = $3 LIMIT 1`, [tenantId, marcaId, idempotencyKey])
+    if (mutationKey.rows.length) throw serviceError('Idempotency-Key já foi usado', 'IDEMPOTENCY_CONFLICT', 409)
 
     const previousRequest = await db.query(
       `SELECT * FROM marca_condicoes_comerciais
@@ -395,14 +405,11 @@ export async function confirmarCondicaoMarca(db, {
     if (currentRevision !== expected) {
       throw serviceError('A revisão da marca mudou; atualize a prévia antes de confirmar', 'STALE_REVISION', 409, { currentRevision })
     }
-    if (conditions.some((row) => row.inicio_vigencia === normalized.inicio_vigencia)) {
+    if (conditions.some((row) => !row.cancelled_at && row.inicio_vigencia === normalized.inicio_vigencia)) {
       throw serviceError('Já existe condição para esta competência', 'CONDITION_EXISTS', 409)
     }
 
     const preview = await previewInTransaction(db, { tenantId, marcaId, proposal: normalized, conditions })
-    if (preview.bloqueada) {
-      throw serviceError('A competência possui movimentos financeiros fechados', 'FINANCIAL_PERIOD_CLOSED', 409, { preview })
-    }
     const vencimento = resolverVencimentoCondicao(
       normalized,
       resolveMarcaCondicao(conditions, normalized.inicio_vigencia),
@@ -448,12 +455,13 @@ export async function confirmarCondicaoMarca(db, {
           AND NOT EXISTS (
             SELECT 1 FROM marca_condicoes_comerciais newer
              WHERE newer.tenant_id = $1::uuid AND newer.marca_id = $2::uuid
-               AND newer.cancelled_at IS NULL
                AND newer.inicio_vigencia > $7::date
                AND newer.inicio_vigencia <= date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')::date
           )`,
       [tenantId, marcaId, normalized.fixo_mensal_cents / 100, normalized.comissao_franquia_basis / 100, normalized.comissao_franqueadora_basis / 100, normalized.tipo_cobranca, normalized.inicio_vigencia],
     )
+    preview.financeiro = await reconcileCondicaoReceitas(db, { tenantId, marcaId, start: normalized.inicio_vigencia, end,
+      operacao: 'create', conditionId: created.id, motivo: normalized.motivo, actorUserId })
     await auditCondition(db, { tenantId, actorUserId, marcaId, conditionId: created.id, proposal: normalized })
     await db.query('COMMIT')
     return { condition: conditionRowToPublic(created), idempotent: false, recalculated: true, preview }
@@ -465,7 +473,7 @@ export async function confirmarCondicaoMarca(db, {
 
 /**
  * Ajusta SÓ o vencimento de uma versão existente (não mexe em valores, então
- * não exige nova vigência nem revisão). Títulos de receita ainda não recebidos
+ * não exige nova vigência; incrementa a revisão para invalidar prévias antigas). Títulos de receita ainda não recebidos
  * da vigência dessa versão acompanham a nova data; títulos com baixa ficam como estão.
  */
 export async function atualizarVencimentoCondicao(db, {
@@ -483,6 +491,9 @@ export async function atualizarVencimentoCondicao(db, {
   }
   await db.query('BEGIN')
   try {
+    await lockTenantLiveFinance(db, tenantId)
+    await db.query(`SELECT pg_advisory_xact_lock(hashtext('receita_titulos:' || $1::text))`, [tenantId])
+    await lockMarca(db, { tenantId, marcaId })
     // Mudar a janela com títulos já materializados (qualquer status) na vigência da versão
     // reescreveria a competência do passado: exige nova versão com inicio_vigencia futuro.
     if (campos.comissao_janela_inicio_dia !== undefined) {
@@ -498,7 +509,7 @@ export async function atualizarVencimentoCondicao(db, {
               AND rt.competencia < COALESCE((
                     SELECT MIN(n.inicio_vigencia) FROM marca_condicoes_comerciais n
                      WHERE n.tenant_id = c.tenant_id AND n.marca_id = c.marca_id
-                       AND n.cancelled_at IS NULL AND n.inicio_vigencia > c.inicio_vigencia
+                       AND n.inicio_vigencia > c.inicio_vigencia
                   ), DATE '9999-12-01')
          ) AS tem`,
         [tenantId, marcaId, condicaoId, campos.comissao_janela_inicio_dia],
@@ -513,7 +524,8 @@ export async function atualizarVencimentoCondicao(db, {
     }
     const updated = await db.query(
       `UPDATE marca_condicoes_comerciais
-          SET fixo_vencimento_dia = COALESCE($4::smallint, fixo_vencimento_dia),
+          SET revision = (SELECT COALESCE(MAX(revision), 1) + 1 FROM marca_condicoes_comerciais WHERE tenant_id = $1::uuid AND marca_id = $2::uuid),
+              fixo_vencimento_dia = COALESCE($4::smallint, fixo_vencimento_dia),
               fixo_vencimento_mes_offset = COALESCE($5::smallint, fixo_vencimento_mes_offset),
               comissao_vencimento_dia = COALESCE($6::smallint, comissao_vencimento_dia),
               comissao_vencimento_mes_offset = COALESCE($7::smallint, comissao_vencimento_mes_offset),
@@ -547,7 +559,7 @@ export async function atualizarVencimentoCondicao(db, {
           AND rt.competencia < COALESCE((
                 SELECT MIN(n.inicio_vigencia) FROM marca_condicoes_comerciais n
                  WHERE n.tenant_id = $1::uuid AND n.marca_id = $2::uuid
-                   AND n.cancelled_at IS NULL AND n.inicio_vigencia > c.inicio_vigencia
+                   AND n.inicio_vigencia > c.inicio_vigencia
               ), DATE '9999-12-01')`,
       [tenantId, marcaId, condicaoId],
     )

@@ -58,13 +58,12 @@ export async function calcularComissoesDaLive(db, { liveId, tenantId, gmv, pedid
      LEFT JOIN marcas m     ON m.tenant_id = $1::uuid
                             AND ${MARCA_RESOLVE_PREDICATE}
      LEFT JOIN LATERAL (
-       SELECT c.id, c.comissao_franquia_pct, c.comissao_franqueadora_pct
+       SELECT c.id, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franquia_pct ELSE 0 END AS comissao_franquia_pct, CASE WHEN c.cancelled_at IS NULL THEN c.comissao_franqueadora_pct ELSE 0 END AS comissao_franqueadora_pct
          FROM marca_condicoes_comerciais c
         WHERE c.tenant_id = $1::uuid
           AND c.marca_id = m.id
           AND c.inicio_vigencia <= (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date
-          AND c.cancelled_at IS NULL
-        ORDER BY c.inicio_vigencia DESC
+        ORDER BY c.inicio_vigencia DESC, (c.cancelled_at IS NULL) DESC
         LIMIT 1
      ) mc ON true
      WHERE l.id = $2 AND l.tenant_id = $1::uuid

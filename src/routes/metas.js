@@ -15,7 +15,7 @@ const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
  */
 function lerMes(request, reply) {
   try {
-    return parseAnoMes(request.query?.mes)
+    return parseAnoMes(request.query?.mes || saoPauloDateInput(new Date()).slice(0, 7))
   } catch (err) {
     reply.code(err.statusCode ?? 400).send({ error: err.message })
     return null

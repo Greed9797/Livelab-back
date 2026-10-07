@@ -113,7 +113,7 @@ export async function analyticsOperacionalRoutes(app) {
 
   app.put('/v1/analytics/metas-operacionais', { preHandler: app.requirePapel(['franqueador_master','franqueado','gerente']) }, async (request, reply) => {
     const body = request.body ?? {}
-    const overridesValid = rows => rows === undefined || (Array.isArray(rows) && rows.length <= 300 && rows.every(row => UUID_RE.test(row.id) && nullableMoney.safeParse(row.meta_gmv_hora).success))
+    const overridesValid = rows => rows === undefined || (Array.isArray(rows) && rows.length <= 300 && rows.every(row => row !== null && typeof row === 'object' && !Array.isArray(row) && UUID_RE.test(row.id) && nullableMoney.safeParse(row.meta_gmv_hora).success))
     if (!MONTH_RE.test(body.ano_mes ?? '') || !money.safeParse(body.meta_gmv).success || !money.safeParse(body.meta_gmv_hora).success ||
         !configSchema.safeParse(body.configuracao).success || !overridesValid(body.pisos_apresentadoras ?? []) || !overridesValid(body.pisos_marcas ?? [])) {
       return reply.code(400).send({ error: 'Metas, competência, configuração e exceções inválidas.' })

@@ -28,7 +28,7 @@
 // Funções puras exportadas para teste; as que tocam o banco recebem `db` e
 // `tenantId` explícito (além do RLS).
 
-import { normalizarMotivo, statusLancamento, timestampIso } from '../lib/lancamento-status.js'
+import { encerrado, normalizarMotivo, saldoAberto, statusLancamento, timestampIso, valorEncerrado } from '../lib/lancamento-status.js'
 import { centsToExactMoney, exactMoneyToCents } from '../lib/money.js'
 import { randomUUID } from 'node:crypto'
 import { hojeSaoPaulo, listarTitulosReceita } from './receitas-comercial.js'
@@ -118,23 +118,7 @@ const BASE_ITEM = {
 
 // ─── Perdas e cancelamentos (encerramento do saldo) ───────────────────────
 
-const quitado = (i) => Number(i?.valor_pago) > 0 && Number(i.valor_pago) >= Number(i.valor_previsto)
-
-/**
- * true se o item é receita PERDIDA ou custo CANCELADO (status derivado 'perdido'|'cancelado'
- * OU perdido_em/cancelado_em preenchido). Item quitado nunca é encerrado (pago tem precedência).
- */
-export function encerrado(i) {
-  if (!i || quitado(i)) return false
-  return i.status === 'perdido' || i.status === 'cancelado' || Boolean(i.perdido_em) || Boolean(i.cancelado_em)
-}
-
-/** Perda parcial registrada ou saldo encerrado; sempre limitado ao aberto. */
-export function valorEncerrado(i) {
-  const saldo = Math.max(0, r2(r2(i?.valor_previsto) - r2(i?.valor_pago)))
-  if (i?.natureza === 'receita' && i.valor_perdido != null) return Math.min(saldo, Math.max(0, r2(i.valor_perdido)))
-  return encerrado(i) ? saldo : 0
-}
+export { encerrado, valorEncerrado }
 
 /** Previsto que ainda conta: valor_previsto menos perda/cancelamento. */
 export function previstoEfetivo(i) {
@@ -312,7 +296,7 @@ export function filtrarLancamentos(itens, { natureza, status, grupo, classe, ori
 }
 
 /** Em aberto após pagamento e perda/cancelamento, inclusive parcial. */
-const emAberto = (i) => Math.max(0, r2(r2(i.valor_previsto) - r2(i.valor_pago) - valorEncerrado(i)))
+const emAberto = saldoAberto
 
 /**
  * Totais por natureza: previsto (Σ valor_previsto), pago (Σ valor_pago),
@@ -1183,7 +1167,7 @@ export async function desfazerImposto(db, {
  * e ordenados por vencimento: receitas (marcas + avulsas) + custos + apresentadoras
  * + imposto, com a regra de corte aplicada (dataCorte undefined → lida da config).
  */
-export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte } = {}) {
+export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, vencimentoAte } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   let pct = aliquota
   let corte = dataCorte
@@ -1195,13 +1179,13 @@ export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hoje
   // Receitas/avulsas são carregadas UMA vez e reaproveitadas pela projeção do imposto
   // (antes calcularImpostos refazia as mesmas duas listagens).
   const pTitulos = listarTitulosReceita(db, { tenantId, inicio, fim, hoje })
-  const pAvulsas = listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje })
+  const pAvulsas = listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje, vencimentoAte })
   const pReceitas = Promise.all([pTitulos, pAvulsas]).then(([titulos, avulsas]) => ({ titulos, avulsas, inicio, fim }))
   pReceitas.catch(() => {}) // se o imposto não precisar dela, a rejeição já é tratada no Promise.all abaixo
   const [receitas, avulsas, custos, apresentadoras, impostos] = await Promise.all([
     pTitulos,
     pAvulsas,
-    listarCustos(db, { tenantId, inicio, fim, hoje }),
+    listarCustos(db, { tenantId, inicio, fim, hoje, vencimentoAte }),
     listarPagamentosApresentadoras(db, { tenantId, inicio: `${inicio}-01`, fim: `${fim}-01`, hoje }),
     listarImpostos(db, { tenantId, inicio, fim, hoje, aliquota: pct, dataCorte: corte, receitas: pReceitas }),
   ])
@@ -1216,8 +1200,8 @@ export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hoje
 }
 
 /** GET /lancamentos: itens filtrados + totais (dos itens filtrados). */
-export async function consultarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), filtros = {} } = {}) {
-  const itens = filtrarLancamentos(await listarLancamentos(db, { tenantId, inicio, fim, hoje }), filtros)
+export async function consultarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), filtros = {}, vencimentoAte } = {}) {
+  const itens = filtrarLancamentos(await listarLancamentos(db, { tenantId, inicio, fim, hoje, vencimentoAte }), filtros)
   return { inicio, fim, hoje, itens, totais: totalizarLancamentos(itens) }
 }
 
@@ -1597,7 +1581,7 @@ export async function calcularPainelMes(db, { tenantId, mes, hoje = hojeSaoPaulo
   const inicio = addMeses(mes, -12)
   const deMes = corte && corte > `${mes}-01` ? corte : `${mes}-01`
   const [itens, eventosPerda, realizadoAte, realizadoPos, realizadoMes] = await Promise.all([
-    listarLancamentos(db, { tenantId, inicio, fim: mes, hoje, aliquota: config.aliquota_imposto_pct, dataCorte: corte }),
+    listarLancamentos(db, { tenantId, inicio, fim: mes, hoje, aliquota: config.aliquota_imposto_pct, dataCorte: corte, vencimentoAte: fimMes }),
     listarEventosPerdaDre(db, { tenantId, inicio: mes, fim: mes }),
     corte ? realizadoEntre(db, { tenantId, de: corte, ate }) : ZERO_REALIZADO,
     corte ? realizadoEntre(db, { tenantId, de: ate >= corte ? diaSeguinte(ate) : corte, ate: fimMes }) : ZERO_REALIZADO,

@@ -102,3 +102,25 @@ describe('POST /v1/usuarios/convidar — reuso de email após soft-delete', () =
     await app.close()
   })
 })
+
+describe('GET /v1/usuarios/convites-pendentes', () => {
+  it('returns first-access state and server-computed expiration for the invited account', async () => {
+    const queryMock = vi.fn().mockResolvedValue({ rows: [{
+      id: newUserId,
+      nome: 'Amanda',
+      email: 'amanda@example.com',
+      primeiro_acesso: false,
+      expirou: true,
+      invite_expira_em: '2026-10-07T12:00:00.000Z',
+    }] })
+    const { app, query } = buildApp({ queryMock })
+    await app.register(usuariosRoutes)
+
+    const res = await app.inject({ method: 'GET', url: '/v1/usuarios/convites-pendentes' })
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toMatchObject([{ id: newUserId, primeiro_acesso: false, expirou: true }])
+    expect(String(query.mock.calls[0][0])).toContain('u.primeiro_acesso')
+
+    await app.close()
+  })
+})

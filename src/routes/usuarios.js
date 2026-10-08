@@ -631,7 +631,7 @@ export async function usuariosRoutes(app) {
     return app.withTenant(request.user.tenant_id, async (db) => {
       const result = await db.query(
         `SELECT
-           u.id, u.nome, u.email, u.papel, u.criado_em,
+           u.id, u.nome, u.email, u.papel, u.primeiro_acesso, u.criado_em,
            u.invite_expira_em,
            (u.invite_expira_em IS NOT NULL AND u.invite_expira_em < NOW()) AS expirou,
            CASE

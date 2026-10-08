@@ -82,11 +82,12 @@ export async function tiktokRoutes(app) {
    * Recebe o 'code' do TikTok após o login do usuário e troca por Access Token
    */
   app.get('/v1/tiktok/callback', async (request, reply) => {
-    // S-12: CSP global bloqueia scripts; HTML do callback usa style inline.
-    // Override permite style mas mantém scriptSrc 'none'.
+    // O callback precisa notificar a janela OAuth, mas mantém scripts restritos
+    // a este nonce por resposta em vez de liberar inline scripts globalmente.
+    const callbackNonce = crypto.randomBytes(16).toString('base64')
     reply.header(
       'Content-Security-Policy',
-      "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+      `default-src 'none'; script-src 'nonce-${callbackNonce}'; style-src 'unsafe-inline'; img-src data:`,
     )
     if (!oauthEnabled) {
       return reply.code(503).send({
@@ -124,7 +125,7 @@ export async function tiktokRoutes(app) {
       // AUTH: callback OAuth TikTok — tenantId vem de signed state (HMAC verificado); opera só nesse tenant.
       const tenantCheck = await app.db.query(`SELECT id FROM tenants WHERE id = $1`, [tenantId])
       if (tenantCheck.rowCount === 0) {
-        return reply.type('text/html').send(_errorPage('Conta não encontrada. Tente conectar novamente.'))
+        return reply.type('text/html').send(_errorPage('Conta não encontrada. Tente conectar novamente.', callbackNonce))
       }
 
       // Troca code → tokens via TikTok Open API v2
@@ -143,7 +144,7 @@ export async function tiktokRoutes(app) {
 
       if (data.error) {
         app.log.warn({ data }, '[TikTok OAuth] Erro na troca de código')
-        return reply.type('text/html').send(_errorPage(`TikTok: ${data.error_description ?? data.error}`))
+        return reply.type('text/html').send(_errorPage(`TikTok: ${data.error_description ?? data.error}`, callbackNonce))
       }
 
       const expiresAt = new Date(Date.now() + data.expires_in * 1000)
@@ -162,11 +163,11 @@ export async function tiktokRoutes(app) {
       app.log.info(`[TikTok OAuth] Token salvo para tenant ${tenantId} (open_id: ${openIdMasked})`)
 
       const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:4200'
-      return reply.type('text/html').send(_successPage(frontendUrl))
+      return reply.type('text/html').send(_successPage(frontendUrl, callbackNonce))
 
     } catch (err) {
       app.log.error({ err }, '[TikTok OAuth] Falha ao processar callback')
-      return reply.type('text/html').send(_errorPage('Falha de comunicação com o TikTok. Tente novamente.'))
+      return reply.type('text/html').send(_errorPage('Falha de comunicação com o TikTok. Tente novamente.', callbackNonce))
     }
   });
 
@@ -188,10 +189,28 @@ export async function tiktokRoutes(app) {
     const notExpired = t.tiktok_token_expires_at ? new Date(t.tiktok_token_expires_at) > new Date() : false
     const connected = hasToken && notExpired
 
+    // Este endpoint só descreve configuração local. Não consulta o provedor e,
+    // portanto, não afirma que a credencial foi validada externamente.
+    const availability = hasOauthConfig
+      ? { available: true, reason: null }
+      : !oauthEnabled
+        ? { available: false, reason: 'oauth_disabled' }
+        : { available: false, reason: 'server_not_configured' }
+
     return reply.send({
       connected,
       tiktok_user_id: t.tiktok_user_id ?? null,
       token_expires_at: t.tiktok_token_expires_at ?? null,
+      capability: {
+        supported: true,
+        oauth: availability,
+        scope: 'user.info.basic',
+      },
+      credential: {
+        registered: hasToken,
+        valid_by_expiry: hasToken ? notExpired : null,
+        externally_verified: false,
+      },
     })
   })
 
@@ -515,7 +534,7 @@ export async function tiktokRoutes(app) {
 
 // ── HTML helpers para o OAuth callback ───────────────────────────────────────
 
-function _successPage(frontendUrl) {
+function _successPage(frontendUrl, nonce) {
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head><meta charset="UTF-8"><title>TikTok Conectado</title>
@@ -526,7 +545,7 @@ function _successPage(frontendUrl) {
     <h2 style="color:#010101">✓ TikTok conectado com sucesso!</h2>
     <p style="color:#666">Esta aba será fechada automaticamente...</p>
   </div>
-  <script>
+  <script nonce="${nonce}">
     // Notifica o opener (popup OAuth flow): envia tanto o evento legado
     // ('tiktok_connected') quanto o novo ('tiktok_oauth_complete') pra
     // compat com clientes antigos e novos. Targets '*' pra funcionar
@@ -542,7 +561,7 @@ function _successPage(frontendUrl) {
 </body></html>`
 }
 
-function _errorPage(message) {
+function _errorPage(message, nonce) {
   return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head><meta charset="UTF-8"><title>Erro TikTok</title>
@@ -552,8 +571,9 @@ function _errorPage(message) {
   <div style="text-align:center">
     <h2 style="color:#c0392b">Erro ao conectar TikTok</h2>
     <p style="color:#666">${message}</p>
-    <button onclick="window.close()" style="padding:8px 16px;cursor:pointer">Fechar</button>
+    <button id="close" style="padding:8px 16px;cursor:pointer">Fechar</button>
   </div>
+  <script nonce="${nonce}">document.getElementById('close').addEventListener('click', () => window.close())</script>
 </body></html>`
 }
 

@@ -7,8 +7,16 @@ const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
 const configSchema = z.object({
   logo_url:            z.string().url().or(z.literal('')).optional().nullable(),
   nome:                z.string().min(1).optional(),
+  cnpj:                z.string().max(32).optional().nullable(),
+  cidade:              z.string().max(80).optional().nullable(),
+  uf:                  z.string().trim().length(2).transform((value) => value.toUpperCase()).optional().nullable(),
   telefone_contato:    z.string().optional().nullable(),
   email_contato:       z.string().email().optional().nullable(),
+  // Aliases enviados pela tela anterior. Mantidos explicitamente durante a transição.
+  nome_franquia:       z.string().min(1).optional(),
+  telefone:            z.string().optional().nullable(),
+  email:               z.string().email().optional().nullable(),
+  estado:              z.string().trim().length(2).transform((value) => value.toUpperCase()).optional().nullable(),
   gateway_api_key:     z.string().optional().nullable(),
   gateway_wallet_id:   z.string().optional().nullable(),
   // LEGACY ASAAS — manter pra compat 6 meses. Clients antigos podem usar asaas_* fields (mapeiam pra gateway_*)
@@ -23,7 +31,7 @@ const configSchema = z.object({
   notif_live_meta:      z.boolean().optional(),
   notif_lead_novo:      z.boolean().optional(),
   notif_contrato:       z.boolean().optional(),
-})
+}).passthrough()
 
 const rankingPublicoSchema = z.object({
   ativo: z.boolean().optional(),
@@ -42,7 +50,40 @@ function mapRankingPublico(row) {
     cidade: row.ranking_publico_cidade ?? row.cidade ?? '',
     uf: row.ranking_publico_uf ?? row.uf ?? '',
     meta_gmv: row.ranking_publico_meta_gmv == null ? null : Number(row.ranking_publico_meta_gmv),
+    // A interface precisa distinguir o valor efetivo da personalização gravada.
+    overrides: {
+      nome_publico: row.ranking_publico_nome ?? null,
+      logo_url: row.ranking_publico_logo_url ?? null,
+      cidade: row.ranking_publico_cidade ?? null,
+      uf: row.ranking_publico_uf ?? null,
+      meta_gmv: row.ranking_publico_meta_gmv == null ? null : Number(row.ranking_publico_meta_gmv),
+    },
   }
+}
+
+const CONFIG_READ_ONLY_FIELDS = new Set([
+  'id', 'gateway_api_key_hidden', 'has_gateway', 'gateway_provider',
+  'asaas_api_key_hidden', 'has_asaas', 'has_tiktok', 'contact_history',
+])
+
+const CONFIG_WRITABLE_FIELDS = new Set([
+  'logo_url', 'nome', 'cnpj', 'cidade', 'uf', 'telefone_contato', 'email_contato',
+  'nome_franquia', 'telefone', 'email', 'estado', 'gateway_api_key',
+  'gateway_wallet_id', 'asaas_api_key', 'asaas_wallet_id', 'tiktok_access_token',
+  'tiktok_shop_id', 'nova_senha', 'meta_diaria_gmv', 'notif_email_ativo',
+  'notif_live_meta', 'notif_lead_novo', 'notif_contrato',
+])
+
+function unknownConfigFields(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return []
+  return Object.keys(body).filter((key) => !CONFIG_WRITABLE_FIELDS.has(key) && !CONFIG_READ_ONLY_FIELDS.has(key))
+}
+
+function resolveAlias(data, canonical, alias) {
+  if (data[canonical] !== undefined && data[alias] !== undefined && data[canonical] !== data[alias]) {
+    return { error: `Envie apenas ${canonical}; ${alias} é um alias legado.` }
+  }
+  return { value: data[canonical] !== undefined ? data[canonical] : data[alias] }
 }
 
 export async function configuracoesRoutes(app) {
@@ -102,7 +143,7 @@ export async function configuracoesRoutes(app) {
     return app.withTenant(tenant_id, async (db) => {
       const { rows } = await db.query(`
         SELECT id, nome, logo_url,
-               telefone_contato, email_contato,
+               cnpj, cidade, uf, telefone_contato, email_contato,
                gateway_api_key, gateway_wallet_id,
                tiktok_access_token, tiktok_shop_id,
                meta_diaria_gmv,
@@ -129,6 +170,9 @@ export async function configuracoesRoutes(app) {
         id:                     conf.id,
         nome:                   conf.nome,
         logo_url:               conf.logo_url,
+        cnpj:                   conf.cnpj,
+        cidade:                 conf.cidade,
+        uf:                     conf.uf,
         telefone_contato:       conf.telefone_contato,
         email_contato:          conf.email_contato,
         gateway_api_key_hidden: hideKey(conf.gateway_api_key),
@@ -180,30 +224,34 @@ export async function configuracoesRoutes(app) {
 
     const { tenant_id } = request.user
     const data = parsed.data
+    const fields = [
+      ['ativo', 'ranking_publico_ativo'],
+      ['nome_publico', 'ranking_publico_nome'],
+      ['logo_url', 'ranking_publico_logo_url'],
+      ['cidade', 'ranking_publico_cidade'],
+      ['uf', 'ranking_publico_uf'],
+      ['meta_gmv', 'ranking_publico_meta_gmv'],
+    ].filter(([key]) => Object.hasOwn(data, key))
+    if (fields.length === 0) {
+      return reply.code(400).send({ error: 'Informe ao menos um campo do ranking público.' })
+    }
 
     return app.withTenant(tenant_id, async (db) => {
+      const values = [tenant_id]
+      const updates = fields.map(([key, column], index) => {
+        values.push(data[key])
+        return `${column} = $${index + 2}`
+      })
       const { rows } = await db.query(`
         UPDATE tenants
-           SET ranking_publico_ativo = COALESCE($2, ranking_publico_ativo),
-               ranking_publico_nome = $3,
-               ranking_publico_logo_url = $4,
-               ranking_publico_cidade = $5,
-               ranking_publico_uf = $6,
-               ranking_publico_meta_gmv = $7,
+           SET ${updates.join(', ')},
                atualizado_em = NOW()
          WHERE id = $1
-         RETURNING ranking_publico_ativo, ranking_publico_nome,
+         RETURNING nome, logo_url, cidade, uf,
+                   ranking_publico_ativo, ranking_publico_nome,
                    ranking_publico_logo_url, ranking_publico_cidade,
                    ranking_publico_uf, ranking_publico_meta_gmv
-      `, [
-        tenant_id,
-        data.ativo ?? null,
-        data.nome_publico ?? null,
-        data.logo_url ?? null,
-        data.cidade ?? null,
-        data.uf ?? null,
-        data.meta_gmv ?? null,
-      ])
+      `, values)
 
       return mapRankingPublico(rows[0] ?? {})
     })
@@ -213,12 +261,23 @@ export async function configuracoesRoutes(app) {
   app.patch('/v1/configuracoes', {
     preHandler: [app.authenticate, app.requirePapel(WRITE_CONFIGURACOES)],
   }, async (request, reply) => {
+    const unsupported = unknownConfigFields(request.body)
+    if (unsupported.length > 0) {
+      return reply.code(400).send({ error: `Campos de configurações não suportados: ${unsupported.join(', ')}` })
+    }
     const parsed = configSchema.safeParse(request.body)
 
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub: user_id } = request.user
     const data = parsed.data
+    const nome = resolveAlias(data, 'nome', 'nome_franquia')
+    const telefone = resolveAlias(data, 'telefone_contato', 'telefone')
+    const email = resolveAlias(data, 'email_contato', 'email')
+    const uf = resolveAlias(data, 'uf', 'estado')
+    const aliases = [nome, telefone, email, uf]
+    const aliasError = aliases.find((item) => item.error)
+    if (aliasError) return reply.code(400).send({ error: aliasError.error })
 
     return app.withTenant(tenant_id, async (db) => {
       try {
@@ -228,8 +287,11 @@ export async function configuracoesRoutes(app) {
         const values = [tenant_id]
         let paramIdx = 2
 
-        if (data.nome !== undefined)            { updates.push(`nome = $${paramIdx++}`);            values.push(data.nome) }
+        if (nome.value !== undefined)           { updates.push(`nome = $${paramIdx++}`);            values.push(nome.value) }
         if (data.logo_url !== undefined)        { updates.push(`logo_url = $${paramIdx++}`);        values.push(data.logo_url) }
+        if (data.cnpj !== undefined)            { updates.push(`cnpj = $${paramIdx++}`);            values.push(data.cnpj) }
+        if (data.cidade !== undefined)          { updates.push(`cidade = $${paramIdx++}`);          values.push(data.cidade) }
+        if (uf.value !== undefined)             { updates.push(`uf = $${paramIdx++}`);              values.push(uf.value) }
         // LEGACY ASAAS — aceita tanto campo novo (gateway_*) quanto legado (asaas_*) — alias semântico. Remover em 2026-11.
         const apiKey = data.gateway_api_key ?? data.asaas_api_key
         const walletId = data.gateway_wallet_id ?? data.asaas_wallet_id
@@ -245,28 +307,28 @@ export async function configuracoesRoutes(app) {
         if (data.notif_contrato !== undefined)       { updates.push(`notif_contrato = $${paramIdx++}`);       values.push(data.notif_contrato) }
 
         // Campos de contato com histórico
-        if (data.telefone_contato !== undefined || data.email_contato !== undefined) {
+        if (telefone.value !== undefined || email.value !== undefined) {
           const currentQ = await db.query(
             `SELECT telefone_contato, email_contato FROM tenants WHERE id = $1`, [tenant_id]
           )
           const current = currentQ.rows[0]
 
-          if (data.telefone_contato !== undefined && data.telefone_contato !== current.telefone_contato) {
+          if (telefone.value !== undefined && telefone.value !== current.telefone_contato) {
             updates.push(`telefone_contato = $${paramIdx++}`)
-            values.push(data.telefone_contato)
+            values.push(telefone.value)
             await db.query(
               `INSERT INTO tenant_contact_history (tenant_id, alterado_por, campo, valor_anterior, valor_novo)
                VALUES ($1, $2, 'telefone', $3, $4)`,
-              [tenant_id, user_id, current.telefone_contato, data.telefone_contato]
+              [tenant_id, user_id, current.telefone_contato, telefone.value]
             )
           }
-          if (data.email_contato !== undefined && data.email_contato !== current.email_contato) {
+          if (email.value !== undefined && email.value !== current.email_contato) {
             updates.push(`email_contato = $${paramIdx++}`)
-            values.push(data.email_contato)
+            values.push(email.value)
             await db.query(
               `INSERT INTO tenant_contact_history (tenant_id, alterado_por, campo, valor_anterior, valor_novo)
                VALUES ($1, $2, 'email', $3, $4)`,
-              [tenant_id, user_id, current.email_contato, data.email_contato]
+              [tenant_id, user_id, current.email_contato, email.value]
             )
           }
         }
@@ -275,7 +337,13 @@ export async function configuracoesRoutes(app) {
           await db.query(`UPDATE tenants SET ${updates.join(', ')} WHERE id = $1`, values)
         }
 
-        if (data.nova_senha) {
+        const hasPasswordUpdate = Boolean(data.nova_senha)
+        if (updates.length === 0 && !hasPasswordUpdate) {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: 'Nenhuma configuração editável foi informada.' })
+        }
+
+        if (hasPasswordUpdate) {
           const bcrypt = await import('bcrypt')
           const hash = await bcrypt.default.hash(data.nova_senha, 12)
           await db.query(
@@ -284,8 +352,18 @@ export async function configuracoesRoutes(app) {
           )
         }
 
+        const savedQ = await db.query(
+          `SELECT nome, cnpj, cidade, uf, logo_url, telefone_contato, email_contato
+           FROM tenants
+           WHERE id = $1`,
+          [tenant_id],
+        )
         await db.query('COMMIT')
-        return { ok: true, message: 'Configurações atualizadas com sucesso' }
+        return {
+          ok: true,
+          message: 'Configurações atualizadas com sucesso',
+          settings: savedQ.rows[0] ?? null,
+        }
       } catch (e) {
         await db.query('ROLLBACK')
         throw e

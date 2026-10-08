@@ -850,6 +850,85 @@ describe('LIVELAB operational routes', () => {
     await app.close()
   })
 
+  it('PATCH /v1/configuracoes/ranking-publico preserves omitted overrides and accepts an explicit null clear', async () => {
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({
+        rows: [{
+          nome: 'Livelab Blumenau', logo_url: 'https://cdn/logo.png', cidade: 'Blumenau', uf: 'SC',
+          ranking_publico_ativo: false, ranking_publico_nome: 'Ranking Blumenau',
+          ranking_publico_logo_url: 'https://cdn/ranking.png', ranking_publico_cidade: 'Gaspar',
+          ranking_publico_uf: 'SC', ranking_publico_meta_gmv: '50000.00',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          nome: 'Livelab Blumenau', logo_url: 'https://cdn/logo.png', cidade: 'Blumenau', uf: 'SC',
+          ranking_publico_ativo: false, ranking_publico_nome: null,
+          ranking_publico_logo_url: 'https://cdn/ranking.png', ranking_publico_cidade: 'Gaspar',
+          ranking_publico_uf: 'SC', ranking_publico_meta_gmv: '50000.00',
+        }],
+      })
+    const { app } = buildApp({ queryMock })
+    await app.register(configuracoesRoutes)
+
+    const onlyActive = await app.inject({
+      method: 'PATCH', url: '/v1/configuracoes/ranking-publico', payload: { ativo: false },
+    })
+    expect(onlyActive.statusCode).toBe(200)
+    expect(queryMock.mock.calls[0][0]).toContain('ranking_publico_ativo = $2')
+    expect(queryMock.mock.calls[0][0]).not.toContain('ranking_publico_nome =')
+
+    const clearName = await app.inject({
+      method: 'PATCH', url: '/v1/configuracoes/ranking-publico', payload: { nome_publico: null },
+    })
+    expect(clearName.statusCode).toBe(200)
+    expect(clearName.json()).toMatchObject({ nome_publico: 'Livelab Blumenau' })
+    expect(clearName.json().overrides.nome_publico).toBeNull()
+    await app.close()
+  })
+
+  it('PATCH /v1/configuracoes persists canonical unit fields and legacy aliases without silent unknown fields', async () => {
+    const queryMock = vi.fn().mockImplementation(async (sql) => (
+      String(sql).includes('SELECT telefone_contato, email_contato')
+        ? { rows: [{ telefone_contato: null, email_contato: null }] }
+        : String(sql).includes('SELECT nome, cnpj, cidade, uf, logo_url, telefone_contato, email_contato')
+          ? { rows: [{
+            nome: 'LiveLab Blumenau', cnpj: '12.345.678/0001-90', cidade: 'Blumenau', uf: 'SC',
+            logo_url: null, telefone_contato: '47999999999', email_contato: 'contato@livelab.com.br',
+          }] }
+        : { rows: [] }
+    ))
+    const { app } = buildApp({ queryMock })
+    await app.register(configuracoesRoutes)
+
+    const saved = await app.inject({
+      method: 'PATCH',
+      url: '/v1/configuracoes',
+      payload: {
+        nome_franquia: 'LiveLab Blumenau', cnpj: '12.345.678/0001-90', cidade: 'Blumenau',
+        estado: 'sc', telefone: '47999999999', email: 'contato@livelab.com.br',
+      },
+    })
+    expect(saved.statusCode).toBe(200)
+    expect(saved.json().settings).toEqual({
+      nome: 'LiveLab Blumenau', cnpj: '12.345.678/0001-90', cidade: 'Blumenau', uf: 'SC',
+      logo_url: null, telefone_contato: '47999999999', email_contato: 'contato@livelab.com.br',
+    })
+    const update = queryMock.mock.calls.find(([sql]) => String(sql).startsWith('UPDATE tenants SET'))
+    expect(update[0]).toContain('nome = $2')
+    expect(update[0]).toContain('cnpj = $3')
+    expect(update[0]).toContain('cidade = $4')
+    expect(update[0]).toContain('uf = $5')
+    expect(update[1]).toContain('SC')
+
+    const unsupported = await app.inject({
+      method: 'PATCH', url: '/v1/configuracoes', payload: { dado_inventado: 'x' },
+    })
+    expect(unsupported.statusCode).toBe(400)
+    expect(unsupported.json().error).toMatch(/não suportados/)
+    await app.close()
+  })
+
   it('calcularComissoesAtribuidas chooses presenter ladder by monthly GMV', async () => {
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '2' }] })

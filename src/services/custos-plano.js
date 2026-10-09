@@ -16,6 +16,7 @@ import { classeDoItem } from '../lib/custo-classe.js'
 import { randomUUID } from 'node:crypto'
 import { centsToExactMoney, exactMoneyToCents } from '../lib/money.js'
 import { registrarEstorno, registrarLiquidacao } from './financeiro-liquidacoes-command.js'
+import { esperarLeiturasFinanceiras } from './financeiro-read-snapshot.js'
 
 export const GRUPOS_CUSTO = [
   'operacional', 'estrutural', 'diversos', 'investimento', 'prolabore',
@@ -216,20 +217,26 @@ export const RECORRENTE_COLS = `
  * Custos do período (meses 'YYYY-MM' ou datas; usa os 7 primeiros chars):
  * materializados (manuais, parcelas, recorrentes já geradas) + recorrentes virtuais.
  */
-export async function listarCustos(db, { tenantId, inicio, fim, hoje, vencimentoAte }) {
+export async function listarCustos(db, { tenantId, inicio, fim, hoje, vencimentoAte, incluirSemData = false }) {
   const mi = mesDe(inicio)
   const mf = mesDe(fim ?? inicio)
   if (!mesValido(mi) || !mesValido(mf) || mf < mi) throw new Error('período inválido')
   if (vencimentoAte && !/^\d{4}-\d{2}-\d{2}$/.test(vencimentoAte)) throw new Error('vencimento inválido')
   const params = [tenantId, primeiroDia(mi), ultimoDia(mf)]
   if (vencimentoAte) params.push(vencimentoAte)
+  // Preserve the legacy predicate verbatim. Only the operational selector opts
+  // into undated historical rows; ordinary month lists retain their scope.
+  let periodo = vencimentoAte
+    ? '((competencia >= $2::date AND competencia <= $3::date) OR data_vencimento <= $4::date)'
+    : 'competencia >= $2::date AND competencia <= $3::date'
+  if (incluirSemData) periodo = `((${periodo}) OR (data_vencimento IS NULL AND competencia <= $3::date))`
 
-  const [custos, recs] = await Promise.all([
+  const [custos, recs] = await esperarLeiturasFinanceiras([
     db.query(
       `SELECT ${CUSTO_COLS}
          FROM custos
         WHERE tenant_id = $1::uuid
-          AND ${vencimentoAte ? '((competencia >= $2::date AND competencia <= $3::date) OR data_vencimento <= $4::date)' : 'competencia >= $2::date AND competencia <= $3::date'}
+          AND ${periodo}
         ORDER BY data_vencimento NULLS LAST, competencia, criado_em`,
       params,
     ),
@@ -369,9 +376,12 @@ async function totalLiquidoCanonico(db, tenantId, id) {
  * centavos e a compatibilidade com valor_pago é confirmada sob lock.
  */
 export async function pagarCusto(db, {
-  tenantId, id: rawId, valorPago, dataPagamento, hoje, ator,
-  chaveOperacao = randomUUID(),
+  tenantId, id: rawId, valorPago, valorIncremental, dataPagamento, hoje, ator,
+  chaveOperacao = randomUUID(), retornarLiquidacao = false,
 } = {}) {
+  if (valorPago != null && valorIncremental != null) {
+    throw erroCusto('Informe valorPago acumulado ou valorIncremental, não ambos', 400, 'CUSTO_VALOR_INVALIDO')
+  }
   let id = rawId
   const virtual = parseIdVirtual(rawId)
   if (virtual) id = await materializarVirtual(db, { tenantId, ...virtual })
@@ -394,14 +404,17 @@ export async function pagarCusto(db, {
     [tenantId, chaveOperacao],
   )
   const anterior = anteriores[0]
-  const alvo = valorPago == null ? previsto : centsCusto(valorPago, 'valor_pago')
-  if (alvo > previsto) throw erroCusto('valor_pago excede o valor previsto', 409, 'CUSTO_VALOR_EXCEDENTE')
-  const delta = anterior ? centsCusto(anterior.valor, 'valor') : alvo - pagoAtual
+  const incremento = valorIncremental == null ? null : centsCusto(valorIncremental, 'valor_operacao')
+  const alvo = incremento === null ? (valorPago == null ? previsto : centsCusto(valorPago, 'valor_pago')) : null
+  if (alvo !== null && alvo > previsto) throw erroCusto('valor_pago excede o valor previsto', 409, 'CUSTO_VALOR_EXCEDENTE')
+  const delta = anterior ? centsCusto(anterior.valor, 'valor') : incremento ?? (alvo - pagoAtual)
   if (!anterior && delta <= 0n) throw erroCusto('Custo já pago neste valor', 409, 'CUSTO_SEM_SALDO')
   const data = dataPagamento ?? anterior?.data ?? hoje
-  const motivo = JSON.stringify({ alvo: centsToExactMoney(alvo), operacao: 'baixa_total_legada' })
+  const motivo = JSON.stringify(incremento === null
+    ? { alvo: centsToExactMoney(alvo), operacao: 'baixa_total_legada' }
+    : { valor_operacao: centsToExactMoney(incremento), operacao: 'incremental' })
 
-  await registrarLiquidacao(db, {
+  const liquidacao = await registrarLiquidacao(db, {
     tenantId, origemTipo: 'custo', origemId: id, valor: centsToExactMoney(delta), data,
     ator, idempotenciaChave: chaveOperacao, comandoOrigem: 'custos.pagar', motivo,
     validarOrigemParaUpdate: async (tx) => {
@@ -412,7 +425,7 @@ export async function pagarCusto(db, {
       const pago = centsCusto(custo.valor_pago ?? '0', 'valor_pago')
       const liquido = await totalLiquidoCanonico(tx, tenantId, id)
       if (liquido !== pago) throw erroCustoDivergente()
-      if (alvo !== pago + delta) {
+      if (alvo !== null && alvo !== pago + delta) {
         throw erroCusto('valor_pago mudou durante a baixa; tente novamente', 409, 'CUSTO_PAGAMENTO_CONCORRENTE')
       }
       const saldo = valor - pago
@@ -428,7 +441,8 @@ export async function pagarCusto(db, {
       )
     },
   })
-  return custoParaItem(await custoAtual(db, tenantId, id), hoje)
+  const item = custoParaItem(await custoAtual(db, tenantId, id), hoje)
+  return retornarLiquidacao ? { item, liquidacao } : item
 }
 
 /** Estorno simples: somente uma liquidação ativa equivalente ao total legado. */

@@ -300,6 +300,98 @@ const atorConciliacao = (userId) => userId
   : { tipo: 'sistema', id: 'asaas.conciliacao' }
 const chaveConciliacao = (transacaoId) => `asaas:${transacaoId}:${randomUUID()}`
 
+const ORIGEM_POR_TIPO = Object.freeze({
+  receita: 'receita_titulo',
+  avulsa: 'receita_avulsa',
+  custo: 'custo',
+  apresentadora: 'apresentadora_pagamento',
+  imposto: 'imposto',
+})
+
+async function alvoPertenceALiquidacao(db, { tenantId, tipo, alvoId, origemId }) {
+  if (UUID_RE.test(String(alvoId ?? ''))) return origemId === alvoId
+  let sql
+  let params
+  if (tipo === 'receita') {
+    const m = /^calc:([0-9a-f-]{36}):(\d{4}-(?:0[1-9]|1[0-2])):(fixo|comissao)$/i.exec(alvoId)
+    if (!m) return false
+    sql = `SELECT 1 FROM receita_titulos
+            WHERE tenant_id=$1::uuid AND id=$2::uuid AND marca_id=$3::uuid
+              AND competencia=$4::date AND componente=$5`
+    params = [tenantId, origemId, m[1], `${m[2]}-01`, m[3]]
+  } else if (tipo === 'custo') {
+    const m = /^rec:([0-9a-f-]{36}):(\d{4}-(?:0[1-9]|1[0-2]))$/i.exec(alvoId)
+    if (!m) return false
+    sql = `SELECT 1 FROM custos
+            WHERE tenant_id=$1::uuid AND id=$2::uuid AND recorrente_id=$3::uuid
+              AND competencia=$4::date AND tipo <> 'imposto'`
+    params = [tenantId, origemId, m[1], `${m[2]}-01`]
+  } else if (tipo === 'apresentadora') {
+    const m = RE_APRES.exec(alvoId)
+    if (!m) return false
+    sql = `SELECT 1 FROM apresentadora_pagamentos
+            WHERE tenant_id=$1::uuid AND id=$2::uuid AND apresentadora_id=$3::uuid
+              AND competencia=$4::date AND componente=$5`
+    params = [tenantId, origemId, m[1], `${m[2]}-01`, m[3] ?? 'fixo']
+  } else if (tipo === 'imposto') {
+    const m = RE_IMPOSTO.exec(alvoId)
+    if (!m) return false
+    sql = `SELECT 1 FROM custos
+            WHERE tenant_id=$1::uuid AND id=$2::uuid AND tipo='imposto' AND competencia=$3::date`
+    params = [tenantId, origemId, `${m[1]}-01`]
+  } else {
+    return false
+  }
+  return Boolean((await db.query(sql, params)).rows[0])
+}
+
+/**
+ * Conciliação de uma transação com um fato que já foi registrado manualmente.
+ * Este caminho apenas valida e devolve o vínculo; nunca insere outra liquidação.
+ */
+export async function vincularLiquidacaoExistenteConciliacao(db, {
+  tenantId, transacao, tipo, alvoId, liquidacaoId,
+} = {}) {
+  const erroTipo = validarTipoConciliacao(transacao?.tipo, tipo)
+  if (erroTipo) throw new ConciliacaoError(erroTipo, 400, 'TIPO_INCOMPATIVEL')
+  if (!UUID_RE.test(String(liquidacaoId ?? ''))) {
+    throw new ConciliacaoError('liquidacao_id inválida', 400, 'LIQUIDACAO_INVALIDA')
+  }
+  let valorTx
+  try { valorTx = exactMoneyToCents(String(transacao?.valor)) } catch { /* tratado abaixo */ }
+  if (!valorTx || valorTx <= 0n || !isData(String(transacao?.data ?? ''))) {
+    throw new ConciliacaoError('Transação sem valor/data válidos', 400, 'TRANSACAO_INVALIDA')
+  }
+  const { rows } = await db.query(
+    `SELECT id, origem_tipo, origem_id, valor::text AS valor,
+            to_char(data_liquidacao, 'YYYY-MM-DD') AS data
+       FROM financeiro_liquidacoes
+      WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+    [tenantId, liquidacaoId],
+  )
+  const liquidacao = rows[0]
+  if (!liquidacao) throw new ConciliacaoError('Liquidação não encontrada neste tenant', 404, 'LIQUIDACAO_NAO_ENCONTRADA')
+  if (liquidacao.origem_tipo !== ORIGEM_POR_TIPO[tipo]) {
+    throw new ConciliacaoError('Liquidação não pertence ao tipo informado', 409, 'LIQUIDACAO_ORIGEM_DIVERGENTE')
+  }
+  if (!(await alvoPertenceALiquidacao(db, {
+    tenantId, tipo, alvoId: String(alvoId ?? ''), origemId: liquidacao.origem_id,
+  }))) {
+    throw new ConciliacaoError('Liquidação não pertence ao lançamento informado', 409, 'LIQUIDACAO_ORIGEM_DIVERGENTE')
+  }
+  if (exactMoneyToCents(liquidacao.valor) !== valorTx || liquidacao.data !== transacao.data) {
+    throw new ConciliacaoError('Valor ou data da liquidação diverge da transação', 409, 'LIQUIDACAO_TRANSACAO_DIVERGENTE')
+  }
+  return {
+    aplicada: false,
+    motivo: 'liquidacao_existente',
+    alvo_id: liquidacao.origem_id,
+    liquidacao_id: liquidacao.id,
+    valor_pago: liquidacao.valor,
+    data_pagamento: liquidacao.data,
+  }
+}
+
 // Serviços como receberTitulo abrem BEGIN/COMMIT próprios; dentro de uma transação já aberta
 // isso commitaria o vínculo antes da hora. Este wrapper converte em SAVEPOINT/RELEASE/ROLLBACK TO,
 // mantendo a baixa e o vínculo atômicos.
@@ -327,7 +419,19 @@ export function comSavepoints(db) {
   }
 }
 
-const jaPago = (v) => Number(v ?? 0) > 0
+function obrigacaoQuitada(row) {
+  if (!row) return false
+  // Consultas reais sempre trazem o previsto. O fallback preserva o contrato
+  // defensivo de integrações antigas que só projetavam `valor_pago`.
+  if (row.valor_previsto == null) return Number(row.valor_pago ?? 0) > 0
+  try {
+    return exactMoneyToCents(String(row.valor_pago ?? 0))
+      + exactMoneyToCents(String(row.valor_perdido ?? 0))
+      >= exactMoneyToCents(String(row.valor_previsto))
+  } catch {
+    return Number(row.valor_pago ?? 0) > 0
+  }
+}
 
 async function baixarReceita(db, { tenantId, tx, alvoId, userId, chaveOperacao }) {
   const mod = await import('./receitas-comercial.js')
@@ -336,13 +440,14 @@ async function baixarReceita(db, { tenantId, tx, alvoId, userId, chaveOperacao }
   let existente
   if (ref.tipo === 'materializado') {
     existente = await db.query(
-      'SELECT id, valor_pago, perdido_em FROM receita_titulos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
+      `SELECT id, valor_previsto, valor_pago, COALESCE(valor_perdido, 0) AS valor_perdido, perdido_em
+         FROM receita_titulos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE`,
       [ref.id, tenantId],
     )
     if (!existente.rows[0]) throw naoEncontrado('Título de receita não encontrado')
   } else {
     existente = await db.query(
-      `SELECT id, valor_pago, perdido_em FROM receita_titulos
+      `SELECT id, valor_previsto, valor_pago, COALESCE(valor_perdido, 0) AS valor_perdido, perdido_em FROM receita_titulos
         WHERE tenant_id = $1::uuid AND marca_id = $2::uuid AND competencia = $3::date AND componente = $4
         FOR UPDATE`,
       [tenantId, ref.marca_id, `${ref.mes}-01`, ref.componente],
@@ -350,13 +455,13 @@ async function baixarReceita(db, { tenantId, tx, alvoId, userId, chaveOperacao }
   }
   const row = existente.rows[0]
   if (row?.perdido_em) throw encerradoErro('receita')
-  if (row && jaPago(row.valor_pago)) {
+  if (obrigacaoQuitada(row)) {
     return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
   }
   try {
     const item = await mod.receberTitulo(comSavepoints(db), {
-      tenantId, id: alvoId, valorPago: tx.valor, dataPagamento: tx.data, actorUserId: userId ?? null,
-      observacao: 'Baixa via conciliação Asaas', chaveOperacao,
+      tenantId, id: alvoId, valorIncremental: tx.valor, dataPagamento: tx.data, actorUserId: userId ?? null,
+      observacao: 'Baixa via conciliação Asaas', chaveOperacao, retornoBasico: true,
     })
     return { aplicada: true, alvo_id: item.id, valor_pago: item.valor_pago, data_pagamento: item.data_pagamento }
   } catch (err) {
@@ -375,16 +480,17 @@ async function resolverCustoId(db, tenantId, alvoId) {
 
 async function baixarCustoPorId(db, { tenantId, tx, id, chaveOperacao, userId }) {
   const r = await db.query(
-    'SELECT id, valor_pago, tipo, cancelado_em FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
+    `SELECT id, valor AS valor_previsto, valor_pago, tipo, cancelado_em
+       FROM custos WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE`,
     [id, tenantId],
   )
   const row = r.rows[0]
   if (!row || row.tipo === 'imposto') throw naoEncontrado('Custo não encontrado')
   if (row.cancelado_em) throw encerradoErro('custo')
-  if (jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
+  if (obrigacaoQuitada(row)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
   const { pagarCusto } = await import('./custos-plano.js')
   const item = await pagarCusto(comSavepoints(db), {
-    tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data,
+    tenantId, id: row.id, valorIncremental: tx.valor, dataPagamento: tx.data,
     hoje: hojeSaoPaulo(), ator: atorConciliacao(userId), chaveOperacao,
   })
   return { aplicada: true, alvo_id: row.id, valor_pago: item.valor_pago, data_pagamento: item.data_pagamento }
@@ -407,14 +513,19 @@ async function baixarApresentadora(db, { tenantId, tx, alvoId, userId, chaveOper
     [tenantId, apresentadoraId, `${mes}-01`, componente],
   )
   if (ex.rows[0]?.cancelado_em) throw encerradoErro('custo')
-  if (ex.rows[0] && jaPago(ex.rows[0].valor_pago)) {
-    return { aplicada: false, motivo: 'ja_baixado', alvo_id: ex.rows[0].id }
-  }
   const pg = await import('./apresentadoras-pagamentos.js')
-  const reg = await pg.registrarPagamentoApresentadora(comSavepoints(db), {
-    tenantId, apresentadoraId, mes, componente, valorPago: tx.valor, dataPagamento: tx.data,
-    observacao: 'Baixa via conciliação Asaas', userId: userId ?? null, chaveOperacao,
-  })
+  let reg
+  try {
+    reg = await pg.registrarPagamentoApresentadora(comSavepoints(db), {
+      tenantId, apresentadoraId, mes, componente, valorIncremental: tx.valor, dataPagamento: tx.data,
+      observacao: 'Baixa via conciliação Asaas', userId: userId ?? null, chaveOperacao,
+    })
+  } catch (error) {
+    if (error?.code === 'APRESENTADORA_SEM_SALDO' && ex.rows[0]) {
+      return { aplicada: false, motivo: 'ja_baixado', alvo_id: ex.rows[0].id }
+    }
+    throw error
+  }
   if (!reg) throw naoEncontrado('Apresentadora não encontrada')
   const r = await db.query(
     `SELECT id FROM apresentadora_pagamentos
@@ -428,13 +539,14 @@ async function baixarApresentadora(db, { tenantId, tx, alvoId, userId, chaveOper
 async function baixarAvulsa(db, { tenantId, tx, alvoId, userId, chaveOperacao }) {
   if (!UUID_RE.test(alvoId)) throw naoEncontrado('Receita avulsa não encontrada')
   const ex = await db.query(
-    'SELECT id, valor_pago, perdido_em FROM receitas_avulsas WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE',
+    `SELECT id, valor_previsto, valor_pago, COALESCE(valor_perdido, 0) AS valor_perdido, perdido_em
+       FROM receitas_avulsas WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE`,
     [alvoId, tenantId],
   )
   const row = ex.rows[0]
   if (!row) throw naoEncontrado('Receita avulsa não encontrada')
   if (row.perdido_em) throw encerradoErro('receita')
-  if (jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
+  if (obrigacaoQuitada(row)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
   const avulsas = await import('./receitas-avulsas.js')
   const item = await avulsas.receberReceitaAvulsa(comSavepoints(db), {
     tenantId, id: row.id, valorPago: tx.valor, dataPagamento: tx.data,
@@ -452,18 +564,18 @@ async function baixarImposto(db, { tenantId, tx, alvoId, userId, chaveOperacao }
   const filtro = m ? 'competencia = $2::date' : 'id = $2::uuid'
   const ref = m ? `${m[1]}-01` : alvoId
   const { rows } = await db.query(
-    `SELECT id, valor_pago, cancelado_em, to_char(competencia, 'YYYY-MM') AS mes
+    `SELECT id, valor AS valor_previsto, valor_pago, cancelado_em, to_char(competencia, 'YYYY-MM') AS mes
        FROM custos WHERE tenant_id = $1::uuid AND tipo = 'imposto' AND ${filtro} FOR UPDATE`,
     [tenantId, ref],
   )
   const row = rows[0]
   if (!m && !row) throw naoEncontrado('Imposto não encontrado')
   if (row?.cancelado_em) throw encerradoErro('custo')
-  if (row && jaPago(row.valor_pago)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
+  if (obrigacaoQuitada(row)) return { aplicada: false, motivo: 'ja_baixado', alvo_id: row.id }
   const mes = m?.[1] ?? row.mes
   const { pagarImposto } = await import('./financeiro-agregador.js')
   await pagarImposto(comSavepoints(db), {
-    tenantId, mes, valorPago: tx.valor, dataPagamento: tx.data,
+    tenantId, mes, valorIncremental: tx.valor, dataPagamento: tx.data,
     ator: atorConciliacao(userId), chaveOperacao,
   })
   const { rows: criados } = await db.query(

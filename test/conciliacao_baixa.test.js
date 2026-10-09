@@ -84,7 +84,7 @@ describe('darBaixaConciliacao — receita', () => {
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: TX, tipo: 'receita', alvoId: `calc:${MARCA}:2026-03:fixo`, userId: 'u1' })
     expect(r).toMatchObject({ aplicada: true, alvo_tipo: 'receita', alvo_id: TITULO, valor_pago: 1500.5 })
     const args = receitas.receberTitulo.mock.calls[0][1]
-    expect(args).toMatchObject({ tenantId: T, id: `calc:${MARCA}:2026-03:fixo`, valorPago: '1500.50', dataPagamento: '2026-03-12' })
+    expect(args).toMatchObject({ tenantId: T, id: `calc:${MARCA}:2026-03:fixo`, valorIncremental: '1500.50', dataPagamento: '2026-03-12' })
     expect(args.chaveOperacao).toMatch(new RegExp(`^asaas:${GATEWAY}:`))
     const sqls = db.queries.map((q) => q.sql)
     expect(sqls).not.toContain('COMMIT')
@@ -121,7 +121,7 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'custo', alvoId: CUSTO })
     expect(r).toMatchObject({ aplicada: true, alvo_id: CUSTO, valor_pago: 300, data_pagamento: '2026-03-20' })
     expect(custos.pagarCusto.mock.calls[0][1]).toMatchObject({
-      tenantId: T, id: CUSTO, valorPago: '300.00', dataPagamento: '2026-03-20',
+      tenantId: T, id: CUSTO, valorIncremental: '300.00', dataPagamento: '2026-03-20',
     })
     expect(custos.pagarCusto.mock.calls[0][1].chaveOperacao).toMatch(new RegExp(`^asaas:${GATEWAY}:`))
     expect(db.queries.map((q) => q.sql)).toContain('SAVEPOINT conc_sp_1')
@@ -161,7 +161,7 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'imposto', alvoId: 'imposto:2026-03' })
     expect(agregador.pagarImposto.mock.calls[0][0]).toHaveProperty('query')
     expect(agregador.pagarImposto.mock.calls[0][1]).toMatchObject({
-      tenantId: T, mes: '2026-03', valorPago: '300.00', dataPagamento: SAIDA.data,
+      tenantId: T, mes: '2026-03', valorIncremental: '300.00', dataPagamento: SAIDA.data,
     })
     expect(r).toMatchObject({ aplicada: true, alvo_tipo: 'imposto', alvo_id: CUSTO, valor_pago: SAIDA.valor, data_pagamento: SAIDA.data })
   })
@@ -194,7 +194,7 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'apresentadora', alvoId: `apresentadora:${APRES}:2026-02`, userId: 'u1' })
     expect(r).toMatchObject({ aplicada: true, alvo_id: PG, valor_pago: 300 })
     expect(apres.registrarPagamentoApresentadora.mock.calls[0][1]).toMatchObject({
-      tenantId: T, apresentadoraId: APRES, mes: '2026-02', componente: 'fixo', valorPago: '300.00', dataPagamento: '2026-03-20',
+      tenantId: T, apresentadoraId: APRES, mes: '2026-02', componente: 'fixo', valorIncremental: '300.00', dataPagamento: '2026-03-20',
     })
   })
 
@@ -215,6 +215,7 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
 
   it('apresentadora: componente fixo já baixado não bloqueia o variável (e vice-versa)', async () => {
     apres.registrarPagamentoApresentadora.mockResolvedValue({ valor_pago: '300.00', data_pagamento: '2026-03-20' })
+    apres.registrarPagamentoApresentadora.mockRejectedValueOnce(Object.assign(new Error('sem saldo'), { code: 'APRESENTADORA_SEM_SALDO' }))
     let n = 0
     const db = fakeDb((sql, params) => {
       if (/FROM apresentadora_pagamentos/.test(sql)) {
@@ -230,10 +231,11 @@ describe('darBaixaConciliacao — custo / imposto / apresentadora', () => {
   })
 
   it('apresentadora já paga: só vincula', async () => {
+    apres.registrarPagamentoApresentadora.mockRejectedValueOnce(Object.assign(new Error('sem saldo'), { code: 'APRESENTADORA_SEM_SALDO' }))
     const db = fakeDb((sql) => (/FROM apresentadora_pagamentos/.test(sql) ? { rows: [{ id: PG, valor_pago: '10' }] } : null))
     const r = await darBaixaConciliacao(db, { tenantId: T, transacao: SAIDA, tipo: 'apresentadora', alvoId: `apresentadora:${APRES}:2026-02` })
     expect(r).toMatchObject({ aplicada: false, motivo: 'ja_baixado', alvo_id: PG })
-    expect(apres.registrarPagamentoApresentadora).not.toHaveBeenCalled()
+    expect(apres.registrarPagamentoApresentadora).toHaveBeenCalledTimes(1)
   })
 
   it('apresentadora cancelada: 409 ALVO_CANCELADO e não registra pagamento', async () => {

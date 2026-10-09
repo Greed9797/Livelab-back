@@ -51,14 +51,15 @@ WITH origens AS (
         o.classe_custo,o.classe_custo_recorrente,
         NULL::text AS inconsistencia
  FROM eventos e LEFT JOIN origens o ON o.origem_tipo=e.origem_tipo AND o.id=e.origem_id
- WHERE e.data BETWEEN $2::date AND $3::date AND ($4::date IS NULL OR e.data >= $4::date)
+ WHERE e.data >= $2::date AND ($3::date IS NULL OR e.data <= $3::date) AND ($4::date IS NULL OR e.data >= $4::date)
  UNION ALL
  SELECT ('legado:'||o.origem_tipo||':'||o.id),'liquidacao',o.origem_tipo,o.id,o.natureza,
         o.data_pagamento,o.valor_pago,'legado',o.origem,o.grupo,o.componente,o.competencia,o.data_vencimento,
         o.descricao,o.marca_id,o.marca_nome,o.cliente_id,o.cliente_nome,o.apresentadora_id,o.apresentadora_nome,
         o.classe_custo,o.classe_custo_recorrente,NULL
  FROM origens o LEFT JOIN cobertura c ON c.origem_tipo=o.origem_tipo AND c.origem_id=o.id
- WHERE c.origem_id IS NULL AND o.valor_pago>0 AND o.data_pagamento BETWEEN $2::date AND $3::date
+ WHERE c.origem_id IS NULL AND o.valor_pago>0 AND o.data_pagamento >= $2::date
+       AND ($3::date IS NULL OR o.data_pagamento <= $3::date)
        AND ($4::date IS NULL OR o.data_pagamento >= $4::date)
  UNION ALL
  SELECT ('sem-data:'||o.origem_tipo||':'||o.id),'revisao',o.origem_tipo,o.id,o.natureza,NULL::date,0,'legado',
@@ -87,18 +88,21 @@ SELECT *,valor::text AS valor,to_char(data,'YYYY-MM-DD') AS data,
        to_char(competencia,'YYYY-MM-DD') AS competencia,to_char(data_vencimento,'YYYY-MM-DD') AS data_vencimento
 FROM movimentos ORDER BY movimentos.data,movimentos.id`
 
-export async function lerMovimentosFinanceirosPeriodo(db, { tenantId, de, ate, dataCorte = null }) {
+export async function lerMovimentosFinanceirosPeriodo(db, { tenantId, de, ate, dataCorte = null, dinheiroExato = false, incluirFuturos = false }) {
   if (!tenantId || !/^\d{4}-\d{2}-\d{2}$/.test(de ?? '') || !/^\d{4}-\d{2}-\d{2}$/.test(ate ?? '') || de > ate) {
     throw Object.assign(new Error('Escopo financeiro inválido'), { statusCode: 400, code: 'INVALID_PERIOD' })
   }
-  const { rows } = await db.query(MOVIMENTOS_PERIODO_SQL, [tenantId, de, ate, dataCorte])
+  // Accumulated paid includes future-dated facts even beyond a display horizon.
+  // Operational cash needs them all to reconstruct paid as of its base date.
+  const { rows } = await db.query(MOVIMENTOS_PERIODO_SQL, [tenantId, de, incluirFuturos ? null : ate, dataCorte])
   const divergencias = rows.filter((r) => r.inconsistencia)
   // Partial legacy/canonical coverage cannot be assigned to an invented date.
   // Surface the exact obligations; never silently add a residual to the last payment.
   if (divergencias.length) throw Object.assign(new Error('Recebimentos e pagamentos precisam de reconciliação antes de calcular o caixa.'), {
     statusCode: 409, code: 'FINANCIAL_RECONCILIATION_REQUIRED', divergencias: divergencias.map((r) => ({ origem_tipo: r.origem_tipo, origem_id: r.origem_id, motivo: r.inconsistencia })),
   })
-  const itens = rows.map((r) => ({ ...r, valor: Number(r.valor), classe: classeDoItem(r) }))
+  const itens = rows.map((r) => ({ ...r, valor: dinheiroExato
+    ? centsToExactMoney(exactMoneyToCents(String(r.valor))) : Number(r.valor), classe: classeDoItem(r) }))
   return { itens, reconciliacao: { eventos_canonicos: itens.filter((r) => r.fonte === 'canonico').length, movimentos_legados: itens.filter((r) => r.fonte === 'legado').length } }
 }
 

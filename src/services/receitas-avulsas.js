@@ -73,7 +73,7 @@ export function receitaAvulsaParaItem(row, hoje = hojeSaoPaulo()) {
 }
 
 /** Receitas avulsas cuja COMPETÊNCIA está em [inicio, fim] (YYYY-MM ou YYYY-MM-DD). */
-export async function listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), grupo, status, vencimentoDe, vencimentoAte } = {}) {
+export async function listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), grupo, status, vencimentoDe, vencimentoAte, incluirSemData = false } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   const mi = String(inicio ?? '').slice(0, 7)
   const mf = String(fim ?? inicio ?? '').slice(0, 7)
@@ -92,6 +92,7 @@ export async function listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje = 
     if (vencimentoDe) { params.push(vencimentoDe); vencimento += ' AND data_vencimento >= $5::date' }
     periodo = `((${periodo}) OR (${vencimento}))`
   }
+  if (incluirSemData) periodo = `((${periodo}) OR (data_vencimento IS NULL AND competencia <= $3::date))`
   const { rows } = await db.query(
     `SELECT ${RECEITA_AVULSA_COLS}
        FROM receitas_avulsas
@@ -203,7 +204,7 @@ async function temLiquidacoesCanonicas(db, tenantId, id) {
 }
 
 /** Baixa: valor_pago default = saldo recebível após perdas. */
-export async function receberReceitaAvulsa(db, { tenantId, id, valorPago, dataPagamento, hoje = hojeSaoPaulo(), ator, chaveOperacao }) {
+export async function receberReceitaAvulsa(db, { tenantId, id, valorPago, dataPagamento, hoje = hojeSaoPaulo(), ator, chaveOperacao, retornarLiquidacao = false }) {
   if (!RE_UUID.test(String(id ?? ''))) return null
   if (chaveOperacao) {
     // O comando possui a transação. Chamadores legados em conciliação usam o
@@ -232,7 +233,7 @@ export async function receberReceitaAvulsa(db, { tenantId, id, valorPago, dataPa
       throw erro('valor_pago deve ser decimal com até duas casas', 400, 'INVALID_RECEITA_AVULSA')
     }
     const data = dataPagamento ?? anteriores[0]?.data ?? hoje
-    await registrarLiquidacao(db, {
+    const liquidacao = await registrarLiquidacao(db, {
       tenantId, origemTipo: 'receita_avulsa', origemId: id, valor: centsToExactMoney(cents), data,
       ator, idempotenciaChave: chaveOperacao, comandoOrigem: 'receita_avulsa.receber',
       validarOrigemParaUpdate: async (tx) => {
@@ -252,7 +253,8 @@ export async function receberReceitaAvulsa(db, { tenantId, id, valorPago, dataPa
         )
       },
     })
-    return buscarReceitaAvulsa(db, { tenantId, id, hoje })
+    const item = await buscarReceitaAvulsa(db, { tenantId, id, hoje })
+    return retornarLiquidacao ? { item, liquidacao } : item
   }
   if (await temLiquidacoesCanonicas(db, tenantId, id)) {
     throw erro('Receita com liquidações registradas exige chave de operação', 409, 'RECEITA_EXIGE_COMANDO')

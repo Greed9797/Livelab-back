@@ -12,6 +12,7 @@ import { perdaJaRegistrada, requisicaoPerda } from '../lib/perda-idempotencia.js
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
 import { lerMovimentosFinanceirosPeriodo, resumirRecebimentos } from './financeiro-movimentos-periodo.js'
+import { esperarLeiturasFinanceiras } from './financeiro-read-snapshot.js'
 // Ciclo estático intencional (o agregador importa este módulo): só usado em tempo de
 // chamada, nunca no topo do módulo.
 import { aplicarCorte, buscarConfigFinanceiro, dentroDoCorte, vencimentoEfetivo } from './financeiro-agregador.js'
@@ -194,7 +195,7 @@ function tituloPublico({ stored, calc, hoje }) {
     : round2(stored.valor_perdido)
   const suspenso = stored?.suspensao_comercial?.ativa === true
   const valorPrevisto = suspenso ? round2(valorPago + valorPerdido) : valorOriginal
-  const dataVencimento = dateKey(stored?.data_vencimento ?? calc.data_vencimento)
+  const dataVencimento = dateKey(stored ? stored.data_vencimento : calc?.data_vencimento)
   const dataPagamento = dateKey(stored?.data_pagamento ?? null)
   const tipoCobranca = calc?.tipo_cobranca ?? stored?.tipo_cobranca ?? 'fixo_mais_comissao'
   const marcaNome = src.marca_nome ?? calc?.marca_nome ?? null
@@ -239,7 +240,7 @@ function tituloPublico({ stored, calc, hoje }) {
   return item
 }
 
-async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId = null, componente = null, id = null, vencimentoDe = null, vencimentoAte = null }) {
+async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId = null, componente = null, id = null, vencimentoDe = null, vencimentoAte = null, incluirSemData = false }) {
   const { rows } = await db.query(
     `SELECT rt.id, rt.tenant_id, rt.marca_id, rt.cliente_id, rt.competencia, rt.componente,
             rt.valor_previsto, rt.valor_pago, rt.data_vencimento, rt.data_pagamento, rt.observacao,
@@ -251,7 +252,8 @@ async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId 
       WHERE rt.tenant_id = $1::uuid
         AND ((($2::date IS NULL OR rt.competencia >= $2::date)
         AND ($3::date IS NULL OR rt.competencia <= $3::date))
-        OR ($7::date IS NOT NULL AND rt.data_vencimento BETWEEN $7::date AND $8::date))
+        OR ($7::date IS NOT NULL AND rt.data_vencimento BETWEEN $7::date AND $8::date)
+        ${incluirSemData ? 'OR (rt.data_vencimento IS NULL AND rt.competencia <= $3::date)' : ''})
         AND ($4::uuid IS NULL OR rt.marca_id = $4::uuid)
         AND ($5::text IS NULL OR rt.componente = $5::text)
         AND ($6::uuid IS NULL OR rt.id = $6::uuid)`,
@@ -266,11 +268,11 @@ async function listarMaterializados(db, { tenantId, startDate, endDate, marcaId 
  * o valor recalculado fica em `valor_calculado` (+ `divergente`).
  * Filtros opcionais: status, marca_id, cliente_id, componente.
  */
-export async function listarTitulosReceita(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), status, marca_id: marcaId, cliente_id: clienteId, componente, vencimentoDe, vencimentoAte } = {}) {
+export async function listarTitulosReceita(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), status, marca_id: marcaId, cliente_id: clienteId, componente, vencimentoDe, vencimentoAte, incluirSemData = false } = {}) {
   const { startDate, endDate } = resolverPeriodoCompetencia(inicio, fim)
-  const [calculados, materializados] = await Promise.all([
+  const [calculados, materializados] = await esperarLeiturasFinanceiras([
     calcularReceitasComerciais(db, { tenantId, inicio: startDate, fim: endDate }),
-    listarMaterializados(db, { tenantId, startDate, endDate, vencimentoDe, vencimentoAte }),
+    listarMaterializados(db, { tenantId, startDate, endDate, vencimentoDe, vencimentoAte, incluirSemData }),
   ])
   const porChave = new Map(calculados.map((c) => [chave(c.marca_id, c.competencia, c.componente), c]))
   const itens = []
@@ -435,8 +437,9 @@ async function tituloAtualizado(db, { tenantId, id, hoje }) {
  * Aceita id de título materializado (uuid) ou virtual (`calc:<marca>:<AAAA-MM>:<componente>`).
  */
 export async function receberTitulo(db, {
-  tenantId, id, valorPago, dataPagamento, observacao, hoje = hojeSaoPaulo(),
+  tenantId, id, valorPago, valorIncremental, dataPagamento, observacao, hoje = hojeSaoPaulo(),
   actorUserId = null, actorId = actorUserId, actorType = 'usuario', chaveOperacao = randomUUID(),
+  retornoBasico = false, retornarLiquidacao = false,
 } = {}) {
   const ref = parseIdTitulo(id)
   if (!ref) throw serviceError('Título de receita não encontrado', 'RECEITA_NOT_FOUND', 404)
@@ -465,8 +468,13 @@ export async function receberTitulo(db, {
       }
     }
   }
+  if (valorPago != null && valorIncremental != null) {
+    throw serviceError('Informe valorPago acumulado ou valorIncremental, não ambos', 'INVALID_PAYMENT')
+  }
   const requested = valorPago == null ? null : exactMoneyToCents(String(valorPago))
+  const incremental = valorIncremental == null ? null : exactMoneyToCents(String(valorIncremental))
   if (requested !== null && requested <= 0n) throw serviceError('valor_pago deve ser maior que zero', 'INVALID_PAYMENT')
+  if (incremental !== null && incremental <= 0n) throw serviceError('valor incremental deve ser maior que zero', 'INVALID_PAYMENT')
   const { rows: previous } = await db.query(
     `SELECT valor::text AS valor, to_char(data_liquidacao, 'YYYY-MM-DD') AS data_liquidacao,
             idempotencia_payload
@@ -475,8 +483,7 @@ export async function receberTitulo(db, {
   )
   const prior = previous[0]
   const data = dataPagamento ?? prior?.data_liquidacao ?? hoje
-  const alvo = requested == null ? 'saldo' : centsToExactMoney(requested)
-  const motivo = JSON.stringify({ alvo, observacao: observacao ?? null })
+  const alvo = incremental !== null ? null : (requested == null ? 'saldo' : centsToExactMoney(requested))
   // Replay usa o incremento original; a comparação do payload canônico detecta
   // a mesma chave com alvo, data, ator ou origem diferentes.
   const current = prior ? null : await db.query(
@@ -488,11 +495,16 @@ export async function receberTitulo(db, {
   const row = current?.rows[0]
   if (row?.suspensao_comercial?.ativa) throw serviceError('Cobrança suspensa pela exclusão da competência. Cadastre uma nova condição antes de receber.', 'RECEITA_SUSPENSA_COMERCIAL', 409)
   const maximo = row && exactMoneyToCents(row.valor_previsto) - exactMoneyToCents(row.valor_perdido ?? '0')
-  const target = requested ?? maximo
-  if (!prior && target > maximo) throw serviceError('valor_pago excede o saldo após perdas', 'INVALID_PAYMENT', 409)
-  const delta = prior ? prior.valor : centsToExactMoney(target - exactMoneyToCents(row.valor_pago))
-  if (!prior && target <= exactMoneyToCents(row.valor_pago)) throw serviceError('Título já recebido neste valor', 'INVALID_PAYMENT', 409)
-  await registrarLiquidacao(db, {
+  const target = incremental === null ? (requested ?? maximo) : null
+  if (!prior && target !== null && target > maximo) throw serviceError('valor_pago excede o saldo após perdas', 'INVALID_PAYMENT', 409)
+  const delta = prior ? prior.valor : incremental !== null
+    ? centsToExactMoney(incremental)
+    : centsToExactMoney(target - exactMoneyToCents(row.valor_pago))
+  if (!prior && target !== null && target <= exactMoneyToCents(row.valor_pago)) throw serviceError('Título já recebido neste valor', 'INVALID_PAYMENT', 409)
+  const motivo = JSON.stringify(incremental !== null
+    ? { operacao: 'incremental', valor_operacao: centsToExactMoney(incremental), observacao: observacao ?? null }
+    : { alvo, observacao: observacao ?? null })
+  const liquidacao = await registrarLiquidacao(db, {
     tenantId, origemTipo: 'receita_titulo', origemId: tituloId, valor: delta, data,
     ator: { tipo: actorType, id: actorId ?? 'sistema' }, idempotenciaChave: chaveOperacao,
     comandoOrigem: 'receitas-comercial.receber', motivo,
@@ -524,10 +536,10 @@ export async function receberTitulo(db, {
       }
       const saldo = exactMoneyToCents(titulo.valor_previsto) - exactMoneyToCents(titulo.valor_perdido ?? '0') - exactMoneyToCents(titulo.valor_pago)
       if (saldo <= 0n) throw serviceError('Título sem saldo disponível', 'INVALID_PAYMENT', 409)
-      if (requested == null && saldo !== exactMoneyToCents(delta)) {
+      if (incremental === null && requested == null && saldo !== exactMoneyToCents(delta)) {
         throw serviceError('Saldo mudou durante a baixa; tente novamente', 'INVALID_PAYMENT', 409)
       }
-      if (requested != null && requested !== exactMoneyToCents(titulo.valor_pago) + exactMoneyToCents(delta)) {
+      if (incremental === null && requested != null && requested !== exactMoneyToCents(titulo.valor_pago) + exactMoneyToCents(delta)) {
         throw serviceError('valor_pago mudou durante a baixa; tente novamente', 'INVALID_PAYMENT', 409)
       }
       return { tenantId: titulo.tenant_id, natureza: 'receita', saldoElegivel: centsToExactMoney(saldo) }
@@ -541,7 +553,19 @@ export async function receberTitulo(db, {
       )
     },
   })
-  return tituloAtualizado(db, { tenantId, id: tituloId, hoje })
+  if (retornoBasico) {
+    const { rows } = await db.query(
+      `SELECT id, valor_previsto::text AS valor_previsto, valor_pago::text AS valor_pago,
+              COALESCE(valor_perdido, 0)::text AS valor_perdido,
+              to_char(data_pagamento, 'YYYY-MM-DD') AS data_pagamento
+         FROM receita_titulos WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+      [tenantId, tituloId],
+    )
+    const item = rows[0] ?? null
+    return retornarLiquidacao ? { item, liquidacao } : item
+  }
+  const item = await tituloAtualizado(db, { tenantId, id: tituloId, hoje })
+  return retornarLiquidacao ? { item, liquidacao } : item
 }
 
 /** Desfaz a baixa: zera valor_pago e data_pagamento (o título volta a ser derivado). */

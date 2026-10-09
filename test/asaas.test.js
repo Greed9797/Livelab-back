@@ -385,7 +385,7 @@ describe('rotas /v1/asaas', () => {
     expect(iBaixa).toBeGreaterThan(iBegin)
     expect(iVinculo).toBeGreaterThan(iBaixa)
     expect(iCommit).toBeGreaterThan(iVinculo)
-    expect(custos.pagarCusto.mock.calls[0][1]).toMatchObject({ tenantId: TENANT, id: CUSTO_ID, valorPago: '250.00' })
+    expect(custos.pagarCusto.mock.calls[0][1]).toMatchObject({ tenantId: TENANT, id: CUSTO_ID, valorIncremental: '250.00' })
     expect(sqls.some((x) => /UPDATE custos/.test(x))).toBe(false)
     expect(queries[iVinculo].params).toEqual([TX_ID, TENANT, 'custo', CUSTO_ID, '33333333-3333-3333-3333-333333333333', true])
   })
@@ -402,7 +402,7 @@ describe('rotas /v1/asaas', () => {
         if (/FROM gateway_transacoes/.test(sql) && /FOR UPDATE/.test(sql)) {
           return { rows: [{ id: TX_ID, tipo: 'entrada', valor: 800, data: '2026-03-21', conciliado_com_id: null }] }
         }
-        if (/SELECT id, valor_pago(, perdido_em)? FROM receitas_avulsas/.test(sql)) return { rows: [{ id: AVULSA_ID, valor_pago: '0.00' }] }
+        if (/FROM receitas_avulsas/.test(sql)) return { rows: [{ id: AVULSA_ID, valor_pago: '0.00' }] }
         if (/UPDATE gateway_transacoes/.test(sql)) return { rows: [{ id: TX_ID, conciliado_com_tipo: 'avulsa', conciliado_com_id: AVULSA_ID, conciliado_baixa: true }] }
         return { rows: [] }
       },

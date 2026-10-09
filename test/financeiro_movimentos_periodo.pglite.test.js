@@ -39,6 +39,22 @@ const error = motivo => ({ statusCode: 409, code: 'FINANCIAL_RECONCILIATION_REQU
   divergencias: [{ origem_tipo: 'receita_titulo', origem_id: titleId, motivo }] })
 
 describe('movimentos: reconciliação independente do período', () => {
+  it('reconciliação obrigatória para legado pago sem data não retorna saldo parcial', async () => {
+    await title('100.00')
+    await pg.query('UPDATE receita_titulos SET data_pagamento = NULL')
+    await expect(read()).rejects.toMatchObject(error('pagamento_sem_data'))
+  })
+
+  it('liquidações parciais em datas distintas preservam cada valor exato', async () => {
+    await title('1000.00')
+    await event({ amount: '400.00', date: '2026-10-05' })
+    await event({ n: 11, amount: '600.00', date: '2026-11-05' })
+    const october = await lerMovimentosFinanceirosPeriodo(pg, { tenantId: tenant, de: '2026-10-01', ate: '2026-10-31', dinheiroExato: true })
+    const november = await lerMovimentosFinanceirosPeriodo(pg, { tenantId: tenant, de: '2026-11-01', ate: '2026-11-30', dinheiroExato: true })
+    expect(october.itens.map(i => i.valor)).toEqual(['400.00'])
+    expect(november.itens.map(i => i.valor)).toEqual(['600.00'])
+  })
+
   it('outubro sem eventos acusa legado100 + canônico20 em novembro com projeção120', async () => {
     await title(120)
     await event()

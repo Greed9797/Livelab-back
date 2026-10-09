@@ -1,5 +1,6 @@
 import { READ_FINANCEIRO } from '../config/role_groups.js'
 import { consultaCsv, paginarConsulta, parseConsultaQuery, selecionarConsulta } from '../services/financeiro-consulta.js'
+import { detalhesReconciliacao } from '../lib/financeiro-error-details.js'
 
 export async function financeiroConsultaRoutes(app) {
   const read = { preHandler: app.requirePapel(READ_FINANCEIRO) }
@@ -24,8 +25,12 @@ export async function financeiroConsultaRoutes(app) {
         try { await db.query('ROLLBACK') } catch (rollbackError) { app.log.error({ err: rollbackError }, 'financeiro consulta rollback failed') }
         throw error
       }
+    }).catch(error => {
+      if (error?.code !== 'FINANCIAL_RECONCILIATION_REQUIRED' || error.statusCode !== 409) throw error
+      reply.code(409).send({ error: error.message, code: error.code, ...detalhesReconciliacao(error) })
+      return null
     })
-    return { selection, options }
+    return reply.sent ? { error: reply } : { selection, options }
   }
 
   app.get('/v1/financeiro/consulta', read, async (request, reply) => {

@@ -3,12 +3,14 @@ import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../src/services/financeiro-agregador.js', async (importOriginal) => {
   const original = await importOriginal()
-  return { ...original, listarLancamentos: vi.fn() }
+  return { ...original, listarLancamentos: vi.fn(), buscarConfigFinanceiro: vi.fn(async () => ({ data_corte: null, saldo_abertura: 0, aliquota_imposto_pct: 0 })) }
 })
+vi.mock('../src/services/financeiro-movimentos-periodo.js', () => ({ lerMovimentosFinanceirosPeriodo: vi.fn() }))
 
 import { listarLancamentos } from '../src/services/financeiro-agregador.js'
 import { financeiroConsultaRoutes } from '../src/routes/financeiro_consulta.js'
 import { parseConsultaQuery } from '../src/services/financeiro-consulta.js'
+import { lerMovimentosFinanceirosPeriodo } from '../src/services/financeiro-movimentos-periodo.js'
 
 const ROOT = '/v1/financeiro/consulta?eixo=competencia&inicio=2026-09&fim=2026-09'
 
@@ -37,6 +39,26 @@ async function appFor(role = 'financeiro_readonly') {
 }
 
 describe('FIN-04 consulta', () => {
+  it('JSON e CSV preservam reconciliação 409 e apenas divergências sanitizadas', async () => {
+    listarLancamentos.mockResolvedValue([])
+    const safe = { origem_tipo: 'custo', origem_id: '00000000-0000-4000-8000-000000000001', motivo: 'pagamento_sem_data' }
+    lerMovimentosFinanceirosPeriodo.mockRejectedValue(Object.assign(new Error('Reconciliação necessária'), {
+      statusCode: 409, code: 'FINANCIAL_RECONCILIATION_REQUIRED',
+      divergencias: [{ ...safe, sql: 'private diagnostic' }, { ...safe }, { origem_tipo: 'secrets', origem_id: 'invalid', motivo: 'private diagnostic' }],
+    }))
+    const app = await appFor()
+    app.setErrorHandler((error, _request, reply) => reply.code(error.statusCode ?? 500).send({ error: error.message }))
+    try {
+      for (const suffix of ['', '.csv']) {
+        const response = await app.inject(`/v1/financeiro/consulta${suffix}?eixo=pagamento&inicio=2026-09&fim=2026-09&competencia_inicio=2026-09&competencia_fim=2026-09`)
+        expect(response.statusCode).toBe(409)
+        expect(response.headers['content-type']).toContain('application/json')
+        expect(response.json()).toEqual({ error: 'Reconciliação necessária', code: 'FINANCIAL_RECONCILIATION_REQUIRED', divergencias: [safe] })
+        expect(app.testQueries.at(-1)).toBe('ROLLBACK')
+      }
+    } finally { await app.close() }
+  })
+
   it('totaliza o conjunto filtrado antes de paginar e ordena com desempate estável', async () => {
     listarLancamentos.mockResolvedValue([
       item('b', { valor_previsto: 0.2, valor_pago: 0.1 }),
@@ -86,7 +108,7 @@ describe('FIN-04 consulta', () => {
     await app.close()
   })
 
-  it('filtra pelo eixo de vencimento dentro das competências explicitamente carregadas', async () => {
+  it('filtra pelo eixo de vencimento e aplica competência como filtro adicional', async () => {
     listarLancamentos.mockResolvedValue([
       item('yes', { competencia: '2026-08-01', data_vencimento: '2026-09-20' }),
       item('no', { competencia: '2026-08-01', data_vencimento: '2026-10-01' }),
@@ -94,8 +116,73 @@ describe('FIN-04 consulta', () => {
     const app = await appFor()
     const res = await app.inject({ method: 'GET', url: `${ROOT.replace('competencia', 'vencimento')}&competencia_inicio=2026-08&competencia_fim=2026-08` })
     expect(res.json().itens.map((i) => i.id)).toEqual(['yes'])
-    expect(listarLancamentos).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ inicio: '2026-08', fim: '2026-08' }))
+    expect(listarLancamentos).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ inicio: '2026-08', fim: '2026-09', vencimentoDe: '2026-09-01', vencimentoAte: '2026-09-30' }))
     await app.close()
+  })
+
+  it('vencimento sem competência no período inclui obrigação antiga e valida filtros opcionais', async () => {
+    listarLancamentos.mockResolvedValue([
+      item('antiga', { competencia: '2024-01-01', data_vencimento: '2026-09-20', valor_previsto: 100 }),
+      item('fora', { competencia: '2026-09-01', data_vencimento: '2026-10-01' }),
+    ])
+    const app = await appFor()
+    try {
+      const url = ROOT.replace('competencia', 'vencimento')
+      const response = await app.inject(url)
+      expect(response.statusCode).toBe(200)
+      expect(response.json().itens.map(i => i.id)).toEqual(['antiga'])
+      expect(listarLancamentos).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ vencimentoDe: '2026-09-01', vencimentoAte: '2026-09-30', regraCorte: 'nenhum' }))
+      expect((await app.inject(`${url}&competencia_inicio=2026-09&competencia_fim=2026-09`)).json().itens).toEqual([])
+      expect((await app.inject(`${url}&competencia_inicio=2026-09`)).statusCode).toBe(400)
+    } finally { await app.close() }
+  })
+
+  it('JSON e CSV compartilham seleção por vencimento, identidade e centavos', async () => {
+    const base = { origem: 'marca_fixo', marca_id: 'marca', componente: 'fixo', competencia: '2024-01-01', data_vencimento: '2026-09-20' }
+    listarLancamentos.mockResolvedValue([
+      item('virtual', { ...base, virtual: true, valor_previsto: 999 }),
+      item('materializado', { ...base, virtual: false, valor_previsto: 0.3, valor_pago: 0.1 }),
+    ])
+    const app = await appFor()
+    try {
+      const url = ROOT.replace('competencia', 'vencimento')
+      const json = (await app.inject(`${url}&limite=1`)).json()
+      const csv = await app.inject(url.replace('/consulta?', '/consulta.csv?'))
+      expect(json.total_registros).toBe(1)
+      expect(json.totais).toEqual({ previsto: '0.30', pago: '0.10', aberto: '0.20' })
+      expect(csv.body).toContain('"materializado"')
+      expect(csv.body).not.toContain('"virtual"')
+      expect(csv.body).toContain('"0.30";"0.10";"0.20"')
+    } finally { await app.close() }
+  })
+
+  it('separa liquidado no período do acumulado, inclusive estorno e CSV', async () => {
+    listarLancamentos.mockResolvedValue([item('parcial', { competencia: '2026-09-01', valor_previsto: 1000,
+      valor_pago: 1000, data_pagamento: '2026-11-05' })])
+    lerMovimentosFinanceirosPeriodo.mockImplementation(async (_db, { de }) => ({
+      itens: [{ id: de, origem_tipo: 'receita_avulsa', origem_id: 'parcial', natureza: 'receita',
+        origem: 'avulsa', competencia: '2026-09-01', tipo: 'liquidacao', data: `${de.slice(0, 7)}-05`,
+        valor: de.startsWith('2026-10') ? '400.00' : '600.00', fonte: 'canonico' }],
+      reconciliacao: { eventos_canonicos: 1, movimentos_legados: 0 },
+    }))
+    const app = await appFor()
+    try {
+      const query = mes => `/v1/financeiro/consulta?eixo=pagamento&inicio=${mes}&fim=${mes}&competencia_inicio=2026-09&competencia_fim=2026-09`
+      for (const [mes, expected] of [['2026-10', '400.00'], ['2026-11', '600.00']]) {
+        const response = await app.inject(query(mes))
+        expect(response.statusCode).toBe(200)
+        expect(response.json().itens).toHaveLength(1)
+        expect(response.json().itens[0]).toMatchObject({ valor_pago: '1000.00', liquidado_no_periodo: expected })
+        expect(response.json().totais).toMatchObject({ pago: '1000.00', liquidado_no_periodo: expected })
+        const csv = await app.inject(query(mes).replace('/consulta?', '/consulta.csv?'))
+        expect(csv.body).toContain('liquidado_no_periodo')
+        expect(csv.body).toContain(`"${expected}"`)
+      }
+      lerMovimentosFinanceirosPeriodo.mockResolvedValue({ itens: [{ id: 'refund', origem_tipo: 'receita_avulsa', origem_id: 'parcial',
+        natureza: 'receita', origem: 'avulsa', competencia: '2026-09-01', tipo: 'estorno', data: '2026-12-05', valor: '-100.00', fonte: 'canonico' }],
+        reconciliacao: { eventos_canonicos: 1, movimentos_legados: 0 } })
+      expect((await app.inject(query('2026-12'))).json().totais.liquidado_no_periodo).toBe('-100.00')
+    } finally { await app.close() }
   })
 
   it('aplica origem, texto, faixa numérica e direção; saldo encerrado não fica em aberto', async () => {

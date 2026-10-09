@@ -1,5 +1,8 @@
 import { exactMoneyToCents } from '../lib/money.js'
-import { filtrarLancamentos, hojeSaoPaulo, listarLancamentos, valorEncerrado } from './financeiro-agregador.js'
+import { buscarConfigFinanceiro, filtrarLancamentos, hojeSaoPaulo, listarLancamentos, valorEncerrado } from './financeiro-agregador.js'
+import { ultimoDia } from './custos-plano.js'
+import { referenciaFinanceira, selecionarObrigacoesPorVencimento, valoresObrigacao } from './financeiro-obrigacoes-vencimento.js'
+import { lerMovimentosFinanceirosPeriodo } from './financeiro-movimentos-periodo.js'
 
 const ORIGENS = ['marca_fixo', 'marca_comissao', 'avulsa', 'manual', 'recorrente', 'parcela', 'apresentadora', 'imposto']
 const STATUS = ['previsto', 'pendente', 'atrasado', 'parcial', 'pago', 'perdido', 'cancelado']
@@ -50,8 +53,8 @@ function integer(value, name, fallback, max) {
 /**
  * Query pública de GET /v1/financeiro/consulta e /consulta.csv:
  * eixo=competencia|vencimento|pagamento, inicio/fim=AAAA-MM (inclusive),
- * competencia_inicio/competencia_fim=AAAA-MM (obrigatórios nos eixos vencimento/pagamento;
- * delimitam as competências carregadas pelo agregador), natureza=receita|custo,
+ * competencia_inicio/competencia_fim=AAAA-MM (opcionais em vencimento, obrigatórios
+ * em pagamento; são filtros adicionais, nunca uma competência oculta), natureza=receita|custo,
  * origem, id da obrigação, componente, contraparte (texto), status, q (texto),
  * valor_min/valor_max (valor_previsto decimal positivo),
  * ordenar=data|valor, direcao=asc|desc, pagina (1..1000000), limite (1..200).
@@ -73,12 +76,14 @@ export function parseConsultaQuery(query = {}) {
     if (competencia_inicio !== undefined || competencia_fim !== undefined) throw invalid('competencia_inicio/fim só se aplicam a vencimento/pagamento')
     competencia_inicio = inicio
     competencia_fim = fim
+  } else if (eixo === 'vencimento' && competencia_inicio === undefined && competencia_fim === undefined) {
+    competencia_inicio = competencia_fim = null
   } else {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(competencia_inicio ?? '') || !/^\d{4}-(0[1-9]|1[0-2])$/.test(competencia_fim ?? '')) {
       throw invalid('competencia_inicio/fim são obrigatórios no formato AAAA-MM')
     }
   }
-  if (competencia_inicio > competencia_fim || monthIndex(competencia_fim) - monthIndex(competencia_inicio) >= 36) {
+  if (competencia_inicio !== null && (competencia_inicio > competencia_fim || monthIndex(competencia_fim) - monthIndex(competencia_inicio) >= 36)) {
     throw invalid('Competências devem estar em ordem e cobrir no máximo 36 meses')
   }
   if (query.natureza !== undefined && !['receita', 'custo'].includes(query.natureza)) throw invalid('natureza inválida')
@@ -120,15 +125,46 @@ function normalizeText(value) {
 
 /** Seleção única para JSON e CSV: filtrar, ordenar e totalizar antes da paginação. */
 export async function selecionarConsulta(db, { tenantId, filtros, hoje = hojeSaoPaulo() }) {
-  const itensBase = await listarLancamentos(db, {
-    tenantId, inicio: filtros.competencia_inicio, fim: filtros.competencia_fim, hoje,
-  })
-  const campoData = { competencia: 'competencia', vencimento: 'data_vencimento', pagamento: 'data_pagamento' }[filtros.eixo]
+  let itensBase
+  let reconciliacao
+  if (filtros.eixo === 'vencimento') {
+    itensBase = await selecionarObrigacoesPorVencimento(db, { tenantId, de: `${filtros.inicio}-01`, ate: ultimoDia(filtros.fim), hoje })
+  } else {
+    itensBase = await listarLancamentos(db, {
+      tenantId, inicio: filtros.competencia_inicio, fim: filtros.competencia_fim, hoje,
+      ...(filtros.eixo === 'pagamento' ? { regraCorte: 'nenhum' } : {}),
+    })
+  }
+  if (filtros.eixo === 'pagamento') {
+    const cfg = await buscarConfigFinanceiro(db, tenantId)
+    const leitura = await lerMovimentosFinanceirosPeriodo(db, {
+      tenantId, de: `${filtros.inicio}-01`, ate: ultimoDia(filtros.fim), dataCorte: cfg.data_corte, dinheiroExato: true,
+    })
+    reconciliacao = leitura.reconciliacao
+    const porOrigem = new Map()
+    for (const movimento of leitura.itens) {
+      const key = referenciaFinanceira(movimento)
+      if (!porOrigem.has(key)) porOrigem.set(key, [])
+      porOrigem.get(key).push(movimento)
+    }
+    itensBase = itensBase.flatMap((item) => {
+      const eventos = porOrigem.get(referenciaFinanceira(item))
+      if (!eventos?.length) return []
+      return [{ ...item, liquidado_no_periodo: decimal(eventos.reduce((n, e) => n + cents(e.valor), 0n)),
+        data_pagamento_periodo: eventos.map(e => e.data).sort().at(-1),
+        movimentos_no_periodo: eventos.map(e => ({ id: e.id, tipo: e.tipo, data: e.data, valor: decimal(cents(e.valor)), fonte: e.fonte })) }]
+    })
+  }
+  const campoData = { competencia: 'competencia', vencimento: 'data_vencimento', pagamento: 'data_pagamento_periodo' }[filtros.eixo]
   const min = filtros.valor_min === null ? null : cents(filtros.valor_min)
   const max = filtros.valor_max === null ? null : cents(filtros.valor_max)
   const contraparte = filtros.contraparte ? normalizeText(filtros.contraparte) : null
   const componente = filtros.componente ? normalizeText(filtros.componente) : null
   const itens = filtrarLancamentos(itensBase, filtros).filter((item) => {
+    if (filtros.eixo === 'vencimento' && filtros.competencia_inicio) {
+      const competencia = dateText(item.competencia)?.slice(0, 7)
+      if (!competencia || competencia < filtros.competencia_inicio || competencia > filtros.competencia_fim) return false
+    }
     if (filtros.id && String(item.id) !== filtros.id) return false
     if (componente && normalizeText(item.componente) !== componente) return false
     if (contraparte && !normalizeText([
@@ -151,15 +187,17 @@ export async function selecionarConsulta(db, { tenantId, filtros, hoje = hojeSao
       || compareText(String(a.componente ?? ''), String(b.componente ?? ''))
   })
   const totaisCentavos = { previsto: 0n, pago: 0n, aberto: 0n }
+  if (filtros.eixo === 'pagamento') totaisCentavos.liquidado_no_periodo = 0n
   const itensComSaldo = itens.map((item) => {
     const previsto = cents(item.valor_previsto)
     const pago = cents(item.valor_pago)
     const encerrado = cents(valorEncerrado(item))
     // Saldo negativo é uma divergência de origem; zerá-lo mascararia sobrepagamento.
-    const aberto = previsto - pago - encerrado
+    const aberto = filtros.eixo === 'vencimento' ? valoresObrigacao(item).aberto : previsto - pago - encerrado
     totaisCentavos.previsto += previsto
     totaisCentavos.pago += pago
     totaisCentavos.aberto += aberto
+    if (filtros.eixo === 'pagamento') totaisCentavos.liquidado_no_periodo += cents(item.liquidado_no_periodo)
     return {
       ...item,
       // Esta API nova entrega dinheiro em texto decimal para o painel e CSV.
@@ -173,7 +211,7 @@ export async function selecionarConsulta(db, { tenantId, filtros, hoje = hojeSao
   return {
     itens: itensComSaldo, total_registros: itensComSaldo.length,
     totais: Object.fromEntries(Object.entries(totaisCentavos).map(([key, value]) => [key, decimal(value)])),
-    filtros, data_referencia: hoje,
+    filtros, data_referencia: hoje, ...(reconciliacao ? { reconciliacao } : {}),
   }
 }
 
@@ -196,16 +234,18 @@ function csvCell(value, kind) {
 
 /** CSV UTF-8, separador ;, escopo/referência no cabeçalho e decimal com ponto. */
 export function consultaCsv(selecao) {
+  const columns = selecao.filtros.eixo === 'pagamento'
+    ? [...CSV_COLUMNS, 'liquidado_no_periodo', 'data_pagamento_periodo'] : CSV_COLUMNS
   const scope = new URLSearchParams(Object.entries(selecao.filtros)
     .filter(([, value]) => value !== null && value !== undefined)
     .sort(([a], [b]) => a.localeCompare(b)))
   const rows = [
     [csvCell('consulta', 'text'), csvCell(scope.toString(), 'text')].join(';'),
     [csvCell('data_referencia', 'text'), csvCell(selecao.data_referencia, 'date')].join(';'),
-    CSV_COLUMNS.join(';'),
+    columns.join(';'),
   ]
   for (const item of selecao.itens) {
-    rows.push(CSV_COLUMNS.map((key) => csvCell(item[key], key.startsWith('valor_') || key === 'saldo_aberto' ? 'money' : ['competencia', 'data_vencimento', 'data_pagamento'].includes(key) ? 'date' : 'text')).join(';'))
+    rows.push(columns.map((key) => csvCell(item[key], key.startsWith('valor_') || ['saldo_aberto', 'liquidado_no_periodo'].includes(key) ? 'money' : ['competencia', 'data_vencimento', 'data_pagamento', 'data_pagamento_periodo'].includes(key) ? 'date' : 'text')).join(';'))
   }
   return `\uFEFF${rows.join('\r\n')}\r\n`
 }

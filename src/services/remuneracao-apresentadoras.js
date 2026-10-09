@@ -4,6 +4,7 @@ import { apresentadoraHorasSql, liveGmvSql, liveHoursSql, liveOrdersSql } from '
 import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr, officialLiveGmvSql, scaledStoredCommissionSql } from '../lib/sale-gmv-sql.js'
+import { esperarLeiturasFinanceiras } from './financeiro-read-snapshot.js'
 
 export const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 export const DATA_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
@@ -113,7 +114,7 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes, aprese
   }
   const competencia = competenciaDoMes(mes)
   const fim = ultimoDiaDoMes(mes)
-  const [fixos, comissoes, adicionais] = await Promise.all([
+  const [fixos, comissoes, adicionais] = await esperarLeiturasFinanceiras([
     db.query(`
       SELECT a.id AS apresentadora_id, a.nome,
              ROUND(COALESCE(${presenterFixedAtSql('a', '$2::date')}

@@ -215,15 +215,17 @@ export async function listarPagamentosApresentadoras(db, { tenantId, inicio, fim
 
 // Baixa de UM componente: default = previsto do componente. Retorna null se a apresentadora não existe no tenant.
 // Upsert pela UNIQUE (tenant, apresentadora, competência, componente): repetir não gera baixa dupla.
-export async function registrarPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, componente = 'fixo', valorPago, dataPagamento, observacao, userId, chaveOperacao = randomUUID() }) {
+export async function registrarPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, componente = 'fixo', valorPago, valorIncremental, dataPagamento, observacao, userId, ator, chaveOperacao = randomUUID(), retornarLiquidacao = false }) {
   if (!ehComponente(componente)) throw new TypeError('componente inválido')
+  if (valorPago != null && valorIncremental != null) throw new TypeError('Informe valorPago acumulado ou valorIncremental, não ambos')
   const ap = await db.query('SELECT id FROM apresentadoras WHERE id = $1::uuid AND tenant_id = $2::uuid', [apresentadoraId, tenantId])
   if (!ap.rows[0]) return null
   let valor = valorPago
-  if (valor == null) {
+  let previsto
+  if (valor == null || valorIncremental != null) {
     const fechamento = await buscarFechamentoApresentadoras(db, { tenantId, mes, apresentadoraId })
-    const previsto = previstoDoComponente(fechamento.apresentadoras[0], componente)
-    valor = previsto
+    previsto = previstoDoComponente(fechamento.apresentadoras[0], componente)
+    valor = valorIncremental ?? previsto
   } else {
     const valorEmCentavos = dinheiroEmCentavos(valor)
     if (valorEmCentavos == null) throw new TypeError('valor_pago inválido')
@@ -241,13 +243,16 @@ export async function registrarPagamentoApresentadora(db, { tenantId, apresentad
   )
   const anterior = anteriores[0]
   const projetadoAntes = cents(existente?.valor_pago ?? '0')
-  const delta = anterior ? cents(anterior.valor) : alvo - projetadoAntes
+  const incremento = valorIncremental == null ? null : cents(valorIncremental, 'valor_operacao')
+  const delta = anterior ? cents(anterior.valor) : incremento ?? (alvo - projetadoAntes)
   if (!anterior && delta <= 0n) throw erroFinanceiro('Pagamento já registrado neste valor', 'APRESENTADORA_SEM_SALDO')
   const data = dataPagamento ?? anterior?.data ?? hojeSaoPaulo()
-  await registrarLiquidacao(db, {
+  const liquidacao = await registrarLiquidacao(db, {
     tenantId, origemTipo: 'apresentadora_pagamento', origemId: linhaId, valor: centsToExactMoney(delta), data,
-    ator: { tipo: 'usuario', id: userId ?? 'sistema' }, idempotenciaChave: chaveOperacao,
-    comandoOrigem: 'apresentadoras.pagar', motivo: JSON.stringify({ alvo: centsToExactMoney(alvo), observacao: observacao ?? null }),
+    ator: ator ?? { tipo: 'usuario', id: userId ?? 'sistema' }, idempotenciaChave: chaveOperacao,
+    comandoOrigem: 'apresentadoras.pagar', motivo: JSON.stringify(incremento === null
+      ? { alvo: centsToExactMoney(alvo), observacao: observacao ?? null }
+      : { operacao: 'incremental', valor_operacao: centsToExactMoney(incremento), observacao: observacao ?? null }),
     validarOrigemParaUpdate: async (tx) => {
       const linha = await linhaParaUpdate(tx, { tenantId, apresentadoraId, mes, componente, linhaId })
       if (!linha) return null
@@ -256,10 +261,12 @@ export async function registrarPagamentoApresentadora(db, { tenantId, apresentad
       const projetado = cents(linha.valor_pago)
       const liquido = await totaisCanonicos(tx, tenantId, linhaId)
       if (liquido !== projetado) throw erroFinanceiro('Baixa legada sem fatos equivalentes; revisão necessária', 'APRESENTADORA_LIQUIDACAO_DIVERGENTE')
-      if (alvo <= projetado) throw erroFinanceiro('Pagamento já registrado neste valor', 'APRESENTADORA_SEM_SALDO')
+      if (incremento === null && alvo <= projetado) throw erroFinanceiro('Pagamento já registrado neste valor', 'APRESENTADORA_SEM_SALDO')
       // O contrato legado recebe o total acumulado; com valor explícito ele
       // não impunha teto do fechamento. O writer canônico recebe o delta.
-      return { tenantId: linha.tenant_id, natureza: 'custo', saldoElegivel: centsToExactMoney(alvo - projetado) }
+      const saldo = incremento === null ? alvo - projetado : cents(previsto) - projetado
+      if (saldo <= 0n) throw erroFinanceiro('Pagamento sem saldo disponível', 'APRESENTADORA_SEM_SALDO')
+      return { tenantId: linha.tenant_id, natureza: 'custo', saldoElegivel: centsToExactMoney(saldo) }
     },
     aplicarProjecao: async (tx, evento) => {
       const { rows } = await tx.query(
@@ -271,7 +278,8 @@ export async function registrarPagamentoApresentadora(db, { tenantId, apresentad
       if (!rows[0]) throw erroFinanceiro('Pagamento mudou durante a baixa; revisão necessária', 'APRESENTADORA_PAGAMENTO_CONCORRENTE')
     },
   })
-  return pagamentoAtual(db, { tenantId, apresentadoraId, mes, componente })
+  const item = await pagamentoAtual(db, { tenantId, apresentadoraId, mes, componente })
+  return retornarLiquidacao ? { item, liquidacao } : item
 }
 
 export async function desfazerPagamentoApresentadora(db, { tenantId, apresentadoraId, mes, componente = 'fixo', hoje = hojeSaoPaulo(), userId, chaveOperacao = randomUUID() }) {

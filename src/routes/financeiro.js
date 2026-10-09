@@ -16,6 +16,7 @@ import { notArchivedSql, saoPauloInclusiveRangeSql } from '../lib/live-count-sql
 import { marcaFixoVigenciaSql, marcaGeraReceitaSql } from '../lib/receita-marca-sql.js'
 import { listarCustos } from '../services/custos-plano.js'
 import { lerSnapshotFinanceiro } from '../services/financeiro-read-snapshot.js'
+import { calcularCaixaOperacional } from '../services/financeiro-caixa-operacional.js'
 import {
   atualizarConfigFinanceiro, buscarConfigFinanceiro, calcularCaixa, calcularDre, calcularDreMes, calcularFluxoCaixa,
   calcularPainelMes, cancelarImposto, consultarLancamentos, dataValida, desfazerImposto, encerrado, hojeSaoPaulo, pagarImposto, previstoEfetivo,
@@ -166,7 +167,7 @@ export async function financeiroRoutes(app) {
       ttlMs: FINANCEIRO_AGREGADOR_CACHE_TTL_MS,
       // Cash intervals and their obligations must share one snapshot: a partial
       // settlement committed between reads must not disappear or count twice.
-      computeFn: () => params.regime === 'caixa_vencimento' || ['caixa', 'painel', 'fluxo-caixa', 'lancamentos'].includes(params.rota)
+      computeFn: () => params.regime === 'caixa_vencimento' || ['caixa', 'caixa-operacional', 'painel', 'fluxo-caixa', 'lancamentos'].includes(params.rota)
         ? app.withTenant(tenantId, (db) => lerSnapshotFinanceiro(db, computeFn))
         : lerAgregador(tenantId, computeFn),
     })
@@ -966,6 +967,20 @@ export async function financeiroRoutes(app) {
       const ate = parsed.data.ate ?? hoje
       return await agregadorCache(reply, tenant_id, { rota: 'caixa', hoje, ate },
         (db) => calcularCaixa(db, { tenantId: tenant_id, ate, hoje }))
+    } catch (error) {
+      return responderErro(reply, error)
+    }
+  })
+
+  // Six months from today's São Paulo data base; a read cannot alter the opening
+  // balance, horizon or tenant scope through simulation/query parameters.
+  app.get('/v1/financeiro/caixa-operacional', { preHandler: app.requirePapel(READ_FINANCEIRO) }, async (request, reply) => {
+    if (Object.keys(request.query ?? {}).length) return reply.code(400).send({ error: 'Caixa operacional usa a data atual e horizonte fixo de seis meses' })
+    const { tenant_id } = request.user
+    const hoje = hojeSaoPaulo()
+    try {
+      return await agregadorCache(reply, tenant_id, { rota: 'caixa-operacional', hoje, horizonte: 6 },
+        (db) => calcularCaixaOperacional(db, { tenantId: tenant_id, hoje }))
     } catch (error) {
       return responderErro(reply, error)
     }

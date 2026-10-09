@@ -38,6 +38,7 @@ import { listarPagamentosApresentadoras } from './apresentadoras-pagamentos.js'
 import { ehAporte, listarReceitasAvulsas } from './receitas-avulsas.js'
 import { CLASSES_CUSTO, classeDoItem } from '../lib/custo-classe.js'
 import { lerMovimentosFinanceirosPeriodo } from './financeiro-movimentos-periodo.js'
+import { esperarLeiturasFinanceiras } from './financeiro-read-snapshot.js'
 
 export { CLASSES_CUSTO, classeDoItem, hojeSaoPaulo }
 
@@ -229,7 +230,7 @@ export function montarItemImposto({ calculo, materializado = null, hoje }) {
     grupo: 'imposto',
     descricao: `Imposto ${String(calculo.aliquota).replace('.', ',')}% s/ recebido ${calculo.mes_base.slice(5)}/${calculo.mes_base.slice(0, 4)}`,
     competencia: `${mes}-01`,
-    data_vencimento: materializado?.data_vencimento ?? vencimentoImposto(mes),
+    data_vencimento: materializado ? materializado.data_vencimento : vencimentoImposto(mes),
     valor_previsto: materializado ? r2(materializado.valor) : calculo.valor,
     valor_pago: r2(materializado?.valor_pago),
     data_pagamento: materializado?.data_pagamento ?? null,
@@ -797,7 +798,7 @@ export function montarFluxoCaixa({ mes, itens, movimentos = [], saldoInicial = 0
 // ─── Banco: config ────────────────────────────────────────────────────────
 
 /** { aliquota_imposto_pct, data_corte: 'YYYY-MM-DD'|null, saldo_abertura } do tenant. */
-export async function buscarConfigFinanceiro(db, tenantId) {
+export async function buscarConfigFinanceiro(db, tenantId, { dinheiroExato = false } = {}) {
   const r = await db.query(
     `SELECT aliquota_imposto_pct,
             to_char(financeiro_data_corte, 'YYYY-MM-DD') AS data_corte,
@@ -809,7 +810,9 @@ export async function buscarConfigFinanceiro(db, tenantId) {
   return {
     aliquota_imposto_pct: row.aliquota_imposto_pct == null ? ALIQUOTA_IMPOSTO_PADRAO : Number(row.aliquota_imposto_pct),
     data_corte: row.data_corte ?? null,
-    saldo_abertura: r2(row.saldo_abertura),
+    saldo_abertura: dinheiroExato
+      ? (row.saldo_abertura == null ? null : centsToExactMoney(exactMoneyToCents(String(row.saldo_abertura))))
+      : r2(row.saldo_abertura),
   }
 }
 
@@ -904,7 +907,7 @@ export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeS
       titulos = carregadas.titulos.filter(naFaixa)
       avulsas = carregadas.avulsas.filter(naFaixa)
     } else {
-      ;[titulos, avulsas] = await Promise.all([
+      ;[titulos, avulsas] = await esperarLeiturasFinanceiras([
         listarTitulosReceita(db, { tenantId, inicio: de, fim: baseFim, hoje }),
         listarReceitasAvulsas(db, { tenantId, inicio: de, fim: baseFim, hoje }),
       ])
@@ -923,7 +926,7 @@ export async function calcularImpostos(db, { tenantId, inicio, fim, hoje = hojeS
 
 /** Lançamentos de imposto do período (omitidos quando valor 0 e sem baixa). */
 export async function listarImpostos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, receitas } = {}) {
-  const [calculos, mats] = await Promise.all([
+  const [calculos, mats] = await esperarLeiturasFinanceiras([
     calcularImpostos(db, { tenantId, inicio, fim, hoje, aliquota, dataCorte, receitas }),
     impostosMaterializados(db, { tenantId, inicio, fim }),
   ])
@@ -987,17 +990,19 @@ async function totalLiquidoImposto(db, tenantId, custoId) {
  * juntos pelo comando canônico.
  */
 export async function pagarImposto(db, {
-  tenantId, mes, valorPago, dataPagamento, observacao, hoje = hojeSaoPaulo(),
-  ator = { tipo: 'sistema', id: 'financeiro-agregador' }, chaveOperacao = randomUUID(),
+  tenantId, mes, valorPago, valorIncremental, dataPagamento, observacao, hoje = hojeSaoPaulo(),
+  ator = { tipo: 'sistema', id: 'financeiro-agregador' }, chaveOperacao = randomUUID(), retornarLiquidacao = false,
 } = {}) {
+  if (valorPago != null && valorIncremental != null) throw erro('Informe valorPago acumulado ou valorIncremental, não ambos', 400, 'INVALID_PAYMENT')
   if (!RE_MES.test(String(mes ?? ''))) throw erro('mes deve estar no formato AAAA-MM')
   if (dataPagamento != null && !RE_DATA.test(String(dataPagamento))) throw erro('data_pagamento deve estar no formato AAAA-MM-DD', 400, 'INVALID_PAYMENT')
   const materializados = await impostosMaterializados(db, { tenantId, inicio: mes, fim: mes })
   if (materializados.get(mes)?.cancelado_em) throw erro('Imposto cancelado. Reative antes de pagar.', 409, 'CUSTO_CANCELADO')
   const [calculo] = await calcularImpostos(db, { tenantId, inicio: mes, fim: mes, hoje })
-  const alvo = valorPago == null ? centavosImposto(calculo.valor) : centavosImposto(valorPago)
-  if (alvo <= 0n) throw erro('valor_pago deve ser maior que zero (imposto calculado é zero)', 400, 'INVALID_PAYMENT')
-  const previsto = calculo.valor > 0 ? calculo.valor : Number(centsToExactMoney(alvo))
+  const incremento = valorIncremental == null ? null : centavosImposto(valorIncremental, 'valor_operacao')
+  const alvo = incremento === null ? (valorPago == null ? centavosImposto(calculo.valor) : centavosImposto(valorPago)) : null
+  if ((alvo ?? incremento) <= 0n) throw erro('valor_pago deve ser maior que zero (imposto calculado é zero)', 400, 'INVALID_PAYMENT')
+  const previsto = calculo.valor > 0 ? calculo.valor : Number(centsToExactMoney(alvo ?? incremento))
   const obs = observacao ?? `Base ${calculo.mes_base} (${calculo.base_tipo}): ${calculo.base.toFixed(2)} × ${calculo.aliquota}%`
   // Materialização cria apenas a obrigação. Nunca grava a baixa fora do
   // comando: isso mantém evento e projeção atômicos.
@@ -1017,18 +1022,20 @@ export async function pagarImposto(db, {
   const pagoAtual = centavosImposto(atual.valor_pago)
   const liquidoAtual = await totalLiquidoImposto(db, tenantId, atual.id)
   if (liquidoAtual !== pagoAtual) throw erroImposto('Baixa legada sem fatos equivalentes; revisão necessária', 'IMPOSTO_LIQUIDACAO_DIVERGENTE')
-  if (alvo > previstoCents) throw erroImposto('valor_pago excede o valor previsto', 'IMPOSTO_VALOR_EXCEDENTE')
+  if (alvo !== null && alvo > previstoCents) throw erroImposto('valor_pago excede o valor previsto', 'IMPOSTO_VALOR_EXCEDENTE')
   const { rows: anteriores } = await db.query(
     `SELECT valor::text AS valor, to_char(data_liquidacao, 'YYYY-MM-DD') AS data
        FROM financeiro_liquidacoes WHERE tenant_id = $1::uuid AND idempotencia_chave = $2`,
     [tenantId, chaveOperacao],
   )
   const anterior = anteriores[0]
-  const delta = anterior ? centavosImposto(anterior.valor, 'valor') : alvo - pagoAtual
+  const delta = anterior ? centavosImposto(anterior.valor, 'valor') : incremento ?? (alvo - pagoAtual)
   if (!anterior && delta <= 0n) throw erroImposto('Imposto já pago neste valor', 'IMPOSTO_SEM_SALDO')
   const data = dataPagamento ?? anterior?.data ?? hoje
-  const motivo = JSON.stringify({ alvo: centsToExactMoney(alvo), observacao: obs, operacao: 'baixa_total_legada' })
-  await registrarLiquidacao(db, {
+  const motivo = JSON.stringify(incremento === null
+    ? { alvo: centsToExactMoney(alvo), observacao: obs, operacao: 'baixa_total_legada' }
+    : { valor_operacao: centsToExactMoney(incremento), observacao: obs, operacao: 'incremental' })
+  const liquidacao = await registrarLiquidacao(db, {
     tenantId, origemTipo: 'imposto', origemId: atual.id, valor: centsToExactMoney(delta), data,
     ator, idempotenciaChave: chaveOperacao, comandoOrigem: 'impostos.pagar', motivo,
     validarOrigemParaUpdate: async (tx) => {
@@ -1039,7 +1046,7 @@ export async function pagarImposto(db, {
       const pago = centavosImposto(imposto.valor_pago)
       const liquido = await totalLiquidoImposto(tx, tenantId, imposto.id)
       if (liquido !== pago) throw erroImposto('Baixa legada sem fatos equivalentes; revisão necessária', 'IMPOSTO_LIQUIDACAO_DIVERGENTE')
-      if (alvo !== pago + delta) throw erroImposto('valor_pago mudou durante a baixa; tente novamente', 'IMPOSTO_PAGAMENTO_CONCORRENTE')
+      if (alvo !== null && alvo !== pago + delta) throw erroImposto('valor_pago mudou durante a baixa; tente novamente', 'IMPOSTO_PAGAMENTO_CONCORRENTE')
       const saldo = valor - pago
       if (saldo <= 0n) throw erroImposto('Imposto sem saldo disponível', 'IMPOSTO_SEM_SALDO')
       return { tenantId: imposto.tenant_id, natureza: 'custo', saldoElegivel: centsToExactMoney(saldo) }
@@ -1053,7 +1060,8 @@ export async function pagarImposto(db, {
       )
     },
   })
-  return itemImpostoDoMes(db, { tenantId, mes, hoje })
+  const item = await itemImpostoDoMes(db, { tenantId, mes, hoje })
+  return retornarLiquidacao ? { item, liquidacao } : item
 }
 
 /**
@@ -1163,7 +1171,7 @@ export async function desfazerImposto(db, {
  * e ordenados por vencimento: receitas (marcas + avulsas) + custos + apresentadoras
  * + imposto, com a regra de corte aplicada (dataCorte undefined → lida da config).
  */
-export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, vencimentoDe, vencimentoAte, regraCorte = 'legado' } = {}) {
+export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hojeSaoPaulo(), aliquota, dataCorte, vencimentoDe, vencimentoAte, incluirSemData = false, regraCorte = 'legado' } = {}) {
   if (!tenantId) throw erro('tenantId é obrigatório', 400, 'INVALID_SCOPE')
   let pct = aliquota
   let corte = dataCorte
@@ -1174,17 +1182,23 @@ export async function listarLancamentos(db, { tenantId, inicio, fim, hoje = hoje
   }
   // Receitas/avulsas são carregadas UMA vez e reaproveitadas pela projeção do imposto
   // (antes calcularImpostos refazia as mesmas duas listagens).
-  const pTitulos = listarTitulosReceita(db, { tenantId, inicio, fim, hoje, vencimentoDe, vencimentoAte })
-  const pAvulsas = listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje, vencimentoDe, vencimentoAte })
-  const pReceitas = Promise.all([pTitulos, pAvulsas]).then(([titulos, avulsas]) => ({ titulos, avulsas, inicio, fim }))
+  const pTitulos = listarTitulosReceita(db, { tenantId, inicio, fim, hoje, vencimentoDe, vencimentoAte, incluirSemData })
+  const pAvulsas = listarReceitasAvulsas(db, { tenantId, inicio, fim, hoje, vencimentoDe, vencimentoAte, incluirSemData })
+  const pReceitas = esperarLeiturasFinanceiras([pTitulos, pAvulsas]).then(([titulos, avulsas]) => ({ titulos, avulsas, inicio, fim }))
   pReceitas.catch(() => {}) // se o imposto não precisar dela, a rejeição já é tratada no Promise.all abaixo
-  const [receitas, avulsas, custos, apresentadoras, impostos] = await Promise.all([
+  // A branch (notably presenter month loops) can issue more reads after another
+  // rejects. Drain every branch before the caller rolls back/releases its tenant
+  // snapshot; Promise.all would leave those reads running outside the snapshot.
+  const resultados = await Promise.allSettled([
     pTitulos,
     pAvulsas,
-    listarCustos(db, { tenantId, inicio, fim, hoje, vencimentoAte }),
+    listarCustos(db, { tenantId, inicio, fim, hoje, vencimentoAte, incluirSemData }),
     listarPagamentosApresentadoras(db, { tenantId, inicio: `${inicio}-01`, fim: `${fim}-01`, hoje }),
     listarImpostos(db, { tenantId, inicio, fim, hoje, aliquota: pct, dataCorte: corte, receitas: pReceitas }),
   ])
+  const falha = resultados.find(r => r.status === 'rejected')
+  if (falha) throw falha.reason
+  const [receitas, avulsas, custos, apresentadoras, impostos] = resultados.map(r => r.value)
   const itens = [
     ...receitas.map((t) => normalizarReceita(t, hoje)),
     ...avulsas.map((a) => marcarEncerramento({ ...BASE_ITEM, ...a })),

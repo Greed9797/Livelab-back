@@ -227,9 +227,27 @@ export async function registrarLiquidacao(db, {
     let replay = replayOrConflict(await existingLiquidacao(tx, tenant, key), payloadBase, rowToLiquidacao)
     if (replay) return replay
 
-    const lock = validateOriginLock(await validarOrigemParaUpdate(tx, {
-      tenantId: tenant, origemTipo: origem, origemId: origemUuid,
-    }), tenant)
+    let lock
+    try {
+      lock = validateOriginLock(await validarOrigemParaUpdate(tx, {
+        tenantId: tenant, origemTipo: origem, origemId: origemUuid,
+      }), tenant)
+    } catch (error) {
+      // A validação também adquire o lock da origem. Se uma requisição com a
+      // mesma chave terminou enquanto esta aguardava, o estado projetado pode
+      // agora parecer sem saldo. O fato idempotente prevalece sobre esse erro.
+      try {
+        const replayDepoisDoLock = replayOrConflict(
+          await existingLiquidacao(tx, tenant, key), payloadBase, rowToLiquidacao,
+        )
+        if (replayDepoisDoLock) return replayDepoisDoLock
+      } catch (replayError) {
+        // Erro SQL pode ter abortado a transação (25P02); nesse caso preserve a
+        // falha original. Conflito idempotente é erro de domínio e deve vencer.
+        if (replayError?.code === 'FINANCEIRO_IDEMPOTENCIA_CONFLITO') throw replayError
+      }
+      throw error
+    }
 
     // A segunda leitura é necessária para concorrência: outro comando com a
     // mesma chave pode ter concluído enquanto aguardávamos o lock da origem.

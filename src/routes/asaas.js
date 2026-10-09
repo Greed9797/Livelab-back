@@ -26,6 +26,7 @@ import {
   candidatoDeLancamento,
   darBaixaConciliacao,
   desfazerBaixaConciliacao,
+  vincularLiquidacaoExistenteConciliacao,
   TIPOS_ALVO,
   dataNoMes,
   normalizarTransacaoAsaas,
@@ -58,6 +59,9 @@ const conciliarSchema = z.object({
   tipo: z.enum(TIPOS_ALVO),
   // uuid ou id virtual (calc:/rec:/apresentadora:/imposto:) — resolvido em darBaixaConciliacao
   id: z.string().trim().min(1).max(200),
+  // Quando informado, a transação apenas referencia o fato já registrado.
+  // Sem este campo, a conciliação mantém o comportamento legado de criar a baixa.
+  liquidacao_id: uuidGenerico.optional(),
 })
 
 // Tabela/coluna do módulo financeiro (migrations 164/165, outras frentes) ainda não aplicada.
@@ -351,7 +355,7 @@ export async function asaasRoutes(app) {
     if (!parsed.success) {
       return reply.code(400).send({ error: 'Dados inválidos', detalhes: parsed.error.issues })
     }
-    const { transacao_id, tipo, id } = parsed.data
+    const { transacao_id, tipo, id, liquidacao_id } = parsed.data
     const { tenant_id, sub: userId } = request.user
 
     const out = await app.withTenant(tenant_id, async (db) => {
@@ -372,9 +376,13 @@ export async function asaasRoutes(app) {
         // Baixa ANTES do vínculo (precisa do UUID real do alvo, materializado se virtual) — mesma transação.
         let baixa
         try {
-          baixa = await darBaixaConciliacao(db, {
-            tenantId: tenant_id, transacao: tx, tipo, alvoId: id, userId: userId ?? null,
-          })
+          baixa = liquidacao_id
+            ? await vincularLiquidacaoExistenteConciliacao(db, {
+                tenantId: tenant_id, transacao: tx, tipo, alvoId: id, liquidacaoId: liquidacao_id,
+              })
+            : await darBaixaConciliacao(db, {
+                tenantId: tenant_id, transacao: tx, tipo, alvoId: id, userId: userId ?? null,
+              })
         } catch (err) {
           if (err instanceof ConciliacaoError) return fim(db, err.status, { error: err.message, codigo: err.codigo })
           if (!erroSchemaAusente(err)) throw err
@@ -402,7 +410,11 @@ export async function asaasRoutes(app) {
         action: 'asaas.conciliar',
         entity_type: 'gateway_transacoes',
         entity_id: transacao_id,
-        metadata: { tipo, alvo_ref: id, alvo_id: out.body.conciliado_com_id, baixa_aplicada: out.body.baixa?.aplicada === true },
+        metadata: {
+          tipo, alvo_ref: id, alvo_id: out.body.conciliado_com_id,
+          baixa_aplicada: out.body.baixa?.aplicada === true,
+          liquidacao_id: out.body.baixa?.liquidacao_id ?? null,
+        },
       })
     }
     return reply.code(out.status).send(out.body)

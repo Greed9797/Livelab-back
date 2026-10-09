@@ -12,7 +12,32 @@ const pg = new PGlite()
 
 await pg.exec(`
   CREATE TABLE tenants (id uuid PRIMARY KEY);
-  CREATE TABLE apresentadoras (id uuid PRIMARY KEY, tenant_id uuid NOT NULL REFERENCES tenants(id), nome text NOT NULL);
+  CREATE TABLE apresentadoras (
+    id uuid PRIMARY KEY, tenant_id uuid NOT NULL REFERENCES tenants(id), nome text NOT NULL,
+    fixo numeric(12,2) DEFAULT 2700, data_inicio date, data_fim date, user_id uuid,
+    ativo boolean NOT NULL DEFAULT true, arquivada boolean NOT NULL DEFAULT false
+  );
+  CREATE TABLE apresentadora_fixo_historico (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL,
+    apresentadora_id uuid NOT NULL, valor numeric(12,2) NOT NULL, vigencia_inicio date NOT NULL
+  );
+  CREATE TABLE lives (
+    id uuid PRIMARY KEY, tenant_id uuid NOT NULL, status text, iniciado_em timestamptz,
+    uniao_destino_id uuid, uniao_desfeita_em timestamptz, arquivada_em timestamptz,
+    apresentador_id uuid, ads_gmv numeric, manual_gmv numeric, fat_gerado numeric
+  );
+  CREATE TABLE live_apresentadoras_v2 (live_id uuid, tenant_id uuid, apresentadora_id uuid);
+  CREATE TABLE apresentadora_remuneracao_adicionais (
+    id uuid PRIMARY KEY, tenant_id uuid NOT NULL, apresentadora_id uuid NOT NULL,
+    competencia date NOT NULL, tipo text, descricao text, data_referencia date,
+    valor numeric(15,2), cancelado_em timestamptz, criado_em timestamptz
+  );
+  CREATE TABLE vendas_atribuidas (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL,
+    origem text NOT NULL, origem_id uuid, apresentadora_id uuid,
+    data date NOT NULL, gmv numeric(15,2) NOT NULL DEFAULT 0,
+    comissao_apresentadora numeric(15,2) NOT NULL DEFAULT 0, status_aprovacao text
+  );
   CREATE TABLE apresentadora_pagamentos (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id uuid NOT NULL REFERENCES tenants(id),
     apresentadora_id uuid NOT NULL REFERENCES apresentadoras(id), competencia date NOT NULL,
@@ -26,6 +51,9 @@ await pg.exec(`
     ('${apresentadora}', '${tenant}', 'Canônica'),
     ('${legado}', '${tenant}', 'Legada'),
     ('${multi}', '${tenant}', 'Multi');
+  INSERT INTO vendas_atribuidas
+    (tenant_id, origem, origem_id, apresentadora_id, data, gmv, comissao_apresentadora, status_aprovacao)
+    VALUES ('${tenant}', 'video', NULL, '${apresentadora}', '2026-10-05', 1200, 20, 'aprovada');
   INSERT INTO apresentadora_pagamentos (tenant_id, apresentadora_id, competencia, componente, valor_pago, data_pagamento)
     VALUES ('${tenant}', '${legado}', '${mes}-01', 'fixo', 10.00, '2026-10-05');
 `)
@@ -39,7 +67,7 @@ await pg.exec(`
   CREATE ROLE fin03_apresentadoras;
   GRANT USAGE ON SCHEMA public TO fin03_apresentadoras;
   GRANT SELECT, INSERT, UPDATE ON apresentadora_pagamentos TO fin03_apresentadoras;
-  GRANT SELECT ON apresentadoras TO fin03_apresentadoras;
+  GRANT SELECT ON apresentadoras, apresentadora_fixo_historico, vendas_atribuidas, lives, live_apresentadoras_v2, apresentadora_remuneracao_adicionais TO fin03_apresentadoras;
   GRANT SELECT, INSERT, UPDATE ON financeiro_liquidacoes TO fin03_apresentadoras;
   GRANT SELECT, INSERT, UPDATE ON financeiro_estornos TO fin03_apresentadoras;
   SELECT set_config('app.tenant_id', '${tenant}', false);

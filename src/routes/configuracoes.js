@@ -347,9 +347,10 @@ export async function configuracoesRoutes(app) {
           const bcrypt = await import('bcrypt')
           const hash = await bcrypt.default.hash(data.nova_senha, 12)
           await db.query(
-            `UPDATE users SET senha_hash = $1 WHERE id = $2 AND tenant_id = $3`,
+            `UPDATE users SET senha_hash = $1, token_version = COALESCE(token_version, 1) + 1 WHERE id = $2 AND tenant_id = $3`,
             [hash, user_id, tenant_id]
           )
+          await db.query('UPDATE refresh_tokens SET revogado = true WHERE user_id = $1', [user_id])
         }
 
         const savedQ = await db.query(
@@ -359,6 +360,7 @@ export async function configuracoesRoutes(app) {
           [tenant_id],
         )
         await db.query('COMMIT')
+        if (hasPasswordUpdate) app.invalidateTokenVersionCache?.(user_id)
         return {
           ok: true,
           message: 'Configurações atualizadas com sucesso',

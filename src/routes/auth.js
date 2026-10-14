@@ -16,6 +16,7 @@ import {
 import { SECURITY } from '../config/security.js'
 import { notify, isEmailConfigured } from '../services/mailer.js'
 import { getAccountPhoto } from '../services/account-photo.js'
+import { findActiveAccount } from '../services/account-credentials.js'
 
 const _frontendUrl = () =>
   (process.env.FRONTEND_URL ?? 'https://app.grupolivelab.com.br').replace(/\/+$/, '')
@@ -33,15 +34,7 @@ export async function authRoutes(app) {
     }
     const { email, senha } = parsed.data
 
-    const result = await app.db.query(
-      `SELECT u.*, t.nome as tenant_nome
-       FROM users u JOIN tenants t ON t.id = u.tenant_id
-       WHERE LOWER(u.email) = LOWER($1) AND u.ativo = true
-       LIMIT 1`,
-      [email]
-    )
-
-    const user = result.rows[0]
+    const user = await findActiveAccount(app.db, email)
     if (!user) {
       app.audit?.log?.(request, { action: 'auth.login_failed', metadata: { email, reason: 'user_not_found' } })?.catch(err => app.log.error({ err }, 'audit log failed'))
       return reply.code(401).send({ error: 'Credenciais inválidas' })

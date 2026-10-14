@@ -1,3 +1,5 @@
+import { mcpRoutes } from './mcp/server.js'
+import { readMcpConfig } from './mcp/oauth.js'
 import { registerReadiness } from './services/readiness.js'
 import { getKnowledgeStorageStatus } from './services/knowledge-storage.js'
 import Fastify from 'fastify'
@@ -149,6 +151,7 @@ export async function buildApp(opts = {}) {
   // A allowlist abaixo é a fonte da verdade para origens permitidas.
   // Para adicionar uma origem nova, atualize tanto este array quanto o
   // env var CORS_ORIGIN no painel de deploy — nunca use '*'.
+  const mcpConfig = readMcpConfig()
   const corsBase = process.env.NODE_ENV === 'production'
     ? [
         'https://app.grupolivelab.com.br',
@@ -166,6 +169,15 @@ export async function buildApp(opts = {}) {
   const corsAllowedOrigins = corsBase
     ? [...new Set([...corsBase, ...corsEnv])]
     : (corsEnv.length ? corsEnv : null)
+
+  const mcpOrigins = mcpConfig.enabled ? [mcpConfig.origin, 'https://chatgpt.com'] : []
+  app.addHook('onRequest', async (request, reply) => {
+    const origin = request.headers.origin
+    if (mcpOrigins.includes(origin) && !corsAllowedOrigins?.includes(origin)
+      && !/^\/(mcp(?:\/|\?|$)|oauth\/|\.well-known\/oauth-)/.test(request.url)) {
+      return reply.code(403).send({ error: 'Origin da integração restrita ao MCP/OAuth' })
+    }
+  })
 
   const TIKTOK_ORIGINS = [
     'https://developers.tiktok.com',
@@ -249,6 +261,7 @@ export async function buildApp(opts = {}) {
       if (origin === undefined) return cb(null, true)
       // S-06: rejeita origin "null" (iframe sandbox, file://, redirects opacos)
       if (origin === 'null') return cb(new Error('Not allowed by CORS'))
+      if (mcpOrigins.includes(origin)) return cb(null, true)
       // Dev sem allowlist → só localhost/127.0.0.1, nunca tudo
       if (!corsAllowedOrigins) {
         const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
@@ -263,7 +276,7 @@ export async function buildApp(opts = {}) {
       cb(new Error('Not allowed by CORS'))
     },
     credentials: true,
-    allowedHeaders: corsAllowedHeaders,
+    allowedHeaders: [...corsAllowedHeaders, ...(mcpConfig.enabled ? ['MCP-Protocol-Version'] : [])],
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   })
   // S-12: CSP habilitado globalmente; TikTok callback sobrescreve no handler.
@@ -412,6 +425,7 @@ export async function buildApp(opts = {}) {
   await app.register(portalApresentadoraRoutes)
   await app.register(metasRoutes)
   await app.register(uploadsRoutes)
+  await app.register(mcpRoutes, { config: mcpConfig })
 
   // S-11: opcional — se HEALTH_CHECK_TOKEN setado, exige header pra responder.
   // 404 (não 401) pra não confirmar existência do endpoint a scanners.

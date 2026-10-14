@@ -13,7 +13,7 @@
     "test:watch": "vitest"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "keywords": [],
   "author": "",
@@ -36,7 +36,9 @@
     "pg": "^8.20.0",
     "resend": "^6.12.3",
     "tiktok-live-connector": "2.1.1-beta1",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "oidc-provider": "^9.12.2"
   },
   "overrides": {
     "protobufjs": "7.6.5",

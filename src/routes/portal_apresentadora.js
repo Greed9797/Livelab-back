@@ -10,6 +10,7 @@ import {
 import { getOwnPortalPerformance } from '../services/portal-apresentadora-performance.js'
 import { withPortalPresenterDb, withPortalPresenterSession } from '../services/portal-apresentadora-db.js'
 import { getOwnPortalRemuneration } from '../services/portal-apresentadora-remuneracao.js'
+import { getOwnMonthlyPresenterReport, rejectOtherPresenterReport } from '../services/portal-apresentadora-relatorio.js'
 import { marcaStatusOperacionalSql } from '../lib/entity-status.js'
 import { parsePortalCount, parsePortalMoney } from '../lib/portal-submission-input.js'
 import { saoPauloDateInput, saoPauloDayBounds } from '../lib/timezone.js'
@@ -227,6 +228,27 @@ export async function portalApresentadoraRoutes(app) {
       ])
       return { items: items.items, submissoes: pending.rows.map((row) => ({ ...row, gmv_declarado: row.gmv_declarado == null ? null : Number(row.gmv_declarado), pedidos_declarados: row.pedidos_declarados == null ? null : Number(row.pedidos_declarados), live_impressions_declaradas: row.live_impressions_declaradas == null ? null : Number(row.live_impressions_declaradas), manual_views_declaradas: row.manual_views_declaradas == null ? null : Number(row.manual_views_declaradas), live_impressions_oficiais: row.live_impressions_oficiais == null ? null : Number(row.live_impressions_oficiais), manual_views_oficiais: row.manual_views_oficiais == null ? null : Number(row.manual_views_oficiais) })) }
     })
+  })
+
+  app.get('/v1/portal/apresentadora/relatorio-mensal', { preHandler: ownAccess }, async (request, reply) => {
+    const range = monthOr400(request.query, reply); if (!range) return reply
+    const requested = request.query?.apresentadora_id
+    if (requested != null && String(requested) !== '' && !uuid.safeParse(String(requested)).success) {
+      return reply.code(400).send({ error: 'apresentadora_id inválido' })
+    }
+    const profile = await withPortalPresenterDb(app, request.user.tenant_id, (db) => resolveOwnProfile(db, request.user.tenant_id, request.user.sub, request.user.papel))
+    if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
+    try {
+      rejectOtherPresenterReport(profile.id, requested == null || requested === '' ? '' : String(requested))
+    } catch (error) {
+      return reply.code(error.statusCode ?? 403).send({ error: error.message })
+    }
+    return app.withTenant(request.user.tenant_id, (db) => getOwnMonthlyPresenterReport(db, {
+      tenantId: request.user.tenant_id,
+      apresentadoraId: profile.id,
+      nome: profile.nome,
+      mes: range.mes,
+    }))
   })
 
   app.post('/v1/portal/apresentadora/submissoes', { preHandler: ownAccess }, async (request, reply) => {

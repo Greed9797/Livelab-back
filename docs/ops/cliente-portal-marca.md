@@ -37,6 +37,8 @@ Na preparação autorizada de 21/10, os lockfiles receberam patches compatíveis
 
 Os gates finais também são executados nos runners do GitHub antes de avançar as branches de produção. A máquina local apresentou carga 186 em 10 núcleos e timeouts de 5 segundos em arquivos diferentes, embora os arquivos isolados passassem. Não aumentar timeouts, omitir testes nem tratar uma execução cancelada ou com timeout como PASS.
 
+Liberação de 21/10: backend `d24ceac980204cc19b0e59a6234dfc086549246e`, [CI 39620918729](https://github.com/Greed9797/Livelab-back/actions/runs/39620918729), com 2.183 testes aprovados, zero falhas e 67 skips preexistentes, além das fixtures SQL. Frontend `2cbf087c469b9cf541b623b179210963a711c78f`, [CI 39615198644](https://github.com/Greed9797/Livelab-Front/actions/runs/39615198644), com tipagem, 971 testes e build aprovados; os quatro cenários sintéticos de navegador também passaram. A revisão independente do escopo cadastral está em `.specs/features/agente-cadastros/validation.md`, com oito critérios atendidos e cinco regressões simuladas detectadas. O commit posterior de registro altera somente documentação; o código e os testes são idênticos aos do gate.
+
 ## Publicação autorizada em 21/10/2026
 
 O usuário autorizou explicitamente implementar e publicar o portal e o escopo de atualização cadastral do agente. O responsável indicou uma marca piloto e um e-mail nesta sessão, mantidos fora do repositório. A associação exige conferir a ficha/marca existente e usar uma sessão administrativa válida; não criar outra marca nem alterar os resultados para fazer o teste passar. A entrega não executa a correção em massa de dados reais.

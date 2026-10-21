@@ -42,11 +42,11 @@ Acceptance Criteria:
 
 | ID | Requirement | Status |
 | --- | --- | --- |
-| AGCAD-1 | Escopo próprio no mecanismo existente | implementing |
-| AGCAD-2 | Métodos e rotas exatos | implementing |
-| AGCAD-3 | Isolamento tenant | implementing |
-| AGCAD-4 | DTO e cache restritos | implementing |
-| AGCAD-5 | Campos e referência validados | implementing |
-| AGCAD-6 | Sincronização e auditoria atômicas | implementing |
-| AGCAD-7 | Compatibilidade e revogação | implementing |
-| AGCAD-8 | Gates e revisão independente | implementing |
+| AGCAD-1 | Escopo próprio no mecanismo existente | verified |
+| AGCAD-2 | Métodos e rotas exatos | verified |
+| AGCAD-3 | Isolamento tenant | verified |
+| AGCAD-4 | DTO e cache restritos | verified |
+| AGCAD-5 | Campos e referência validados | verified |
+| AGCAD-6 | Sincronização e auditoria atômicas | verified |
+| AGCAD-7 | Compatibilidade e revogação | verified |
+| AGCAD-8 | Gates e revisão independente | verified |

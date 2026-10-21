@@ -12,7 +12,7 @@
 
 - Quick auth: npx vitest run test/cliente_portal_access.test.js test/auth_session_state.test.js
 - Quick dados: npx vitest run test/cliente_portal_revisado*.test.js
-- Build: npm test
+- Build: npm test -- --maxWorkers=4 (mesmos testes/timeouts; concorrência local limitada)
 
 ## Execution Plan
 
@@ -48,7 +48,7 @@ Depends on: T1, T2
 Tests: regressão completa, runner de migrations sem migrations novas e runbook de publicação/rollback
 Gate: Build
 Done when: npm test verde, testes legados alinhados à regra aprovada e nenhum cache Graft no diff.
-Status: pending
+Status: complete
 Owner: root
 
 ### T4: Verificar isolamento independentemente

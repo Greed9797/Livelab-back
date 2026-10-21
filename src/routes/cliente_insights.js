@@ -1,14 +1,16 @@
-// Portal do cliente final — endpoints de leitura, sempre filtrados pelo cliente
-// vinculado ao usuário logado (resolvido via JWT). NUNCA aceita cliente_id do front.
-// Regra de visibilidade: métricas (Home/analytics/financeiro) contam toda live
-// encerrada do cliente; a aba Conteúdo (replays) exige status_publicacao='publicado'.
-// (exceto bloco de live ao vivo da Home, que pode mostrar live em andamento própria).
+// Portal do cliente final — os três endpoints públicos abaixo usam a mesma
+// régua: tenant/JWT, cliente e marca contratante exatos, live encerrada ativa
+// e não arquivada, com revisão concluída (revisado ou publicado). NUNCA aceita
+// cliente_id ou marca_id do front. Os helpers legados abaixo atendem rotas
+// internas que o guard global bloqueia para cliente_parceiro.
 
 import { calcularStatusOperacional } from '../services/status_operacional.js'
 import { isFimDeSemanaSP } from '../services/comissao.js'
 import { buildRelatorioOperacionalPdf } from '../services/reports.js'
 import { liveGmvSql, liveOrdersSql, liveHoursSql } from '../lib/metric-sql.js'
-import { liveSaleCommissionLateralSql } from '../lib/sale-gmv-sql.js'
+import { liveSaleCommissionLateralSql, officialLiveGmvSql } from '../lib/sale-gmv-sql.js'
+import { officialEndedLiveSql } from '../lib/live-count-sql.js'
+import { getClientePortalContext } from '../lib/cliente_resolver.js'
 
 const TZ = 'America/Sao_Paulo'
 
@@ -34,6 +36,72 @@ function parsePeriodo(query = {}) {
     mes: mes >= 1 && mes <= 12 ? mes : now.getMonth() + 1,
     ano: ano >= 2000 && ano <= 2100 ? ano : now.getFullYear(),
   }
+}
+
+function parsePortalPeriodo(query = {}) {
+  const mesProvided = query.mes != null
+  const anoProvided = query.ano != null
+  const mes = typeof query.mes === 'string' && /^\d{1,2}$/.test(query.mes) ? Number(query.mes) : null
+  const ano = typeof query.ano === 'string' && /^\d{4}$/.test(query.ano) ? Number(query.ano) : null
+  if ((mesProvided && (mes == null || mes < 1 || mes > 12)) || (anoProvided && (ano == null || ano < 2000 || ano > 2100))) return null
+  const nowParts = new Intl.DateTimeFormat('en-US', { timeZone: TZ, year: 'numeric', month: 'numeric' }).formatToParts(new Date())
+  const current = Object.fromEntries(nowParts.filter((part) => part.type !== 'literal').map((part) => [part.type, Number(part.value)]))
+  return { mes: mes ?? current.month, ano: ano ?? current.year }
+}
+
+function parseOffset(value) {
+  if (value == null) return 0
+  if (typeof value !== 'string' || !/^(0|[1-9]\d*)$/.test(value)) return null
+  const offset = Number(value)
+  return Number.isSafeInteger(offset) ? offset : null
+}
+
+function validDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value ?? '')) return false
+  const [year, month, day] = value.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+}
+
+function nullableNumber(value) {
+  if (value == null) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function roundNullable(value) {
+  const number = nullableNumber(value)
+  return number == null ? null : Number(number.toFixed(2))
+}
+
+function safeLiveHoursSql(alias = 'l') {
+  return `CASE
+    WHEN COALESCE(${alias}.encerrado_em, ${alias}.previsto_fim) > ${alias}.iniciado_em
+      THEN LEAST(EXTRACT(EPOCH FROM (COALESCE(${alias}.encerrado_em, ${alias}.previsto_fim) - ${alias}.iniciado_em)) / 3600.0, 24.0)
+    ELSE NULL
+  END`
+}
+
+function nullableLiveOrdersSql(alias = 'l') {
+  return `CASE WHEN ${alias}.manual_orders IS NULL AND ${alias}.final_orders_count IS NULL
+    THEN NULL ELSE ${liveOrdersSql(alias)} END`
+}
+
+function reviewedLiveWhereSql(alias = 'l') {
+  return `${alias}.tenant_id = $1::uuid
+    AND ${alias}.cliente_id = $2::uuid
+    AND ${alias}.marca_id = $3::uuid
+    AND ${officialEndedLiveSql(alias)}
+    AND ${alias}.status_publicacao IN ('revisado', 'publicado')`
+}
+
+function noStore(reply) {
+  reply.header('Cache-Control', 'private, no-store')
+}
+
+function portalForbidden(reply) {
+  noStore(reply)
+  return reply.code(403).send({ error: 'Vínculo de cliente inválido' })
 }
 
 async function getClienteVinculado(db, tenantId, userId) {
@@ -113,214 +181,193 @@ export async function clienteInsightsRoutes(app) {
   const access = [app.authenticate, app.requirePapel(['cliente_parceiro'])]
 
   // ───────────────── GET /v1/cliente/home ─────────────────
-  app.get('/v1/cliente/home', { preHandler: access }, async (request) => {
+  app.get('/v1/cliente/home', { preHandler: access }, async (request, reply) => {
     const { sub: userId, tenant_id: tenantId } = request.user
-    const periodo = parsePeriodo(request.query)
+    noStore(reply)
+    const periodo = parsePortalPeriodo(request.query)
+    if (!periodo) return reply.code(400).send({ error: 'mes/ano inválidos' })
 
     return app.withTenant(tenantId, async (db) => {
-      const cliente = await getClienteVinculado(db, tenantId, userId)
-      if (!cliente) {
-        return {
-          periodo, cliente: null, gmv_mes: 0, gmv_lives_mes: 0, lives_mes: 0,
-          horas_live_mes: 0, pedidos: 0, gmv_por_live: 0, gmv_por_hora: 0,
-          live_now: [], proximas_lives_dia: [], series_mensais: [], melhores_horarios_venda: [],
-          contrato: null,
-          financeiro_cliente: { valor_fixo: 0, comissao_pct: 0, comissao_variavel: 0, total_devido: 0 },
-        }
-      }
-
-      const contrato = await getContratoAtivo(db, tenantId, cliente.id)
+      const context = await getClientePortalContext(db, userId, tenantId)
+      if (!context) return portalForbidden(reply)
 
       const resumoQ = await db.query(
         `WITH periodo AS (
-           SELECT make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${TZ}') AS inicio,
-                  make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${TZ}') + INTERVAL '1 month' AS fim
+           SELECT make_timestamptz($4::int, $5::int, 1, 0, 0, 0, '${TZ}') AS inicio,
+                  make_timestamptz($4::int, $5::int, 1, 0, 0, 0, '${TZ}') + INTERVAL '1 month' AS fim
          )
          SELECT
-           -- fat_gerado cru ignorava ads_gmv, onde o import do TikTok grava: toda live
-           -- importada aparecia com GMV zero só para o cliente. Mesma COALESCE do resto.
-           COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_mes,
+           COUNT(l.id)::int AS total_rows,
+           SUM(${officialLiveGmvSql('l')}) AS gmv_mes,
+           COUNT(l.id) FILTER (WHERE ${officialLiveGmvSql('l')} IS NOT NULL)::int AS gmv_known,
            COUNT(l.id)::int AS lives_mes,
-           COALESCE(SUM(${liveOrdersSql('l')}), 0)::int AS pedidos,
-           COALESCE(SUM(${liveHoursSql('l')}), 0) AS horas_live_mes
+           SUM(${nullableLiveOrdersSql('l')}) AS pedidos,
+           COUNT(l.id) FILTER (WHERE ${nullableLiveOrdersSql('l')} IS NOT NULL)::int AS pedidos_known,
+           SUM(${safeLiveHoursSql('l')}) AS horas_live_mes,
+           COUNT(l.id) FILTER (WHERE ${safeLiveHoursSql('l')} IS NOT NULL)::int AS horas_known
          FROM lives l CROSS JOIN periodo p
-         WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
-           AND l.status = 'encerrada'
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
+         WHERE ${reviewedLiveWhereSql('l')}
            AND l.iniciado_em >= p.inicio AND l.iniciado_em < p.fim`,
-        [tenantId, cliente.id, periodo.ano, periodo.mes],
+        [tenantId, context.clienteId, context.marcaId, periodo.ano, periodo.mes],
       )
       const resumo = resumoQ.rows[0] ?? {}
 
-      const liveNowQ = await db.query(
-        `SELECT l.id, l.iniciado_em, ${liveGmvSql('l')} AS gmv,
-                ${liveOrdersSql('l')}::int AS pedidos, c.numero AS cabine_numero
-         FROM lives l
-         LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
-         WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
-           AND l.status IN ('ao_vivo', 'em_andamento')
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
-         ORDER BY l.iniciado_em DESC LIMIT 3`,
-        [tenantId, cliente.id],
-      )
-
-      const proximasQ = await db.query(
-        // agenda_eventos não tem cliente_id: link via marca_id → marcas.cliente_id
-        // (mesmo padrão de lives.js). marca_id presente em todos os eventos de live.
-        `SELECT ae.id, ae.data_inicio, ae.data_fim, c.numero AS cabine_numero
-         FROM agenda_eventos ae
-         JOIN marcas m ON m.id = ae.marca_id AND m.tenant_id = ae.tenant_id
-         LEFT JOIN cabines c ON c.id = ae.cabine_id AND c.tenant_id = ae.tenant_id
-         WHERE ae.tenant_id = $1::uuid AND m.cliente_id = $2::uuid
-           AND ae.tipo = 'live' AND ae.data_inicio >= NOW()
-           AND (ae.data_inicio AT TIME ZONE '${TZ}')::date = (NOW() AT TIME ZONE '${TZ}')::date
-           AND ae.status NOT IN ('cancelado')
-         ORDER BY ae.data_inicio LIMIT 5`,
-        [tenantId, cliente.id],
-      )
-
       const seriesQ = await db.query(
-        `SELECT to_char(date_trunc('month', l.iniciado_em AT TIME ZONE '${TZ}'), 'YYYY-MM') AS mes,
-                COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv,
+        `WITH periodo AS (
+           SELECT make_timestamptz($4::int, $5::int, 1, 0, 0, 0, '${TZ}') AS fim
+         )
+         SELECT to_char(date_trunc('month', l.iniciado_em AT TIME ZONE '${TZ}'), 'YYYY-MM') AS mes,
+                SUM(${officialLiveGmvSql('l')}) AS gmv,
+                COUNT(l.id) FILTER (WHERE ${officialLiveGmvSql('l')} IS NOT NULL)::int AS gmv_known,
                 COUNT(l.id)::int AS lives
-         FROM lives l
-         WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
-           AND l.status = 'encerrada'
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
-           AND l.iniciado_em >= (date_trunc('month', NOW() AT TIME ZONE '${TZ}') - INTERVAL '5 months')
+         FROM lives l CROSS JOIN periodo p
+         WHERE ${reviewedLiveWhereSql('l')}
+           AND l.iniciado_em >= p.fim - INTERVAL '5 months' AND l.iniciado_em < p.fim + INTERVAL '1 month'
          GROUP BY 1 ORDER BY 1`,
-        [tenantId, cliente.id],
+        [tenantId, context.clienteId, context.marcaId, periodo.ano, periodo.mes],
       )
 
-      const gmvMes = round2(resumo.gmv_mes)
+      const isEmpty = Number(resumo.total_rows ?? 0) === 0
       const livesMes = Number(resumo.lives_mes ?? 0)
-      const horasLive = round2(resumo.horas_live_mes)
-      const pedidos = Number(resumo.pedidos ?? 0)
-      const valorFixo = toNumber(contrato?.valor_fixo)
-      const comissaoPct = toNumber(contrato?.comissao_pct)
-      const comissaoVariavel = round2(gmvMes * (comissaoPct / 100))
-      const totalDevido = round2(valorFixo + comissaoVariavel)
+      const gmvRaw = isEmpty ? 0 : (Number(resumo.gmv_known ?? 0) === livesMes ? nullableNumber(resumo.gmv_mes) : null)
+      const horasRaw = isEmpty ? 0 : (Number(resumo.horas_known ?? 0) === livesMes ? nullableNumber(resumo.horas_live_mes) : null)
+      const gmvMes = roundNullable(gmvRaw)
+      const horasLive = roundNullable(horasRaw)
+      const pedidos = isEmpty ? 0 : (Number(resumo.pedidos_known ?? 0) === livesMes ? nullableNumber(resumo.pedidos) : null)
+      const byLive = livesMes > 0 && gmvRaw != null ? round2(gmvRaw / livesMes) : null
+      const byHour = horasRaw > 0 && gmvRaw != null ? round2(gmvRaw / horasRaw) : null
+      const monthly = new Map(seriesQ.rows.map((row) => [row.mes, row]))
+      const seriesMensais = Array.from({ length: 6 }, (_, index) => {
+        const date = new Date(Date.UTC(periodo.ano, periodo.mes - 6 + index, 1))
+        const mes = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`
+        const row = monthly.get(mes)
+        return { mes, gmv: row ? (Number(row.gmv_known ?? 0) === Number(row.lives ?? 0) ? roundNullable(row.gmv) : null) : 0, lives: row ? Number(row.lives ?? 0) : 0 }
+      })
 
       return {
         periodo,
-        cliente: { id: cliente.id, nome: cliente.nome, nicho: cliente.nicho },
+        marca: { id: context.marcaId, nome: context.marcaNome },
         gmv_mes: gmvMes,
-        gmv_lives_mes: gmvMes,
         lives_mes: livesMes,
         horas_live_mes: horasLive,
         pedidos,
-        gmv_por_live: livesMes > 0 ? round2(gmvMes / livesMes) : 0,
-        gmv_por_hora: horasLive > 0 ? round2(gmvMes / horasLive) : 0,
-        live_now: liveNowQ.rows.map((r) => ({
-          id: r.id, iniciado_em: r.iniciado_em, gmv: round2(r.gmv),
-          pedidos: Number(r.pedidos ?? 0), cabine_numero: r.cabine_numero ?? null,
-        })),
-        proximas_lives_dia: proximasQ.rows.map((r) => ({
-          id: r.id, data_inicio: r.data_inicio, data_fim: r.data_fim, cabine_numero: r.cabine_numero ?? null,
-        })),
-        series_mensais: seriesQ.rows.map((r) => ({ mes: r.mes, gmv: round2(r.gmv), lives: Number(r.lives ?? 0) })),
-        melhores_horarios_venda: [],
-        contrato: contratoDTO(contrato, valorFixo, comissaoPct),
-        financeiro_cliente: { valor_fixo: valorFixo, comissao_pct: comissaoPct, comissao_variavel: comissaoVariavel, total_devido: totalDevido },
+        gmv_por_live: byLive,
+        gmv_por_hora: byHour,
+        series_mensais: seriesMensais,
       }
     })
   })
 
   // ───────────────── GET /v1/cliente/conteudo/lives ─────────────────
-  app.get('/v1/cliente/conteudo/lives', { preHandler: access }, async (request) => {
+  app.get('/v1/cliente/conteudo/lives', { preHandler: access }, async (request, reply) => {
     const { sub: userId, tenant_id: tenantId } = request.user
-    const periodo = parsePeriodo(request.query)
-    const emptyResumo = { gmv: 0, lives: 0, pedidos: 0, horas: 0 }
+    noStore(reply)
+    const periodo = parsePortalPeriodo(request.query)
+    const offset = parseOffset(request.query.offset)
+    if (!periodo || offset == null) return reply.code(400).send({ error: !periodo ? 'mes/ano inválidos' : 'offset inválido' })
 
     return app.withTenant(tenantId, async (db) => {
-      const cliente = await getClienteVinculado(db, tenantId, userId)
-      if (!cliente) return { periodo, resumo: emptyResumo, lives: [] }
+      const context = await getClientePortalContext(db, userId, tenantId)
+      if (!context) return portalForbidden(reply)
 
+      const resumoQ = await db.query(
+        `WITH periodo AS (
+           SELECT make_timestamptz($4::int, $5::int, 1, 0, 0, 0, '${TZ}') AS inicio,
+                  make_timestamptz($4::int, $5::int, 1, 0, 0, 0, '${TZ}') + INTERVAL '1 month' AS fim),
+         base AS (
+           SELECT l.id, l.iniciado_em, l.encerrado_em, l.status_publicacao,
+             ${officialLiveGmvSql('l')} AS gmv, ${nullableLiveOrdersSql('l')}::int AS pedidos,
+             ${safeLiveHoursSql('l')} * 60 AS duracao_min
+           FROM lives l CROSS JOIN periodo p
+           WHERE ${reviewedLiveWhereSql('l')}
+             AND l.iniciado_em >= p.inicio AND l.iniciado_em < p.fim)
+         SELECT COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE gmv IS NOT NULL)::int AS gmv_known,
+           COUNT(*) FILTER (WHERE pedidos IS NOT NULL)::int AS pedidos_known,
+           COUNT(*) FILTER (WHERE duracao_min IS NOT NULL)::int AS horas_known,
+           SUM(gmv) AS resumo_gmv, SUM(pedidos) AS resumo_pedidos,
+           SUM(duracao_min / 60.0) AS resumo_horas FROM base`,
+        [tenantId, context.clienteId, context.marcaId, periodo.ano, periodo.mes],
+      )
       const result = await db.query(
         `WITH periodo AS (
-           SELECT make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${TZ}') AS inicio,
-                  make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${TZ}') + INTERVAL '1 month' AS fim
-         )
-         SELECT
-           l.id, l.iniciado_em, l.encerrado_em, l.status, l.status_publicacao,
-           ${liveGmvSql('l')} AS gmv, ${liveOrdersSql('l')}::int AS pedidos,
-           l.manual_views, l.manual_likes, l.manual_comments, l.manual_shares, l.resumo,
-           c.numero AS cabine_numero, u.nome AS apresentador_nome,
-           GREATEST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.iniciado_em) - l.iniciado_em)) / 60, 0) AS duracao_min
+           SELECT make_timestamptz($4::int, $5::int, 1, 0, 0, 0, '${TZ}') AS inicio,
+                  make_timestamptz($4::int, $5::int, 1, 0, 0, 0, '${TZ}') + INTERVAL '1 month' AS fim)
+         SELECT l.id, l.iniciado_em, l.encerrado_em, l.status_publicacao,
+           ${officialLiveGmvSql('l')} AS gmv, ${nullableLiveOrdersSql('l')}::int AS pedidos,
+           ${safeLiveHoursSql('l')} * 60 AS duracao_min
          FROM lives l CROSS JOIN periodo p
-         LEFT JOIN cabines c ON c.id = l.cabine_id AND c.tenant_id = l.tenant_id
-         LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
-         WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
-           AND l.status = 'encerrada' AND l.status_publicacao = 'publicado'
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
+         WHERE ${reviewedLiveWhereSql('l')}
            AND l.iniciado_em >= p.inicio AND l.iniciado_em < p.fim
-         ORDER BY l.iniciado_em DESC LIMIT 200`,
-        [tenantId, cliente.id, periodo.ano, periodo.mes],
+         ORDER BY l.iniciado_em DESC, l.id DESC LIMIT 50 OFFSET $6`,
+        [tenantId, context.clienteId, context.marcaId, periodo.ano, periodo.mes, offset],
       )
 
       const lives = result.rows.map((r) => ({
         id: r.id, iniciado_em: r.iniciado_em, encerrado_em: r.encerrado_em,
-        status: r.status, status_publicacao: r.status_publicacao,
-        gmv: round2(r.gmv), pedidos: Number(r.pedidos ?? 0),
-        views: toNumber(r.manual_views), likes: toNumber(r.manual_likes),
-        comments: toNumber(r.manual_comments), shares: toNumber(r.manual_shares),
-        resumo: r.resumo ?? null, cabine_numero: r.cabine_numero ?? null,
-        apresentador_nome: r.apresentador_nome ?? null,
-        duracao_min: Math.round(toNumber(r.duracao_min)),
+        status: 'encerrada', status_publicacao: r.status_publicacao,
+        gmv: roundNullable(r.gmv), pedidos: nullableNumber(r.pedidos),
+        duracao_min: r.duracao_min == null ? null : Math.round(Number(r.duracao_min)),
       }))
-
-      const resumo = lives.reduce(
-        (acc, l) => ({
-          gmv: round2(acc.gmv + l.gmv), lives: acc.lives + 1,
-          pedidos: acc.pedidos + l.pedidos, horas: round2(acc.horas + l.duracao_min / 60),
-        }),
-        { ...emptyResumo },
-      )
-
-      return { periodo, resumo, lives }
+      const first = resumoQ.rows[0]
+      const total = Number(first?.total ?? 0)
+      return {
+        periodo,
+        resumo: {
+          gmv: total === 0 ? 0 : (Number(first?.gmv_known ?? 0) === total ? roundNullable(first?.resumo_gmv) : null),
+          lives: total,
+          pedidos: total === 0 ? 0 : (Number(first?.pedidos_known ?? 0) === total ? nullableNumber(first?.resumo_pedidos) : null),
+          horas: total === 0 ? 0 : (Number(first?.horas_known ?? 0) === total ? roundNullable(first?.resumo_horas) : null),
+        },
+        total, limit: 50, offset, lives,
+      }
     })
   })
 
   // ───────────────── GET /v1/cliente/analytics/diario ─────────────────
   app.get('/v1/cliente/analytics/diario', { preHandler: access }, async (request, reply) => {
     const { from, to } = request.query
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(from ?? '') || !/^\d{4}-\d{2}-\d{2}$/.test(to ?? '')) {
+    noStore(reply)
+    if (!validDate(from) || !validDate(to) || from > to) {
       return reply.code(400).send({ error: 'from/to devem estar em YYYY-MM-DD' })
     }
     const { sub: userId, tenant_id: tenantId } = request.user
 
     return app.withTenant(tenantId, async (db) => {
-      const cliente = await getClienteVinculado(db, tenantId, userId)
-      if (!cliente) return []
+      const context = await getClientePortalContext(db, userId, tenantId)
+      if (!context) return portalForbidden(reply)
 
       const result = await db.query(
         `SELECT
            (l.iniciado_em AT TIME ZONE '${TZ}')::date AS dia,
-           COALESCE(SUM(${liveGmvSql('l')}), 0) AS gmv_lives,
-           COALESCE(SUM(${liveOrdersSql('l')}), 0)::int AS pedidos,
+           SUM(${officialLiveGmvSql('l')}) AS gmv_lives,
+           COUNT(l.id) FILTER (WHERE ${officialLiveGmvSql('l')} IS NOT NULL)::int AS gmv_known,
+           SUM(${nullableLiveOrdersSql('l')}) AS pedidos,
+           COUNT(l.id) FILTER (WHERE ${nullableLiveOrdersSql('l')} IS NOT NULL)::int AS pedidos_known,
            COUNT(l.id)::int AS total_lives,
-           COALESCE(SUM(${liveHoursSql('l')}), 0) AS horas_live
+           SUM(${safeLiveHoursSql('l')}) AS horas_live,
+           COUNT(l.id) FILTER (WHERE ${safeLiveHoursSql('l')} IS NOT NULL)::int AS horas_known
          FROM lives l
-         WHERE l.tenant_id = $1::uuid AND l.cliente_id = $2::uuid
-           AND l.status = 'encerrada'
-           AND l.uniao_destino_id IS NULL AND l.uniao_desfeita_em IS NULL AND l.arquivada_em IS NULL
-           AND l.iniciado_em AT TIME ZONE '${TZ}' >= $3::date
-           AND l.iniciado_em AT TIME ZONE '${TZ}' < ($4::date + INTERVAL '1 day')
+         WHERE ${reviewedLiveWhereSql('l')}
+           AND l.iniciado_em AT TIME ZONE '${TZ}' >= $4::date
+           AND l.iniciado_em AT TIME ZONE '${TZ}' < ($5::date + INTERVAL '1 day')
          GROUP BY 1 ORDER BY 1`,
-        [tenantId, cliente.id, from, to],
+        [tenantId, context.clienteId, context.marcaId, from, to],
       )
 
       return result.rows.map((row) => {
-        const gmv = round2(row.gmv_lives)
-        const horas = toNumber(row.horas_live)
+        const gmvRaw = Number(row.gmv_known ?? 0) === Number(row.total_lives ?? 0) ? nullableNumber(row.gmv_lives) : null
+        const horasRaw = Number(row.horas_known ?? 0) === Number(row.total_lives ?? 0) ? nullableNumber(row.horas_live) : null
+        const gmv = roundNullable(gmvRaw)
+        const horas = roundNullable(horasRaw)
         const lives = Number(row.total_lives ?? 0)
         return {
           dia: typeof row.dia === 'string' ? row.dia : row.dia.toISOString().slice(0, 10),
-          gmv_lives: gmv, gmv_videos: 0, gmv_total: gmv,
-          pedidos: Number(row.pedidos ?? 0), total_lives: lives, total_videos: 0,
-          horas_live: round2(horas),
-          gmv_por_hora: horas > 0 ? round2(gmv / horas) : 0,
-          gmv_por_live: lives > 0 ? round2(gmv / lives) : 0,
+          gmv_lives: gmv, gmv_total: gmv,
+          pedidos: Number(row.pedidos_known ?? 0) === lives ? nullableNumber(row.pedidos) : null, total_lives: lives,
+          horas_live: horas,
+          gmv_por_hora: horasRaw > 0 && gmvRaw != null ? round2(gmvRaw / horasRaw) : null,
+          gmv_por_live: lives > 0 && gmvRaw != null ? round2(gmvRaw / lives) : null,
         }
       })
     })

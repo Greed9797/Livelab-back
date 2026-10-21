@@ -37,10 +37,10 @@ Owner: root
 
 ### T2: Consultar somente resultados revisados da marca
 Depends on: none
-Tests: mocks e PGlite para PORTAL-1,2,3,4,6,7
+Tests: mocks e PGlite para PORTAL-1,2,3,4,6,7; gate completo npm test -- --maxWorkers=4 aprovou 2168 testes e manteve 74 skips preexistentes
 Gate: Quick dados
 Done when: as três rotas reutilizam identidade/filtro/DTO seguro e o contrato alinhado com a UI.
-Status: in progress
+Status: complete
 Owner: backend_portal
 
 ### T3: Integrar contratos e preparar entrega local

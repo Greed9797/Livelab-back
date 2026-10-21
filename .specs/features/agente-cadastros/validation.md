@@ -2,9 +2,9 @@
 
 # Agente de atualização cadastral
 
-**Date**: 2026-10-21  
-**Spec**: `.specs/features/agente-cadastros/spec.md`  
-**Diff range**: `e718793..d24ceac980204cc19b0e59a6234dfc086549246e`  
+**Date**: 2026-10-21
+**Spec**: `.specs/features/agente-cadastros/spec.md`
+**Diff range**: `e718793..d24ceac980204cc19b0e59a6234dfc086549246e`
 **Verifier**: independent sub-agent, author ≠ verifier
 
 The feature meets all eight acceptance criteria. The first CI run exposed an exact-export compatibility regression; it was fixed in `132ddcf`. Commit `d24ceac` adds real-SQL detail-read, cross-tenant detail, and partial-update assertions without changing runtime source.

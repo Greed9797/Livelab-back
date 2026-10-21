@@ -27,10 +27,16 @@ Toda chave tem um **escopo**, escolhido na criação e fixo depois:
 |---|---|---|
 | `operacional` (padrão) | `automacao` | Lives, marcas, apresentadoras, import do TikTok — a lista logo abaixo |
 | `financeiro` | `automacao_financeiro` | Só lançamentos financeiros — ver [Financeiro](#financeiro) |
+| `cadastros` | `automacao_cadastros` | Consulta e correção cadastral por contrato — ver [Agente de cadastros](agente-cadastros.md) |
 
 Um escopo não enxerga as rotas do outro: a chave operacional leva 403 em todo o
 financeiro, e a financeira leva 403 em lives, marcas, apresentadoras e usuários.
-Quem precisa dos dois cria duas chaves.
+Quem precisa de mais de um escopo cria chaves separadas.
+
+O escopo `cadastros` tem sua própria lista restrita: `GET /v1/cadastros`,
+`GET /v1/cadastros/:id` e `PATCH /v1/cadastros/:id`. As permissões das chaves
+operacional e financeira continuam as mesmas. A nova chave não consulta contratos;
+o responsável fornece os documentos ao agente por seu canal de trabalho.
 
 Respostas de recusa:
 

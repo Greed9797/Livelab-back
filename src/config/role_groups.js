@@ -28,6 +28,10 @@ const ADMIN = ['franqueador_master', 'franqueado', 'gerente']
 //   fato alcança (sem DELETE, sem /config, sem Asaas) é a allowlist do plugin.
 export const AUTOMACAO = 'automacao'
 export const AUTOMACAO_FINANCEIRO = 'automacao_financeiro'
+// Escopo exclusivo para correção cadastral por contratos. Ele só é incluído
+// nos grupos específicos de /v1/cadastros abaixo: não herda marcas, clientes
+// ou qualquer outro domínio só por compartilhar dados de cadastro.
+export const AUTOMACAO_CADASTROS = 'automacao_cadastros'
 const ADMIN_COMERCIAL = [...ADMIN, 'gerente_comercial']
 
 // ─── FINANCEIRO ──────────────────────────────────────────────────────
@@ -111,6 +115,9 @@ export const READ_ANALYTICS = [
 // quem lia cliente continua lendo marca, e só a chave entra a mais.
 export const READ_MARCAS = [...READ_CLIENTES, AUTOMACAO]
 export const WRITE_MARCAS = [...WRITE_CLIENTES, AUTOMACAO]
+
+export const READ_CADASTROS = [...READ_MARCAS, AUTOMACAO_CADASTROS]
+export const WRITE_CADASTROS = [...WRITE_CLIENTES, AUTOMACAO_CADASTROS]
 
 export const READ_AGENDA = [
   ...ADMIN, 'operacional',

@@ -13,6 +13,7 @@ const MES_BODY = '[0-9]{4}-(?:0[1-9]|1[0-2])'
 // segunda trava, independente desta.
 const PAPEL_AUTOMACAO = 'automacao'
 const PAPEL_AUTOMACAO_FINANCEIRO = 'automacao_financeiro'
+const PAPEL_AUTOMACAO_CADASTROS = 'automacao_cadastros'
 
 // Portal externo: uma rota nova autenticada nasce fechada para clientes.
 // Usa o template registrado pelo Fastify, nunca um caminho fornecido no JWT.
@@ -140,11 +141,20 @@ export const ROTAS_API_KEY_FINANCEIRO = [
   ['PATCH', '/v1/financeiro/impostos/:mes/desfazer'],
 ]
 
+// Escopo de correção cadastral por contrato. Os métodos são deliberadamente
+// exatos: não cria, não promove cliente e não alcança nenhuma outra rota.
+export const ROTAS_API_KEY_CADASTROS = [
+  ['GET', '/v1/cadastros'],
+  ['GET', '/v1/cadastros/:id'],
+  ['PATCH', '/v1/cadastros/:id'],
+]
+
 // Papel da chave → allowlist. Papel fora daqui (linha mexida à mão no banco,
 // papel de gente) não alcança rota nenhuma.
 export const ROTAS_API_KEY_POR_PAPEL = Object.freeze({
   [PAPEL_AUTOMACAO]: ROTAS_API_KEY,
   [PAPEL_AUTOMACAO_FINANCEIRO]: ROTAS_API_KEY_FINANCEIRO,
+  [PAPEL_AUTOMACAO_CADASTROS]: ROTAS_API_KEY_CADASTROS,
 })
 
 const PLACEHOLDERS = Object.freeze({
@@ -231,7 +241,8 @@ async function authPlugin(app) {
 
   app.addHook('onSend', async (request, reply, payload) => {
     const route = request.routeOptions?.url ?? ''
-    if (request.user?.papel === 'cliente_parceiro' || route.startsWith('/v1/cliente/') || route.startsWith('/v1/auth/')) {
+    const cadastroRoute = route === '/v1/cadastros' || route.startsWith('/v1/cadastros/')
+    if (request.user?.papel === 'cliente_parceiro' || request.user?.papel === PAPEL_AUTOMACAO_CADASTROS || cadastroRoute || route.startsWith('/v1/cliente/') || route.startsWith('/v1/auth/')) {
       reply.header('Cache-Control', 'private, no-store')
     }
     return payload
@@ -358,6 +369,7 @@ async function authPlugin(app) {
       app.log.warn({ rota: request.url }, 'chave de API inválida, revogada ou expirada')
       return reply.code(401).send({ error: 'Chave de API inválida' })
     }
+    if (chave.papel === PAPEL_AUTOMACAO_CADASTROS) reply.header('Cache-Control', 'private, no-store')
     // `?? null`: papel ausente não pode cair no default do escopo operacional.
     if (!chaveAlcancaRota(request.method, request.url, chave.papel ?? null)) {
       app.log.warn(

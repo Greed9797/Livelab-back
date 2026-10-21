@@ -12,7 +12,7 @@ import { ensureClienteMarca } from './client-brand.js'
 import { cadastroColsSql, cadastroFromSql, cadastroMetricasMesJoinSql, cadastroStatusSql, CAMPOS_FICHA_SENSIVEIS } from '../lib/cadastro-sql.js'
 import { buildConfiguracaoComercial, MARCA_NOME_DUPLICADA } from '../routes/marcas.js'
 import { CLIENTE_STATUS_VIVOS } from '../routes/clientes.js'
-import { tiktokUsernameField, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
+import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
 import { resolveMonthRange } from '../lib/operacional.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -82,6 +82,52 @@ export const atualizarCadastroSchema = z.object({
   ...camposFicha,
 })
 
+// A automação de contratos só corrige estes dados factuais. Campos de ciclo
+// comercial, vínculo, status, datas, observações e condições ficam fora.
+export const CAMPOS_AUTOMACAO_CADASTROS = Object.freeze([
+  'nome', 'celular', 'email', 'cpf', 'cnpj', 'razao_social', 'nicho',
+  'fat_anual', 'cidade', 'estado', 'cep', 'vende_tiktok', 'site',
+  'marketplace_url', 'tiktok_username', 'logo_url', 'cor',
+])
+
+const atualizarCadastroAutomacaoSchema = z.object({
+  nome: z.string().trim().min(1).optional(),
+  celular: camposFicha.celular,
+  email: camposFicha.email,
+  cpf: camposFicha.cpf,
+  cnpj: camposFicha.cnpj,
+  razao_social: camposFicha.razao_social,
+  nicho: camposFicha.nicho,
+  fat_anual: camposFicha.fat_anual,
+  cidade: camposFicha.cidade,
+  estado: camposFicha.estado,
+  cep: camposFicha.cep,
+  vende_tiktok: camposFicha.vende_tiktok,
+  site: camposComuns.site,
+  marketplace_url: camposComuns.marketplace_url,
+  tiktok_username: camposComuns.tiktok_username,
+  logo_url: camposComuns.logo_url,
+  cor: camposComuns.cor,
+}).strict()
+
+export function validarAtualizacaoAutomacao(dados) {
+  const body = dados && typeof dados === 'object' && !Array.isArray(dados) ? dados : null
+  if (!body) throw new CadastroError(400, 'CADASTRO_INVALIDO', 'Payload inválido')
+  const referenciaDocumento = typeof body.referencia_documento === 'string' ? body.referencia_documento.trim() : ''
+  if (!referenciaDocumento || referenciaDocumento.length > 500) {
+    throw new CadastroError(400, 'REFERENCIA_DOCUMENTO_OBRIGATORIA', 'referencia_documento é obrigatória')
+  }
+  const proibidos = Object.keys(body).filter((campo) => campo !== 'referencia_documento' && !CAMPOS_AUTOMACAO_CADASTROS.includes(campo))
+  if (proibidos.length > 0) {
+    throw new CadastroError(403, 'CAMPO_NAO_PERMITIDO', 'Esta chave só pode corrigir dados cadastrais.', { campos: proibidos })
+  }
+  const { referencia_documento: _referenciaDocumento, ...campos } = body
+  const parsed = atualizarCadastroAutomacaoSchema.safeParse(campos)
+  if (!parsed.success) throw new CadastroError(400, 'CADASTRO_INVALIDO', parsed.error.issues[0].message)
+  if (Object.keys(parsed.data).length === 0) throw new CadastroError(400, 'CADASTRO_SEM_CAMPOS', 'Nenhum campo para atualizar')
+  return { dados: parsed.data, referenciaDocumento }
+}
+
 export const promoverSchema = z.object({
   cliente_id: z.string().uuid().optional(),
   celular: z.string().optional(),
@@ -136,6 +182,50 @@ export function mapCadastroRow(row, { ocultarFicha = false } = {}) {
   // a carteira de clientes (contato/faturamento) — mesma regra de READ_MARCAS.
   if (ocultarFicha) for (const campo of CAMPOS_FICHA_SENSIVEIS) out[campo] = null
   return out
+}
+
+function mapCadastroAutomacaoRow(row) {
+  if (!row) return null
+  const out = { id: row.marca_id, marca_id: row.marca_id, cliente_id: row.cliente_id }
+  for (const campo of CAMPOS_AUTOMACAO_CADASTROS) out[campo] = row[campo] ?? null
+  if (out.fat_anual !== null) out.fat_anual = Number(out.fat_anual)
+  return out
+}
+
+/** DTO estrito para a chave de contratos: somente IDs e os 17 campos editáveis. */
+export async function obterCadastroAutomacao(db, { tenantId, id }) {
+  const marcaId = await resolverCadastroId(db, { tenantId, id })
+  if (!marcaId) return null
+  const { rows } = await db.query(
+    `SELECT m.id AS marca_id, c.id AS cliente_id,
+            m.nome, c.celular, c.email, c.cpf, c.cnpj, c.razao_social, c.nicho,
+            c.fat_anual, c.cidade, c.estado, c.cep, c.vende_tiktok,
+            COALESCE(m.site, c.site) AS site, m.marketplace_url,
+            ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username,
+            COALESCE(m.logo_url, c.logo_url) AS logo_url, m.cor
+       FROM marcas m
+       LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id AND m.tipo = 'cliente'
+      WHERE m.id = $1::uuid AND m.tenant_id = $2::uuid`,
+    [marcaId, tenantId],
+  )
+  return mapCadastroAutomacaoRow(rows[0])
+}
+
+export async function listarCadastrosAutomacao(db, { tenantId }) {
+  const { rows } = await db.query(
+    `SELECT m.id AS marca_id, c.id AS cliente_id,
+            m.nome, c.celular, c.email, c.cpf, c.cnpj, c.razao_social, c.nicho,
+            c.fat_anual, c.cidade, c.estado, c.cep, c.vende_tiktok,
+            COALESCE(m.site, c.site) AS site, m.marketplace_url,
+            ${tiktokUsernameSql({ marca: 'm', cliente: 'c' })} AS tiktok_username,
+            COALESCE(m.logo_url, c.logo_url) AS logo_url, m.cor
+       FROM marcas m
+       LEFT JOIN clientes c ON c.id = m.cliente_id AND c.tenant_id = m.tenant_id AND m.tipo = 'cliente'
+      WHERE m.tenant_id = $1::uuid
+      ORDER BY m.nome ASC`,
+    [tenantId],
+  )
+  return rows.map(mapCadastroAutomacaoRow)
 }
 
 /**
@@ -346,7 +436,7 @@ function setClause(updates, offset) {
  *  - tipo/cliente_id: 409 (use POST /v1/cadastros/:id/promover-cliente);
  *  - campos financeiros: 409 (use /v1/marcas/:id/condicoes).
  */
-export async function atualizarCadastro(db, { tenantId, id, dados }) {
+export async function atualizarCadastro(db, { tenantId, id, dados, antesDeCommit = null, obterResultado = null }) {
   rejeitarFinanceiro(dados)
   if (dados && (Object.hasOwn(dados, 'tipo') || Object.hasOwn(dados, 'cliente_id'))) {
     throw new CadastroError(409, 'USE_PROMOVER_CLIENTE',
@@ -373,6 +463,7 @@ export async function atualizarCadastro(db, { tenantId, id, dados }) {
     if (clienteId) {
       await db.query('SELECT id FROM clientes WHERE id = $1::uuid AND tenant_id = $2::uuid FOR UPDATE', [clienteId, tenantId])
     }
+    const antes = antesDeCommit ? await obterCadastroAutomacao(db, { tenantId, id: marca.id }) : null
 
     const fichaUpd = {}
     const marcaUpd = {}
@@ -450,8 +541,14 @@ export async function atualizarCadastro(db, { tenantId, id, dados }) {
         )
       }
     }
+    if (antesDeCommit) {
+      const depois = await obterCadastroAutomacao(db, { tenantId, id: marca.id })
+      await antesDeCommit({ antes, depois, marcaId: marca.id })
+    }
   })
-  return obterCadastro(db, { tenantId, id: marcaId })
+  return obterResultado
+    ? obterResultado(db, { tenantId, id: marcaId })
+    : obterCadastro(db, { tenantId, id: marcaId })
 }
 
 /**

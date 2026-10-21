@@ -3,13 +3,16 @@
 // /v1/clientes e /v1/marcas continuam respondendo o mesmo formato.
 // Contrato: docs/api-automacao.md ("Cadastros") e src/lib/cadastro-sql.js.
 import { performance } from 'node:perf_hooks'
-import { READ_MARCAS, WRITE_CLIENTES } from '../config/role_groups.js'
+import { READ_CADASTROS, WRITE_CADASTROS } from '../config/role_groups.js'
 import { origemDados } from '../plugins/auth.js'
 import { buildCacheKey, invalidateTenant, setCacheControl, withCache } from '../lib/dashboard-cache.js'
 import { LISTAGEM_NAMESPACES } from './marcas.js'
 import {
   CadastroError,
   atualizarCadastro,
+  listarCadastrosAutomacao,
+  obterCadastroAutomacao,
+  validarAtualizacaoAutomacao,
   criarCadastro,
   listarCadastros,
   obterCadastro,
@@ -41,11 +44,16 @@ function responderErro(reply, error) {
 export async function cadastrosRoutes(app) {
   // Leitura: quem lê marcas (inclui a chave de API do bot, que só alcança os GET —
   // ver ROTAS_API_KEY em src/plugins/auth.js). Escrita: quem escreve clientes.
-  const readAccess = [app.authenticate, app.requirePapel(READ_MARCAS)]
-  const writeAccess = [app.authenticate, app.requirePapel(WRITE_CLIENTES)]
+  const readAccess = [app.authenticate, app.requirePapel(READ_CADASTROS)]
+  const writeAccess = [app.authenticate, app.requirePapel(WRITE_CADASTROS)]
+  const isCadastroAutomation = (request) => request.user?.papel === 'automacao_cadastros' && Boolean(request.viaApiKey)
 
   app.get('/v1/cadastros', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
+    if (isCadastroAutomation(request)) {
+      reply.header('Cache-Control', 'private, no-store')
+      return app.withTenant(tenant_id, (db) => listarCadastrosAutomacao(db, { tenantId: tenant_id }))
+    }
     const { tipo, status, q } = request.query ?? {}
     const geraReceita = parseBool(request.query?.gera_receita)
     const incluirSistema = parseBool(request.query?.sistema) !== false
@@ -66,6 +74,12 @@ export async function cadastrosRoutes(app) {
   app.get('/v1/cadastros/:id', { preHandler: readAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     return app.withTenant(tenant_id, async (db) => {
+      if (isCadastroAutomation(request)) {
+        reply.header('Cache-Control', 'private, no-store')
+        const cadastro = await obterCadastroAutomacao(db, { tenantId: tenant_id, id: request.params.id })
+        if (!cadastro) return reply.code(404).send({ code: 'CADASTRO_NAO_ENCONTRADO', error: 'Cadastro não encontrado' })
+        return cadastro
+      }
       const cadastro = await obterCadastro(db, {
         tenantId: tenant_id, id: request.params.id, ocultarFicha: Boolean(request.viaApiKey),
       })
@@ -93,11 +107,38 @@ export async function cadastrosRoutes(app) {
 
   app.patch('/v1/cadastros/:id', { preHandler: writeAccess }, async (request, reply) => {
     const { tenant_id } = request.user
+    let automacao
+    if (isCadastroAutomation(request)) {
+      try {
+        automacao = validarAtualizacaoAutomacao(request.body)
+      } catch (error) {
+        return responderErro(reply, error)
+      }
+    }
     return app.withTenant(tenant_id, async (db) => {
       try {
-        const cadastro = await atualizarCadastro(db, { tenantId: tenant_id, id: request.params.id, dados: request.body })
+        const cadastro = await atualizarCadastro(db, {
+          tenantId: tenant_id,
+          id: request.params.id,
+          dados: automacao?.dados ?? request.body,
+          obterResultado: automacao ? obterCadastroAutomacao : null,
+          antesDeCommit: automacao ? async ({ antes, depois, marcaId }) => {
+            const camposAlterados = Object.keys(automacao.dados)
+            const selecionarCampos = (cadastro) => Object.fromEntries(camposAlterados.map((campo) => [campo, cadastro?.[campo] ?? null]))
+            await app.audit.log(request, {
+              action: 'cadastro.update_by_contract_agent',
+              entity_type: 'marca',
+              entity_id: marcaId,
+              metadata: {
+                referencia_documento: automacao.referenciaDocumento,
+                antes: selecionarCampos(antes),
+                depois: selecionarCampos(depois),
+              },
+            }, { db, strict: true })
+          } : null,
+        })
         invalidateTenant(tenant_id, LISTAGEM_NAMESPACES)
-        app.audit?.log?.(request, {
+        if (!automacao) app.audit?.log?.(request, {
           action: 'cadastro.update', entity_type: 'marca', entity_id: cadastro?.marca_id,
           metadata: { changed_fields: Object.keys(request.body ?? {}) },
         })?.catch?.((err) => app.log.error({ err }, 'audit log failed'))

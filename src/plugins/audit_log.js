@@ -25,7 +25,7 @@ async function auditLogPlugin(app) {
      * @param {FastifyRequest} request — para extrair user_id, tenant_id, ip, ua
      * @param {{action: string, entity_type?: string, entity_id?: string, metadata?: object}} info
      */
-    async log(request, info) {
+    async log(request, info, { db = app.db, strict = false } = {}) {
       try {
         const tenantId = request.user?.tenant_id ?? null
         // Quando quem age é uma chave de API, o `sub` é `apikey:<uuid>` — string
@@ -45,7 +45,7 @@ async function auditLogPlugin(app) {
           metadata.api_key_nome = request.viaApiKey.nome
         }
 
-        await app.db.query(
+        await db.query(
           `INSERT INTO audit_log
              (tenant_id, user_id, action, entity_type, entity_id, metadata, ip, user_agent)
            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`,
@@ -61,6 +61,7 @@ async function auditLogPlugin(app) {
           ],
         )
       } catch (err) {
+        if (strict) throw err
         // Audit log nunca pode quebrar fluxo da request.
         // Loga + continua.
         request.log.warn({ err, info }, '[audit] log falhou — request prossegue')

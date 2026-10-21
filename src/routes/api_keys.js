@@ -15,13 +15,14 @@
 import { z } from 'zod'
 import { randomBytes } from 'node:crypto'
 import { hashDaChave } from '../plugins/auth.js'
-import { AUTOMACAO, AUTOMACAO_FINANCEIRO } from '../config/role_groups.js'
+import { AUTOMACAO, AUTOMACAO_CADASTROS, AUTOMACAO_FINANCEIRO } from '../config/role_groups.js'
 
 const ADMIN = ['franqueador_master', 'franqueado', 'gerente']
 
 export const PAPEL_POR_ESCOPO = Object.freeze({
   operacional: AUTOMACAO,
   financeiro: AUTOMACAO_FINANCEIRO,
+  cadastros: AUTOMACAO_CADASTROS,
 })
 const escopoDoPapel = (papel) =>
   Object.keys(PAPEL_POR_ESCOPO).find((escopo) => PAPEL_POR_ESCOPO[escopo] === papel) ?? null
@@ -32,9 +33,9 @@ const criarSchema = z.object({
   // quiser uma chave temporária passa a data.
   expira_em: z.string().datetime().nullable().optional(),
   // Sem escopo = chave operacional, como sempre foi. O papel em si nunca vem do
-  // body: só um destes dois escopos, mapeados aqui.
-  escopo: z.enum(['operacional', 'financeiro'], {
-    error: "escopo deve ser 'operacional' ou 'financeiro'",
+  // body: só um destes escopos, mapeados aqui.
+  escopo: z.enum(['operacional', 'financeiro', 'cadastros'], {
+    error: "escopo deve ser 'operacional', 'financeiro' ou 'cadastros'",
   }).default('operacional'),
 })
 

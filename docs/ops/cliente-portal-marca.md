@@ -17,7 +17,9 @@ Implementação local do portal somente de leitura da marca contratante. Login, 
 
 Backend base: `b987be35afb4bacd8f8160970b7ec3ba8c7e5506`. Frontend base do GitHub: `ff3df3347d5db81c226f52d5b163b3c02de3e7e7`.
 
-A versão pública do frontend consultada em 21/10/2026 identificou o build como `1791570506329` (09/10/2026, 15:28, São Paulo). Esse identificador não é um commit nem um ID de deployment. O deployment exato de rollback deve ser registrado pela Vercel antes da publicação; não assumir que a base do GitHub corresponde ao build publicado.
+A versão pública do frontend consultada em 21/10/2026 identificou o build como `1791570506329` (09/10/2026, 15:28, São Paulo). Esse identificador não é um commit nem um ID de deployment. O workflow anterior bem-sucedido é `37973187138`, commit `0155a0f5`, com deployment `https://liveshop-saas-frontend-react-87zj73jit-leonardoames-projects.vercel.app` e inspeção `https://vercel.com/leonardoames-projects/liveshop-saas-frontend-react/7iQ1geBnGKxENnyUuqLVmrCktGRH`. O log confirma o alias `app.grupolivelab.com.br`. Não assumir que a base do GitHub corresponde ao build publicado.
+
+O projeto Vercel antigo no scope `greed9797s-projects` não atende o alias atual. A produção do workflow está no scope `leonardoames-projects`; usar os secrets já configurados no GitHub Actions, sem substituir seus IDs pelos exemplos antigos da documentação. O token Vercel disponível no shell nesta sessão alcança o projeto antigo e não deve ser usado para publicar o app atual.
 
 O trabalho local anterior está preservado em `/Users/lucas/livelab-analysis/local-sync-20261021-093618`, nas branches e stashes registrados nos arquivos `restore.json`. Caches do indexador gerados na análise foram guardados fora dos diffs de implementação.
 
@@ -31,7 +33,13 @@ Na máquina compartilhada, `npm test -- --maxWorkers=4` executa a suíte inteira
 
 O relatório independente em `.specs/features/cliente-portal-marca/validation.md` registra evidências, gates e sensores de regressão. A implementação só está validada quando esse relatório indicar PASS.
 
-## Publicação: autorização separada obrigatória
+Na preparação autorizada de 21/10, os lockfiles receberam patches compatíveis: `follow-redirects` 1.16.1 nos dois repositórios e Vite 7.3.7 no frontend. Nenhuma dependência foi adicionada. A repetição de `npm audit --omit=dev --json` retornou zero vulnerabilidades de produção nos dois projetos. Referências dos patches: [follow-redirects](https://github.com/advisories/GHSA-q3jh-wrc6-jgq8), [Vite](https://github.com/advisories/GHSA-587h-7wmj-h5pm).
+
+Os gates finais também são executados nos runners do GitHub antes de avançar as branches de produção. A máquina local apresentou carga 186 em 10 núcleos e timeouts de 5 segundos em arquivos diferentes, embora os arquivos isolados passassem. Não aumentar timeouts, omitir testes nem tratar uma execução cancelada ou com timeout como PASS.
+
+## Publicação autorizada em 21/10/2026
+
+O usuário autorizou explicitamente implementar e publicar o portal e o escopo de atualização cadastral do agente. O responsável indicou uma marca piloto e um e-mail nesta sessão, mantidos fora do repositório. A associação exige conferir a ficha/marca existente e usar uma sessão administrativa válida; não criar outra marca nem alterar os resultados para fazer o teste passar. A entrega não executa a correção em massa de dados reais.
 
 1. Registrar os commits aprovados dos dois repositórios, o commit backend atualmente servido por `/health`, a versão pública do frontend e os IDs dos deployments anteriores no Railway e na Vercel.
 2. Conferir os diffs de `migrations/` e `apply_migrations.js` e as migrations pendentes do ambiente com o responsável. O Railway executa migrations antes de servir o container novo; nenhuma migration nova pertence a este recurso.

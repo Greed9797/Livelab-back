@@ -38,7 +38,7 @@ Verification: regressão adicional com registro real de relatoriosRoutes confirm
 
 ### T2: Consultar somente resultados revisados da marca
 Depends on: none
-Tests: mocks e PGlite para PORTAL-1,2,3,4,6,7; gate completo npm test -- --maxWorkers=4 aprovou 2168 testes e manteve 74 skips preexistentes
+Tests: mocks e PGlite para PORTAL-1,2,3,4,6,7; gate final independente npm test -- --maxWorkers=4 aprovou 2169 testes e manteve 74 skips preexistentes
 Gate: Quick dados
 Done when: as três rotas reutilizam identidade/filtro/DTO seguro e o contrato alinhado com a UI.
 Status: complete
@@ -57,5 +57,7 @@ Depends on: T3
 Tests: revisão dos dois repositórios e pelo menos cinco mutações em cópias descartáveis
 Gate: Build
 Done when: validation.md com evidências, sensores mortos e validação determinística PASS.
-Status: pending
+Status: complete
 Owner: verifier
+
+Verification: validation.md PASS independente para PORTAL-1 a PORTAL-10; seis mutações em scratch detectadas, sem alterações nos worktrees reais.

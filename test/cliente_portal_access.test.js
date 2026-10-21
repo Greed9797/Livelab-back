@@ -1,6 +1,7 @@
 import Fastify from 'fastify'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { authPlugin } from '../src/plugins/auth.js'
+import { relatoriosRoutes } from '../src/routes/relatorios.js'
 
 const tenant = '11111111-1111-4111-8111-111111111111'
 const actor = '22222222-2222-4222-8222-222222222222'
@@ -10,7 +11,7 @@ afterEach(async () => {
   vi.unstubAllEnvs()
 })
 
-async function build({ guard = 'authenticate', papel = 'cliente_parceiro', state, unavailable = false } = {}) {
+async function build({ guard = 'authenticate', papel = 'cliente_parceiro', state, unavailable = false, originalReport = false } = {}) {
   vi.stubEnv('JWT_SECRET', 'synthetic-local-client-portal-access-key-2026')
   const app = Fastify()
   apps.push(app)
@@ -20,6 +21,8 @@ async function build({ guard = 'authenticate', papel = 'cliente_parceiro', state
     return { rows: state === null ? [] : [state ?? current] }
   })
   app.decorate('db', { query })
+  const withTenant = vi.fn(async () => { throw new Error('legacy report handler must not execute') })
+  app.decorate('withTenant', withTenant)
   await authPlugin(app)
   const handler = vi.fn(async () => ({ reached: true }))
   const preHandler = guard === 'role'
@@ -40,10 +43,14 @@ async function build({ guard = 'authenticate', papel = 'cliente_parceiro', state
     ['PATCH', '/v1/cliente/meta'], ['POST', '/v1/onboarding'],
     ['GET', '/v1/auth/senha'], ['POST', '/v1/cliente/home'],
   ]
-  for (const [method, url] of routes) app.route({ method, url, preHandler, handler })
+  for (const [method, url] of routes) {
+    if (originalReport && url === '/v1/relatorios/cliente/:id/pdf') continue
+    app.route({ method, url, preHandler, handler })
+  }
+  if (originalReport) await app.register(relatoriosRoutes)
   app.get('/v1/cliente/fails', { preHandler }, async () => { throw new Error('synthetic') })
   const token = app.jwt.sign({ sub: actor, tenant_id: tenant, papel, token_version: 1 })
-  return { app, handler, query, headers: { authorization: `Bearer ${token}` } }
+  return { app, handler, query, withTenant, headers: { authorization: `Bearer ${token}` } }
 }
 
 describe.each(['authenticate', 'role', 'both'])('cliente portal allowlist through %s', (guard) => {
@@ -81,6 +88,16 @@ describe.each(['authenticate', 'role', 'both'])('cliente portal allowlist throug
 })
 
 describe('cliente portal current sessions', () => {
+  it('blocks the actual legacy PDF registration before resolving any customer report data', async () => {
+    const { app, headers, withTenant, query } = await build({ originalReport: true })
+    const response = await app.inject({ url: `/v1/relatorios/cliente/${actor}/pdf?periodo=2026-10`, headers })
+    expect(response.statusCode).toBe(403)
+    expect(response.json()).toEqual({ error: 'Recurso indisponível no portal do cliente.' })
+    expect(response.headers['cache-control']).toBe('private, no-store')
+    expect(withTenant).not.toHaveBeenCalled()
+    expect(query).toHaveBeenCalledOnce()
+    expect(query.mock.calls[0][0]).toContain('SELECT token_version, ativo, papel, tenant_id FROM users')
+  })
   it.each([
     ['missing', null],
     ['inactive', { token_version: 1, ativo: false, papel: 'cliente_parceiro', tenant_id: tenant }],

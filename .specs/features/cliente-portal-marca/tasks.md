@@ -34,6 +34,7 @@ Gate: Quick auth
 Done when: PORTAL-4,5,8 atendidos no limite da API sem alterar papéis internos.
 Status: complete
 Owner: root
+Verification: regressão adicional com registro real de relatoriosRoutes confirmou 403 antes de consultar dados do relatório; 83 testes de acesso aprovados.
 
 ### T2: Consultar somente resultados revisados da marca
 Depends on: none

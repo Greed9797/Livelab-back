@@ -91,6 +91,14 @@ describe('automação cadastral em PostgreSQL real', () => {
       'razao_social', 'site', 'tiktok_username', 'vende_tiktok',
     ])
 
+    const detail = await app.inject({ method: 'GET', url: `/v1/cadastros/${marca}`, headers: { 'x-api-key': chave } })
+    expect(detail.statusCode).toBe(200)
+    expect(detail.headers['cache-control']).toBe('private, no-store')
+    expect(detail.json()).toEqual(list.json()[0])
+    const foreignDetail = await app.inject({ method: 'GET', url: `/v1/cadastros/${outraMarca}`, headers: { 'x-api-key': chave } })
+    expect(foreignDetail.statusCode).toBe(404)
+    expect(foreignDetail.headers['cache-control']).toBe('private, no-store')
+
     const patch = await app.inject({
       method: 'PATCH', url: `/v1/cadastros/${marca}`, headers: { 'x-api-key': chave },
       payload: {
@@ -123,6 +131,17 @@ describe('automação cadastral em PostgreSQL real', () => {
     expect(audit.metadata.depois.cnpj).toBe('[redacted]')
     expect(Object.keys(audit.metadata.antes).sort()).toHaveLength(17)
     expect(audit.user_id).toBe(keyId)
+
+    const partial = await app.inject({
+      method: 'PATCH', url: `/v1/cadastros/${marca}`, headers: { 'x-api-key': chave },
+      payload: { cidade: 'Indaial', referencia_documento: 'Aditivo endereco, pagina 1' },
+    })
+    expect(partial.statusCode).toBe(200)
+    expect(partial.headers['cache-control']).toBe('private, no-store')
+    expect(partial.json()).toEqual({ ...corrigido, cidade: 'Indaial' })
+    const partialAudit = (await db.query("SELECT metadata FROM audit_log WHERE metadata->>'referencia_documento' = 'Aditivo endereco, pagina 1'")).rows[0]
+    expect(partialAudit.metadata.antes).toEqual({ cidade: 'Gaspar' })
+    expect(partialAudit.metadata.depois).toEqual({ cidade: 'Indaial' })
 
     const other = await app.inject({ method: 'PATCH', url: `/v1/cadastros/${outraMarca}`, headers: { 'x-api-key': chave }, payload: { nome: 'Invadida', referencia_documento: 'Contrato' } })
     if (other.statusCode !== 404) throw new Error(other.body)

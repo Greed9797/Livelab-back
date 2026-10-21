@@ -3,7 +3,7 @@
 // /v1/clientes e /v1/marcas continuam respondendo o mesmo formato.
 // Contrato: docs/api-automacao.md ("Cadastros") e src/lib/cadastro-sql.js.
 import { performance } from 'node:perf_hooks'
-import { READ_CADASTROS, WRITE_CADASTROS } from '../config/role_groups.js'
+import { READ_MARCAS, WRITE_CLIENTES, AUTOMACAO_CADASTROS } from '../config/role_groups.js'
 import { origemDados } from '../plugins/auth.js'
 import { buildCacheKey, invalidateTenant, setCacheControl, withCache } from '../lib/dashboard-cache.js'
 import { LISTAGEM_NAMESPACES } from './marcas.js'
@@ -44,8 +44,8 @@ function responderErro(reply, error) {
 export async function cadastrosRoutes(app) {
   // Leitura: quem lê marcas (inclui a chave de API do bot, que só alcança os GET —
   // ver ROTAS_API_KEY em src/plugins/auth.js). Escrita: quem escreve clientes.
-  const readAccess = [app.authenticate, app.requirePapel(READ_CADASTROS)]
-  const writeAccess = [app.authenticate, app.requirePapel(WRITE_CADASTROS)]
+  const readAccess = [app.authenticate, app.requirePapel([...READ_MARCAS, AUTOMACAO_CADASTROS])]
+  const writeAccess = [app.authenticate, app.requirePapel([...WRITE_CLIENTES, AUTOMACAO_CADASTROS])]
   const isCadastroAutomation = (request) => request.user?.papel === 'automacao_cadastros' && Boolean(request.viaApiKey)
 
   app.get('/v1/cadastros', { preHandler: readAccess }, async (request, reply) => {

@@ -116,9 +116,6 @@ export const READ_ANALYTICS = [
 export const READ_MARCAS = [...READ_CLIENTES, AUTOMACAO]
 export const WRITE_MARCAS = [...WRITE_CLIENTES, AUTOMACAO]
 
-export const READ_CADASTROS = [...READ_MARCAS, AUTOMACAO_CADASTROS]
-export const WRITE_CADASTROS = [...WRITE_CLIENTES, AUTOMACAO_CADASTROS]
-
 export const READ_AGENDA = [
   ...ADMIN, 'operacional',
   'auditor', 'suporte', 'produtor_live', 'marketing', 'comercial_readonly',

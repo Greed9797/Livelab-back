@@ -29,3 +29,38 @@ export async function getClienteId(db, userId, tenantId) {
   const r = await getClienteVinculado(db, userId, tenantId)
   return r?.id ?? null
 }
+
+/**
+ * Contexto mínimo do portal externo. Um usuário de cliente só enxerga dados
+ * quando o vínculo e a marca contratante são ambos únicos no tenant do JWT.
+ * Retornar null é intencional: qualquer inconsistência deve falhar fechada.
+ */
+export async function getClientePortalContext(db, userId, tenantId) {
+  if (!tenantId || !userId) return null
+
+  const clienteResult = await db.query(
+    `SELECT id, nome
+       FROM clientes
+      WHERE user_id = $1
+        AND tenant_id = $2::uuid`,
+    [userId, tenantId],
+  )
+  if (clienteResult.rows.length !== 1) return null
+
+  const cliente = clienteResult.rows[0]
+  const marcaResult = await db.query(
+    `SELECT id, nome
+       FROM marcas
+      WHERE tenant_id = $1::uuid
+        AND cliente_id = $2::uuid
+        AND tipo = 'cliente'`,
+    [tenantId, cliente.id],
+  )
+  if (marcaResult.rows.length !== 1) return null
+
+  return {
+    clienteId: cliente.id,
+    marcaId: marcaResult.rows[0].id,
+    marcaNome: marcaResult.rows[0].nome,
+  }
+}

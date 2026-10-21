@@ -1,8 +1,12 @@
 import { z } from 'zod'
 import { parseMoneyToDecimal } from '../lib/money.js'
 import { tiktokUsernameField } from '../lib/tiktok-username.js'
+import { getClientePortalContext } from '../lib/cliente_resolver.js'
 
 export async function clientePortalRoutes(app) {
+  app.addHook('onRequest', async (_request, reply) => {
+    reply.header('Cache-Control', 'private, no-store')
+  })
   // Helper: resolve cliente_id from authenticated user_id (FK) scoped by JWT tenant.
   async function getClienteId(db, userId, tenantId) {
     const res = await db.query(
@@ -153,19 +157,26 @@ export async function clientePortalRoutes(app) {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
   }, async (request, reply) => {
     return app.withTenant(request.user.tenant_id, async (db) => {
+      const context = await getClientePortalContext(db, request.user.sub, request.user.tenant_id)
+      if (!context) return reply.code(403).send({ error: 'Vínculo de cliente e marca não configurado.' })
       const r = await db.query(
         `SELECT id, nome, email, celular, cnpj, razao_social,
-                site, logo_url, status, fat_anual, nicho, cidade, estado, tiktok_username
+                site, logo_url, nicho, cidade, estado, tiktok_username
          FROM clientes
-         WHERE user_id = $1
-           AND tenant_id = $2::uuid
+         WHERE id = $1::uuid
+           AND user_id = $2
+           AND tenant_id = $3::uuid
          LIMIT 1`,
-        [request.user.sub, request.user.tenant_id]
+        [context.clienteId, request.user.sub, request.user.tenant_id]
       )
-      if (r.rows.length === 0) {
-        return reply.code(404).send({ error: 'Cliente não encontrado para este usuário.' })
+      if (r.rows.length !== 1) {
+        return reply.code(403).send({ error: 'Vínculo de cliente e marca não configurado.' })
       }
-      return r.rows[0]
+      const row = r.rows[0]
+      return Object.fromEntries([
+        'id', 'nome', 'email', 'celular', 'cnpj', 'razao_social', 'site',
+        'logo_url', 'nicho', 'cidade', 'estado', 'tiktok_username',
+      ].map((field) => [field, row[field] ?? null]))
     })
   })
 
@@ -199,23 +210,24 @@ export async function clientePortalRoutes(app) {
   app.get('/v1/cliente/meta', {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
   }, async (request, reply) => {
-    const ano = parseInt(request.query.ano)
-    const mes = parseInt(request.query.mes)
+    const ano = Number(request.query.ano)
+    const mes = Number(request.query.mes)
 
-    if (!ano || !mes || mes < 1 || mes > 12) {
+    if (!/^\d{4}$/.test(String(request.query.ano ?? '')) || !/^(?:0?[1-9]|1[0-2])$/.test(String(request.query.mes ?? '')) || ano < 2000 || ano > 2100) {
       return reply.code(400).send({ error: 'Parâmetros ano e mes são obrigatórios (mes: 1-12)' })
     }
 
     return app.withTenant(request.user.tenant_id, async (db) => {
-      const clienteId = await getClienteId(db, request.user.sub, request.user.tenant_id)
-      if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      const context = await getClientePortalContext(db, request.user.sub, request.user.tenant_id)
+      if (!context) return reply.code(403).send({ error: 'Vínculo de cliente e marca não configurado.' })
 
       const res = await db.query(
-        'SELECT meta_gmv FROM cliente_metas WHERE cliente_id = $1 AND ano = $2 AND mes = $3',
-        [clienteId, ano, mes]
+        'SELECT meta_gmv FROM cliente_metas WHERE cliente_id = $1 AND tenant_id = $2::uuid AND ano = $3 AND mes = $4',
+        [context.clienteId, request.user.tenant_id, ano, mes]
       )
 
-      const meta_gmv = res.rows[0] ? parseFloat(res.rows[0].meta_gmv) : 0
+      const value = res.rows[0]?.meta_gmv
+      const meta_gmv = value == null || !Number.isFinite(Number(value)) ? null : Number(value)
       return reply.send({ ano, mes, meta_gmv })
     })
   })

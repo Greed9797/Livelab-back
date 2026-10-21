@@ -14,6 +14,18 @@ const MES_BODY = '[0-9]{4}-(?:0[1-9]|1[0-2])'
 const PAPEL_AUTOMACAO = 'automacao'
 const PAPEL_AUTOMACAO_FINANCEIRO = 'automacao_financeiro'
 
+// Portal externo: uma rota nova autenticada nasce fechada para clientes.
+// Usa o template registrado pelo Fastify, nunca um caminho fornecido no JWT.
+const ROTAS_PORTAL_CLIENTE = new Set([
+  'GET /v1/cliente/home',
+  'GET /v1/cliente/conteudo/lives',
+  'GET /v1/cliente/analytics/diario',
+  'GET /v1/cliente/perfil',
+  'GET /v1/cliente/meta',
+  'POST /v1/auth/logout',
+  'PATCH /v1/auth/senha',
+])
+
 // Rotas que uma chave de API alcança. Tudo que não está aqui responde 403 para
 // a chave, mesmo que o papel dela permitisse.
 //
@@ -217,6 +229,14 @@ async function authPlugin(app) {
     },
   })
 
+  app.addHook('onSend', async (request, reply, payload) => {
+    const route = request.routeOptions?.url ?? ''
+    if (request.user?.papel === 'cliente_parceiro' || route.startsWith('/v1/cliente/') || route.startsWith('/v1/auth/')) {
+      reply.header('Cache-Control', 'private, no-store')
+    }
+    return payload
+  })
+
   // Helper: valida que JWT.token_version está atualizado vs DB.
   // Se DB.token_version > JWT.token_version, o JWT foi invalidado por
   // /redefinir-senha ou /usuarios/:id/force-logout — retorna 401.
@@ -256,18 +276,29 @@ async function authPlugin(app) {
   // Invalida o cache na hora quando a sessão é derrubada de propósito.
   app.decorate('invalidateTokenVersionCache', (userId) => tokenVersionCache.delete(userId))
 
+  function enforceClienteScope(request, reply) {
+    if (request.user?.papel !== 'cliente_parceiro') return
+    const route = `${request.method} ${request.routeOptions?.url ?? ''}`
+    if (!ROTAS_PORTAL_CLIENTE.has(route)) {
+      return reply.code(403).send({ error: 'Recurso indisponível no portal do cliente.' })
+    }
+  }
+
   async function _verifyTokenVersion(request, reply) {
   // Chave de API não tem sessão para expirar: quem a derruba é a revogação na
   // própria tabela, conferida a cada request. `sub` pode ser o criador da chave
   // (ou null); token_version desse usuário não invalida a chave.
   if (request.viaApiKey) return
+    if (request.user?.papel === 'cliente_parceiro') {
+      reply.header('Cache-Control', 'private, no-store')
+    }
     // Dedup por request: rotas que empilham [authenticate, requirePapel(...)]
     // chamariam este check 2× (1 SELECT token_version + 1 jwtVerify redundante
     // cada). Após a 1ª verificação bem-sucedida na request, marcamos a flag e
     // pulamos a 2ª — segurança idêntica (verifica exatamente 1× por request).
-    if (request._tokenVersionChecked) return
+    if (request._tokenVersionChecked) return enforceClienteScope(request, reply)
     const userId = request.user?.sub
-    if (!userId) return // sem sub: outros checks vão recusar
+    if (!userId) return reply.code(401).send({ error: 'Sessão expirada' })
     const jwtVersion = Number.isInteger(request.user?.token_version)
       ? request.user.token_version
       : 1
@@ -283,6 +314,7 @@ async function authPlugin(app) {
     // Sucesso: marca para que o 2º middleware da mesma request
     // não repita o SELECT. Em caso de 401 acima já retornamos — a request morre.
     request._tokenVersionChecked = true
+    return enforceClienteScope(request, reply)
   }
 
   // preHandler reutilizável: app.authenticate

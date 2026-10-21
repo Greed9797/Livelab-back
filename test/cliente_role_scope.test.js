@@ -68,6 +68,8 @@ describe('cliente role go-live scope', () => {
   it('allows cliente settings read-only data: perfil and meta', async () => {
     const { app, queryMock } = buildClienteApp()
     queryMock
+      .mockResolvedValueOnce({ rows: [{ id: 'cliente-1', nome: 'Cliente A' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'marca-1', nome: 'Marca A' }] })
       .mockResolvedValueOnce({
         rows: [{
           id: 'cliente-1',
@@ -87,6 +89,7 @@ describe('cliente role go-live scope', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [{ id: 'cliente-1' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'marca-1', nome: 'Marca A' }] })
       .mockResolvedValueOnce({ rows: [{ meta_gmv: '1000.00' }] })
 
     await app.register(clientePortalRoutes)

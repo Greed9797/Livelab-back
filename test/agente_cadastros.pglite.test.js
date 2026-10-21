@@ -28,10 +28,9 @@ async function buildApp({ falharAuditoria = false } = {}) {
   app.decorate('withTenant', async (_tenantId, fn) => fn(db))
   app.setErrorHandler((error, _request, reply) => reply.code(500).send({ error: error.message }))
   if (falharAuditoria) {
-    app.decorate('audit', { log: async () => { throw new Error('falha de auditoria') } })
-  } else {
-    await app.register(auditLogPlugin)
+    await db.exec("ALTER TABLE audit_log ADD CONSTRAINT rejeitar_agente CHECK (action <> 'cadastro.update_by_contract_agent')")
   }
+  await app.register(auditLogPlugin)
   await app.register(cadastrosRoutes)
 }
 
@@ -143,5 +142,7 @@ describe('automação cadastral em PostgreSQL real', () => {
     const response = await app.inject({ method: 'PATCH', url: `/v1/cadastros/${marca}`, headers: { 'x-api-key': chave }, payload: { nome: 'Não deve persistir', referencia_documento: 'Contrato' } })
     expect(response.statusCode).toBe(500)
     expect((await db.query(`SELECT nome FROM marcas WHERE id = '${marca}'`)).rows[0].nome).toBe('Marca Um')
+    expect((await db.query(`SELECT nome FROM clientes WHERE id = '${cliente}'`)).rows[0].nome).toBe('Marca Um')
+    expect((await db.query('SELECT COUNT(*)::int AS total FROM audit_log')).rows[0].total).toBe(0)
   })
 })

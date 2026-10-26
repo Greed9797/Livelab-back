@@ -133,4 +133,85 @@ describe('CRM lead workflow', () => {
     expect(queryMock.mock.calls.some(([sql]) => sql.includes('INSERT INTO lead_tarefas'))).toBe(true)
     await app.close()
   })
+
+  it('converts a lead already in ganho when it has no linked client', async () => {
+    const writes = []
+    const client = {
+      query: vi.fn(async (sql) => {
+        if (sql.includes('SELECT set_config')) return { rows: [] }
+        if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+        if (sql.includes('SELECT * FROM leads')) return { rows: [{
+          id: 'lead-1', nome: 'Marca QA', crm_etapa: 'ganho', convertido_cliente_id: null,
+          nicho: null, cidade: null, estado: null, lat: null, lng: null, fat_estimado: 100,
+        }] }
+        if (/^(INSERT|UPDATE|DELETE)/.test(sql.trim())) writes.push(sql)
+        if (sql.includes('INSERT INTO clientes')) return { rows: [{ id: 'cliente-1' }] }
+        return { rows: [] }
+      }),
+      release: vi.fn(),
+    }
+    const { app } = buildLeadsApp(vi.fn())
+    app.db.pool.connect.mockResolvedValue(client)
+    await app.register(leadsRoutes)
+
+    const response = await app.inject({ method: 'POST', url: '/v1/leads/lead-1/ganhar', payload: {} })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ ok: true, cliente_id: 'cliente-1' })
+    expect(writes.filter((sql) => sql.includes('INSERT INTO clientes'))).toHaveLength(1)
+    expect(writes.filter((sql) => sql.includes('INSERT INTO contratos'))).toHaveLength(1)
+    expect(writes.filter((sql) => sql.includes('UPDATE leads'))).toHaveLength(1)
+    await app.close()
+  })
+
+  it('blocks conversion when a linked client exists, regardless of CRM stage', async () => {
+    const writes = []
+    const client = {
+      query: vi.fn(async (sql) => {
+        if (sql.includes('SELECT set_config')) return { rows: [] }
+        if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+        if (sql.includes('SELECT * FROM leads')) return { rows: [{
+          id: 'lead-1', crm_etapa: 'em_negociacao', convertido_cliente_id: 'cliente-existente',
+        }] }
+        if (sql.includes('INSERT INTO clientes')) return { rows: [{ id: 'cliente-2' }] }
+        if (/^(INSERT|UPDATE|DELETE)/.test(sql.trim())) writes.push(sql)
+        return { rows: [] }
+      }),
+      release: vi.fn(),
+    }
+    const { app } = buildLeadsApp(vi.fn())
+    app.db.pool.connect.mockResolvedValue(client)
+    await app.register(leadsRoutes)
+
+    const response = await app.inject({ method: 'POST', url: '/v1/leads/lead-1/ganhar', payload: {} })
+
+    expect(response.statusCode).toBe(409)
+    expect(writes).toEqual([])
+    expect(client.query).toHaveBeenCalledWith('ROLLBACK')
+    await app.close()
+  })
+
+  it('does not write when the lead belongs to another tenant', async () => {
+    const writes = []
+    const client = {
+      query: vi.fn(async (sql) => {
+        if (sql.includes('SELECT set_config')) return { rows: [] }
+        if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] }
+        if (sql.includes('SELECT * FROM leads')) return { rows: [] }
+        if (/^(INSERT|UPDATE|DELETE)/.test(sql.trim())) writes.push(sql)
+        return { rows: [] }
+      }),
+      release: vi.fn(),
+    }
+    const { app } = buildLeadsApp(vi.fn())
+    app.db.pool.connect.mockResolvedValue(client)
+    await app.register(leadsRoutes)
+
+    const response = await app.inject({ method: 'POST', url: '/v1/leads/lead-for-other-tenant/ganhar', payload: {} })
+
+    expect(response.statusCode).toBe(404)
+    expect(writes).toEqual([])
+    expect(client.query).toHaveBeenCalledWith('ROLLBACK')
+    await app.close()
+  })
 })

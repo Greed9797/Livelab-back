@@ -120,12 +120,12 @@ function buildApp({
     }
     if (text.includes('INSERT INTO training_bookmarks')) return { rows: [] }
     if (text.includes('DELETE FROM training_bookmarks')) return { rows: [] }
-    if (text.includes('ORDER BY module.sort_order')) {
+    if (text.includes('JOIN training_trails AS trail')) {
       return {
         rows: catalog.lessons.map((lesson) => ({ id: lesson.id, slug: catalog.trail.slug })),
       }
     }
-    if (text.includes('SELECT id FROM training_lessons')) {
+    if (text.includes('FROM training_lessons') && text.trimStart().startsWith('SELECT id')) {
       const id = catalog.lessons[0].id
       return { rows: [{ id }] }
     }
@@ -238,7 +238,7 @@ describe('training learner APIs', () => {
     await app.close()
   })
 
-  it('marks complete explicitly and points to the next lesson by module then sort', async () => {
+  it('marks nonvideo lessons complete and follows the trail global order', async () => {
     const { app, query } = buildApp()
     await app.register(trainingRoutes)
     const response = await app.inject({ method: 'POST', url: `/v1/training/lessons/${LESSON}/complete` })
@@ -249,8 +249,8 @@ describe('training learner APIs', () => {
       next_lesson_id: LESSON_2,
       resume_path: `/conhecimento/trilhas/primeira-live-que-converte/aulas/${LESSON_2}`,
     })
-    const orderSql = query.mock.calls.find((call) => String(call[0]).includes('ORDER BY module.sort_order'))
-    expect(orderSql[0]).toMatch(/module\.sort_order,\s*l\.sort_order/)
+    const orderSql = query.mock.calls.find((call) => String(call[0]).includes('JOIN training_trails AS trail'))
+    expect(orderSql[0]).toMatch(/ORDER BY l\.global_position/)
     await app.close()
   })
 

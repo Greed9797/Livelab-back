@@ -146,6 +146,14 @@ export function invalidateTenant(tenantId, namespaceNames) {
   }
 }
 
+export function invalidateNamespace(name) {
+  const ns = namespaces.get(name)
+  if (!ns) return
+  ns.gen.set('', geracaoAtual(ns, '') + 1)
+  ns.cache.clear()
+  ns.inFlight.clear()
+}
+
 // Test helper — limpa todo o estado entre testes (não usado em produção).
 export function _clearDashboardCache() {
   namespaces.clear()

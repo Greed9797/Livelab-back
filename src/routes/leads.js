@@ -389,7 +389,7 @@ export async function leadsRoutes(app) {
       )
       const lead = leadQ.rows[0]
       if (!lead) { await client.query('ROLLBACK'); return reply.code(404).send({ error: 'Lead não encontrado' }) }
-      if (lead.crm_etapa === 'ganho') { await client.query('ROLLBACK'); return reply.code(409).send({ error: 'Lead já convertido' }) }
+      if (lead.convertido_cliente_id) { await client.query('ROLLBACK'); return reply.code(409).send({ error: 'Lead já convertido' }) }
 
       // Cria cliente
       const clienteQ = await client.query(

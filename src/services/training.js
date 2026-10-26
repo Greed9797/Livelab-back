@@ -72,6 +72,9 @@ export function orderTrailLessons(lessons, modules, trailId) {
   return lessons
     .filter((lesson) => moduleById.get(lesson.module_id)?.trail_id === trailId)
     .sort((a, b) => {
+      if (a.global_position != null || b.global_position != null) {
+        return (a.global_position ?? Number.MAX_SAFE_INTEGER) - (b.global_position ?? Number.MAX_SAFE_INTEGER)
+      }
       const modA = moduleById.get(a.module_id)?.sort_order ?? 0
       const modB = moduleById.get(b.module_id)?.sort_order ?? 0
       return modA - modB || a.sort_order - b.sort_order
@@ -182,6 +185,10 @@ export function hydrateLesson(lesson, { sources, progress, bookmarked, now, incl
   const publishedAt = source?.published_at ?? null
   const updatedAt = source?.updated_at ?? source?.atualizado_em ?? null
   const material = includeContent ? lessonMaterial(source) : null
+  const directVideo = lesson.source_kind === 'direct_video'
+    ? { video_provider: lesson.video_provider, video_id: lesson.video_id, video_url: lesson.video_url, video_library_id: lesson.video_library_id ?? null }
+    : null
+  const resolvedMaterial = directVideo ? directVideo : material
   const unitMissing = lesson.source_kind === 'unit_material' && !source
   return {
     id: lesson.id,
@@ -196,8 +203,9 @@ export function hydrateLesson(lesson, { sources, progress, bookmarked, now, incl
     platforms: (source?.platforms?.length ? source.platforms : lesson.platforms) ?? ['tiktok'],
     objectives: (source?.objectives?.length ? source.objectives : lesson.objectives) ?? [],
     prerequisites: (source?.prerequisites?.length ? source.prerequisites : lesson.prerequisites) ?? [],
-    cover_image_url: source?.cover_image_url ?? null,
+    cover_image_url: source?.cover_image_url ?? lesson.cover_image_url ?? null,
     featured: Boolean(lesson.featured || source?.featured || source?.destaque),
+    video_version: lesson.video_version ?? 1,
     required: lesson.required !== false,
     freshness: freshness({ published_at: publishedAt, updated_at: updatedAt }, now),
     published_at: publishedAt,
@@ -209,17 +217,18 @@ export function hydrateLesson(lesson, { sources, progress, bookmarked, now, incl
         slug: source.slug,
         origin: source.origin_kind === 'unit_material' ? 'unidade' : 'rede',
       }
-      : null,
-    content_available: Boolean(source),
+      : (directVideo ? { kind: 'direct_video', id: lesson.video_id, slug: null, origin: 'rede' } : null),
+    content_available: Boolean(source || directVideo),
     ...(unitMissing ? { content_gap: 'material_unidade_nao_encontrado' } : {}),
     ...(includeContent
       ? {
         content_markdown: material?.content_markdown ?? null,
-        video_provider: material?.video_provider ?? 'none',
-        video_id: material?.video_id ?? null,
-        video_url: material?.video_url ?? null,
+        video_provider: resolvedMaterial?.video_provider ?? 'none',
+        video_id: resolvedMaterial?.video_id ?? null,
+        video_url: resolvedMaterial?.video_url ?? null,
+        video_library_id: resolvedMaterial?.video_library_id ?? null,
         external_url: material?.external_url ?? null,
-        material,
+        material: resolvedMaterial,
       }
       : {}),
     progress: {
@@ -227,10 +236,17 @@ export function hydrateLesson(lesson, { sources, progress, bookmarked, now, incl
       started_at: progress?.started_at ?? null,
       last_opened_at: progress?.last_opened_at ?? null,
       completed_at: progress?.completed_at ?? null,
+      watched_percent: progress?.watched_percent == null ? null : Number(progress.watched_percent),
+      last_position_seconds: Number(progress?.last_position_seconds ?? 0),
+      duration_seconds: progress?.duration_seconds == null ? null : Number(progress.duration_seconds),
+      position_revision: progress?.position_revision ?? 0,
+      video_version: progress?.video_version ?? lesson.video_version ?? 1,
+      completion_source: progress?.completion_source ?? null,
     },
     bookmarked: Boolean(bookmarked),
     module_id: lesson.module_id,
     sort_order: lesson.sort_order,
+    global_position: lesson.global_position ?? lesson.sort_order,
   }
 }
 
@@ -292,6 +308,7 @@ export function assembleTrail({ trail, modules, lessons, progressByLesson, bookm
     return { id: module.id, title: module.title, sort_order: module.sort_order, lessons: moduleLessons }
   })
   const flat = hydratedModules.flatMap((module) => module.lessons)
+    .sort((a, b) => a.global_position - b.global_position)
   flat.forEach((lesson, index) => {
     lesson.next_lesson_id = flat[index + 1]?.id ?? null
     const module = hydratedModules.find((row) => row.lessons.some((item) => item.id === lesson.id))
@@ -301,6 +318,7 @@ export function assembleTrail({ trail, modules, lessons, progressByLesson, bookm
     id: trail.id,
     slug: trail.slug,
     title: trail.title,
+    cover_image_url: trail.cover_image_url ?? null,
     outcome: trail.outcome,
     audience_roles: trail.audience_roles ?? [],
     topics: trail.topics ?? [],
@@ -310,8 +328,9 @@ export function assembleTrail({ trail, modules, lessons, progressByLesson, bookm
     module_count: hydratedModules.length,
     lesson_count: flat.length,
     ...trailProgress(trailLessons, progressByLesson),
-    resume_path: resumePath(trail.slug, nextRequiredLesson(trailLessons, progressByLesson)?.id ?? flat[0]?.id),
+    resume_path: resumePath(trail.slug, nextRequiredLesson(orderTrailLessons(lessons, modules, trail.id), progressByLesson)?.id ?? flat[0]?.id),
     modules: hydratedModules,
+    ordered_lessons: flat,
   }
 }
 

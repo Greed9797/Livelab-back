@@ -3,7 +3,7 @@ import { READ_CLIENTES, WRITE_APRESENTADORAS, WRITE_CLIENTES, WRITE_CONFIGURACOE
 import { uploadTenantImage } from '../lib/image_upload.js'
 
 const folderSchema = z.object({
-  folder: z.enum(['apresentadoras', 'clientes', 'marcas', 'logos']).optional().default('logos'),
+  folder: z.enum(['apresentadoras', 'clientes', 'marcas', 'logos', 'treinamentos']).optional().default('logos'),
 })
 
 export async function uploadsRoutes(app) {
@@ -19,6 +19,9 @@ export async function uploadsRoutes(app) {
   }, async (request, reply) => {
     const parsed = folderSchema.safeParse(request.query ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    if (parsed.data.folder === 'treinamentos' && request.user.papel !== 'franqueador_master') {
+      return reply.code(403).send({ error: 'Apenas o franqueador master pode enviar capas de treinamento.' })
+    }
     return uploadTenantImage(request, reply, { folder: parsed.data.folder })
   })
 }

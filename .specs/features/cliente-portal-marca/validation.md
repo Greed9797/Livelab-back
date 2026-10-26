@@ -75,3 +75,12 @@ All mutations were applied to disposable `git archive HEAD` copies with installe
 ## Validation: PASS
 
 **PASS.** The implementation meets PORTAL-1 through PORTAL-10. No fix task or lesson is required because no acceptance gap, spec-precision gap, or surviving mutation was found.
+
+
+## Release refresh — 2026-10-26
+
+The release retains the approved source, authentication rules, migrations and deployment configuration from `41686f605f3c668265421d1bd3baaea23cfe7279`. Only compatible dependency resolutions changed: body-parser 2.4.0, fast-uri 3.1.9 / Fastify nested 4.2.3, Fastify 5.12.7, qs 6.16.1 and zod 4.6.7. Package ranges remain unchanged; independent review confirmed exactly six lockfile entries and coherent dependency chains.
+
+Local validation: syntax checks on 188 JavaScript files PASS; 2,176 tests PASS, zero failures and 74 pre-existing environment-dependent skips; coverage statements 70.73%, branches 64.43%, functions 74.23%, lines 73.77%; all isolated SQL integration fixtures PASS; production dependency audit zero vulnerabilities. Production database variables were removed from the test environment. The initial sandbox-only run could not open a localhost test port; the permitted rerun passed without changing tests. CI must additionally validate the fresh disposable PostgreSQL schema and RLS suite before promotion.
+
+The responsible owner explicitly confirmed resolution of the credential review on 2026-10-26 and instructed publication. No credentials were rotated by this release. Existing local training work and migration 186 were excluded from this isolated release.

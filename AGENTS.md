@@ -39,3 +39,16 @@ re-read whole files.
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
 <!-- graft:end -->
+
+## Repository context
+
+This repository contains the LiveShop SaaS backend API. Start at `src/app.js`
+for plugin and route registration; route handlers live under `src/routes/`,
+and shared business logic lives under `src/services/` and `src/lib/`.
+
+Production deployment verification on October 26, 2026 recorded backend commit
+`894e903b57610b8a38431b3a1e220ecbe4499089`, from Railway source branch
+`codex/blumenau-operational-fase1`. See
+[`docs/production-release-2026-10-26.md`](docs/production-release-2026-10-26.md)
+for its migration, readiness, validation, and rollback record. The active
+checkout branch can differ from the production source branch.

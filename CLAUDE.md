@@ -16,10 +16,12 @@ TEST_PG_URL=... npm run test:pg
 ## Produção
 
 - API: `https://liveshop-saas-api-production.up.railway.app`.
-- Branch publicada pelo Railway: `codex/blumenau-operational-fase1`. Push nessa branch inicia deploy automaticamente.
+- Commit publicado em 26/10/2026: `894e903b57610b8a38431b3a1e220ecbe4499089`, pela branch de origem `codex/blumenau-operational-fase1`. Push nessa branch pode iniciar deploy automaticamente; a branch atual do checkout não identifica a versão publicada.
 - `railway.json` executa `node apply_migrations.js` antes de servir o novo container. Toda migration precisa entrar em `MIGRATIONS_LIST`, ser idempotente e compatível com a versão anterior da API durante essa janela.
-- Verifique `/readyz` e as rotas afetadas após cada deploy. Uma rota autenticada pode responder 401 sem credencial; 404 indica que a rota não está disponível.
-- Analytics operacional está publicado pelo PR #75, com a migration 183 e as rotas `/v1/analytics/operacao`, `/v1/analytics/metas-operacionais` e `/v1/analytics/operacao/consolidar-dia`. A tela está no Vercel. A rota respondeu 401 sem autenticação após o deploy; ainda faltam smoke autenticado com conta de teste e auditoria da RLS no banco.
+- O deploy `4bd1f6ef-0b73-4c71-b307-17a51331da35` concluiu com sucesso. As rotas `/health` e `/readyz` retornaram 200 e o storage estava saudável. A migration 186 consta aplicada no ledger efetivo do Railway.
+- Consulte [`docs/production-release-2026-10-26.md`](docs/production-release-2026-10-26.md) para os identificadores do deploy, validação, limites e condição de rollback. Uma rota autenticada pode responder 401 sem credencial; isso não confirma o fluxo autenticado.
+- A documentação do CRM está em [`docs/crm-api.md`](docs/crm-api.md). O módulo de treinamento está descrito em [`docs/training-module.md`](docs/training-module.md).
+- Histórico: Analytics operacional foi publicado pelo PR #75, com a migration 183 e as rotas `/v1/analytics/operacao`, `/v1/analytics/metas-operacionais` e `/v1/analytics/operacao/consolidar-dia`.
 
 ## Financeiro e cadastro
 

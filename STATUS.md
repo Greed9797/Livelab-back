@@ -1,155 +1,35 @@
-# STATUS — Backend LiveShop SaaS
+# Estado do backend LiveLab
 
-**Última atualização**: 2026-05-10
-**Tag prod**: `v1.5.0-deadcode-clean`
-**Score sênior**: ~96/100 (zero issues critical)
+Última verificação: 26/10/2026. Este arquivo registra o estado observado nessa data; confira a produção e a branch remota antes de preparar outro release.
 
----
+## Produção verificada
 
-## Última atividade (2026-05-22 — branch codex/blumenau-operational-fase1)
+- API: https://liveshop-saas-api-production.up.railway.app.
+- Branch conectada à Railway: `codex/blumenau-operational-fase1`.
+- Commit: `894e903b57610b8a38431b3a1e220ecbe4499089`, sobre a publicação do portal `9d0e02c`.
+- Railway: projeto `kind-rebirth`, serviço `liveshop-saas-api`, ambiente `production`.
+- Deploy `4bd1f6ef-0b73-4c71-b307-17a51331da35`: sucesso.
+- `/health` e `/readyz`: HTTP 200; armazenamento configurado e saudável.
+- Migrações registradas até `186_training_video.sql`, sem pendências na inspeção do banco efetivo do serviço.
 
-- `f6ee8fc`: fix(sync) — sincronização bidirecional lives↔agenda_eventos
-  - `iniciarLive`: usa `resolvedMarcaId` do payload (fix live sem agenda)
-  - `PATCH /v1/lives/:id`: sincroniza marca_id, apresentadora_id, previsto_fim→data_fim para agenda_evento vinculado
-  - `PATCH /v1/agenda/:id`: ao setar `ao_vivo` com `live_id`, sincroniza live com dados do evento
+## Entrega mais recente
 
----
+Treinamentos em vídeo e correção da conversão do CRM estão publicados. O CRM fica em `/clientes/crm` no frontend e usa a API existente `/v1/leads`, com autenticação e escopo da unidade. A conversão verifica `convertido_cliente_id`, sem depender apenas da etapa do Kanban.
 
-## Estado atual
+Treinamentos usam o catálogo existente, players YouTube/Panda, capas no armazenamento existente, união dos trechos assistidos e conclusão a 90%. O progresso mantém posição, percentual e data de conclusão separados. Gestão e relatórios seguem os papéis existentes.
 
-- ✅ Health: `https://liveshop-saas-api-production.up.railway.app/health` → `{"ok":true}`
-- ✅ Tests: 62/62 (`npx vitest run`)
-- ✅ Coverage: 21% baseline + threshold 20% no CI (alarm regressão)
-- ✅ CI: GitHub Actions `.github/workflows/backend-ci.yml` (vitest + syntax + audit)
-- ✅ Sentry instalado (DSN não setado em prod — pendente user)
-- ✅ Audit log + INCIDENT_PLAYBOOK.md + 3 ADRs documentados
-- ✅ Migrations 058 + 059 + 060 + 061 aplicadas em prod
-- ✅ RLS hardening: 13/27 rotas com WHERE tenant_id + WITH CHECK policies
-- ⏳ Pendente: P0 manuais (role NOBYPASSRLS, DATABASE_URL, Sentry DSN, UptimeRobot, branch protection)
+## Evidências
 
----
+- [CI completo do release](https://github.com/Greed9797/Livelab-back/actions/runs/40413286251): sucesso; 2.200 testes passaram e 67 foram ignorados conforme a suíte existente, além de coverage e fixtures SQL isoladas.
+- Testes focados do release: 50 passaram em 6 arquivos.
+- Auditoria de dependências de produção: nenhuma vulnerabilidade encontrada nessa execução.
+- [Registro de produção e operação](docs/production-release-2026-10-26.md).
+- [Guia de treinamentos](docs/training-module.md).
 
-## Última sprint (2026-05-08 — release `v1.5.0-deadcode-clean`)
+## Limites de validação
 
-### Aplicado
+Não foi executado novo smoke visual em produção com sessão de franqueado/master, nem reprodução de vídeo da própria conta Panda no domínio de produção. Os exemplos públicos dos players foram verificados durante a implementação local. A ativação do MCP/OAuth não foi alterada nem validada por este release.
 
-**P1 RLS hardening** (13/27 rotas com `WHERE tenant_id` explícito):
-- analytics, home, clientes, apresentadoras, cabines, contratos, financeiro, recomendacoes, excelencia, pacotes, cliente_portal, solicitacoes
-- Migration `060_rls_with_check.sql` aplicada — todas policies agora com WITH CHECK
+O checkout principal pode conter trabalho local anterior ao SHA publicado. Preserve essas alterações e use a branch remota e o SHA efetivo como referência de release. O grafo Graft descreve o código do checkout em que foi gerado.
 
-**P2 Testing infra**:
-- vitest --coverage com threshold 20% pinned
-- E2E Playwright config corrigido (`cwd` aponta Playground)
-- Helper `loginViaAPI` hardenado (waitForFunction polling + retry 3×)
-- Análise specs: 41/66 pass (61%); falhas são specs outdated, não regressions
-
-**P3 UX hardening**:
-- Error boundary global Flutter (release-only)
-- A11y semantics on por default
-- CSP meta tag em web/index.html
-
-**P4 DR / Incident**:
-- INCIDENT_PLAYBOOK.md (10 cenários, ~370 linhas)
-- Audit log: migration 061 + plugin `src/plugins/audit_log.js` (PII scrub)
-- Script `scripts/pg_dump_offsite.sh` (backup S3/R2 com retention 30d)
-
-**P5 Docs**:
-- ADR 0001 Flutter Web canvaskit (frontend repo)
-- ADR 0002 Fastify vs Express
-- ADR 0003 Supabase RLS strategy
-- README sênior (250+ linhas com setup, arch, runbook)
-- CONTRIBUTING.md + PR template
-
-**Dead code cleanup**:
-- 2 itens backend (getClientIp, has alias)
-- Hotfix `b777ff0` — managerHas re-adicionado (audit reportou unused, era usado em cabines.js:1190)
-
----
-
-## Pendências para 100%
-
-### 🔴 P0 — Manuais (você, ~30min)
-
-1. Criar role `liveshop_app NOBYPASSRLS LOGIN` no Supabase Dashboard SQL Editor
-2. Atualizar `DATABASE_URL` Railway pra essa role
-3. Criar projeto Sentry → setar `SENTRY_DSN` em Railway env
-4. UptimeRobot ping `/health` 5min
-5. Branch protection master GitHub
-6. `WEBHOOK_REPLAY_PROTECTION=true` Railway (após sender bio-crm enviar timestamp+nonce)
-7. Aplicar `scripts/cleanup_lives_dirty.sql` (8 lives com encerrado_em > 24h)
-8. Setar BACKUP_S3_* envs Railway + cron 03:00 → `bash scripts/pg_dump_offsite.sh`
-
-### ✅ P1 — RLS hardening (completo)
-
-- 13/27 rotas com `WHERE tenant_id` explícito + WITH CHECK em policies
-- Rotas: analytics, home, clientes, apresentadoras, cabines, contratos, financeiro, recomendacoes, excelencia, pacotes, cliente_portal, solicitacoes
-- 14 rotas restantes em Wave 3 (cliente_dashboard, franqueado, leads, manuais, onboarding, tenants, tiktok, etc.)
-
-### 🟡 P2-P4 — Backlog (Wave 2, ~10h)
-
-- Widget tests Flutter (5 critical screens)
-- Coverage backend 70% target
-- pg_dump validation script (restore test semanal)
-- Audit log integrado em rotas críticas (delete custo, change senha, etc)
-- E2E Playwright UI specs match livelab_v2 sidebar text
-
-### 🔵 W3 — Roadmap (próximo trimestre)
-
-- Feature flags (PostHog ou DB table)
-- LGPD direito esquecimento
-- WAF Cloudflare em frente Railway
-- Mutation testing (Stryker)
-- DB read replicas Supabase para analytics
-
----
-
-## Comandos prontos
-
-```bash
-# Tests + push
-npx vitest run                     # 62/62
-npx vitest run --coverage          # threshold 20%
-node apply_migrations.js           # idempotente
-git push origin master             # Railway auto-deploy
-
-# Audit
-node scripts/audit-rls.js          # detect RLS drift
-node --check src/**/*.js           # syntax
-
-# DB ops
-set -a; source .env; set +a
-psql "$DATABASE_URL" -c "SELECT ..."
-psql "$DATABASE_URL" < scripts/cleanup_lives_dirty.sql  # após editar ROLLBACK→COMMIT
-
-# Backup
-BACKUP_S3_BUCKET=... bash scripts/pg_dump_offsite.sh
-```
-
----
-
-## URLs
-
-- App: https://livelab-3601f.web.app · https://app.grupolivelab.com.br
-- API: https://liveshop-saas-api-production.up.railway.app/v1
-- Health: `/health` (token via `HEALTH_CHECK_TOKEN` env)
-- GitHub: Greed9797/liveshop_saas_api-backend-
-
-## Credenciais teste (4 roles)
-
-| Role | Email | Senha |
-|---|---|---|
-| franqueador_master | admin@liveshop.com | admin123 |
-| franqueado | franqueado@liveshop.com | teste123 |
-| cliente_parceiro | cliente@liveshop.com | teste123 |
-| apresentador | apresentador@liveshop.com | teste123 |
-
----
-
-## Referências
-
-- `~/.claude/plans/crystalline-launching-acorn.md` — plano mestre
-- `~/security-report.md` — auditoria segurança + CRITICAL FINDING
-- `~/qa-e2e-report-2026-05-08.md` — QA E2E último ciclo
-- `~/lighthouse-baseline-2026-05-07.md` — perf baseline
-- `INCIDENT_PLAYBOOK.md` — runbook 10 cenários
-- `docs/adr/*.md` — ADRs (Fastify, RLS strategy)
+O [status anterior](docs/archive/status-backend-before-2026-10-26.md) foi arquivado; suas métricas, tarefas manuais e avaliações globais não foram revalidadas nesta entrega.

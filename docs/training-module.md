@@ -2,6 +2,14 @@
 
 O catálogo de treinamentos pertence à rede. O progresso e o relatório pertencem à unidade autenticada.
 
+## Estado em produção
+
+O módulo está publicado na API do deploy de 26/10/2026. A migration 186 foi
+aplicada pelo runner transacional antes do início da aplicação. O catálogo
+existente permaneceu disponível com uma trilha e cinco aulas. Consulte o
+[registro da release](production-release-2026-10-26.md) para evidências e
+limites de validação.
+
 ## Acesso
 
 - Alunos: **Base**, em `/conhecimento`, com as trilhas e aulas existentes.
@@ -69,15 +77,18 @@ Foram reutilizados os componentes, autenticação, catálogo, serviços e armaze
 
 ## Implantação e validação
 
-A implementação e os testes locais não autorizam publicação ou alterações no banco de produção. A migração deve ser aplicada pelo executor existente somente após revisão e autorização do ambiente de destino. Não executar o comando de inicialização apontado a um banco de produção para testar o módulo.
+Para futuras alterações, valide a migration em banco descartável e confira o ambiente de destino antes de executar qualquer comando que altere dados. Não aponte o comando de inicialização a um banco de produção para testar o módulo. O estado publicado em 26/10/2026 está descrito no [registro da release](production-release-2026-10-26.md).
 
-Antes de publicar, executar testes aplicáveis do backend, migração em banco descartável, testes de isolamento e os gates do frontend (`typecheck`, testes e build). A revisão deve conferir autorização no servidor e união concorrente dos intervalos, além das telas.
+Antes de uma futura publicação, execute os testes aplicáveis do backend, valide a migration em banco descartável, confira o isolamento por unidade e rode os gates do frontend (`typecheck`, testes e build). A revisão deve conferir autorização no servidor e união concorrente dos intervalos, além das telas.
 
-A tabela de medições é adicional; a tabela de progresso legado permanece disponível. Em rollback da aplicação, preservar a migração e os dados de medição para posterior retomada, sem executar remoções destrutivas. A aplicação antiga não conhece as novas aulas de vídeo direto; o rollback não deve ser apresentado como suporte dessas aulas na versão anterior.
+A tabela de medições é adicional; a tabela de progresso legado permanece disponível. Em rollback da aplicação, preserve a migration e os dados de medição para posterior retomada, sem executar remoções destrutivas. A versão anterior à release não conhece as aulas com fonte `direct_video`; o rollback do binário não restaura compatibilidade com essas aulas.
 
-Aplicar `migrations/186_training_video.sql` pelo executor existente (`apply_migrations.js`). A migração adiciona campos ao catálogo e cria `training_video_progress`, com RLS obrigatório por unidade; não migra conclusões antigas para percentuais fictícios. Nenhuma migração foi aplicada a ambientes compartilhados durante esta implementação. Não há dependência nova nem chave de API de vídeo necessária para os players. Permanecem necessárias as configurações de armazenamento já existentes, e vídeos Panda precisam da biblioteca/pullzone correta e de permissão para reprodução no domínio de destino.
+`migrations/186_training_video.sql` adiciona campos ao catálogo e cria `training_video_progress`, com RLS obrigatório por unidade; não converte conclusões antigas em percentuais fictícios. A migration 186 já está aplicada em produção. Não há dependência nova nem chave de API de vídeo necessária para os players. Permanecem necessárias as configurações de armazenamento já existentes, e vídeos Panda precisam da biblioteca/pullzone correta e de permissão para reprodução no domínio de destino.
 
-### Evidências locais
+### Evidências da implementação local
+
+Os testes e verificações abaixo registram a validação local feita durante a
+implementação. Eles não substituem smoke tests autenticados em produção.
 
 - Backend: 42 testes aplicáveis, executados em grupos: rotas/serviço/normalização (27), fluxo integrado com banco PGlite descartável (10) e SQL legado (5). A migração foi executada nesse banco de teste.
 - Frontend: 35 testes em 10 arquivos do módulo na execução integrada; em seguida, foram acrescentados casos de relógio quantizado do SDK Panda e de compatibilidade com vídeos avulsos (37 casos aplicáveis no total). Os 13 testes de player/coletor e os três testes da tela de aula passaram após os respectivos ajustes. `npm run typecheck`, `npm run build` e uma segunda geração do bundle Vite passaram; a proteção final de previews avulsos foi conferida pelo teste da tela e pela checagem de tipos.

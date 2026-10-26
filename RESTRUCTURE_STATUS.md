@@ -1,3 +1,5 @@
+> Registro histórico da reestruturação de maio de 2026. Não representa o estado atual de produção; consulte [STATUS.md](STATUS.md).
+
 # LiveLab — Status da Reestruturação
 **Branch:** `stabilization/core-restructure`  
 **Última atualização:** 2026-05-18

@@ -2,7 +2,7 @@
 
 Backend Node.js + Fastify para a plataforma multi-tenant LiveShop. Gerencia franquias de Live Shop (TikTok Live), pagamentos, contratos, analytics e integrações.
 
-**Stack**: Node.js 20 · Fastify 5 · PostgreSQL (Supabase) · JWT · TikTok Live · Vitest
+**Stack**: Node.js 22 · Fastify 5 · PostgreSQL · JWT · TikTok Live · Vitest
 
 ---
 
@@ -32,7 +32,7 @@ Health check: `GET http://localhost:3001/health`
 | `BIO_CRM_WEBHOOK_SECRET` | HMAC do webhook bio | opcional |
 | `WEBHOOK_REPLAY_PROTECTION` | `true` ativa anti-replay bio-crm | `false` |
 | `HEALTH_CHECK_TOKEN` | auth do `/health` | opcional |
-| `SENTRY_DSN` | observabilidade (Wave 1 backlog) | opcional |
+| `SENTRY_DSN` | destino de observabilidade Sentry | opcional |
 | `USE_DEV_BYPASS=true` | pula JWT (apenas dev) | NUNCA em prod |
 
 Lista completa em `.env.example`.
@@ -45,12 +45,12 @@ Lista completa em `.env.example`.
 |---|---|
 | `npm run dev` | nodemon, watch `src/`, porta 3001 |
 | `npm start` | aplica migrations + inicia servidor (Railway entrypoint) |
-| `npx vitest run` | 62 testes unit, ~300ms |
+| `npx vitest run` | suíte Vitest |
 | `npm run test:watch` | watch mode |
-| `npm run e2e` | Playwright (atualmente quebrado por config — backlog W2.7) |
-| `node apply_migrations.js` | aplica migrations idempotentemente |
-| `node create_user.js` | cria usuário pra dev |
-| `node seed_users.js` | cria usuários de teste (admin/franqueado/cliente) |
+| `npm run test:integration` | integração com banco PGlite descartável |
+| `npm run test:pg` | integração PostgreSQL; configurar banco de teste |
+| `node apply_migrations.js` | aplica pendências conforme o ledger transacional |
+| `node scripts/seed_users.js` | cria usuários no ambiente de desenvolvimento configurado |
 
 ---
 
@@ -65,7 +65,7 @@ Lista completa em `.env.example`.
 
 - `src/plugins/db.js` — pool Postgres com 2 decorators:
   - `app.db` — pool-level. Para queries de sistema (auth, health, cron) sem tenant.
-  - `app.dbTenant(tenantId)` — connection-level com `set_config('app.tenant_id', ...)`. ⚠️ **Queries DEVEM ter `WHERE tenant_id = $tenant` explícito** porque a role Postgres atual no Supabase tem `BYPASSRLS=true` (ver Runbook → RLS leak).
+  - `app.dbTenant(tenantId)` — connection-level com `set_config('app.tenant_id', ...)`. Inclua filtro explícito de tenant nas queries multi-tenant e confira o papel e a configuração RLS no ambiente de destino.
 - `src/plugins/auth.js` — JWT (15min), refresh token (7d, hash SHA256), `app.requirePapel(['gerente'])` RBAC
 
 ### Rotas
@@ -112,7 +112,7 @@ Endpoints públicos com HMAC + rate-limit. Padrão em `src/routes/webhook_bio_cr
 Em `migrations/*.sql` ordenadas por número. Lista canônica em `apply_migrations.js`.
 
 ```bash
-node apply_migrations.js     # aplica pendentes idempotentemente
+node apply_migrations.js     # banco de teste; aplica somente pendentes do ledger
 ```
 
 ⚠️ Migrations são **append-only** — nunca renomear nem editar uma já aplicada. Para corrigir, criar nova migration.
@@ -122,7 +122,7 @@ node apply_migrations.js     # aplica pendentes idempotentemente
 ## Testes
 
 ```bash
-npx vitest run                                # todos os 62 testes
+npx vitest run                                # suíte completa
 npx vitest run test/routes.regressions.test.js # arquivo específico
 ```
 
@@ -137,16 +137,20 @@ grep -n "app\.\(get\|post\|patch\|delete\)" src/routes/<arquivo>.js
 
 ## Deploy
 
-**Produção**: Railway auto-deploy on push para `master`.
-
-```bash
-git push origin master
-# Railway aplica migrations + start (script "start" no package.json)
-```
+**Produção**: Railway monitora a branch `codex/blumenau-operational-fase1`.
+Um push nessa branch pode iniciar um deploy. O Railway executa
+`node apply_migrations.js` como pre-deploy; consulte o registro publicado antes
+de planejar uma alteração ou rollback.
 
 **Status**: https://liveshop-saas-api-production.up.railway.app/health
 
-URLs deprecated: `livelabackend.onrender.com` está MORTA. Não usar.
+O deploy verificado em 26/10/2026 está registrado em
+[`docs/production-release-2026-10-26.md`](docs/production-release-2026-10-26.md).
+O checkout atual pode estar em outra branch e não identifica o código
+publicado.
+
+CRM: [`docs/crm-api.md`](docs/crm-api.md). Treinamentos:
+[`docs/training-module.md`](docs/training-module.md).
 
 ### Tag release
 
@@ -164,30 +168,29 @@ git push origin v1.x.y
 1. Confirmar via UptimeRobot ou `curl https://liveshop-saas-api-production.up.railway.app/health`
 2. Railway dashboard → Logs do deploy mais recente
 3. Common causes:
-   - `DATABASE_URL` inválida → reset Supabase password
+   - `DATABASE_URL` inválida → conferir a configuração no gerenciador de segredos, sem expor valores nem alterar credenciais como primeiro diagnóstico
    - Migration falha → criar novo migration que reverta o problema
    - Memory limit → upgrade plan ou otimizar query
-4. Rollback: Railway dashboard → Deployments → "Redeploy" no commit anterior
+4. Consulte o registro da release para o commit anterior e as limitações de
+   rollback. Preserve a migration 186 e os dados de treinamento.
 
 ### Erro 500 frequente
 
-1. Verificar Sentry (quando configurado — backlog W1.1)
+1. Verificar Sentry, se estiver configurado para o ambiente
 2. `railway logs` filtrar por `ERROR`
-3. Hotfix em branch separado, push direto se urgente (master atualmente sem branch protection)
+3. Consulte o fluxo de entrega atual antes de preparar a correção.
 
 ### DB down (Supabase)
 
 1. https://status.supabase.com
-2. Read replicas: ainda em backlog (Wave 3)
-3. Backup: 7 dias retention default Supabase. Dump diário externo: backlog (W2.13)
+2. Consulte o status do provedor e a configuração de backup do ambiente.
 
-### Vazamento de dados (RLS leak — CRITICAL)
+### Isolamento entre tenants
 
-⚠️ Role Postgres atual no DATABASE_URL tem **BYPASSRLS=true**. Toda query sem `WHERE tenant_id` explícito vaza dados entre tenants. Ver `~/security-report.md` seção "CRITICAL FINDING (2026-05-07)".
-
-**Hotfix por rota**: adicionar `WHERE tabela.tenant_id = $1::uuid` em qualquer rota que retorna lista.
-
-**Fix definitivo (próxima sprint)**: criar role `liveshop_app` no Supabase Dashboard com `NOBYPASSRLS`, atualizar `DATABASE_URL` no Railway.
+As rotas multi-tenant devem limitar as consultas ao tenant autenticado e usar
+as proteções de acesso definidas pelo backend. Confirme o papel PostgreSQL e o
+estado RLS no ambiente afetado antes de tratar configuração histórica como
+estado atual.
 
 ---
 
@@ -195,26 +198,17 @@ git push origin v1.x.y
 
 - `.env.example` — todas variáveis com descrição
 - `STATUS.md` — estado atual, pendências, decisões
-- `~/security-report.md` — auditoria de segurança completa
-- `~/qa-report-2026-05-07.md` — QA report último ciclo
+- `docs/production-release-2026-10-26.md` — deploy verificado e rollback
+- `docs/crm-api.md` — rotas e contrato CRM
+- `docs/training-module.md` — catálogo e progresso de treinamentos
 
 ---
 
 ## Convenções
 
 - **Commits**: Conventional Commits — `feat:`, `fix:`, `sec:`, `docs:`, `chore:`, `refactor:`, `test:`
-- **PRs**: precisam CI green + 1 review (branch protection backlog W1.6)
+- **PRs**: siga os checks de CI e o processo de revisão configurados no repositório
 - **Branch**: `feat/<descricao>` ou `fix/<descricao>`
 - **Tags**: `vMAJOR.MINOR.PATCH[-suffix]`
 
 ---
-
-## Score de hardening (atual)
-
-Após Wave 0+1 do plano de prod hardening:
-- Security: 91/100 (com RLS leak documentado e hotfix de cabines)
-- Observability: 60/100 (CI configurado, Sentry pendente)
-- Documentation: 75/100 (este README + STATUS + relatórios)
-- Testing: 65/100 (62 unit tests; coverage report e E2E pendentes)
-
-**Backlog priorizado**: ver `~/.claude/plans/crystalline-launching-acorn.md` Wave 2+3.

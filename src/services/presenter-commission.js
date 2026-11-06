@@ -1,6 +1,8 @@
 import { anoMesRange } from '../lib/ano-mes.js'
 import { isWeekendInSaoPaulo, saoPauloDateInput } from '../lib/timezone.js'
 import { defaultPresenterCommissionPct } from '../config/presenter_defaults.js'
+import { feriadoEm } from '../lib/calendario-blumenau.js'
+import { feriadosDoPeriodo } from './feriados.js'
 
 export const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 export const WEEKEND_LIVE_PRESENTER_COMMISSION_PCT = 2
@@ -14,7 +16,9 @@ function toNumber(value, fallback = 0) {
  * Comissão da apresentadora — fonte única de verdade.
  *
  * Regras (decisão 2026-05-25, Lucas):
- *   1) Sábado/domingo (TZ America/Sao_Paulo) em LIVE → 2% fixo, sobrepõe escada.
+ *   1) Sábado/domingo/feriado (TZ America/Sao_Paulo) em LIVE → 2% fixo, sobrepõe escada.
+ *      Feriado = calendário embutido + tabela feriados da unidade; no recálculo
+ *      mensal vem pronto em monthlyContext.feriados (Map data → nome).
  *   2) Caso contrário, escada cliff por GMV mensal acumulado da apresentadora
  *      (vendas_atribuidas do mês atual, exceto a venda em cálculo) + GMV desta venda:
  *        SELECT da faixa onde gmv_inicio <= base_gmv AND (gmv_fim IS NULL OR gmv_fim >= base_gmv)
@@ -40,8 +44,16 @@ export async function resolvePresenterCommissionPct(db, {
 }) {
   if (!apresentadoraId) return 0
 
-  if (origem === 'live' && data && isWeekendInSaoPaulo(data)) {
-    return WEEKEND_LIVE_PRESENTER_COMMISSION_PCT
+  if (origem === 'live' && data) {
+    if (isWeekendInSaoPaulo(data)) return WEEKEND_LIVE_PRESENTER_COMMISSION_PCT
+    const diaLive = saoPauloDateInput(data)
+    if (diaLive && /^\d{4}-\d{2}-\d{2}$/.test(diaLive)) {
+      // monthlyContext sem feriados (chamador antigo) cai no calendário embutido: nunca consulta o banco.
+      const feriado = monthlyContext
+        ? (monthlyContext.feriados ? monthlyContext.feriados.has(diaLive) : Boolean(feriadoEm(diaLive)))
+        : (await feriadosDoPeriodo(db, tenantId, diaLive, diaLive)).has(diaLive)
+      if (feriado) return WEEKEND_LIVE_PRESENTER_COMMISSION_PCT
+    }
   }
 
   // Contexto restrito a uma execução de recálculo mensal: mesmas faixas e base,

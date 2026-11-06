@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { anoMesRange } from '../lib/ano-mes.js'
 import { READ_VENDAS_ATRIBUIDAS, WRITE_FINANCEIRO, WRITE_VENDAS_ATRIBUIDAS } from '../config/role_groups.js'
 import { NIL_UUID, resolvePresenterCommissionPct } from '../services/presenter-commission.js'
+import { feriadosDoPeriodo } from '../services/feriados.js'
 import { sincronizarSnapshotComissaoApresentadora } from '../services/comissao-snapshot.js'
 
 const vendaSchema = z.object({
@@ -240,6 +241,8 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
     `SELECT gmv_inicio, gmv_fim, comissao_pct FROM tenant_comissao_faixas_default
       WHERE tenant_id = $1::uuid ORDER BY gmv_inicio DESC`, [tenantId],
   )).rows
+  const datas = pendentes.map((v) => String(v.data).slice(0, 10)).sort()
+  const feriados = await feriadosDoPeriodo(db, tenantId, datas[0], datas[datas.length - 1])
   const updates = []
   for (const venda of pendentes) {
     // GMV ausente ou gravado 0 não vira comissão 0. A leitura oficial também
@@ -249,7 +252,7 @@ export async function recalcularVendasAtribuidasApresentadora(db, { tenantId, ap
     const pct = await resolvePresenterCommissionPct(db, {
       tenantId, apresentadoraId, origem: venda.origem, origemId: venda.origem_id,
       data: venda.data, gmv: venda.gmv,
-      monthlyContext: { gmvExcludingOrigin: venda.gmv_excluding_origin, presenterBands, defaultBands },
+      monthlyContext: { gmvExcludingOrigin: venda.gmv_excluding_origin, presenterBands, defaultBands, feriados },
     })
     const update = { id: venda.id, ap: gmv * (pct / 100),
       franquia: gmv * (Number(venda.comissao_franquia_pct ?? 0) / 100),

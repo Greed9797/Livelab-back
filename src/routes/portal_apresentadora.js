@@ -17,6 +17,7 @@ import { saoPauloDateInput, saoPauloDayBounds } from '../lib/timezone.js'
 import { invalidateTenant } from '../lib/dashboard-cache.js'
 import { invalidateHomeDashboard } from './home.js'
 import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
+import { syncVendaVideo, videoFinanceiroFechado } from './videos.js'
 
 const PORTAL_PAPEIS = ['apresentador', 'apresentadora']
 const REVIEW_PAPEIS = ['franqueador_master', 'franqueado', 'gerente', 'operacional', 'produtor_live']
@@ -38,6 +39,46 @@ const submissionSchema = z.object({
   manual_views_declaradas: views,
   request_id: uuid.optional(),
 }).strict()
+// Vídeo vai para video_registros (mesma tabela da gestão), nunca para lives:
+// é o que impede um vídeo de contar como live e vice-versa.
+const portalVideoSchema = z.object({
+  marca_id: uuid,
+  data: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'data deve ter o formato YYYY-MM-DD'),
+  quantidade: orders,
+  gmv_atribuido: money.optional(),
+  pedidos_atribuidos: orders.optional(),
+  plataforma: z.string().trim().min(1).max(40).optional(),
+  observacoes: z.string().trim().max(1000).nullable().optional(),
+}).strict()
+
+export function normalizePortalVideo(input, now = new Date()) {
+  const hoje = saoPauloDateInput(now)
+  const parsed = new Date(`${input.data}T12:00:00Z`)
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== input.data) return { error: 'Data inválida.' }
+  if (input.data > hoje || input.data.slice(0, 7) !== hoje.slice(0, 7)) return { error: 'Registre vídeos do mês atual, até hoje.' }
+  const quantidade = parsePortalCount(input.quantidade, 1000)
+  if (!quantidade.ok) return { error: quantidade.error }
+  if (quantidade.value < 1) return { error: 'Informe ao menos 1 vídeo.' }
+  const gmv = parsePortalMoney(input.gmv_atribuido ?? 0)
+  if (!gmv.ok) return { error: gmv.error }
+  const pedidos = parsePortalCount(input.pedidos_atribuidos ?? 0, 1_000_000)
+  if (!pedidos.ok) return { error: pedidos.error }
+  return {
+    value: {
+      marca_id: input.marca_id,
+      data: input.data,
+      quantidade: quantidade.value,
+      gmv_atribuido: gmv.value,
+      pedidos_atribuidos: pedidos.value,
+      plataforma: input.plataforma ?? 'tiktok',
+      observacoes: input.observacoes || null,
+    },
+  }
+}
+
+function portalVideoEditavel(data, now = new Date()) {
+  return String(data).slice(0, 7) === saoPauloDateInput(now).slice(0, 7)
+}
 const reviewSchema = z.object({
   versao_esperada: z.number().int().positive().optional(),
   motivo_revisao: z.string().trim().min(1).max(1000).optional(),
@@ -342,6 +383,104 @@ export async function portalApresentadoraRoutes(app) {
         if (!row.rows[0]) return reply.code(404).send({ error: 'Submissão não encontrada ou não pode ser cancelada.' })
         await recordHistory(db, { tenantId: request.user.tenant_id, submissionId: row.rows[0].id, version: row.rows[0].versao, action: 'cancelada', actorId: request.user.sub })
         return { ok: true, ...row.rows[0] }
+      })
+    })
+  })
+
+  // Vídeo entra direto (sem fila de revisão): o registro conta no relatório na
+  // hora; o GMV vira venda atribuída pendente e segue a aprovação financeira.
+  const activeMarca = (db, marcaId, tenantId) => db.query(`SELECT 1 FROM marcas m LEFT JOIN clientes cl ON cl.id=m.cliente_id AND cl.tenant_id=m.tenant_id WHERE m.id=$1::uuid AND m.tenant_id=$2::uuid AND ${marcaStatusOperacionalSql('m', 'cl')}='ativa' LIMIT 1`, [marcaId, tenantId])
+  const lockOwnVideo = (db, id, tenantId, apresentadoraId) => db.query(`SELECT id, to_char(data,'YYYY-MM-DD') AS data FROM video_registros WHERE id=$1::uuid AND tenant_id=$2::uuid AND apresentadora_id=$3::uuid FOR UPDATE`, [id, tenantId, apresentadoraId])
+
+  app.get('/v1/portal/apresentadora/videos', { preHandler: ownAccess }, async (request, reply) => {
+    const range = monthOr400(request.query, reply); if (!range) return reply
+    return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
+      const profile = await resolveOwnProfile(db, request.user.tenant_id, request.user.sub, request.user.papel)
+      if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
+      const rows = await db.query(`
+        SELECT vr.id, vr.marca_id, m.nome AS marca_nome, to_char(vr.data,'YYYY-MM-DD') AS data, vr.quantidade,
+               vr.plataforma, vr.gmv_atribuido, vr.pedidos_atribuidos, vr.observacoes, vr.criado_em,
+               va.status_aprovacao AS venda_status
+          FROM video_registros vr
+          LEFT JOIN marcas m ON m.id=vr.marca_id AND m.tenant_id=vr.tenant_id
+          LEFT JOIN LATERAL (
+            SELECT v.status_aprovacao FROM vendas_atribuidas v
+             WHERE v.tenant_id=vr.tenant_id AND v.origem='video' AND v.origem_id=vr.id
+             ORDER BY (v.status_aprovacao IN ('aprovada','fechada','faturada')) DESC LIMIT 1
+          ) va ON TRUE
+         WHERE vr.tenant_id=$1::uuid AND vr.apresentadora_id=$2::uuid AND vr.data >= $3::date AND vr.data < $4::date
+         ORDER BY vr.data DESC, vr.criado_em DESC`, [request.user.tenant_id, profile.id, range.start, range.end])
+      const fechado = new Set(['aprovada', 'fechada', 'faturada'])
+      return {
+        mes: range.mes,
+        total_videos: rows.rows.reduce((acc, row) => acc + Number(row.quantidade ?? 0), 0),
+        items: rows.rows.map((row) => ({ ...row, editavel: portalVideoEditavel(row.data) && !fechado.has(row.venda_status) })),
+      }
+    })
+  })
+
+  app.post('/v1/portal/apresentadora/videos', { preHandler: ownAccess }, async (request, reply) => {
+    const parsed = portalVideoSchema.safeParse(request.body ?? {}); if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const normalized = normalizePortalVideo(parsed.data); if (normalized.error) return reply.code(400).send({ error: normalized.error })
+    const d = normalized.value
+    return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
+      const tenantId = request.user.tenant_id
+      const profile = await resolveOwnProfile(db, tenantId, request.user.sub, request.user.papel)
+      if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
+      if (!(await activeMarca(db, d.marca_id, tenantId)).rows[0]) return reply.code(404).send({ error: 'Marca ativa não encontrada nesta unidade.' })
+      return inSubmissionTransaction(db, async () => {
+        const created = await db.query(`
+          INSERT INTO video_registros (tenant_id, marca_id, apresentadora_id, data, quantidade, plataforma, gmv_atribuido, pedidos_atribuidos, observacoes, criado_por)
+          VALUES ($1::uuid,$2::uuid,$3::uuid,$4::date,$5,$6,$7,$8,$9,$10::uuid)
+          RETURNING id, tenant_id, marca_id, apresentadora_id, to_char(data,'YYYY-MM-DD') AS data, quantidade, plataforma, gmv_atribuido, pedidos_atribuidos, observacoes, criado_em`,
+          [tenantId, d.marca_id, profile.id, d.data, d.quantidade, d.plataforma, d.gmv_atribuido, d.pedidos_atribuidos, d.observacoes, request.user.sub])
+        await syncVendaVideo(db, tenantId, created.rows[0])
+        reply.code(201)
+        return { ...created.rows[0], editavel: true }
+      })
+    })
+  })
+
+  app.patch('/v1/portal/apresentadora/videos/:id', { preHandler: ownAccess }, async (request, reply) => {
+    const idCheck = uuid.safeParse(request.params?.id); if (!idCheck.success) return reply.code(400).send({ error: 'id inválido' })
+    const parsed = portalVideoSchema.safeParse(request.body ?? {}); if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+    const normalized = normalizePortalVideo(parsed.data); if (normalized.error) return reply.code(400).send({ error: normalized.error })
+    const d = normalized.value
+    return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
+      const tenantId = request.user.tenant_id
+      const profile = await resolveOwnProfile(db, tenantId, request.user.sub, request.user.papel)
+      if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
+      return inSubmissionTransaction(db, async () => {
+        const current = await lockOwnVideo(db, idCheck.data, tenantId, profile.id)
+        if (!current.rows[0]) return reply.code(404).send({ error: 'Vídeo não encontrado.' })
+        if (!portalVideoEditavel(current.rows[0].data)) return reply.code(409).send({ error: 'Vídeo de mês anterior não pode ser alterado.' })
+        if (await videoFinanceiroFechado(db, tenantId, idCheck.data)) return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser alterado' })
+        if (!(await activeMarca(db, d.marca_id, tenantId)).rows[0]) return reply.code(404).send({ error: 'Marca ativa não encontrada nesta unidade.' })
+        const updated = await db.query(`
+          UPDATE video_registros SET marca_id=$3::uuid, data=$4::date, quantidade=$5, plataforma=$6, gmv_atribuido=$7, pedidos_atribuidos=$8, observacoes=$9
+           WHERE id=$1::uuid AND tenant_id=$2::uuid
+          RETURNING id, tenant_id, marca_id, apresentadora_id, to_char(data,'YYYY-MM-DD') AS data, quantidade, plataforma, gmv_atribuido, pedidos_atribuidos, observacoes, criado_em`,
+          [idCheck.data, tenantId, d.marca_id, d.data, d.quantidade, d.plataforma, d.gmv_atribuido, d.pedidos_atribuidos, d.observacoes])
+        await syncVendaVideo(db, tenantId, updated.rows[0])
+        return { ...updated.rows[0], editavel: true }
+      })
+    })
+  })
+
+  app.delete('/v1/portal/apresentadora/videos/:id', { preHandler: ownAccess }, async (request, reply) => {
+    const idCheck = uuid.safeParse(request.params?.id); if (!idCheck.success) return reply.code(400).send({ error: 'id inválido' })
+    return withPortalPresenterDb(app, request.user.tenant_id, async (db) => {
+      const tenantId = request.user.tenant_id
+      const profile = await resolveOwnProfile(db, tenantId, request.user.sub, request.user.papel)
+      if (!profile) return reply.code(409).send({ error: 'Perfil de apresentadora não configurado.' })
+      return inSubmissionTransaction(db, async () => {
+        const current = await lockOwnVideo(db, idCheck.data, tenantId, profile.id)
+        if (!current.rows[0]) return reply.code(404).send({ error: 'Vídeo não encontrado.' })
+        if (!portalVideoEditavel(current.rows[0].data)) return reply.code(409).send({ error: 'Vídeo de mês anterior não pode ser excluído.' })
+        if (await videoFinanceiroFechado(db, tenantId, idCheck.data)) return reply.code(409).send({ code: 'FINANCIAL_ROW_CLOSED', error: 'O vídeo possui atribuição financeira fechada e não pode ser excluído' })
+        await db.query(`DELETE FROM vendas_atribuidas WHERE tenant_id=$1::uuid AND origem='video' AND origem_id=$2::uuid`, [tenantId, idCheck.data])
+        await db.query(`DELETE FROM video_registros WHERE id=$1::uuid AND tenant_id=$2::uuid`, [idCheck.data, tenantId])
+        return { ok: true, id: idCheck.data }
       })
     })
   })

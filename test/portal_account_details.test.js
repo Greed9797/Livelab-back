@@ -7,7 +7,7 @@ const apresentadoraId = '22222222-2222-4222-8222-222222222222'
 
 describe('presenter account details', () => {
   it('uses the canonical monthly total and scopes every source before reading', async () => {
-    const query = vi.fn()
+    const query = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: apresentadoraId, nome: 'Ana', valor: '1440.00' }] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: apresentadoraId, nome: 'Ana', valor: '35.50' }] })
       .mockResolvedValueOnce({ rows: [{ id: 'extra', apresentadora_id: apresentadoraId, nome: 'Ana', tipo: 'bonificacao', descricao: 'Meta', valor: '100.25' }] })
@@ -16,8 +16,10 @@ describe('presenter account details', () => {
     expect(result.extras).toHaveLength(1)
     for (const [sql, params] of query.mock.calls) {
       expect(params[0]).toBe(tenantId)
+      // Feriados são da unidade, não da apresentadora: única leitura sem o filtro dela.
+      if (sql.includes('FROM feriados')) continue
       expect(params.at(-1)).toBe(apresentadoraId)
-      expect(sql).toMatch(/AND (?:a\.id|va\.apresentadora_id|ara\.apresentadora_id) = \$[34]::uuid/)
+      expect(sql).toMatch(/AND (?:a\.id|va\.apresentadora_id|ara\.apresentadora_id|ap_v2\.apresentadora_id) = \$[34]::uuid/)
     }
   })
 
@@ -32,7 +34,7 @@ describe('presenter account details', () => {
   it('returns zero for an empty own monthly closing', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [] })
     expect(await getOwnPortalRemuneration({ query }, { tenantId, apresentadoraId, mes: '2026-09' }))
-      .toEqual({ mes: '2026-09', fixo: 0, comissao: 0, adicionais: 0, total: 0, extras: [] })
+      .toEqual({ mes: '2026-09', fixo: 0, comissao: 0, bonus_fim_de_semana: 0, adicionais: 0, total: 0, horas: null, dias_especiais: [], extras: [] })
   })
 
   it('reads photo only through the authenticated explicit tenant/account link', async () => {

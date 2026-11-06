@@ -3,6 +3,7 @@ import { recalcularVendasAtribuidasApresentadora } from '../routes/vendas_atribu
 import { comissaoValorFromPct } from '../lib/comissao-sem-cabine.js'
 import { calcularComissaoFranquia } from './comissao.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
+import { montarFeriados } from './feriados.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -178,6 +179,14 @@ function contextoSql() {
         ))
           FROM tenant_comissao_faixas_default d
          WHERE d.tenant_id = $1::uuid
+      ), '[]'::json),
+      -- Ajustes de feriado da unidade (tabela pequena): 2% em live no feriado.
+      'feriados', COALESCE((
+        SELECT json_agg(json_build_object('data', to_char(fe.data, 'YYYY-MM-DD'), 'nome', fe.nome, 'ativo', fe.ativo))
+          FROM feriados fe
+         WHERE fe.tenant_id = $1::uuid
+           AND fe.data >= (SELECT MIN((iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date) FROM base)
+           AND fe.data <= (SELECT MAX((iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date) FROM base)
       ), '[]'::json)
     ) AS payload`
 }
@@ -406,6 +415,9 @@ export async function aprovarLoteNaSessao({
   const byId = new Map((parsed.submissoes ?? []).map((row) => [row.id, row]))
   const faixas = bandsByPresenter(parsed.faixas ?? [])
   const faixasTenant = parsed.faixas_tenant ?? []
+  // Feriados (2% em live): calendário embutido + ajustes da unidade vindos no contexto.
+  const diasLote = [...byId.values()].map((row) => saoPauloDateInput(row.iniciado_em)).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d ?? "")).sort()
+  const feriados = diasLote.length ? montarFeriados(diasLote[0], diasLote.at(-1), parsed.feriados ?? []) : new Map()
   const aprovadasNoLote = []
   const gmvMes = new Map()
   const lifts = new Map()
@@ -448,7 +460,7 @@ export async function aprovarLoteNaSessao({
         origemId: info.id,
         data: info.iniciado_em,
         gmv,
-        monthlyContext: { gmvExcludingOrigin: gmvBase, presenterBands, defaultBands },
+        monthlyContext: { gmvExcludingOrigin: gmvBase, presenterBands, defaultBands, feriados },
       })
       comissaoApresentadora = gmv * (Number(comissaoApresentadoraPct) / 100)
     }

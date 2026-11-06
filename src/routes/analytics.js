@@ -15,7 +15,7 @@ import { apresentadoraHorasPresencaSql, liveGmvSql } from '../lib/metric-sql.js'
 import { officialLineCommissionExpr, officialLineGmvExpr } from '../lib/sale-gmv-sql.js'
 import { activeLiveJoinSql, activeLiveSql } from '../lib/live-merge-sql.js'
 import { notArchivedSql, presenterFanoutSql, presenterGmvShareSql } from '../lib/live-count-sql.js'
-import { classificarDia, intervaloDeDias, somarDias } from '../lib/calendario-blumenau.js'
+import { classificarDia, ehDiaUtil, intervaloDeDias, somarDias } from '../lib/calendario-blumenau.js'
 import { saoPauloDateInput } from '../lib/timezone.js'
 import { applyApresentadorasToLive, rateioAbsoluto } from '../lib/live-rateio.js'
 import { performance } from 'node:perf_hooks'
@@ -2552,26 +2552,34 @@ export async function analyticsRoutes(app) {
             GROUP BY dia, marca_id, marca_nome, apresentadora_id, apresentadora_nome
           ),
           video_daily AS (
+            -- Quantidade vem do registro (vídeo sem GMV também conta); GMV/pedidos
+            -- vêm da venda atribuída, que só existe quando há GMV.
             SELECT
-              va.data::date AS dia,
-              va.marca_id,
+              vr.data::date AS dia,
+              vr.marca_id,
               COALESCE(m.nome, 'Sem marca') AS marca_nome,
-              va.apresentadora_id,
+              vr.apresentadora_id,
               COALESCE(a.nome, 'Sem apresentadora') AS apresentadora_nome,
               COALESCE(SUM(va.gmv), 0) AS gmv_videos,
               COALESCE(SUM(va.pedidos), 0)::int AS pedidos_videos,
-              COUNT(DISTINCT va.origem_id)::int AS total_videos
-            FROM vendas_atribuidas va
-            LEFT JOIN marcas m ON m.id = va.marca_id AND m.tenant_id = va.tenant_id
-            LEFT JOIN apresentadoras a ON a.id = va.apresentadora_id AND a.tenant_id = va.tenant_id
-            WHERE va.tenant_id = current_setting('app.tenant_id', true)::uuid
-              AND va.origem = 'video'
-              AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
-              AND va.data >= $1::date
-              AND va.data <= $2::date
-              AND ($3::uuid IS NULL OR va.marca_id = $3::uuid)
-              AND ($4::uuid IS NULL OR va.apresentadora_id = $4::uuid)
-            GROUP BY va.data::date, va.marca_id, COALESCE(m.nome, 'Sem marca'), va.apresentadora_id, COALESCE(a.nome, 'Sem apresentadora')
+              COALESCE(SUM(vr.quantidade), 0)::int AS total_videos
+            FROM video_registros vr
+            LEFT JOIN LATERAL (
+              SELECT SUM(v.gmv) AS gmv, SUM(v.pedidos) AS pedidos
+                FROM vendas_atribuidas v
+               WHERE v.tenant_id = vr.tenant_id
+                 AND v.origem = 'video'
+                 AND v.origem_id = vr.id
+                 AND COALESCE(v.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+            ) va ON TRUE
+            LEFT JOIN marcas m ON m.id = vr.marca_id AND m.tenant_id = vr.tenant_id
+            LEFT JOIN apresentadoras a ON a.id = vr.apresentadora_id AND a.tenant_id = vr.tenant_id
+            WHERE vr.tenant_id = current_setting('app.tenant_id', true)::uuid
+              AND vr.data >= $1::date
+              AND vr.data <= $2::date
+              AND ($3::uuid IS NULL OR vr.marca_id = $3::uuid)
+              AND ($4::uuid IS NULL OR vr.apresentadora_id = $4::uuid)
+            GROUP BY vr.data::date, vr.marca_id, COALESCE(m.nome, 'Sem marca'), vr.apresentadora_id, COALESCE(a.nome, 'Sem apresentadora')
           ),
           comissao_daily AS (
             -- Comissão da apresentadora por (dia, marca, apresentadora), da fonte
@@ -2662,9 +2670,28 @@ export async function analyticsRoutes(app) {
           else merged.push({ ...row, total_lives: 0, total_videos: 0, gmv_lives: 0, gmv_videos: 0, horas_live: 0, pedidos: 0, comissao_apresentadora: 0, comissao_gmv_base: 0 })
         }
 
+        // Meta diária de vídeos (config operacional do mês) só faz sentido no
+        // relatório de uma apresentadora; vale nos dias úteis.
+        let metaVideosPorDia = null
+        if (apresentadoraId) {
+          const metas = await db.query(
+            `SELECT ano_mes, configuracao_operacional->>'videos_por_apresentador' AS videos
+               FROM meta_unidade
+              WHERE tenant_id = current_setting('app.tenant_id', true)::uuid
+                AND ano_mes >= $1 AND ano_mes <= $2
+                AND configuracao_operacional->>'videos_por_apresentador' IS NOT NULL`,
+            [String(fromDate).slice(0, 7), String(toDate).slice(0, 7)],
+          )
+          const porMes = new Map(metas.rows.map((m) => [m.ano_mes, Number(m.videos)]))
+          metaVideosPorDia = Object.fromEntries(intervaloDeDias(String(fromDate).slice(0, 10), String(toDate).slice(0, 10))
+            .filter((d) => porMes.has(d.slice(0, 7)) && ehDiaUtil(d))
+            .map((d) => [d, porMes.get(d.slice(0, 7))]))
+        }
+
         return {
           periodo: { from: fromDate, to: toDate, mesAno },
           filters: { marca_id: marcaId, apresentadora_id: apresentadoraId },
+          meta_videos_por_dia: metaVideosPorDia,
           rows: merged.map((row) => {
             const gmvPendente = round2(row.gmv_pendente)
             const pedidosPendentes = toInt(row.pedidos_pendentes)

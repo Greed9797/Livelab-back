@@ -139,10 +139,10 @@ async function pagamentoAtual(db, { tenantId, apresentadoraId, mes, componente }
   return rows[0] ?? null
 }
 
-// Previsto do componente a partir de uma linha do fechamento. variável = comissão + adicionais.
+// Previsto do componente a partir de uma linha do fechamento. variável = comissão + bônus fds/feriado + adicionais.
 export function previstoDoComponente(ap, componente) {
   if (componente === 'fixo') return r2(ap?.fixo)
-  return r2(Number(ap?.comissao ?? 0) + Number(ap?.adicionais ?? 0))
+  return r2(Number(ap?.comissao ?? 0) + Number(ap?.bonus_fim_de_semana ?? 0) + Number(ap?.adicionais ?? 0))
 }
 
 /**
@@ -195,7 +195,7 @@ export async function listarPagamentosApresentadoras(db, { tenantId, inicio, fim
     }
     for (const ap of fechamento.apresentadoras) {
       vistos.add(ap.apresentadora_id)
-      const detalhe = { fixo: ap.fixo, comissao: ap.comissao, adicionais: ap.adicionais }
+      const detalhe = { fixo: ap.fixo, comissao: ap.comissao, bonus_fim_de_semana: ap.bonus_fim_de_semana ?? 0, adicionais: ap.adicionais }
       for (const comp of COMPONENTES) montar(ap.apresentadora_id, ap.nome, comp, previstoDoComponente(ap, comp), detalhe)
     }
     // Pagamento registrado para apresentadora que saiu do fechamento (inativada/arquivada).
@@ -206,7 +206,7 @@ export async function listarPagamentosApresentadoras(db, { tenantId, inicio, fim
     }
     for (const apId of orfas) {
       const n = await db.query('SELECT nome FROM apresentadoras WHERE id = $1::uuid AND tenant_id = $2::uuid', [apId, tenantId])
-      for (const comp of COMPONENTES) montar(apId, n.rows[0]?.nome ?? 'Apresentadora', comp, 0, { fixo: 0, comissao: 0, adicionais: 0 })
+      for (const comp of COMPONENTES) montar(apId, n.rows[0]?.nome ?? 'Apresentadora', comp, 0, { fixo: 0, comissao: 0, bonus_fim_de_semana: 0, adicionais: 0 })
     }
   }
   return itens.sort((a, b) => a.competencia.localeCompare(b.competencia)

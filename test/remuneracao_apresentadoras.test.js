@@ -22,7 +22,7 @@ function buildApp(queryMock = vi.fn().mockResolvedValue({ rows: [] })) {
 
 describe('remuneração de apresentadoras', () => {
   it('fecha fixo, comissão inclusive sem GMV, adicionais e bônus sem duplicar', async () => {
-    const query = vi.fn()
+    const query = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '2700.00' }] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '35.50' }] })
       .mockResolvedValueOnce({ rows: [
@@ -31,7 +31,7 @@ describe('remuneração de apresentadoras', () => {
       ] })
     const fechamento = await buscarFechamentoApresentadoras({ query }, { tenantId, mes: '2026-09' })
     expect(fechamento.apresentadoras).toEqual([expect.objectContaining({ fixo: 2700, comissao: 35.5, adicionais: 125.25, total: 2860.75 })])
-    expect(fechamento.totais).toEqual({ fixo: 2700, comissao: 35.5, adicionais: 125.25, total: 2860.75 })
+    expect(fechamento.totais).toEqual({ fixo: 2700, comissao: 35.5, bonus_fim_de_semana: 0, adicionais: 125.25, total: 2860.75 })
     expect(String(query.mock.calls[1][0])).toContain("COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'")
     expect(String(query.mock.calls[1][0])).toContain("l_oficial.status = 'encerrada'")
     expect(String(query.mock.calls[1][0])).toContain('l_oficial.arquivada_em IS NULL')
@@ -40,7 +40,7 @@ describe('remuneração de apresentadoras', () => {
   })
 
   it('usa o mesmo rateio de contrato do DRE para entrada ou saída no mês', async () => {
-    const query = vi.fn()
+    const query = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '1440.00' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
@@ -54,7 +54,7 @@ describe('remuneração de apresentadoras', () => {
   })
 
   it('arredonda cada componente em centavos antes de fechar o total', async () => {
-    const query = vi.fn()
+    const query = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '2612.90' }] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '0.10' }] })
       .mockResolvedValueOnce({ rows: [{ id: adicionalId, apresentadora_id: presenterId, nome: 'Ana', tipo: 'bonificacao', descricao: 'Extra', data_referencia: null, valor: '0.01' }] })
@@ -66,7 +66,7 @@ describe('remuneração de apresentadoras', () => {
   })
 
   it('arredonda comissão proporcional com escala maior que centavos em vez de estourar 500', async () => {
-    const query = vi.fn()
+    const query = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '2700.00' }] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '15.921947831029052489' }] })
       .mockResolvedValueOnce({ rows: [] })
@@ -75,7 +75,7 @@ describe('remuneração de apresentadoras', () => {
   })
 
   it('rejeita texto que não é valor monetário', async () => {
-    const query = vi.fn()
+    const query = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: '2700.00' }] })
       .mockResolvedValueOnce({ rows: [{ apresentadora_id: presenterId, nome: 'Ana', valor: 'nao-e-dinheiro' }] })
       .mockResolvedValueOnce({ rows: [] })
@@ -113,7 +113,7 @@ describe('remuneração de apresentadoras', () => {
   })
 
   it('retorna o adicional original no retry com request_id, sem nova auditoria', async () => {
-    const query = vi.fn()
+    const query = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: adicionalId, apresentadora_id: presenterId, competencia: '2026-09-01', tipo: 'bonificacao', descricao: 'Meta', data_referencia: null, valor: '30.00', criado: false }] })
     const { app } = buildApp(query)
@@ -127,7 +127,7 @@ describe('remuneração de apresentadoras', () => {
   })
 
   it('recusa request_id reaproveitado com dados diferentes', async () => {
-    const query = vi.fn()
+    const query = vi.fn().mockResolvedValue({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: adicionalId, apresentadora_id: presenterId, competencia: '2026-09-01', tipo: 'bonificacao', descricao: 'Original', data_referencia: null, valor: '30.00', criado: false }] })
     const { app } = buildApp(query)
@@ -254,6 +254,9 @@ describe('remuneração de apresentadoras', () => {
         apresentador_id uuid,
         status text,
         iniciado_em timestamptz,
+        encerrado_em timestamptz,
+        previsto_fim timestamptz,
+        agenda_evento_id uuid,
         arquivada_em timestamptz,
         uniao_destino_id uuid,
         uniao_desfeita_em timestamptz,
@@ -264,7 +267,24 @@ describe('remuneração de apresentadoras', () => {
       CREATE TABLE live_apresentadoras_v2 (
         live_id uuid,
         tenant_id uuid,
-        apresentadora_id uuid
+        apresentadora_id uuid,
+        gmv_rateado numeric,
+        segundos_rateio int,
+        percentual_rateio numeric,
+        papel text
+      );
+      CREATE TABLE agenda_evento_apresentadoras (
+        agenda_evento_id uuid,
+        tenant_id uuid,
+        apresentadora_id uuid,
+        data_inicio timestamptz,
+        data_fim timestamptz
+      );
+      CREATE TABLE feriados (
+        tenant_id uuid NOT NULL,
+        data date NOT NULL,
+        nome text NOT NULL,
+        ativo boolean NOT NULL DEFAULT true
       );
       CREATE TABLE vendas_atribuidas (
         id uuid PRIMARY KEY,

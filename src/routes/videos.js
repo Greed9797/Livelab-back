@@ -50,7 +50,7 @@ async function ensureVideoRefs(db, reply, { tenantId, marcaId, apresentadoraId, 
   return true
 }
 
-async function syncVendaVideo(db, tenantId, video) {
+export async function syncVendaVideo(db, tenantId, video) {
   if (Number(video.gmv_atribuido ?? 0) <= 0) {
     await db.query(
       `DELETE FROM vendas_atribuidas
@@ -85,7 +85,7 @@ async function syncVendaVideo(db, tenantId, video) {
   })
 }
 
-async function videoFinanceiroFechado(db, tenantId, videoId) {
+export async function videoFinanceiroFechado(db, tenantId, videoId) {
   const result = await db.query(
     `SELECT 1 FROM vendas_atribuidas
       WHERE tenant_id = $1::uuid AND origem = 'video' AND origem_id = $2::uuid

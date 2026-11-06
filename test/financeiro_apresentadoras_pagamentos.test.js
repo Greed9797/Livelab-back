@@ -45,6 +45,8 @@ function fakeDb({ pagos = [], config = CFG, fixo = '2700.00', comissao = '160.00
   const query = vi.fn(async (sql, params) => {
     calls.push({ sql: String(sql), params })
     const s = String(sql)
+    // Horas/vendas por dia e feriados do fechamento: sem dias especiais aqui.
+    if (s.includes(' AS dia,') || s.includes('FROM feriados')) return { rows: [] }
     if (s.includes('UPDATE apresentadora_pagamentos SET valor_pago = valor_pago +')) {
       pagamentosAtuais.splice(0, pagamentosAtuais.length, {
         id: 'x', apresentadora_id: apId, competencia: '2026-09-01', componente: 'fixo',

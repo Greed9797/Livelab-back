@@ -18,7 +18,8 @@ const db = { query(sql, params) {
   // and period selection below execute the production SQL in PostgreSQL.
   if (sql.includes('WITH comissao_marca')) return typeof commercial === 'function' ? commercial(params)
     : Promise.resolve({ rows: commercial.filter(r => r.competencia >= params[0] && r.competencia <= params[1]) })
-  if (sql.includes('SELECT va.apresentadora_id, a.nome') || sql.includes('SELECT ara.id, ara.apresentadora_id')) return Promise.resolve({ rows: [] })
+  if (sql.includes('SELECT va.apresentadora_id, a.nome') || sql.includes('SELECT ara.id, ara.apresentadora_id')
+    || sql.includes(' AS dia,') || sql.includes('FROM feriados')) return Promise.resolve({ rows: [] })
   return pg.query(sql, params)
 } }
 beforeAll(async () => {

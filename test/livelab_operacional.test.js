@@ -932,6 +932,7 @@ describe('LIVELAB operational routes', () => {
   it('calcularComissoesAtribuidas chooses presenter ladder by monthly GMV', async () => {
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [{ comissao_franquia_pct: '10', comissao_franqueadora_pct: '2' }] })
+      .mockResolvedValueOnce({ rows: [] }) // feriados da unidade
       .mockResolvedValueOnce({ rows: [{ gmv_mes: '49000.00' }] })
       .mockResolvedValueOnce({ rows: [{ comissao_pct: '1' }] })
       .mockResolvedValueOnce({ rows: [{ comissao_live_pct: '0.5', comissao_video_pct: '0.5' }] })
@@ -951,7 +952,8 @@ describe('LIVELAB operational routes', () => {
       comissao_franquia: 200,
       comissao_franqueadora: 40,
     })
-    expect(queryMock.mock.calls[2][0]).toContain('apresentadora_comissao_faixas')
+    expect(queryMock.mock.calls[1][0]).toContain('FROM feriados')
+    expect(queryMock.mock.calls[3][0]).toContain('apresentadora_comissao_faixas')
   })
 
   it('calcularComissoesAtribuidas applies 2 percent for weekend live', async () => {

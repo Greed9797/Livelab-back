@@ -1,10 +1,27 @@
 import { presenterFixedAtSql } from '../config/presenter_defaults.js'
 import { prorateFatorSql } from '../lib/financeiro-remuneracao.js'
-import { apresentadoraHorasSql, liveGmvSql, liveHoursSql, liveOrdersSql } from '../lib/metric-sql.js'
-import { notArchivedSql, presenterCreditedSql } from '../lib/live-count-sql.js'
+import { apresentadoraHorasPresencaSql, apresentadoraHorasSql, liveGmvSql, liveHoursSql, liveOrdersSql } from '../lib/metric-sql.js'
+import { notArchivedSql, presenterCreditedSql, presenterFanoutSql } from '../lib/live-count-sql.js'
 import { activeLiveSql } from '../lib/live-merge-sql.js'
 import { officialLineCommissionExpr, officialLineGmvExpr, officialLinePctExpr, officialLiveGmvSql, scaledStoredCommissionSql } from '../lib/sale-gmv-sql.js'
 import { esperarLeiturasFinanceiras } from './financeiro-read-snapshot.js'
+import { feriadosDoPeriodo, tipoDiaEspecial } from './feriados.js'
+import { intervaloDeDias } from '../lib/calendario-blumenau.js'
+
+// Regras do fechamento (decisões em docs/regras-fechamento-apresentadoras.md).
+// Bônus automático de sábado/domingo/feriado: R$100 por bloco FECHADO de 4h no
+// dia. Vale a partir desta competência; meses anteriores seguem o lançamento
+// manual antigo, para não alterar fechamentos já pagos.
+export const BONUS_DIA_ESPECIAL_DESDE = '2026-11'
+export const BONUS_DIA_ESPECIAL_HORAS_BLOCO = 4
+export const BONUS_DIA_ESPECIAL_VALOR_BLOCO = 100
+// Meta de horas que garante o fixo: 6h por dia útil (seg–sex, sem feriado).
+export const META_HORAS_DIA_UTIL = 6
+
+export function blocosBonusDoDia(horas) {
+  // Arredonda a 2 casas antes do piso: 4h medidas como 3,9999 continuam um bloco.
+  return Math.floor(Math.round(Number(horas || 0) * 100) / 100 / BONUS_DIA_ESPECIAL_HORAS_BLOCO)
+}
 
 export const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 export const DATA_RE = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
@@ -114,9 +131,10 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes, aprese
   }
   const competencia = competenciaDoMes(mes)
   const fim = ultimoDiaDoMes(mes)
-  const [fixos, comissoes, adicionais] = await esperarLeiturasFinanceiras([
+  const [fixos, comissoes, adicionais, horasDia, vendasDia] = await esperarLeiturasFinanceiras([
     db.query(`
       SELECT a.id AS apresentadora_id, a.nome,
+             to_char(a.data_inicio, 'YYYY-MM-DD') AS data_inicio, to_char(a.data_fim, 'YYYY-MM-DD') AS data_fim,
              ROUND(COALESCE(${presenterFixedAtSql('a', '$2::date')}
                * ${prorateFatorSql("date_trunc('month', $2::date)", 'a.data_inicio', 'a.data_fim')}, 0), 2) AS valor
       FROM apresentadoras a
@@ -153,30 +171,131 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes, aprese
         ${apresentadoraId ? 'AND ara.apresentadora_id = $3::uuid' : ''}
       ORDER BY a.nome ASC, ara.data_referencia ASC NULLS LAST, ara.criado_em ASC
     `, apresentadoraId ? [tenantId, competencia, apresentadoraId] : [tenantId, competencia]),
+    // Horas de presença por apresentadora e dia (mesma régua do painel de
+    // assiduidade): alimentam a meta de horas e o bônus de dia especial.
+    db.query(`
+      SELECT ap_v2.apresentadora_id, a.nome,
+             to_char((l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS dia,
+             ROUND(COALESCE(SUM(${apresentadoraHorasPresencaSql({ live: 'l', rateio: 'ap_v2', turno: 'turno' })}), 0)::numeric, 4) AS horas
+      FROM lives l
+      ${presenterFanoutSql({ live: 'l', rateio: 'ap_v2' })}
+      JOIN apresentadoras a ON a.id = ap_v2.apresentadora_id AND a.tenant_id = l.tenant_id
+      LEFT JOIN LATERAL (
+        SELECT SUM(EXTRACT(EPOCH FROM (aea.data_fim - aea.data_inicio)) / 3600.0) AS horas_turno
+        FROM agenda_evento_apresentadoras aea
+        WHERE aea.agenda_evento_id = l.agenda_evento_id AND aea.tenant_id = l.tenant_id
+          AND aea.apresentadora_id = ap_v2.apresentadora_id
+      ) turno ON true
+      WHERE l.tenant_id = $1::uuid
+        AND l.status = 'encerrada'
+        AND ${activeLiveSql('l')}
+        AND ${notArchivedSql('l')}
+        AND l.iniciado_em >= ($2::timestamp) AT TIME ZONE 'America/Sao_Paulo'
+        AND l.iniciado_em < (($3::date::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/Sao_Paulo')
+        ${apresentadoraId ? 'AND ap_v2.apresentadora_id = $4::uuid' : ''}
+      GROUP BY ap_v2.apresentadora_id, a.nome, 3
+    `, apresentadoraId ? [tenantId, competencia, fim, apresentadoraId] : [tenantId, competencia, fim]),
+    // GMV e comissão de live por dia da live: detalham o que foi pago em dia especial.
+    db.query(`
+      SELECT va.apresentadora_id,
+             to_char((l_oficial.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date, 'YYYY-MM-DD') AS dia,
+             ROUND(COALESCE(SUM(${officialLineGmvExpr('va')}), 0), 2) AS gmv,
+             ROUND(COALESCE(SUM(${officialLineCommissionExpr('va', 'comissao_apresentadora')}), 0), 2) AS comissao
+      FROM vendas_atribuidas va
+      JOIN lives l_oficial ON l_oficial.id = va.origem_id AND l_oficial.tenant_id = va.tenant_id
+      WHERE va.tenant_id = $1::uuid
+        AND va.origem = 'live'
+        AND ${saleInOfficialPresenterMonthSql({ sale: 'va', live: 'l_oficial', startSql: '$2::date', endSql: '$3::date' })}
+        AND COALESCE(va.status_aprovacao, 'pendente_aprovacao') <> 'reprovada'
+        AND va.apresentadora_id IS NOT NULL
+        ${apresentadoraId ? 'AND va.apresentadora_id = $4::uuid' : ''}
+      GROUP BY va.apresentadora_id, 2
+    `, apresentadoraId ? [tenantId, competencia, fim, apresentadoraId] : [tenantId, competencia, fim]),
   ])
+  const feriados = await feriadosDoPeriodo(db, tenantId, competencia, fim)
+  const comBonus = mes >= BONUS_DIA_ESPECIAL_DESDE
 
   const porId = new Map()
   const incluir = (id, nome) => {
-    if (!porId.has(id)) porId.set(id, { apresentadora_id: id, nome, fixo_centavos: 0, comissao_centavos: 0, adicionais_centavos: 0, extras: [] })
+    if (!porId.has(id)) porId.set(id, { apresentadora_id: id, nome, fixo_centavos: 0, comissao_centavos: 0, adicionais_centavos: 0, bonus_centavos: 0, extras: [], dias: new Map(), periodo: null })
     return porId.get(id)
   }
-  for (const row of fixos.rows) incluir(row.apresentadora_id, row.nome).fixo_centavos = centavosDoBanco(row.valor)
+  for (const row of fixos.rows) {
+    const item = incluir(row.apresentadora_id, row.nome)
+    item.fixo_centavos = centavosDoBanco(row.valor)
+    // Janela de vínculo dentro do mês: a meta de horas acompanha o fixo proporcional.
+    const inicio = row.data_inicio && row.data_inicio > competencia ? row.data_inicio : competencia
+    const termino = row.data_fim && row.data_fim < fim ? row.data_fim : fim
+    item.periodo = inicio <= termino ? { inicio, termino } : null
+  }
+  const dia = (item, data) => {
+    if (!item.dias.has(data)) item.dias.set(data, { horas: 0, gmv: 0, comissao: 0 })
+    return item.dias.get(data)
+  }
   for (const row of comissoes.rows) incluir(row.apresentadora_id, row.nome).comissao_centavos = centavosDoBanco(row.valor)
   for (const row of adicionais.rows) {
     const item = incluir(row.apresentadora_id, row.nome)
     const cents = centavosDoBanco(row.valor)
-    item.adicionais_centavos += cents
-    item.extras.push({ id: row.id, tipo: row.tipo, data_referencia: row.data_referencia, descricao: row.descricao, valor: valorResposta(cents) })
+    // Diária manual de fds lançada antes do bônus automático não paga em dobro:
+    // fica listada (para o financeiro cancelar) mas fora do total.
+    const substituido = comBonus && row.tipo === 'fim_de_semana'
+    if (!substituido) item.adicionais_centavos += cents
+    item.extras.push({ id: row.id, tipo: row.tipo, data_referencia: row.data_referencia, descricao: row.descricao, valor: valorResposta(cents), substituido_por_bonus: substituido })
+  }
+  for (const row of horasDia.rows) {
+    // Hora em dia útil só conta para quem já está no fechamento; dia especial
+    // entra mesmo sem fixo/comissão, porque gera bônus.
+    if (!porId.has(row.apresentadora_id) && !tipoDiaEspecial(row.dia, feriados)) continue
+    dia(incluir(row.apresentadora_id, row.nome), row.dia).horas += Number(row.horas ?? 0)
+  }
+  for (const row of vendasDia.rows) {
+    const item = porId.get(row.apresentadora_id)
+    if (!item) continue
+    const d = dia(item, row.dia)
+    d.gmv += Number(row.gmv ?? 0)
+    d.comissao += Number(row.comissao ?? 0)
   }
   const apresentadoras = [...porId.values()].map((item) => {
-    const totalCentavos = item.fixo_centavos + item.comissao_centavos + item.adicionais_centavos
+    const diasEspeciais = []
+    let horasUteis = 0
+    for (const [data, valores] of [...item.dias.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      const tipo = tipoDiaEspecial(data, feriados)
+      if (!tipo) { horasUteis += valores.horas; continue }
+      if (valores.horas <= 0 && valores.gmv <= 0) continue
+      const blocos = comBonus ? blocosBonusDoDia(valores.horas) : 0
+      const bonusCentavos = blocos * BONUS_DIA_ESPECIAL_VALOR_BLOCO * 100
+      item.bonus_centavos += bonusCentavos
+      diasEspeciais.push({
+        data,
+        tipo,
+        feriado: tipo === 'feriado' ? feriados.get(data) : null,
+        horas: Math.round(valores.horas * 100) / 100,
+        blocos_4h: blocos,
+        bonus: valorResposta(bonusCentavos),
+        gmv: Math.round(valores.gmv * 100) / 100,
+        comissao: Math.round(valores.comissao * 100) / 100,
+      })
+    }
+    const diasMeta = item.periodo ? intervaloDeDias(item.periodo.inicio, item.periodo.termino).filter((d) => !tipoDiaEspecial(d, feriados)).length : 0
+    const metaHoras = item.periodo ? diasMeta * META_HORAS_DIA_UTIL : null
+    const realizadas = Math.round(horasUteis * 100) / 100
+    const totalCentavos = item.fixo_centavos + item.comissao_centavos + item.bonus_centavos + item.adicionais_centavos
     return {
       apresentadora_id: item.apresentadora_id,
       nome: item.nome,
       fixo: valorResposta(item.fixo_centavos),
       comissao: valorResposta(item.comissao_centavos),
+      bonus_fim_de_semana: valorResposta(item.bonus_centavos),
       adicionais: valorResposta(item.adicionais_centavos),
       total: valorResposta(totalCentavos),
+      horas: {
+        dias_uteis: diasMeta,
+        meta: metaHoras,
+        realizadas_dias_uteis: realizadas,
+        dias_especiais: Math.round(diasEspeciais.reduce((acc, d) => acc + d.horas, 0) * 100) / 100,
+        bateu_meta: metaHoras == null ? null : realizadas >= metaHoras,
+      },
+      dias_especiais: diasEspeciais,
       extras: item.extras,
     }
   })
@@ -184,9 +303,10 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes, aprese
   const totaisCentavos = apresentadoras.reduce((acc, item) => ({
     fixo: acc.fixo + centavosDoBanco(item.fixo),
     comissao: acc.comissao + centavosDoBanco(item.comissao),
+    bonus_fim_de_semana: acc.bonus_fim_de_semana + centavosDoBanco(item.bonus_fim_de_semana),
     adicionais: acc.adicionais + centavosDoBanco(item.adicionais),
     total: acc.total + centavosDoBanco(item.total),
-  }), { fixo: 0, comissao: 0, adicionais: 0, total: 0 })
+  }), { fixo: 0, comissao: 0, bonus_fim_de_semana: 0, adicionais: 0, total: 0 })
   const totais = Object.fromEntries(Object.entries(totaisCentavos).map(([key, cents]) => [key, valorResposta(cents)]))
   return { mes, apresentadoras, totais }
 }

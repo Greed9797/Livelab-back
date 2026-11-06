@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { READ_FINANCEIRO, WRITE_FINANCEIRO } from '../config/role_groups.js'
 import {
-  buscarFechamentoApresentadoras, buscarHistoricoLivesApresentadora, competenciaDoMes, dataEhFimDeSemana,
+  BONUS_DIA_ESPECIAL_DESDE, buscarFechamentoApresentadoras, buscarHistoricoLivesApresentadora, competenciaDoMes, dataEhFimDeSemana,
   dataEhValida, dinheiroEmCentavos, MES_RE,
 } from '../services/remuneracao-apresentadoras.js'
 
@@ -48,6 +48,11 @@ export async function remuneracaoApresentadorasRoutes(app) {
     const competencia = competenciaDoMes(entrada.mes)
     let valor
     let dataReferencia = null
+    // Desde o bônus automático, o único lançamento manual é o ajuste excepcional
+    // (tipo 'bonificacao', com motivo obrigatório e auditoria).
+    if (entrada.tipo === 'fim_de_semana' && entrada.mes >= BONUS_DIA_ESPECIAL_DESDE) {
+      return reply.code(400).send({ error: 'O bônus de fim de semana/feriado é calculado automaticamente pelas horas. Use um ajuste excepcional com o motivo.' })
+    }
     if (entrada.tipo === 'fim_de_semana') {
       dataReferencia = entrada.data_referencia
       if (!dataReferencia || !dataEhFimDeSemana(dataReferencia) || !dataReferencia.startsWith(`${entrada.mes}-`)) {

@@ -62,6 +62,10 @@ describe('analytics diario', () => {
         expect(params).toEqual(['2026-05-01', '2026-05-31', marcaId, apresentadoraId])
         return { rows: [] }
       }
+      if (sql.includes('FROM meta_unidade')) {
+        expect(params).toEqual(['2026-05', '2026-05'])
+        return { rows: [{ ano_mes: '2026-05', videos: '3' }] }
+      }
       expect(sql).not.toContain('generate_series')
       expect(sql).toContain('COALESCE(l.ads_gmv, l.manual_gmv, l.fat_gerado, 0)')
       expect(sql).toContain('($3::uuid IS NULL OR l.marca_id = $3::uuid)')
@@ -74,7 +78,8 @@ describe('analytics diario', () => {
       expect(sql).toContain('array_agg(DISTINCT live_id)')
       expect(sql).toContain("to_char(MIN(iniciado_em) AT TIME ZONE 'America/Sao_Paulo', 'HH24:MI') AS hora_inicio")
       expect(sql).toContain("to_char(MAX(fim_em) AT TIME ZONE 'America/Sao_Paulo', 'HH24:MI') AS hora_fim")
-      expect(sql).toContain("va.origem = 'video'")
+      expect(sql).toContain("v.origem = 'video'")
+      expect(sql).toContain('COALESCE(SUM(vr.quantidade), 0)::int AS total_videos')
       expect(sql).toContain('FULL OUTER JOIN video_daily')
       expect(sql).toContain('COALESCE(ld.marca_nome, vd.marca_nome')
       expect(sql).toContain("l.iniciado_em >= ($1::timestamp) AT TIME ZONE 'America/Sao_Paulo'")
@@ -112,6 +117,7 @@ describe('analytics diario', () => {
     expect(res.json()).toMatchObject({
       periodo: { from: '2026-05-01', to: '2026-05-31', mesAno: '2026-05' },
       filters: { marca_id: marcaId, apresentadora_id: apresentadoraId },
+      meta_videos_por_dia: { '2026-05-28': 3 },
       rows: [{
         dia: '2026-05-28',
         marca_id: marcaId,
@@ -135,6 +141,10 @@ describe('analytics diario', () => {
       }],
     })
     await app.close()
+    const metas = res.json().meta_videos_por_dia
+    expect(metas['2026-05-30']).toBeUndefined() // sábado
+    expect(metas['2026-05-01']).toBeUndefined() // feriado (Dia do Trabalho)
+    expect(Object.keys(metas)).toHaveLength(20)
   })
 
   it('rejects invalid UUID filters', async () => {

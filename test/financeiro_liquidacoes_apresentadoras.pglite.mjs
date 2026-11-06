@@ -24,9 +24,18 @@ await pg.exec(`
   CREATE TABLE lives (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, status text, iniciado_em timestamptz,
     uniao_destino_id uuid, uniao_desfeita_em timestamptz, arquivada_em timestamptz,
-    apresentador_id uuid, ads_gmv numeric, manual_gmv numeric, fat_gerado numeric
+    apresentador_id uuid, ads_gmv numeric, manual_gmv numeric, fat_gerado numeric,
+    agenda_evento_id uuid, encerrado_em timestamptz, previsto_fim timestamptz
   );
-  CREATE TABLE live_apresentadoras_v2 (live_id uuid, tenant_id uuid, apresentadora_id uuid);
+  CREATE TABLE live_apresentadoras_v2 (
+    live_id uuid, tenant_id uuid, apresentadora_id uuid,
+    gmv_rateado numeric, segundos_rateio numeric, percentual_rateio numeric, papel text
+  );
+  -- Lidas pelo fechamento (horas de presença e feriados da unidade).
+  CREATE TABLE agenda_evento_apresentadoras (
+    tenant_id uuid, agenda_evento_id uuid, apresentadora_id uuid, data_inicio timestamptz, data_fim timestamptz
+  );
+  CREATE TABLE feriados (tenant_id uuid NOT NULL, data date NOT NULL, nome text NOT NULL, ativo boolean NOT NULL DEFAULT true);
   CREATE TABLE apresentadora_remuneracao_adicionais (
     id uuid PRIMARY KEY, tenant_id uuid NOT NULL, apresentadora_id uuid NOT NULL,
     competencia date NOT NULL, tipo text, descricao text, data_referencia date,
@@ -67,7 +76,7 @@ await pg.exec(`
   CREATE ROLE fin03_apresentadoras;
   GRANT USAGE ON SCHEMA public TO fin03_apresentadoras;
   GRANT SELECT, INSERT, UPDATE ON apresentadora_pagamentos TO fin03_apresentadoras;
-  GRANT SELECT ON apresentadoras, apresentadora_fixo_historico, vendas_atribuidas, lives, live_apresentadoras_v2, apresentadora_remuneracao_adicionais TO fin03_apresentadoras;
+  GRANT SELECT ON apresentadoras, apresentadora_fixo_historico, vendas_atribuidas, lives, live_apresentadoras_v2, apresentadora_remuneracao_adicionais, agenda_evento_apresentadoras, feriados TO fin03_apresentadoras;
   GRANT SELECT, INSERT, UPDATE ON financeiro_liquidacoes TO fin03_apresentadoras;
   GRANT SELECT, INSERT, UPDATE ON financeiro_estornos TO fin03_apresentadoras;
   SELECT set_config('app.tenant_id', '${tenant}', false);

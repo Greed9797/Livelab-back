@@ -181,6 +181,8 @@ export const MIGRATIONS_LIST = [
   '184_receita_titulos_suspensao_comercial.sql',
   '185_mcp_oauth.sql',
   '186_training_video.sql',
+  '187_portal_apresentadora_videos.sql',
+  '188_feriados.sql',
 ]
 
 async function ensureMigrationsTable(client) {

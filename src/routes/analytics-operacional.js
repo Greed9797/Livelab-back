@@ -16,6 +16,9 @@ const configSchema = z.object({
   horas_por_apresentador: z.number().finite().positive().max(24),
   cabines_consideradas: z.number().int().min(1).max(100),
   turnos: z.array(z.object({ inicio: z.string(), fim: z.string() }).strict()).min(1).max(8),
+  // Meta diária de vídeos por apresentadora (dias úteis). Opcional: sem ela o
+  // relatório mostra só o realizado.
+  videos_por_apresentador: z.number().int().min(0).max(100).optional(),
 }).strict()
 
 export async function analyticsOperacionalRoutes(app) {

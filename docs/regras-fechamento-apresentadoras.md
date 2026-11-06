@@ -10,7 +10,7 @@ Código: `src/services/remuneracao-apresentadoras.js` (fechamento), `src/service
 |---|---|
 | Escada de comissão | 1% até R$70 mil, 1,5% até R$150 mil, **3ª faixa de 2% acima de R$150 mil mantida** (base: GMV mensal da apresentadora; faixas próprias ou da unidade sobrepõem a padrão). |
 | Sábado, domingo e feriado | Live nesses dias paga **2% fixo** sobre o GMV daquela live (sobrepõe a escada). Vídeo segue a escada. |
-| Bônus de fim de semana/feriado | Automático: **R$100 por bloco fechado de 4h** de live no dia (`floor(horas/4) × R$100`). 3h59 = R$0; 8h = R$200. Soma-se aos 2%. |
+| Bônus de fim de semana/feriado | Automático. Outubro/2026: **R$100 por dia** de sábado/domingo/feriado com live (qualquer duração). A partir de 2026-11: **R$100 por bloco fechado de 4h** de live no dia (`floor(horas/4) × R$100`). 3h59 = R$0; 8h = R$200. Soma-se aos 2%. |
 | Vídeo da apresentadora | Lançado no portal, **conta na hora**, sem aprovação. |
 | Lançamentos manuais | A diária manual de fim de semana deixa de existir a partir de 2026-10 (API devolve 400). Fica só o **ajuste excepcional** (tipo `bonificacao`), com motivo obrigatório e auditoria de quem lançou/cancelou. |
 

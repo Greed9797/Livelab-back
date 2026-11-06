@@ -15,6 +15,8 @@ import { intervaloDeDias } from '../lib/calendario-blumenau.js'
 export const BONUS_DIA_ESPECIAL_DESDE = '2026-10'
 export const BONUS_DIA_ESPECIAL_HORAS_BLOCO = 4
 export const BONUS_DIA_ESPECIAL_VALOR_BLOCO = 100
+// Outubro/2026 paga R$100 por dia de sábado/domingo/feriado com live; daqui em diante, R$100 por bloco de 4h.
+export const BONUS_POR_BLOCO_DESDE = '2026-11'
 // Meta de horas que garante o fixo: 6h por dia útil (seg–sex, sem feriado).
 export const META_HORAS_DIA_UTIL = 6
 
@@ -214,6 +216,7 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes, aprese
   ])
   const feriados = await feriadosDoPeriodo(db, tenantId, competencia, fim)
   const comBonus = mes >= BONUS_DIA_ESPECIAL_DESDE
+  const porBloco = mes >= BONUS_POR_BLOCO_DESDE
 
   const porId = new Map()
   const incluir = (id, nome) => {
@@ -262,8 +265,9 @@ export async function buscarFechamentoApresentadoras(db, { tenantId, mes, aprese
       const tipo = tipoDiaEspecial(data, feriados)
       if (!tipo) { horasUteis += valores.horas; continue }
       if (valores.horas <= 0 && valores.gmv <= 0) continue
-      const blocos = comBonus ? blocosBonusDoDia(valores.horas) : 0
-      const bonusCentavos = blocos * BONUS_DIA_ESPECIAL_VALOR_BLOCO * 100
+      const blocos = porBloco ? blocosBonusDoDia(valores.horas) : null
+      const unidades = !comBonus ? 0 : porBloco ? blocos : (valores.horas > 0 ? 1 : 0)
+      const bonusCentavos = unidades * BONUS_DIA_ESPECIAL_VALOR_BLOCO * 100
       item.bonus_centavos += bonusCentavos
       diasEspeciais.push({
         data,

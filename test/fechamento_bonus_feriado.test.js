@@ -72,6 +72,20 @@ describe('bônus de fim de semana/feriado e meta de horas (a partir de 2026-10)'
     expect(row).toMatchObject({ bonus_fim_de_semana: 0, adicionais: 100, total: 2800 })
   })
 
+  it('outubro/2026 paga R$100 por dia de sábado, domingo ou feriado com live, sem contar blocos', async () => {
+    const db = fechamentoDb({
+      fixos: [{ apresentadora_id: ana, nome: 'Ana', valor: '2700.00', data_inicio: null, data_fim: null }],
+      horas: [
+        { apresentadora_id: ana, nome: 'Ana', dia: '2026-10-24', horas: '3.4667' }, // sábado
+        { apresentadora_id: ana, nome: 'Ana', dia: '2026-10-11', horas: '8.9' }, // domingo
+        { apresentadora_id: ana, nome: 'Ana', dia: '2026-10-12', horas: '4.0167' }, // Nossa Senhora Aparecida
+      ],
+    })
+    const { apresentadoras: [row] } = await buscarFechamentoApresentadoras(db, { tenantId, mes: '2026-10' })
+    expect(row.bonus_fim_de_semana).toBe(300)
+    expect(row.dias_especiais.map((d) => [d.data, d.blocos_4h, d.bonus])).toEqual([['2026-10-11', null, 100], ['2026-10-12', null, 100], ['2026-10-24', null, 100]])
+  })
+
   it('não lança diária manual de fim de semana a partir de novembro', async () => {
     const query = vi.fn().mockResolvedValue({ rows: [] })
     const app = Fastify()

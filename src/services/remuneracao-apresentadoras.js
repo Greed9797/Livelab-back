@@ -12,7 +12,7 @@ import { intervaloDeDias } from '../lib/calendario-blumenau.js'
 // Bônus automático de sábado/domingo/feriado: R$100 por bloco FECHADO de 4h no
 // dia. Vale a partir desta competência; meses anteriores seguem o lançamento
 // manual antigo, para não alterar fechamentos já pagos.
-export const BONUS_DIA_ESPECIAL_DESDE = '2026-11'
+export const BONUS_DIA_ESPECIAL_DESDE = '2026-10'
 export const BONUS_DIA_ESPECIAL_HORAS_BLOCO = 4
 export const BONUS_DIA_ESPECIAL_VALOR_BLOCO = 100
 // Meta de horas que garante o fixo: 6h por dia útil (seg–sex, sem feriado).

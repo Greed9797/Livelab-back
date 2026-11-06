@@ -24,7 +24,7 @@ function fechamentoDb({ fixos = [], comissoes = [], adicionais = [], horas = [],
   }
 }
 
-describe('bônus de fim de semana/feriado e meta de horas (a partir de 2026-11)', () => {
+describe('bônus de fim de semana/feriado e meta de horas (a partir de 2026-10)', () => {
   it('conta blocos fechados de 4h, com tolerância de medição', () => {
     expect([0, 3.99, 3.9999, 4, 7.9, 8, 12.5].map(blocosBonusDoDia)).toEqual([0, 0, 1, 1, 1, 2, 3])
   })
@@ -65,10 +65,10 @@ describe('bônus de fim de semana/feriado e meta de horas (a partir de 2026-11)'
   it('mês anterior ao bônus continua pagando a diária manual e não gera bônus', async () => {
     const db = fechamentoDb({
       fixos: [{ apresentadora_id: ana, nome: 'Ana', valor: '2700.00', data_inicio: null, data_fim: null }],
-      adicionais: [{ id: 'a1', apresentadora_id: ana, nome: 'Ana', tipo: 'fim_de_semana', descricao: 'Sábado', data_referencia: '2026-10-03', valor: '100.00' }],
-      horas: [{ apresentadora_id: ana, nome: 'Ana', dia: '2026-10-03', horas: '8' }],
+      adicionais: [{ id: 'a1', apresentadora_id: ana, nome: 'Ana', tipo: 'fim_de_semana', descricao: 'Sábado', data_referencia: '2026-09-05', valor: '100.00' }],
+      horas: [{ apresentadora_id: ana, nome: 'Ana', dia: '2026-09-05', horas: '8' }],
     })
-    const { apresentadoras: [row] } = await buscarFechamentoApresentadoras(db, { tenantId, mes: '2026-10' })
+    const { apresentadoras: [row] } = await buscarFechamentoApresentadoras(db, { tenantId, mes: '2026-09' })
     expect(row).toMatchObject({ bonus_fim_de_semana: 0, adicionais: 100, total: 2800 })
   })
 

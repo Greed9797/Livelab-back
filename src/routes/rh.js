@@ -34,6 +34,7 @@ const colaboradorSchema = z.object({
   data_admissao: dataSchema,
   data_desligamento: dataSchema,
   salario_fixo: moneySchema.default(0),
+  comissao_pct: z.number().min(0).max(100).default(0),
   ativo: z.boolean().optional(),
 })
 
@@ -50,13 +51,15 @@ const colaboradorUpdateSchema = z.object({
   data_admissao: dataSchema,
   data_desligamento: dataSchema,
   salario_fixo: moneySchema.optional(),
+  comissao_pct: z.number().min(0).max(100).optional(),
   ativo: z.boolean().optional(),
 })
 
 // Whitelist: chave de coluna nunca vem do cliente.
 const COLABORADOR_COLS = new Set([
   'nome', 'cargo', 'setor', 'email', 'telefone', 'cpf', 'observacoes',
-  'data_nascimento', 'data_admissao', 'data_desligamento', 'salario_fixo', 'ativo',
+  'data_nascimento', 'data_admissao', 'data_desligamento', 'salario_fixo',
+  'comissao_pct', 'ativo',
 ])
 
 const folhaBodySchema = z.object({
@@ -93,7 +96,7 @@ export async function rhRoutes(app) {
       const { rows } = await db.query(
         `SELECT id, tenant_id, nome, cargo, setor, email, telefone, cpf,
                 data_nascimento, data_admissao, data_desligamento, salario_fixo,
-                ativo, observacoes, criado_em, atualizado_em
+                comissao_pct, ativo, observacoes, criado_em, atualizado_em
            FROM rh_colaboradores
           WHERE tenant_id = $1::uuid
             ${includeInactive ? '' : 'AND ativo IS TRUE'}
@@ -115,14 +118,15 @@ export async function rhRoutes(app) {
       const result = await db.query(
         `INSERT INTO rh_colaboradores
            (tenant_id, nome, cargo, setor, email, telefone, cpf,
-            data_nascimento, data_admissao, data_desligamento, salario_fixo, ativo, observacoes)
-         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::date, $9::date, $10::date, $11, $12, $13)
+            data_nascimento, data_admissao, data_desligamento, salario_fixo,
+            comissao_pct, ativo, observacoes)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::date, $9::date, $10::date, $11, $12, $13, $14)
          RETURNING *`,
         [
           tenantId, d.nome, d.cargo ?? null, d.setor ?? null, d.email ?? null,
           d.telefone ?? null, d.cpf ?? null, d.data_nascimento ?? null,
           d.data_admissao ?? null, d.data_desligamento ?? null,
-          d.salario_fixo ?? 0, d.ativo ?? true, d.observacoes ?? null,
+          d.salario_fixo ?? 0, d.comissao_pct ?? 0, d.ativo ?? true, d.observacoes ?? null,
         ],
       )
       return result.rows[0]

@@ -16,6 +16,10 @@ beforeAll(async () => {
   const sql = await readFile(new URL('../migrations/189_rh_colaboradores.sql', import.meta.url), 'utf8')
   await db.exec(sql)
   await db.exec(sql) // idempotente
+
+  const sql190 = await readFile(new URL('../migrations/190_rh_comissao_pct.sql', import.meta.url), 'utf8')
+  await db.exec(sql190)
+  await db.exec(sql190) // idempotente
 })
 
 afterAll(async () => {
@@ -92,6 +96,29 @@ describe('schema RH (189)', () => {
     await expect(db.query(
       `INSERT INTO rh_colaboradores (tenant_id, nome, salario_fixo)
        VALUES ($1::uuid, 'Negativo', -1)`,
+      [tenant],
+    )).rejects.toThrow()
+  })
+
+  it('grava comissao_pct e rejeita valor fora de 0..100', async () => {
+    const id = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+    const { rows } = await db.query(
+      `INSERT INTO rh_colaboradores (id, tenant_id, nome, comissao_pct)
+       VALUES ($1::uuid, $2::uuid, 'Eva', 5.00)
+       RETURNING comissao_pct`,
+      [id, tenant],
+    )
+    expect(rows[0].comissao_pct).toBe('5.00')
+
+    const sel = await db.query(
+      `SELECT comissao_pct FROM rh_colaboradores WHERE id = $1::uuid`,
+      [id],
+    )
+    expect(sel.rows[0].comissao_pct).toBe('5.00')
+
+    await expect(db.query(
+      `INSERT INTO rh_colaboradores (tenant_id, nome, comissao_pct)
+       VALUES ($1::uuid, 'Fora', 101)`,
       [tenant],
     )).rejects.toThrow()
   })

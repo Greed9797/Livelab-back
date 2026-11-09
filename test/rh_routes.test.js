@@ -93,7 +93,7 @@ describe('RH routes', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/rh/colaboradores',
-      payload: { nome: 'Ana', cargo: 'Vendedora', salario_fixo: 1500.5, data_admissao: '2026-01-05' },
+      payload: { nome: 'Ana', cargo: 'Vendedora', salario_fixo: 1500.5, comissao_pct: 5, data_admissao: '2026-01-05' },
     })
 
     expect(res.statusCode).toBe(201)
@@ -103,6 +103,8 @@ describe('RH routes', () => {
     expect(insert.params[1]).toBe('Ana')
     expect(insert.params[8]).toBe('2026-01-05')
     expect(insert.params[10]).toBe(1500.5)
+    expect(insert.params[11]).toBe(5)
+    expect(insert.sql).toContain('comissao_pct')
     expect(insert.sql).toContain('RETURNING *')
     await app.close()
   })

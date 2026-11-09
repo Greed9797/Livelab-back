@@ -71,6 +71,34 @@ describe('GET /v1/lives/resumo-dia', () => {
     expect(res.json().totais.gmv_pendente_aprovacao).toBe(10)
     await app.close()
   })
+  it('applies search text q like the list (escaped ILIKE + pending text match)', async () => {
+    const { app, calls } = buildApp({ lives: [{ gmv: 100 }], pending: [
+      { id: 'match', status: 'pendente', pendente_aprovacao: true, gmv_declarado: '10', marca_nome: 'Atto Calçados' },
+      { id: 'other', status: 'pendente', pendente_aprovacao: true, gmv_declarado: '50', marca_nome: 'Outra' },
+    ] })
+    await livesRoutes(app)
+    const res = await app.inject({ method: 'GET', url: '/v1/lives/resumo-dia?data=2026-11-08&q=atto%25' })
+    expect(res.statusCode).toBe(200)
+    const liveCalls = calls.filter((c) => c.sql.includes('FROM lives l'))
+    expect(liveCalls).toHaveLength(2)
+    for (const c of liveCalls) {
+      expect(c.sql).toContain('va_marca.marca_nome ILIKE $')
+      expect(c.sql).toContain('ae.observacoes ILIKE $')
+      expect(c.params).toContain('%atto\\%%')
+    }
+    // '%' é literal (escapado): 'atto%' não casa 'Atto Calçados'
+    expect(res.json().totais.gmv_pendente_aprovacao).toBeFalsy()
+    await app.close()
+
+    const second = buildApp({ lives: [{ gmv: 100 }], pending: [
+      { id: 'match', status: 'pendente', pendente_aprovacao: true, gmv_declarado: '10', marca_nome: 'Atto Calçados' },
+      { id: 'other', status: 'pendente', pendente_aprovacao: true, gmv_declarado: '50', marca_nome: 'Outra' },
+    ] })
+    await livesRoutes(second.app)
+    const res2 = await second.app.inject({ method: 'GET', url: '/v1/lives/resumo-dia?data=2026-11-08&q=ATTO' })
+    expect(res2.json().totais.gmv_pendente_aprovacao).toBe(10)
+    await second.app.close()
+  })
 
   it('ignores non-uuid filter values (keeps general day summary)', async () => {
     const { app, calls } = buildApp({ lives: [{ gmv: 100 }] })

@@ -1961,6 +1961,7 @@ export async function livesRoutes(app) {
     const fMarcaId = UUID_RE.test(request.query?.marca_id ?? '') ? request.query.marca_id : null
     const fCabineId = UUID_RE.test(request.query?.cabine_id ?? '') ? request.query.cabine_id : null
     const fApresentadoraId = UUID_RE.test(request.query?.apresentadora_id ?? '') ? request.query.apresentadora_id : null
+    const fQ = String(request.query?.q ?? '').trim().slice(0, 120)
 
     return app.withTenant(tenant_id, async (db) => {
       const queryResumoDiaLives = async (rangeStart, rangeEnd) => {
@@ -1982,6 +1983,16 @@ export async function livesRoutes(app) {
           params.push(fApresentadoraId)
           where += ` AND ${presenterCreditedSql('l', `$${params.length}::uuid`)}`
         }
+        if (fQ) {
+          // Mesma busca textual da lista (GET /v1/lives).
+          params.push(`%${fQ.replace(/[\\%_]/g, '\\$&')}%`)
+          const qi = params.length
+          where += ` AND (cl.nome ILIKE $${qi}
+            OR va_marca.marca_nome ILIKE $${qi}
+            OR COALESCE(ap_v2.nomes, ap_user.nome, u.nome) ILIKE $${qi}
+            OR l.resumo ILIKE $${qi}
+            OR ae.observacoes ILIKE $${qi})`
+        }
 
         return db.query(
         `SELECT l.id, l.iniciado_em, l.encerrado_em, l.previsto_fim,
@@ -2002,7 +2013,7 @@ export async function livesRoutes(app) {
          LEFT JOIN users u ON u.id = l.apresentador_id AND u.tenant_id = l.tenant_id
          LEFT JOIN apresentadoras ap_user ON ap_user.user_id = l.apresentador_id AND ap_user.tenant_id = l.tenant_id
          LEFT JOIN LATERAL (
-           SELECT ae2.id, ae2.apresentadora_id
+           SELECT ae2.id, ae2.apresentadora_id, ae2.observacoes
            FROM agenda_eventos ae2
            WHERE (ae2.live_id = l.id OR ae2.id = l.agenda_evento_id OR ae2.cabine_id = l.cabine_id)
              AND ae2.tenant_id = l.tenant_id
@@ -2015,6 +2026,7 @@ export async function livesRoutes(app) {
          LEFT JOIN LATERAL (
            SELECT
              (array_agg(a.nome ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC))[1] AS nome,
+             string_agg(a.nome, ' ' ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC) AS nomes,
              (array_agg(lav.apresentadora_id ORDER BY (lav.papel = 'principal') DESC, lav.criado_em ASC))[1] AS apresentadora_id,
              COUNT(*)::int AS total,
              jsonb_agg(
@@ -2049,10 +2061,14 @@ export async function livesRoutes(app) {
 
       const includeDeclarations = ['franqueador_master', 'franqueado', 'gerente', 'operacional', 'produtor_live'].includes(request.user.papel) && ['encerrada', 'todas'].includes(status)
       const pendingEnd = new Date(Date.parse(`${data}T12:00:00Z`) + 86400000).toISOString().slice(0, 10)
+      const qLower = fQ.toLowerCase()
+      // Mesmos campos que a lista busca nas declarações pendentes: marca, apresentadora, observação.
+      const matchesQ = (row) => !qLower || [row.marca_nome, row.apresentadora_nome, row.observacao]
+        .some(v => String(v ?? '').toLowerCase().includes(qLower))
       const filteredPendingRows = async (start) => (await pendingRows(db, {
         tenantId: tenant_id, start, end: pendingEnd,
         marcaId: fMarcaId, apresentadoraId: fApresentadoraId,
-      })).filter(row => !fCabineId || row.cabine_id === fCabineId)
+      })).filter(row => (!fCabineId || row.cabine_id === fCabineId) && matchesQ(row))
       const declarations = includeDeclarations ? await filteredPendingRows(data) : []
 
       const mesInicio = `${data.slice(0, 7)}-01`

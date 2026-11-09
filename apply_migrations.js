@@ -185,6 +185,7 @@ export const MIGRATIONS_LIST = [
   '188_feriados.sql',
   '189_rh_colaboradores.sql',
   '190_rh_comissao_pct.sql',
+  '191_rh_pulmao_fields.sql',
 ]
 
 async function ensureMigrationsTable(client) {

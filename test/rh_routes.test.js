@@ -93,7 +93,12 @@ describe('RH routes', () => {
     const res = await app.inject({
       method: 'POST',
       url: '/v1/rh/colaboradores',
-      payload: { nome: 'Ana', cargo: 'Vendedora', salario_fixo: 1500.5, comissao_pct: 5, data_admissao: '2026-01-05' },
+      payload: {
+        nome: 'Ana', cargo: 'Vendedora', salario_fixo: 1500.5, comissao_pct: 5,
+        data_admissao: '2026-01-05', status: 'ferias', tipo_contrato: 'pj',
+        centro_custo: ['Lives'], responsavel_id: null,
+        ote_comissao: 'R$ 2.500 + comissão', chave_pix: 'x',
+      },
     })
 
     expect(res.statusCode).toBe(201)
@@ -104,8 +109,74 @@ describe('RH routes', () => {
     expect(insert.params[8]).toBe('2026-01-05')
     expect(insert.params[10]).toBe(1500.5)
     expect(insert.params[11]).toBe(5)
+    expect(insert.params[12]).toBe(true) // status ferias continua ativo
+    expect(insert.params[14]).toBe('ferias')
+    expect(insert.params[15]).toBe('pj')
+    expect(insert.params[16]).toEqual(['Lives'])
+    expect(insert.params[17]).toBeNull()
+    expect(insert.params[18]).toBe('R$ 2.500 + comissão')
+    expect(insert.params[19]).toBe('x')
     expect(insert.sql).toContain('comissao_pct')
+    expect(insert.sql).toContain('status')
     expect(insert.sql).toContain('RETURNING *')
+    await app.close()
+  })
+
+  it('PATCH /v1/rh/colaboradores/:id sincroniza ativo=false em status=inativo', async () => {
+    const { app, calls } = buildApp((sql) => {
+      if (sql.includes('UPDATE rh_colaboradores')) return { rows: [{ id: colaboradorId, ativo: false, status: 'inativo' }] }
+      return { rows: [] }
+    })
+    await rhRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/rh/colaboradores/${colaboradorId}`,
+      payload: { ativo: false },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().status).toBe('inativo')
+    const update = calls.find((c) => c.sql.includes('UPDATE rh_colaboradores'))
+    expect(update.sql).toContain('ativo = $')
+    expect(update.sql).toContain('status = $')
+    expect(update.params).toEqual([colaboradorId, tenantId, false, 'inativo'])
+    await app.close()
+  })
+
+  it('PATCH /v1/rh/colaboradores/:id rejeita responsável por si mesmo', async () => {
+    const { app, query } = buildApp()
+    await rhRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/rh/colaboradores/${colaboradorId}`,
+      payload: { responsavel_id: colaboradorId },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'Colaborador não pode ser responsável por si mesmo.' })
+    expect(query).not.toHaveBeenCalled()
+    await app.close()
+  })
+
+  it('POST /v1/rh/colaboradores sem status e ativo=false grava status inativo', async () => {
+    const { app, calls } = buildApp((sql) => {
+      if (sql.includes('INSERT INTO rh_colaboradores')) return { rows: [{ id: 'new-2', nome: 'Sem status', ativo: false, status: 'inativo' }] }
+      return { rows: [] }
+    })
+    await rhRoutes(app)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/rh/colaboradores',
+      payload: { nome: 'Sem status', ativo: false },
+    })
+
+    expect(res.statusCode).toBe(201)
+    const insert = calls.find((c) => c.sql.includes('INSERT INTO rh_colaboradores'))
+    expect(insert.params[12]).toBe(false)
+    expect(insert.params[14]).toBe('inativo')
     await app.close()
   })
 

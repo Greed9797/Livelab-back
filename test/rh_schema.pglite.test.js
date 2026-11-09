@@ -20,6 +20,10 @@ beforeAll(async () => {
   const sql190 = await readFile(new URL('../migrations/190_rh_comissao_pct.sql', import.meta.url), 'utf8')
   await db.exec(sql190)
   await db.exec(sql190) // idempotente
+
+  const sql191 = await readFile(new URL('../migrations/191_rh_pulmao_fields.sql', import.meta.url), 'utf8')
+  await db.exec(sql191)
+  await db.exec(sql191) // idempotente
 })
 
 afterAll(async () => {
@@ -119,6 +123,49 @@ describe('schema RH (189)', () => {
     await expect(db.query(
       `INSERT INTO rh_colaboradores (tenant_id, nome, comissao_pct)
        VALUES ($1::uuid, 'Fora', 101)`,
+      [tenant],
+    )).rejects.toThrow()
+  })
+
+  it('grava status, tipo_contrato, centro_custo e responsavel_id', async () => {
+    const respId = 'f1111111-1111-4111-8111-111111111111'
+    const colabId = 'f2222222-2222-4222-8222-222222222222'
+    await db.query(
+      `INSERT INTO rh_colaboradores (id, tenant_id, nome)
+       VALUES ($1::uuid, $2::uuid, 'Responsável')`,
+      [respId, tenant],
+    )
+    const { rows } = await db.query(
+      `INSERT INTO rh_colaboradores
+         (id, tenant_id, nome, status, tipo_contrato, centro_custo, responsavel_id, ote_comissao, chave_pix)
+       VALUES ($1::uuid, $2::uuid, 'Ferias PJ', 'ferias', 'pj', ARRAY['Lives','Administração'], $3::uuid, 'R$ 2.500', 'pix@x')
+       RETURNING status, tipo_contrato, centro_custo, responsavel_id, ote_comissao, chave_pix`,
+      [colabId, tenant, respId],
+    )
+    expect(rows[0].status).toBe('ferias')
+    expect(rows[0].tipo_contrato).toBe('pj')
+    expect(rows[0].centro_custo).toEqual(['Lives', 'Administração'])
+    expect(rows[0].responsavel_id).toBe(respId)
+    expect(rows[0].ote_comissao).toBe('R$ 2.500')
+    expect(rows[0].chave_pix).toBe('pix@x')
+
+    const sel = await db.query(
+      `SELECT centro_custo FROM rh_colaboradores WHERE id = $1::uuid`,
+      [colabId],
+    )
+    expect(sel.rows[0].centro_custo).toEqual(['Lives', 'Administração'])
+  })
+
+  it('rejeita status e tipo_contrato fora do enum', async () => {
+    await expect(db.query(
+      `INSERT INTO rh_colaboradores (tenant_id, nome, status)
+       VALUES ($1::uuid, 'Status Ruim', 'xxx')`,
+      [tenant],
+    )).rejects.toThrow()
+
+    await expect(db.query(
+      `INSERT INTO rh_colaboradores (tenant_id, nome, tipo_contrato)
+       VALUES ($1::uuid, 'Contrato Ruim', 'xxx')`,
       [tenant],
     )).rejects.toThrow()
   })

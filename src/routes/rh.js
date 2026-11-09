@@ -5,6 +5,8 @@ import { moneySchema } from '../lib/money.js'
 const MES_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const DATA_RE = /^\d{4}-\d{2}-\d{2}$/
+const STATUS_VALUES = ['ativo', 'inativo', 'ferias', 'afastado']
+const CONTRATO_VALUES = ['clt', 'pj', 'estagio', 'freelancer']
 
 export function competenciaDoMes(mes) {
   return `${mes}-01`
@@ -36,6 +38,12 @@ const colaboradorSchema = z.object({
   salario_fixo: moneySchema.default(0),
   comissao_pct: z.number().min(0).max(100).default(0),
   ativo: z.boolean().optional(),
+  status: z.enum(STATUS_VALUES).optional(),
+  tipo_contrato: z.enum(CONTRATO_VALUES).default('clt'),
+  centro_custo: z.array(z.string().trim().min(1)).nullable().optional(),
+  responsavel_id: z.string().uuid().nullable().optional(),
+  ote_comissao: z.string().max(300).nullable().optional(),
+  chave_pix: z.string().max(300).nullable().optional(),
 })
 
 // PATCH não herda defaults do create: campo omitido não pode virar salário 0.
@@ -53,13 +61,20 @@ const colaboradorUpdateSchema = z.object({
   salario_fixo: moneySchema.optional(),
   comissao_pct: z.number().min(0).max(100).optional(),
   ativo: z.boolean().optional(),
+  status: z.enum(STATUS_VALUES).optional(),
+  tipo_contrato: z.enum(CONTRATO_VALUES).optional(),
+  centro_custo: z.array(z.string().trim().min(1)).nullable().optional(),
+  responsavel_id: z.string().uuid().nullable().optional(),
+  ote_comissao: z.string().max(300).nullable().optional(),
+  chave_pix: z.string().max(300).nullable().optional(),
 })
 
 // Whitelist: chave de coluna nunca vem do cliente.
 const COLABORADOR_COLS = new Set([
   'nome', 'cargo', 'setor', 'email', 'telefone', 'cpf', 'observacoes',
   'data_nascimento', 'data_admissao', 'data_desligamento', 'salario_fixo',
-  'comissao_pct', 'ativo',
+  'comissao_pct', 'ativo', 'status', 'tipo_contrato', 'centro_custo',
+  'responsavel_id', 'ote_comissao', 'chave_pix',
 ])
 
 const folhaBodySchema = z.object({
@@ -96,10 +111,12 @@ export async function rhRoutes(app) {
       const { rows } = await db.query(
         `SELECT id, tenant_id, nome, cargo, setor, email, telefone, cpf,
                 data_nascimento, data_admissao, data_desligamento, salario_fixo,
-                comissao_pct, ativo, observacoes, criado_em, atualizado_em
+                comissao_pct, ativo, observacoes, criado_em, atualizado_em,
+                status, tipo_contrato, centro_custo, responsavel_id,
+                ote_comissao, chave_pix
            FROM rh_colaboradores
           WHERE tenant_id = $1::uuid
-            ${includeInactive ? '' : 'AND ativo IS TRUE'}
+            ${includeInactive ? '' : "AND status <> 'inativo'"}
           ORDER BY ativo DESC, nome ASC`,
         [tenantId],
       )
@@ -113,20 +130,26 @@ export async function rhRoutes(app) {
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
     const d = parsed.data
     const tenantId = request.user.tenant_id
+    const status = d.status ?? (d.ativo === false ? 'inativo' : 'ativo')
+    const ativo = d.ativo ?? status !== 'inativo'
 
     const row = await app.withTenant(tenantId, async (db) => {
       const result = await db.query(
         `INSERT INTO rh_colaboradores
            (tenant_id, nome, cargo, setor, email, telefone, cpf,
             data_nascimento, data_admissao, data_desligamento, salario_fixo,
-            comissao_pct, ativo, observacoes)
-         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::date, $9::date, $10::date, $11, $12, $13, $14)
+            comissao_pct, ativo, observacoes,
+            status, tipo_contrato, centro_custo, responsavel_id, ote_comissao, chave_pix)
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8::date, $9::date, $10::date, $11, $12, $13, $14,
+                 $15, $16, $17, $18::uuid, $19, $20)
          RETURNING *`,
         [
           tenantId, d.nome, d.cargo ?? null, d.setor ?? null, d.email ?? null,
           d.telefone ?? null, d.cpf ?? null, d.data_nascimento ?? null,
           d.data_admissao ?? null, d.data_desligamento ?? null,
-          d.salario_fixo ?? 0, d.comissao_pct ?? 0, d.ativo ?? true, d.observacoes ?? null,
+          d.salario_fixo ?? 0, d.comissao_pct ?? 0, ativo, d.observacoes ?? null,
+          status, d.tipo_contrato ?? 'clt', d.centro_custo ?? null,
+          d.responsavel_id ?? null, d.ote_comissao ?? null, d.chave_pix ?? null,
         ],
       )
       return result.rows[0]
@@ -150,7 +173,18 @@ export async function rhRoutes(app) {
     const parsed = colaboradorUpdateSchema.safeParse(request.body ?? {})
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
-    const updates = Object.entries(parsed.data).filter(([key]) => COLABORADOR_COLS.has(key))
+    const updatesObj = { ...parsed.data }
+    if ('status' in updatesObj || 'ativo' in updatesObj) {
+      if ('status' in updatesObj) {
+        updatesObj.ativo = updatesObj.status !== 'inativo'
+      } else {
+        updatesObj.status = updatesObj.ativo ? 'ativo' : 'inativo'
+      }
+    }
+    if (updatesObj.responsavel_id === id) {
+      return reply.code(400).send({ error: 'Colaborador não pode ser responsável por si mesmo.' })
+    }
+    const updates = Object.entries(updatesObj).filter(([key]) => COLABORADOR_COLS.has(key))
     if (updates.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar.' })
 
     const tenantId = request.user.tenant_id
@@ -188,7 +222,7 @@ export async function rhRoutes(app) {
     const row = await app.withTenant(tenantId, async (db) => {
       const result = await db.query(
         `UPDATE rh_colaboradores
-            SET ativo = false, atualizado_em = NOW()
+            SET ativo = false, status = 'inativo', atualizado_em = NOW()
           WHERE id = $1::uuid AND tenant_id = $2::uuid
           RETURNING id`,
         [id, tenantId],
@@ -228,7 +262,7 @@ export async function rhRoutes(app) {
            FROM rh_colaboradores c
            LEFT JOIN rh_folha_mensal f
              ON f.colaborador_id = c.id AND f.tenant_id = c.tenant_id AND f.competencia = $2::date
-          WHERE c.tenant_id = $1::uuid AND (c.ativo IS TRUE OR f.id IS NOT NULL)
+          WHERE c.tenant_id = $1::uuid AND (c.status <> 'inativo' OR f.id IS NOT NULL)
           ORDER BY c.nome ASC`,
         [tenantId, competenciaDoMes(mes)],
       )

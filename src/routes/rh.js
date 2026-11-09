@@ -191,7 +191,23 @@ export async function rhRoutes(app) {
     const set = updates.map(([key], index) => `${key} = $${index + 3}`).join(', ')
     const values = [id, tenantId, ...updates.map(([, value]) => value)]
 
-    const row = await app.withTenant(tenantId, async (db) => {
+    const outcome = await app.withTenant(tenantId, async (db) => {
+      if (updatesObj.responsavel_id) {
+        const { rows } = await db.query(
+          `SELECT id, responsavel_id FROM rh_colaboradores WHERE tenant_id = $1::uuid`,
+          [tenantId],
+        )
+        const porId = new Map(rows.map((linha) => [linha.id, linha.responsavel_id]))
+        const vistos = new Set()
+        let atual = updatesObj.responsavel_id
+        while (atual) {
+          if (atual === id) return { cycle: true }
+          if (vistos.has(atual) || !porId.has(atual)) break
+          vistos.add(atual)
+          atual = porId.get(atual)
+        }
+      }
+
       const result = await db.query(
         `UPDATE rh_colaboradores
             SET ${set}, atualizado_em = NOW()
@@ -199,9 +215,10 @@ export async function rhRoutes(app) {
           RETURNING *`,
         values,
       )
-      return result.rows[0] ?? null
+      return { row: result.rows[0] ?? null }
     })
-    if (!row) return reply.code(404).send({ error: 'Colaborador não encontrado.' })
+    if (outcome.cycle) return reply.code(400).send({ error: 'Vínculo criaria um ciclo de gestão.' })
+    if (!outcome.row) return reply.code(404).send({ error: 'Colaborador não encontrado.' })
 
     app.audit?.log?.(request, {
       action: 'rh.colaborador_update',
@@ -210,7 +227,7 @@ export async function rhRoutes(app) {
       metadata: { changed_fields: updates.map(([key]) => key) },
     })?.catch?.((err) => app.log.error({ err }, 'audit log rh.colaborador_update failed'))
 
-    return row
+    return outcome.row
   })
 
   // DELETE /v1/rh/colaboradores/:id — soft delete

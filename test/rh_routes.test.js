@@ -160,6 +160,33 @@ describe('RH routes', () => {
     await app.close()
   })
 
+  it('PATCH /v1/rh/colaboradores/:id rejeita ciclo de gestão sem UPDATE', async () => {
+    const b = '44444444-4444-4444-8444-444444444444'
+    const c = '55555555-5555-4555-8555-555555555555'
+    const { app, calls } = buildApp((sql) => {
+      if (sql.includes('SELECT id, responsavel_id FROM rh_colaboradores')) {
+        return { rows: [
+          { id: colaboradorId, responsavel_id: b },
+          { id: b, responsavel_id: c },
+          { id: c, responsavel_id: colaboradorId },
+        ] }
+      }
+      return { rows: [] }
+    })
+    await rhRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/rh/colaboradores/${colaboradorId}`,
+      payload: { responsavel_id: c },
+    })
+
+    expect(res.statusCode).toBe(400)
+    expect(res.json()).toEqual({ error: 'Vínculo criaria um ciclo de gestão.' })
+    expect(calls.some((c2) => c2.sql.includes('UPDATE rh_colaboradores'))).toBe(false)
+    await app.close()
+  })
+
   it('POST /v1/rh/colaboradores sem status e ativo=false grava status inativo', async () => {
     const { app, calls } = buildApp((sql) => {
       if (sql.includes('INSERT INTO rh_colaboradores')) return { rows: [{ id: 'new-2', nome: 'Sem status', ativo: false, status: 'inativo' }] }

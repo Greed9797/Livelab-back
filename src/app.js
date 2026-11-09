@@ -59,6 +59,7 @@ import { solicitacoesRoutes } from './routes/solicitacoes.js'
 import { pacotesRoutes } from './routes/pacotes.js'
 import { usuariosRoutes } from './routes/usuarios.js'
 import { apresentadorasRoutes } from './routes/apresentadoras.js'
+import { rhRoutes } from './routes/rh.js'
 import { apresentadoraDisponibilidadeRoutes } from './routes/apresentadora_disponibilidade.js'
 import { liveApresentadoresRoutes } from './routes/live_apresentadores.js'
 import { clientePortalRoutes } from './routes/cliente_portal.js'
@@ -405,6 +406,7 @@ export async function buildApp(opts = {}) {
   await app.register(pacotesRoutes)
   await app.register(usuariosRoutes)
   await app.register(apresentadorasRoutes)
+  await app.register(rhRoutes)
   await app.register(apresentadoraDisponibilidadeRoutes)
   await app.register(liveApresentadoresRoutes)
   await app.register(clientePortalRoutes)

@@ -183,6 +183,7 @@ export const MIGRATIONS_LIST = [
   '186_training_video.sql',
   '187_portal_apresentadora_videos.sql',
   '188_feriados.sql',
+  '189_rh_colaboradores.sql',
 ]
 
 async function ensureMigrationsTable(client) {

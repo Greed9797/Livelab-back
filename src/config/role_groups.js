@@ -161,3 +161,7 @@ export const READ_CLIENTE_NOTAS = READ_CLIENTES
 export const WRITE_CLIENTE_NOTAS = [
   ...ADMIN_COMERCIAL, 'suporte', 'marketing',
 ]
+
+// ─── RH ──────────────────────────────────────────────────────────────
+export const READ_RH = [...ADMIN, 'financeiro', 'financeiro_readonly', 'auditor']
+export const WRITE_RH = [...ADMIN, 'financeiro']

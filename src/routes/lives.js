@@ -23,6 +23,8 @@ import { officialGmvFromPayload } from '../lib/official-gmv.js'
 import { liveSaleCommissionLateralSql } from '../lib/sale-gmv-sql.js'
 import { pendingCollisionSql, pendingRecord, pendingRows } from '../lib/presenter-pending.js'
 
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
 function parseIntegerMetric(value) {
   if (typeof value === 'number') return value
   if (value == null) return value
@@ -1645,7 +1647,6 @@ export async function livesRoutes(app) {
     const statusFilter = request.query?.status // 'em_andamento' | 'encerrada' | undefined
     const reqLimit = Math.min(200, Math.max(10, parseInt(request.query?.limit ?? '50', 10)))
     const reqOffset = Math.max(0, parseInt(request.query?.page ?? '0', 10)) * reqLimit
-    const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
     if (request.query?.cabine_id && (typeof request.query.cabine_id !== 'string' || !UUID_RE.test(request.query.cabine_id))) {
       return reply.code(400).send({ error: 'Selecione uma cabine válida.' })
     }
@@ -1956,6 +1957,10 @@ export async function livesRoutes(app) {
       return reply.code(400).send({ error: 'Data inválida.' })
     }
     const status = String(request.query?.status ?? 'encerrada')
+    // Mesmos filtros da lista (GET /v1/lives): o resumo copiado cobre só as lives visíveis.
+    const fMarcaId = UUID_RE.test(request.query?.marca_id ?? '') ? request.query.marca_id : null
+    const fCabineId = UUID_RE.test(request.query?.cabine_id ?? '') ? request.query.cabine_id : null
+    const fApresentadoraId = UUID_RE.test(request.query?.apresentadora_id ?? '') ? request.query.apresentadora_id : null
 
     return app.withTenant(tenant_id, async (db) => {
       const queryResumoDiaLives = async (rangeStart, rangeEnd) => {
@@ -1964,6 +1969,18 @@ export async function livesRoutes(app) {
         if (status && status !== 'todas') {
           params.push(status)
           where += ` AND l.status = $${params.length}`
+        }
+        if (fCabineId) {
+          params.push(fCabineId)
+          where += ` AND l.cabine_id = $${params.length}::uuid`
+        }
+        if (fMarcaId) {
+          params.push(fMarcaId)
+          where += ` AND COALESCE(l.marca_id, va_marca.marca_id) = $${params.length}::uuid`
+        }
+        if (fApresentadoraId) {
+          params.push(fApresentadoraId)
+          where += ` AND ${presenterCreditedSql('l', `$${params.length}::uuid`)}`
         }
 
         return db.query(
@@ -2032,20 +2049,18 @@ export async function livesRoutes(app) {
 
       const includeDeclarations = ['franqueador_master', 'franqueado', 'gerente', 'operacional', 'produtor_live'].includes(request.user.papel) && ['encerrada', 'todas'].includes(status)
       const pendingEnd = new Date(Date.parse(`${data}T12:00:00Z`) + 86400000).toISOString().slice(0, 10)
-      const declarations = includeDeclarations ? await pendingRows(db, {
-        tenantId: tenant_id, start: data,
-        end: pendingEnd,
-      }) : []
+      const filteredPendingRows = async (start) => (await pendingRows(db, {
+        tenantId: tenant_id, start, end: pendingEnd,
+        marcaId: fMarcaId, apresentadoraId: fApresentadoraId,
+      })).filter(row => !fCabineId || row.cabine_id === fCabineId)
+      const declarations = includeDeclarations ? await filteredPendingRows(data) : []
 
       const mesInicio = `${data.slice(0, 7)}-01`
       const mesBounds = saoPauloDayBounds(mesInicio)
       let livesMes
       if (mesBounds) {
         const mesResult = await queryResumoDiaLives(mesBounds.start, dayBounds.end)
-        const mesDeclarations = includeDeclarations ? await pendingRows(db, {
-          tenantId: tenant_id, start: mesInicio,
-          end: pendingEnd,
-        }) : []
+        const mesDeclarations = includeDeclarations ? await filteredPendingRows(mesInicio) : []
         livesMes = [
           ...mesResult.rows,
           ...mesDeclarations.filter(row => row.pendente_aprovacao === true).map(pendingRecord),

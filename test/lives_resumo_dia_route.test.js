@@ -44,6 +44,44 @@ describe('GET /v1/lives/resumo-dia', () => {
     expect(mesCall?.params.slice(0, 3)).toEqual([tenantId, '2026-09-01T00:00:00 America/Sao_Paulo', '2026-09-12T00:00:00 America/Sao_Paulo'])
     await app.close()
   })
+  it('applies marca/cabine/apresentadora filters to day, month and pending declarations', async () => {
+    const marcaId = '22222222-2222-4222-8222-222222222222'
+    const cabineId = '33333333-3333-4333-8333-333333333333'
+    const apresId = '44444444-4444-4444-8444-444444444444'
+    const { app, calls } = buildApp({ lives: [{ gmv: 100 }], pending: [
+      { id: 'same-cabine', status: 'pendente', pendente_aprovacao: true, gmv_declarado: '10', cabine_id: cabineId },
+      { id: 'other-cabine', status: 'pendente', pendente_aprovacao: true, gmv_declarado: '50', cabine_id: 'other' },
+    ] })
+    await livesRoutes(app)
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/lives/resumo-dia?data=2026-11-08&marca_id=${marcaId}&cabine_id=${cabineId}&apresentadora_id=${apresId}`,
+    })
+    expect(res.statusCode).toBe(200)
+    const liveCalls = calls.filter((c) => c.sql.includes('FROM lives l'))
+    expect(liveCalls).toHaveLength(2)
+    for (const c of liveCalls) {
+      expect(c.sql).toContain('COALESCE(l.marca_id, va_marca.marca_id) = $')
+      expect(c.sql).toContain('l.cabine_id = $')
+      expect(c.sql).toContain('lav_credit.apresentadora_id = $')
+      expect(c.params).toEqual(expect.arrayContaining([marcaId, cabineId, apresId]))
+    }
+    const pendingCalls = calls.filter((c) => c.sql.includes('apresentadora_live_submissoes s'))
+    for (const c of pendingCalls) expect(c.params.slice(3, 5)).toEqual([apresId, marcaId])
+    expect(res.json().totais.gmv_pendente_aprovacao).toBe(10)
+    await app.close()
+  })
+
+  it('ignores non-uuid filter values (keeps general day summary)', async () => {
+    const { app, calls } = buildApp({ lives: [{ gmv: 100 }] })
+    await livesRoutes(app)
+    const res = await app.inject({ method: 'GET', url: '/v1/lives/resumo-dia?data=2026-11-08&marca_id=x%27or%201=1' })
+    expect(res.statusCode).toBe(200)
+    expect(calls[0].sql).not.toContain('va_marca.marca_id) = $')
+    expect(calls[0].params).toHaveLength(4)
+    await app.close()
+  })
+
   it('rejects invalid date format with 400', async () => {
     const { app } = buildApp()
     await livesRoutes(app)

@@ -207,6 +207,51 @@ describe('RH routes', () => {
     await app.close()
   })
 
+  it('PATCH /v1/rh/colaboradores/:id aceita campos opcionais nulos', async () => {
+    const { app, calls } = buildApp((sql) => {
+      if (sql.includes('UPDATE rh_colaboradores')) return { rows: [{ id: colaboradorId, nome: 'Ana' }] }
+      return { rows: [] }
+    })
+    await rhRoutes(app)
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/v1/rh/colaboradores/${colaboradorId}`,
+      payload: {
+        cargo: null, setor: null, email: null, telefone: null, cpf: null,
+        observacoes: null, data_nascimento: null, responsavel_id: null,
+        centro_custo: null, ote_comissao: null, chave_pix: null,
+      },
+    })
+
+    expect(res.statusCode).toBe(200)
+    expect(res.json().id).toBe(colaboradorId)
+    expect(calls.some((c) => c.sql.includes('UPDATE rh_colaboradores'))).toBe(true)
+    await app.close()
+  })
+
+  it('POST /v1/rh/colaboradores aceita campos opcionais nulos', async () => {
+    const { app } = buildApp((sql) => {
+      if (sql.includes('INSERT INTO rh_colaboradores')) return { rows: [{ id: 'new-null', nome: 'Ana' }] }
+      return { rows: [] }
+    })
+    await rhRoutes(app)
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/rh/colaboradores',
+      payload: {
+        nome: 'Ana', cargo: null, setor: null, email: null, telefone: null,
+        cpf: null, observacoes: null, data_nascimento: null, responsavel_id: null,
+        centro_custo: null, ote_comissao: null, chave_pix: null,
+      },
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(res.json().id).toBe('new-null')
+    await app.close()
+  })
+
   it('GET /v1/rh/folha sums totais and uses first-day competencia', async () => {
     const { app, calls } = buildApp((sql) => {
       if (sql.includes('FROM rh_colaboradores c')) {

@@ -71,6 +71,9 @@ const iniciarLiveSchema = z.object({
   previsto_fim: z.string().datetime({ offset: true }).optional().nullable(),
 })
 
+const premiacaoSchema = z.number().min(0).max(9_999_999_999.99).multipleOf(0.01)
+const premiacaoTipoError = 'A bonificação só se aplica a lives de afiliado.'
+
 const encerrarSchema = z.object({
   fat_gerado:         moneySchema,
   qtd_pedidos:        integerMetricSchema.optional(),
@@ -84,6 +87,7 @@ const encerrarSchema = z.object({
   manual_diamonds:    integerMetricSchema.optional(),
   manual_orders:      integerMetricSchema.optional(),
   manual_gmv:         moneySchema.optional(),
+  premiacao:          premiacaoSchema.optional(),
   ads_cost:             moneySchema.optional().nullable(),
   live_impressions:     integerMetricSchema.optional().nullable(),
   product_impressions:  integerMetricSchema.optional().nullable(),
@@ -115,6 +119,7 @@ const liveManualSchema = z.object({
   manual_diamonds:    integerMetricSchema.optional(),
   manual_orders:      integerMetricSchema.optional(),
   manual_gmv:         moneySchema.optional(),
+  premiacao:          premiacaoSchema.optional(),
   ads_cost:             moneySchema.optional().nullable(),
   live_impressions:     integerMetricSchema.optional().nullable(),
   product_impressions:  integerMetricSchema.optional().nullable(),
@@ -124,6 +129,8 @@ const liveManualSchema = z.object({
   tipo:               z.enum(['cliente', 'afiliado', 'teste']).optional().default('cliente'),
   status_publicacao:  z.enum(['rascunho', 'revisado', 'publicado']).optional().default('rascunho'),
   origem_dados:       z.enum(['manual', 'api']).optional().default('manual'),
+}).refine(d => d.premiacao === undefined || d.tipo === 'afiliado', {
+  message: premiacaoTipoError,
 }).refine(d => d.hora_fim > d.hora_inicio, {
   message: 'hora_fim deve ser maior que hora_inicio',
 }).refine(d => !d.apresentador2_id || d.apresentador2_id !== d.apresentador_id, {
@@ -150,6 +157,7 @@ const liveManualEditSchema = z.object({
   manual_diamonds:  integerMetricSchema.optional(),
   manual_orders:    integerMetricSchema.optional(),
   manual_gmv:       moneySchema.optional(),
+  premiacao:        premiacaoSchema.nullable().optional(),
   ads_gmv:          moneySchema.optional().nullable(),
   ads_cost:         moneySchema.optional().nullable(),
   live_impressions: integerMetricSchema.optional().nullable(),
@@ -858,9 +866,9 @@ export async function livesRoutes(app) {
               tipo, status_publicacao, origem_dados, agenda_evento_id, marca_id,
               comissao_apresentadora_pct, comissao_apresentadora_valor,
               ads_cost, live_impressions, product_impressions, product_clicks,
-              avg_viewing_duration, new_followers)
+              avg_viewing_duration, new_followers, premiacao)
            VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
-                   $26,$27,$28,$29,$30,$31)
+                   $26,$27,$28,$29,$30,$31,$32)
            RETURNING id`,
           [
             tenant_id, d.cabine_id ?? null, resolvedClienteId ?? null, apresentadorUserId, gestorId,
@@ -872,6 +880,7 @@ export async function livesRoutes(app) {
             comApresManual.pct, comApresManual.valor,
             d.ads_cost ?? null, d.live_impressions ?? null, d.product_impressions ?? null,
             d.product_clicks ?? null, d.avg_viewing_duration ?? null, d.new_followers ?? null,
+            d.premiacao ?? null,
           ]
         )
         const liveId = ins.rows[0].id
@@ -974,7 +983,7 @@ export async function livesRoutes(app) {
         const liveQ = await db.query(
           `SELECT l.id, l.cabine_id, l.cliente_id, l.marca_id, l.apresentador_id, l.gestor_id, l.agenda_evento_id,
                   ${tiktokUsernameSql({ marca: 'm_current', cliente: 'cl_tiktok', contrato: 'ct' })} AS tiktok_username,
-                  l.previsto_fim, l.tipo, l.status_publicacao, l.origem_dados,
+                  l.previsto_fim, l.tipo, l.status_publicacao, l.origem_dados, l.premiacao,
                   l.status, l.fat_gerado, l.manual_gmv, l.ads_gmv, l.final_orders_count, l.manual_orders, l.iniciado_em, l.encerrado_em,
                   c.contrato_id
              FROM lives l
@@ -1000,6 +1009,12 @@ export async function livesRoutes(app) {
           await db.query('ROLLBACK')
           return reply.code(422).send({ error: 'A origem APRESENTADORA é preservada e não pode ser alterada na edição.' })
         }
+        const tipoPremiacao = d.tipo ?? live.tipo
+        if (d.premiacao != null && tipoPremiacao !== 'afiliado') {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: premiacaoTipoError })
+        }
+        if (live.premiacao != null && tipoPremiacao !== 'afiliado') d.premiacao = null
         if (d.apresentadoras !== undefined) {
           // Atribuições aprovadas são imutáveis no commission-engine. Permitir um novo
           // rateio aqui mudaria o v2 sem mudar as vendas aprovadas e deixaria Analytics
@@ -1181,6 +1196,7 @@ export async function livesRoutes(app) {
         if (d.manual_shares   !== undefined) addField('manual_shares',   d.manual_shares)
         if (d.manual_diamonds !== undefined) addField('manual_diamonds', d.manual_diamonds)
         if (d.manual_orders          !== undefined) addField('manual_orders',          d.manual_orders)
+        if (d.premiacao              !== undefined) addField('premiacao',              d.premiacao)
         if (d.manual_gmv             !== undefined) addField('manual_gmv',             d.manual_gmv)
         if (d.ads_gmv                !== undefined) addField('ads_gmv',                d.ads_gmv)
         if (d.ads_cost               !== undefined) addField('ads_cost',               d.ads_cost)
@@ -1376,7 +1392,7 @@ export async function livesRoutes(app) {
           // ads_gmv junto dos outros dois: é o topo do COALESCE que define o GMV exibido,
           // e ficava de fora do diff — dava para mudar o número de todos os dashboards sem
           // deixar rastro de quem mexeu.
-          'ads_gmv', 'fat_gerado', 'manual_gmv', 'final_orders_count',
+          'ads_gmv', 'fat_gerado', 'manual_gmv', 'final_orders_count', 'premiacao',
         ]
         const diff = {}
         for (const f of auditFields) {
@@ -1505,7 +1521,7 @@ export async function livesRoutes(app) {
                 l.final_total_shares, l.final_gifts_diamonds,
                 l.resumo, l.previsto_fim,
                 l.manual_views, l.manual_likes, l.manual_comments, l.manual_shares,
-                l.manual_diamonds, l.manual_orders, l.manual_gmv,
+                l.manual_diamonds, l.manual_orders, l.manual_gmv, l.premiacao,
                 l.ads_gmv, l.ads_cost, l.live_impressions, l.product_impressions,
                 l.product_clicks, l.avg_viewing_duration, l.new_followers,
                 l.ads_import_batch_id, l.ads_import_row_id, l.ads_metrics_updated_at,
@@ -1881,7 +1897,7 @@ export async function livesRoutes(app) {
                 l.final_total_shares, l.final_gifts_diamonds,
                 l.resumo, l.previsto_fim,
                 l.manual_views, l.manual_likes, l.manual_comments, l.manual_shares,
-                l.manual_diamonds, l.manual_orders, l.manual_gmv,
+                l.manual_diamonds, l.manual_orders, l.manual_gmv, l.premiacao,
                 l.ads_gmv, l.ads_cost, l.live_impressions, l.product_impressions,
                 l.product_clicks, l.avg_viewing_duration, l.new_followers,
                 l.ads_import_batch_id, l.ads_import_row_id, l.ads_metrics_updated_at,
@@ -2465,7 +2481,7 @@ export async function livesRoutes(app) {
       try {
         const liveQ = await db.query(
           `SELECT id, cabine_id, cliente_id, apresentador_id, status, iniciado_em, marca_id, agenda_evento_id,
-                  ads_gmv, manual_gmv, fat_gerado
+                  ads_gmv, manual_gmv, fat_gerado, tipo
            FROM lives
            WHERE id = $1 AND tenant_id = $2::uuid AND status = 'em_andamento'
            FOR UPDATE`,
@@ -2476,6 +2492,11 @@ export async function livesRoutes(app) {
         if (!live) {
           await db.query('ROLLBACK')
           return reply.code(400).send({ error: 'Live não encontrada ou já encerrada' })
+        }
+
+        if (parsed.data.premiacao !== undefined && live.tipo !== 'afiliado') {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: premiacaoTipoError })
         }
 
         let cabine = null
@@ -2584,7 +2605,8 @@ export async function livesRoutes(app) {
                product_impressions  = COALESCE($22, product_impressions),
                product_clicks       = COALESCE($23, product_clicks),
                avg_viewing_duration = COALESCE($24, avg_viewing_duration),
-               new_followers        = COALESCE($25, new_followers)
+               new_followers        = COALESCE($25, new_followers),
+               premiacao            = COALESCE($26, premiacao)
            WHERE id = $5 AND tenant_id = $12::uuid`,
           [
             parsed.data.fat_gerado,
@@ -2612,6 +2634,7 @@ export async function livesRoutes(app) {
             parsed.data.product_clicks ?? null,
             parsed.data.avg_viewing_duration ?? null,
             parsed.data.new_followers ?? null,
+            parsed.data.premiacao ?? null,
           ]
         )
 

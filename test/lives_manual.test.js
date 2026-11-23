@@ -301,8 +301,21 @@ describe('POST /v1/lives/manual', () => {
     })
 
     expect(res.statusCode).toBe(201)
-    expect(insertArgs.length).toBe(31)
-    expect(insertArgs.slice(25)).toEqual([150, 12500, 3200, 410, 95, 55])
+    expect(insertArgs.length).toBe(32)
+    expect(insertArgs.slice(25)).toEqual([150, 12500, 3200, 410, 95, 55, null])
+  })
+
+  it.each([
+    { tipo: 'cliente', premiacao: 65.33 },
+    { tipo: 'afiliado', premiacao: -1 },
+    { tipo: 'afiliado', premiacao: 0.001 },
+  ])('rejects invalid bonuses at registration (%j)', async (bonus) => {
+    const { app, _query } = buildApp()
+    await registerLiveRoutes(app)
+    const res = await app.inject({ method: 'POST', url: '/v1/lives/manual', payload: { ...basePayload, ...bonus } })
+    expect(res.statusCode).toBe(400)
+    expect(_query).not.toHaveBeenCalled()
+    await app.close()
   })
 
   it('allows manual affiliate live using marca_id without cliente_id', async () => {
@@ -342,6 +355,7 @@ describe('POST /v1/lives/manual', () => {
       payload: {
         ...basePayload,
         tipo: 'afiliado',
+        premiacao: 65.33,
         cliente_id: undefined,
         marca_id: marcaId,
       },
@@ -349,6 +363,8 @@ describe('POST /v1/lives/manual', () => {
 
     expect(res.statusCode).toBe(201)
     expect(insertArgs[2]).toBeNull()
+    expect(insertArgs[7]).toBe(basePayload.fat_gerado)
+    expect(insertArgs[31]).toBe(65.33)
     // Afiliada aceita: marca_id direto na live, cliente_id null. A atribuição de comissão
     // agora é feita pelo commission-engine pós-commit (escritor único de origem='live'),
     // que resolve a marca por l.marca_id (EXTRA-6) — não mais por upsert inline aqui.
@@ -521,6 +537,33 @@ describe('POST /v1/lives/manual', () => {
 })
 
 describe('PATCH /v1/lives/:id (edição manual)', () => {
+  it.each([65.33, 0, null])('updates only the affiliate bonus (%s)', async (premiacao) => {
+    const liveId = '11111111-1111-4111-8111-111111111111'
+    const marcaId = '55555555-5555-4555-8555-555555555555'
+    const queryMock = vi.fn(async (sql) => ({
+      rows: sql.includes('FOR UPDATE OF l') ? [{ id: liveId, tipo: 'afiliado', premiacao: '20.00', status: 'encerrada', marca_id: marcaId }] : [],
+    }))
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+    const res = await app.inject({ method: 'PATCH', url: `/v1/lives/${liveId}`, payload: { premiacao } })
+    expect(res.statusCode).toBe(200)
+    const updates = queryMock.mock.calls.filter(([sql]) => sql.startsWith('UPDATE lives'))
+    expect(updates).toEqual([['UPDATE lives SET premiacao = $1 WHERE id = $2 AND tenant_id = $3::uuid', [premiacao, liveId, 'tenant-1']]])
+    await app.close()
+  })
+
+  it('rejects a bonus update to a customer live', async () => {
+    const queryMock = vi.fn(async (sql) => ({
+      rows: sql.includes('FOR UPDATE OF l') ? [{ id: 'live-1', tipo: 'cliente', status: 'encerrada' }] : [],
+    }))
+    const { app } = buildApp({ queryMock })
+    await registerLiveRoutes(app)
+    const res = await app.inject({ method: 'PATCH', url: '/v1/lives/live-1', payload: { premiacao: 65.33 } })
+    expect(res.statusCode).toBe(400)
+    expect(queryMock.mock.calls.some(([sql]) => sql.startsWith('UPDATE lives'))).toBe(false)
+    await app.close()
+  })
+
   it('rejects erasing the presenter origin without writing the live', async () => {
     const queryMock = vi.fn(async sql => ({ rows: sql.includes('FOR UPDATE OF l') ? [{ id: 'live-1', origem_dados: 'apresentadora', status: 'encerrada', status_publicacao: 'revisado' }] : [] }))
     const { app } = buildApp({ queryMock })

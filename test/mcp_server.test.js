@@ -1,9 +1,12 @@
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import bcrypt from 'bcrypt'
+import { PGlite } from '@electric-sql/pglite'
 import Fastify from 'fastify'
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { mcpRoutes } from '../src/mcp/server.js'
 import { artifactHash } from '../src/mcp/oauth-adapter.js'
+import auditLogPlugin from '../src/plugins/audit_log.js'
+import { livesRoutes } from '../src/routes/lives.js'
 import { authPlugin } from '../src/plugins/auth.js'
 import { authRoutes } from '../src/routes/auth.js'
 import { configuracoesRoutes } from '../src/routes/configuracoes.js'
@@ -19,7 +22,12 @@ const config = { enabled: true, origin: 'https://livelab.test', issuer: 'https:/
   cookieKeys: ['test-cookie-secret-with-at-least-32-characters'], storageKey: Buffer.alloc(32, 7).toString('base64'),
   jwks: { keys: [{ ...privateKey.export({ format: 'jwk' }), kid: 'test-key', use: 'sig', alg: 'RS256' }] } }
 
-async function setup() {
+const liveId = '33333333-3333-4333-8333-333333333333'
+const otherLiveId = '44444444-4444-4444-8444-444444444444'
+const otherTenant = '55555555-5555-4555-8555-555555555555'
+const bonusScope = 'livelab:lives:write'
+
+async function setup({ livesWriteTenantId, liveDb } = {}) {
   const artifacts = new Map(), bindings = new Map()
   const user = { id: uid, tenant_id: tenant, ativo: true, papel: 'franqueado', token_version: 1,
     email: 'test@livelab.test', senha_hash: await bcrypt.hash('test-password', 4) }
@@ -54,6 +62,10 @@ async function setup() {
   } })
   app.decorate('withTenant', async (t, fn) => {
     expect(t).toBe(tenant)
+    if (liveDb) return fn({ query: (sql, params) => {
+      if (sql.includes('live_facts AS')) return { rows: [{ id: liveId, origem: 'live', gmv: 1200 }] }
+      return liveDb.query(sql, params)
+    } })
     return fn({ query: async (sql, p) => sql.startsWith('UPDATE users') || sql.startsWith('UPDATE refresh_tokens') ? app.db.query(sql, p) : { rows: [] } })
   })
   await authPlugin(app)
@@ -61,8 +73,13 @@ async function setup() {
   await app.register(configuracoesRoutes)
   await app.register(financeiroRoutes)
   await app.register(remuneracaoApresentadorasRoutes)
+  if (liveDb) {
+    await app.register(auditLogPlugin)
+    await app.register(livesRoutes)
+    app.addHook('onClose', async () => liveDb.close())
+  }
   let provider
-  await app.register(mcpRoutes, { config, onProvider: p => { provider = p } })
+  await app.register(mcpRoutes, { config: { ...config, livesWriteTenantId }, onProvider: p => { provider = p } })
   await app.ready()
   const cookies = new Map()
   const req = async (url, method = 'GET', payload, extraHeaders = {}) => {
@@ -143,6 +160,69 @@ describe('MCP remoto e OAuth integrado', () => {
     expect(res.statusCode, res.body).toBe(200)
     expect((await mcp(f, refreshed.access_token, { jsonrpc: '2.0', id: 4, method: 'tools/list', params: {} })).statusCode).toBe(401)
     await f.app.close()
+  })
+  it('edita só a bonificação via MCP, protege outros tenants e audita a alteração uma vez', async () => {
+    const db = new PGlite()
+    await db.exec(`
+      CREATE TABLE lives (id uuid PRIMARY KEY, tenant_id uuid, tipo text, status text,
+        iniciado_em timestamptz, premiacao numeric(12,2), fat_gerado numeric(12,2),
+        uniao_destino_id uuid, uniao_desfeita_em timestamptz, arquivada_em timestamptz);
+      CREATE TABLE audit_log (tenant_id uuid, user_id uuid, action text, entity_type text,
+        entity_id uuid, metadata jsonb, ip text, user_agent text);
+      INSERT INTO lives (id, tenant_id, tipo, status, iniciado_em, premiacao, fat_gerado) VALUES
+        ('${liveId}', '${tenant}', 'afiliado', 'encerrada', '2026-10-01T10:00:00Z', 20, 1200),
+        ('${otherLiveId}', '${otherTenant}', 'afiliado', 'encerrada', '2026-10-01T10:00:00Z', 30, 500);
+    `)
+    const f = await setup({ livesWriteTenantId: tenant, liveDb: db })
+    try {
+      const grant = await connect(f, `openid offline_access livelab:analytics:read ${bonusScope}`)
+      const exchanged = await exchange(f, { grant_type: 'authorization_code', code: grant.code, code_verifier: grant.verifier, redirect_uri: config.redirectUri })
+      expect(exchanged.statusCode, exchanged.body).toBe(200)
+      const bearer = exchanged.json().access_token
+      const call = async (name, args) => (await mcp(f, bearer, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } })).json().result
+      const editBonus = (args) => call('editar_bonificacao_live', { live_id: liveId, premiacao_anterior: 20, premiacao: 65.33, ...args })
+
+      const listing = await mcp(f, bearer, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+      expect(listing.json().result.tools.find(t => t.name === 'editar_bonificacao_live')?.annotations.readOnlyHint).toBe(false)
+      const detail = await call('detalhar_live', { live_id: liveId })
+      expect(detail.structuredContent?.dados, JSON.stringify(detail)).toMatchObject({ tipo: 'afiliado', premiacao: 20 })
+
+      expect((await editBonus()).structuredContent).toEqual({ live_id: liveId, premiacao: 65.33, alterada: true })
+      expect((await editBonus()).structuredContent).toEqual({ live_id: liveId, premiacao: 65.33, alterada: false })
+      expect(await editBonus({ premiacao: 100 })).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('mudou') }] })
+      expect(await editBonus({ live_id: otherLiveId })).toMatchObject({ isError: true, content: [{ text: expect.stringContaining('não encontrada') }] })
+
+      const audit = await db.query("SELECT user_id, entity_id, metadata FROM audit_log WHERE action = 'live.update'")
+      expect(audit.rows).toEqual([{ user_id: uid, entity_id: liveId, metadata: { diff: { premiacao: { before: 20, after: 65.33 } } } }])
+      expect((await db.query('SELECT premiacao, fat_gerado FROM lives ORDER BY id')).rows).toEqual([
+        { premiacao: '65.33', fat_gerado: '1200.00' }, { premiacao: '30.00', fat_gerado: '500.00' },
+      ])
+      // A falha de auditoria reverte o mesmo UPDATE, sem gravar um valor sem trilha.
+      await db.exec("ALTER TABLE audit_log ADD CHECK (action <> 'live.update' OR entity_id IS NULL) NOT VALID")
+      expect((await editBonus({ premiacao_anterior: 65.33, premiacao: 99 })).isError).toBe(true)
+      expect((await db.query('SELECT premiacao FROM lives WHERE id = $1', [liveId])).rows[0].premiacao).toBe('65.33')
+
+      await db.query('UPDATE lives SET arquivada_em = NOW() WHERE id = $1', [liveId])
+      expect(await editBonus({ premiacao_anterior: 65.33, premiacao: 99 })).toMatchObject({
+        isError: true, content: [{ text: expect.stringContaining('não encontrada') }],
+      })
+      f.user.papel = 'auditor'
+      const denied = await mcp(f, bearer, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+      expect(denied.json().result.tools.some(tool => tool.name === 'editar_bonificacao_live')).toBe(false)
+    } finally {
+      await f.app.close()
+    }
+  })
+  it('mantém a edição ausente quando o consentimento é apenas para consulta', async () => {
+    const f = await setup({ livesWriteTenantId: tenant })
+    try {
+      const grant = await connect(f)
+      const tokens = (await exchange(f, { grant_type: 'authorization_code', code: grant.code, code_verifier: grant.verifier, redirect_uri: config.redirectUri })).json()
+      const result = await mcp(f, tokens.access_token, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
+      expect(result.json().result.tools).toHaveLength(17)
+    } finally {
+      await f.app.close()
+    }
   })
   it('nega PKCE incorreto e callback não cadastrado', async () => {
     const f = await setup(), grant = await connect(f)

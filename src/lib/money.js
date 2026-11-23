@@ -32,6 +32,12 @@ export const moneySchema = z.preprocess(
   z.number().min(0),
 )
 
+export const premiacaoSchema = z.number().min(0).max(9_999_999_999.99).multipleOf(0.01)
+export const liveBonusUpdateSchema = z.object({
+  premiacao: premiacaoSchema.nullable(),
+  premiacao_anterior: premiacaoSchema.nullable(),
+}).strict()
+
 // Contrato novo: SQL NUMERIC(15,2) é recebido como texto. Não passar pelo
 // parser permissivo acima ao registrar fatos financeiros: entrada inválida ou
 // centavos fracionários devem falhar, nunca virar zero por conveniência da UI.

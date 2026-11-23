@@ -87,6 +87,8 @@ export const WRITE_LIVES = [
   ...ADMIN, 'operacional', 'produtor_live', AUTOMACAO,
 ]
 
+export const MANAGE_LIVES = [...ADMIN, 'produtor_live']
+
 // ─── APRESENTADORAS ──────────────────────────────────────────────────
 export const READ_APRESENTADORAS = [
   ...ADMIN, 'operacional',

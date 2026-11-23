@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { aggregateFacts, evolution, compareMetrics } from '../src/services/mcp-indicadores.js'
-import { periodSchema, toolDefinitions } from '../src/mcp/tools.js'
+import { canUseTool, periodSchema, toolDefinitions } from '../src/mcp/tools.js'
 
 const facts = [
   { id: 'l1', origem: 'live', dia: '2026-10-01', gmv: 100, pedidos: 2, horas: 4, marca_id: 'm1', cabine_id: 'c1', participantes: [
@@ -36,10 +36,17 @@ describe('MCP contratos de indicadores', () => {
       expect(periodSchema.safeParse(args).success).toBe(false)
     }
   })
-  it('registra as 17 ferramentas contratadas sem ação de escrita', () => {
-    expect(toolDefinitions).toHaveLength(17)
-    expect(new Set(toolDefinitions.map(t => t.name)).size).toBe(17)
-    expect(toolDefinitions.every(t => t.annotations.readOnlyHint && !t.annotations.destructiveHint)).toBe(true)
+  it('preserva as 17 consultas e libera a única ferramenta de escrita só para o piloto autorizado', () => {
+    expect(new Set(toolDefinitions.map(t => t.name)).size).toBe(toolDefinitions.length)
+    const identity = { user: { ativo: true, papel: 'franqueado', tenant_id: 'tenant-piloto' }, tokenVersion: 1,
+      scope: 'livelab:analytics:read livelab:finance:read livelab:lives:write' }
+    const semPiloto = toolDefinitions.filter(tool => canUseTool(identity, tool))
+    expect(semPiloto).toHaveLength(17)
+    expect(semPiloto.every(t => t.annotations.readOnlyHint && !t.annotations.destructiveHint)).toBe(true)
+    const piloto = { ...identity, livesWriteTenantId: 'tenant-piloto' }
+    const writes = toolDefinitions.filter(tool => !tool.annotations.readOnlyHint && canUseTool(piloto, tool))
+    expect(writes.map(tool => tool.name)).toEqual(['editar_bonificacao_live'])
+    expect(writes[0].annotations.destructiveHint).toBe(true)
   })
   it('não transforma GMV ausente em zero ou acumulado completo', () => {
     const incomplete = [{ ...facts[0], gmv_registrado: false, gmv: 0 }, facts[1]]

@@ -34,7 +34,7 @@ function buildApp(queryMock) {
   return app
 }
 
-function makeQueryMock() {
+function makeQueryMock(tipo = 'cliente') {
   const query = vi.fn(async (sql) => {
     if (sql.includes('FROM lives') && sql.includes("status = 'em_andamento'")) {
       return {
@@ -44,6 +44,7 @@ function makeQueryMock() {
           cliente_id: null,
           apresentador_id: null,
           status: 'em_andamento',
+          tipo,
           iniciado_em: '2026-04-08T17:00:00.000Z',
           marca_id: marcaId,
           agenda_evento_id: null,
@@ -83,6 +84,27 @@ describe('PATCH /v1/lives/:id/encerrar — papel da apresentadora', () => {
     // Nem gmv nem tempo: quem escreve dinheiro realizado é applyApresentadorasToLive.
     expect(sql).not.toContain('gmv_rateado')
     expect(sql).not.toContain('segundos_rateio')
+  })
+
+  it.each([['afiliado', 200], ['cliente', 400]])('accepts a closing bonus only for affiliate lives (%s)', async (tipo, status) => {
+    const query = makeQueryMock(tipo)
+    const app = buildApp(query)
+    await app.register(livesRoutes)
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/v1/lives/${liveId}/encerrar`,
+      payload: { fat_gerado: 1000, premiacao: 65.33 },
+    })
+    expect(response.statusCode).toBe(status)
+    const update = query.mock.calls.find(([sql]) => sql.includes("SET status = 'encerrada'"))
+    if (status === 200) {
+      expect(update[0]).toContain('COALESCE($26, premiacao)')
+      expect(update[1][0]).toBe(1000)
+      expect(update[1][25]).toBe(65.33)
+    } else {
+      expect(update).toBeUndefined()
+    }
+    await app.close()
   })
 
   it('não escreve em v2 quando o encerramento não informa apresentadora', async () => {

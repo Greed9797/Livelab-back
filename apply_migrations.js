@@ -186,6 +186,7 @@ export const MIGRATIONS_LIST = [
   '189_rh_colaboradores.sql',
   '190_rh_comissao_pct.sql',
   '191_rh_pulmao_fields.sql',
+  '192_lives_premiacao.sql',
 ]
 
 async function ensureMigrationsTable(client) {

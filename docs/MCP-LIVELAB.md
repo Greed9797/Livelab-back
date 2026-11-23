@@ -1,8 +1,9 @@
-# MCP Livelab: desempenho e financeiro
+# MCP LiveLab v2: consultas e bonificação
 
 O backend fornece 17 ferramentas MCP de consulta. O transporte é Streamable HTTP
 sem sessão, em `/mcp`. A identidade vem da conta Livelab via OAuth, nunca de um
-tenant informado pelo modelo. O MCP está desligado por padrão.
+tenant informado pelo modelo. O MCP está desligado por padrão. A escrita de
+bonificação é habilitada separadamente para uma unidade piloto.
 
 ## Ferramentas
 
@@ -30,7 +31,27 @@ Períodos diários usam `YYYY-MM-DD`, são inclusivos e limitados a 366 dias.
 Períodos financeiros usam meses completos, até 12 meses. Listagens começam na
 página 0, com limite máximo 100. Consultas com mais de 10.000 fatos ou respostas
 acima de 2 MB são rejeitadas: reduza o período ou filtre, sem truncar totais.
-Não há ferramenta de escrita, SQL livre, pagamento ou reprocessamento.
+O catálogo de consulta continua disponível para conexões com os escopos atuais.
+
+## Editar bonificação na unidade piloto
+
+A ferramenta `editar_bonificacao_live` exige consentimento para
+`livelab:lives:write`, conta ativa na unidade piloto e papel de franqueador
+master, franqueado, gerente ou produtor de live. Para localizar a live pelo
+MCP e consultar o valor atual, solicite também `livelab:analytics:read`.
+
+1. Use `consultar_lives` e confirme o registro correto se houver mais de um candidato.
+2. Chame `detalhar_live` com o ID. A resposta autorizada inclui `dados.tipo`
+   e `dados.premiacao` nas lives de afiliado.
+3. Passe `live_id`, `premiacao_anterior` e `premiacao` para
+   `editar_bonificacao_live`. Os valores são em reais com até dois
+   decimais. Zero grava R$ 0,00 e `null` representa ausência de bonificação.
+4. Se houver conflito, consulte novamente o valor antes de prosseguir.
+   Reenvio quando o valor já corresponde ao pedido retorna `alterada: false`.
+   Uma mudança grava a auditoria junto com o valor, na mesma transação.
+
+A edição usa a mesma coluna exibida no painel de Lives. O histórico registra
+a conta que fez a alteração.
 
 ## Significado dos valores
 
@@ -68,6 +89,7 @@ criptografados; identificadores são armazenados por hash. Refresh tokens rotaci
 | Variável | Conteúdo |
 | --- | --- |
 | MCP_ENABLED | true para habilitar; qualquer outro valor mantém desligado |
+| MCP_LIVES_WRITE_TENANT_ID | UUID da unidade piloto. Vazio ou ausente desabilita a escrita |
 | MCP_PUBLIC_URL | Origem HTTPS pública da API, sem caminho ou query |
 | MCP_CHATGPT_CLIENT_ID | ID do cliente configurado na conexão ChatGPT |
 | MCP_CHATGPT_REDIRECT_URI | Callback HTTPS exato mostrado no ChatGPT, host chatgpt.com |
@@ -86,7 +108,8 @@ gerenciador de secrets do ambiente autorizado. Não versione esse arquivo e não
 publique chaves privadas. Preserve chaves entre reinícios: trocar STORAGE_KEY
 sem recriptografar os artefatos invalida a leitura das conexões existentes.
 
-Escopos: `livelab:analytics:read` e `livelab:finance:read`. Cada chamada também
+Consultas usam `livelab:analytics:read` e `livelab:finance:read`. O escopo
+`livelab:lives:write` exige novo consentimento e configuração do piloto. Cada chamada também
 verifica papel, conta ativa, tenant e versão da sessão no banco. Metas permitem
 apenas os papéis já autorizados pelas rotas; listagem/detalhe de lives exige a
 permissão operacional existente. Conta sem permissão para os escopos solicitados
@@ -115,7 +138,12 @@ Discovery: `/.well-known/oauth-protected-resource/mcp` e
 `/.well-known/oauth-authorization-server/oauth`. A origem ChatGPT só é liberada
 nas rotas MCP/OAuth; a allowlist das outras rotas permanece restrita.
 
-Rollback: definir MCP_ENABLED=false e reiniciar. A API atual continua operando;
+Para homologar o piloto, verifique discovery e conecte uma conta de teste da
+unidade. Confira a edição na tela de Lives e no histórico de auditoria.
+Verifique também uma conta sem permissão e um ID de outra unidade. Para
+desligar só a escrita, remova `MCP_LIVES_WRITE_TENANT_ID` e reinicie.
+
+Rollback completo: definir MCP_ENABLED=false e reiniciar. A API atual continua operando;
 as tabelas aditivas podem permanecer para recuperação. Não apagar dados OAuth
 nem trocar secrets como parte automática do rollback.
 

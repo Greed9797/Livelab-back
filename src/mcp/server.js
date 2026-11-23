@@ -5,7 +5,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { loginSchema } from '../schemas/auth.schema.js'
 import { authenticateAccount } from '../services/account-credentials.js'
 import { artifactHash } from './oauth-adapter.js'
-import { readMcpConfig, createMcpProvider, authenticateMcpBearer, authorizeMcpUser, SCOPES } from './oauth.js'
+import { readMcpConfig, createMcpProvider, authenticateMcpBearer, authorizeMcpUser, SCOPES, supportedMcpScopes } from './oauth.js'
 import { toolDefinitions, executeTool, canUseTool } from './tools.js'
 
 const escape = value => String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
@@ -22,17 +22,21 @@ function validCsrf(config, details, input) {
 }
 function loginPage(details, config) {
   const scope = String(details.params.scope || '').split(' ')
-  const permissions = Object.entries(SCOPES).filter(([, value]) => scope.includes(value)).map(([domain]) => domain === 'finance'
-    ? '<li>Consultar financeiro: receitas calculadas, custos, comissões e fechamento dos apresentadores.</li>'
-    : '<li>Consultar desempenho: GMV, horas, apresentadores, marcas, cabines e metas.</li>').join('')
+  const available = supportedMcpScopes(config)
+  const permissions = [
+    [SCOPES.analytics, 'Consultar desempenho: GMV, horas, apresentadores, marcas, cabines e metas.'],
+    [SCOPES.finance, 'Consultar financeiro: receitas calculadas, custos, comissões e fechamento dos apresentadores.'],
+    [SCOPES.livesWrite, 'Editar a bonificação de lives de afiliado na sua unidade.'],
+  ].filter(([value]) => scope.includes(value) && available.includes(value))
+    .map(([, label]) => `<li>${label}</li>`).join('')
   return `<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Conectar Livelab</title><body>
-    <main><h1>Conectar Livelab ao ChatGPT</h1><p>Autorize as consultas abaixo com sua conta Livelab. Suas permissões atuais continuam valendo.</p>
-    <ul>${permissions}</ul><p>A conexão permite consultas e poderá renovar o acesso até você desconectar ou revogar a autorização. Nenhum pagamento ou alteração será realizado.</p>
+    <main><h1>Conectar Livelab ao ChatGPT</h1><p>Autorize os acessos abaixo com sua conta Livelab. Suas permissões atuais continuam valendo.</p>
+    <ul>${permissions}</ul><p>A conexão permite consultas e poderá renovar o acesso até você desconectar ou revogar a autorização.</p>
     <form method="post" action="/mcp/login/${escape(details.uid)}">
     <input type="hidden" name="csrf" value="${csrf(config, details, Date.now())}">
     <p><label>E-mail <input name="email" type="email" autocomplete="username" maxlength="254" required></label></p>
     <p><label>Senha <input name="senha" type="password" autocomplete="current-password" maxlength="200" required></label></p>
-    <button name="acao" value="autorizar" type="submit">Entrar e autorizar consultas</button>
+    <button name="acao" value="autorizar" type="submit">Entrar e autorizar acessos</button>
     <button name="acao" value="cancelar" type="submit" formnovalidate>Cancelar</button>
     </form></main></body></html>`
 }
@@ -61,7 +65,7 @@ export async function mcpRoutes(app, options = {}) {
     return reply.redirect(`${config.issuer}/.well-known/openid-configuration`)
   })
   const metadata = async (_request, reply) => reply.header('cache-control', 'no-store').send({
-    resource: config.resource, authorization_servers: [config.issuer], scopes_supported: Object.values(SCOPES),
+    resource: config.resource, authorization_servers: [config.issuer], scopes_supported: supportedMcpScopes(config),
     bearer_methods_supported: ['header'], resource_name: 'Livelab — desempenho e financeiro',
   })
   app.get('/.well-known/oauth-protected-resource/mcp', metadata)
@@ -89,9 +93,10 @@ export async function mcpRoutes(app, options = {}) {
     const user = await authenticateAccount(app.db, credentials.data.email, credentials.data.senha)
     if (!user || (details.prompt.name === 'consent' && details.session?.accountId !== user.id)) return reply.code(401).send({ error: 'Credenciais inválidas' })
     const requested = String(details.params.scope || '').split(' ')
-    const resourceScopes = Object.values(SCOPES).filter(scope => requested.includes(scope))
-    if (!resourceScopes.length || resourceScopes.some(scope => !authorizeMcpUser(user, scope,
-      scope === SCOPES.finance ? 'finance' : 'analytics', user.token_version ?? 1))) return reply.code(403).send({ error: 'Sua conta não permite os acessos solicitados' })
+    const domains = Object.keys(SCOPES).filter(domain => requested.includes(SCOPES[domain]))
+    const resourceScopes = domains.map(domain => SCOPES[domain])
+    if (!resourceScopes.length || domains.some(domain => !authorizeMcpUser(user, requested.join(' '),
+      domain, user.token_version ?? 1, config.livesWriteTenantId))) return reply.code(403).send({ error: 'Sua conta não permite os acessos solicitados' })
     const grant = new provider.Grant({ accountId: user.id, clientId: config.clientId })
     grant.addOIDCScope(requested.join(' '))
     grant.addResourceScope(config.resource, resourceScopes.join(' '))
@@ -112,25 +117,25 @@ export async function mcpRoutes(app, options = {}) {
       reply.header('cache-control', 'no-store')
       const identity = await authenticateMcpBearer(app, provider, config, request.headers.authorization)
       if (!identity) return reply.header('www-authenticate', `Bearer resource_metadata="${config.origin}/.well-known/oauth-protected-resource/mcp"`)
-        .code(401).send({ error: 'Conecte sua conta Livelab para consultar' })
+        .code(401).send({ error: 'Conecte sua conta Livelab para acessar o MCP' })
       if (request.method !== 'POST') return reply.header('allow', 'POST').code(405).send({ error: 'Transporte sem sessão; use POST' })
-      const server = new McpServer({ name: 'livelab', version: '1.0.0' })
+      const server = new McpServer({ name: 'livelab', version: '2.0.0' })
       for (const def of toolDefinitions.filter(t => canUseTool(identity, t))) {
         server.registerTool(def.name, { description: def.description, inputSchema: def.schema,
-          outputSchema: z.object({ periodo: z.record(z.string(), z.unknown()), filtros: z.record(z.string(), z.unknown()),
+          outputSchema: def.outputSchema ?? z.object({ periodo: z.record(z.string(), z.unknown()), filtros: z.record(z.string(), z.unknown()),
             consultado_em: z.string(), timezone: z.string(), moeda: z.string(), origem: z.string(), avisos: z.array(z.string()), dados: z.unknown() }),
           annotations: def.annotations }, async args => {
           try {
             const result = await executeTool(app, identity, def.name, args)
             const text = JSON.stringify(result)
             if (Buffer.byteLength(text) > 2_000_000) throw Object.assign(new Error('Resposta muito grande; reduza o período ou use filtros'), { statusCode: 422 })
-            await app.audit?.log?.({ ...request, user: { sub: identity.user.id, tenant_id: identity.user.tenant_id, papel: identity.user.papel } }, {
+            if (def.annotations.readOnlyHint) await app.audit?.log?.({ ...request, user: { sub: identity.user.id, tenant_id: identity.user.tenant_id, papel: identity.user.papel } }, {
               action: 'mcp.tool.read', entity_type: 'mcp', entity_id: null, metadata: { tool: def.name },
             })
             return { content: [{ type: 'text', text }], structuredContent: result }
           } catch (error) {
-            app.log.warn({ tool: def.name, code: error.statusCode || 'query_failed' }, 'Consulta MCP falhou')
-            return { isError: true, content: [{ type: 'text', text: error.statusCode ? error.message : 'Falha ao consultar dados; tente novamente ou reduza o período' }] }
+            app.log.warn({ tool: def.name, code: error.statusCode || 'query_failed' }, 'Ferramenta MCP falhou')
+            return { isError: true, content: [{ type: 'text', text: error.statusCode ? error.message : 'Falha ao executar a ferramenta MCP. Tente novamente.' }] }
           }
         })
       }

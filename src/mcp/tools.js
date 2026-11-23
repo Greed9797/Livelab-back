@@ -2,6 +2,7 @@ import { previstoEfetivo } from '../services/financeiro-agregador.js'
 import { z } from 'zod'
 import { aggregateFacts, evolution, compareMetrics, loadFacts } from '../services/mcp-indicadores.js'
 import { authorizeMcpUser } from './oauth.js'
+import { liveBonusUpdateSchema, premiacaoSchema } from '../lib/money.js'
 import { READ_CABINES, READ_MARCAS, READ_APRESENTADORAS, READ_COMISSOES } from '../config/role_groups.js'
 
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v => {
@@ -37,14 +38,27 @@ export const toolDefinitions = [
   definition('consultar_comissoes', 'finance', 'Comissões calculadas de apresentadores, franquia e franqueadora, separadas por régua. Não confirma pagamento.', periodSchema),
   definition('consultar_fechamento_apresentadores', 'finance', 'Fechamento mensal com fixo, comissão, adicionais e total; permite filtrar uma pessoa.', z.object({ mes: month, apresentadora_id: z.string().uuid().optional() }).strict()),
   definition('consultar_memoria_financeira', 'finance', 'Memória de entradas/saídas operacionais ou fechamento mensal individual, incluindo registros e faixas disponíveis.', z.object({ mes: month, tipo: z.enum(['operacional', 'apresentadora']), apresentadora_id: z.string().uuid().optional() }).strict().refine(v => v.tipo !== 'apresentadora' || Boolean(v.apresentadora_id), 'Informe apresentadora_id')),
+  {
+    name: 'editar_bonificacao_live', domain: 'livesWrite',
+    description: 'Edita apenas a bonificação em reais de uma live de afiliado. Consulte detalhar_live primeiro e use o valor atual como premiacao_anterior. Zero é um valor; null limpa o campo. Se houver mais de uma live possível, solicite a escolha.',
+    schema: liveBonusUpdateSchema.extend({ live_id: z.string().uuid() }).strict(),
+    outputSchema: z.object({ live_id: z.string().uuid(), premiacao: premiacaoSchema.nullable(), alterada: z.boolean() }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  },
 ]
 
 export function canUseTool(identity, def) {
-  if (!authorizeMcpUser(identity.user, identity.scope, def.domain, identity.tokenVersion)) return false
+  if (!authorizeMcpUser(identity.user, identity.scope, def.domain, identity.tokenVersion, identity.livesWriteTenantId)) return false
   const roles = def.name === 'consultar_metas' ? ['franqueado', 'gerente']
     : ['consultar_lives', 'detalhar_live'].includes(def.name) ? READ_CABINES
       : def.name === 'consultar_comissoes' ? READ_COMISSOES : null
   return !roles || roles.includes(identity.user.papel)
+}
+
+function internalAuthorization(app, user) {
+  return `Bearer ${app.jwt.sign({
+    sub: user.id, tenant_id: user.tenant_id, papel: user.papel, token_version: user.token_version ?? 1,
+  }, { expiresIn: '30s' })}`
 }
 
 const pick = (obj, keys) => Object.fromEntries(keys.filter(k => obj?.[k] !== undefined).map(k => [k, obj[k]]))
@@ -60,7 +74,7 @@ export async function sharedRead(app, user, pathname, params = {}) {
   if (!allowed.test(pathname)) throw new Error('Serviço de leitura não permitido')
   const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== null))
   const response = await app.inject({ method: 'GET', url: `${pathname}?${query}`, headers: {
-    authorization: `Bearer ${app.jwt.sign({ sub: user.id, tenant_id: user.tenant_id, papel: user.papel, token_version: user.token_version ?? 1 }, { expiresIn: '30s' })}`,
+    authorization: internalAuthorization(app, user),
   } })
   if (response.statusCode !== 200) throw Object.assign(new Error(response.statusCode === 403 ? 'Seu papel não permite esta consulta' : 'Não foi possível consultar a fonte'), { statusCode: response.statusCode })
   if (Buffer.byteLength(response.payload) > 2_000_000) throw Object.assign(new Error('Fonte retornou mais de 2 MB; reduza o período'), { statusCode: 422 })
@@ -84,6 +98,18 @@ export async function executeTool(app, identity, name, rawArgs) {
   const parsed = def.schema.safeParse(rawArgs)
   if (!parsed.success) throw Object.assign(new Error(parsed.error.issues.map(i => i.message).join('; ')), { statusCode: 400 })
   const args = parsed.data, user = identity.user
+  if (name === 'editar_bonificacao_live') {
+    const { live_id, ...payload } = args
+    const response = await app.inject({
+      method: 'PATCH', url: `/v1/lives/${live_id}/premiacao`, payload,
+      headers: { authorization: internalAuthorization(app, user) },
+    })
+    if (response.statusCode !== 200) {
+      const message = response.statusCode < 500 ? response.json().error : 'Não foi possível editar a bonificação.'
+      throw Object.assign(new Error(message), { statusCode: response.statusCode })
+    }
+    return response.json()
+  }
   const avisos = def.domain === 'finance' ? [financialNote] : []
   let dados, resolvedPeriod, origem = 'lives + vendas_atribuidas; expressões metric-sql'
   if (name === 'buscar_entidades') {
@@ -170,13 +196,17 @@ export async function executeTool(app, identity, name, rawArgs) {
     avisos.push('Contagem de valores registrados não comprova cobertura completa: imports antigos podem ter gravado zero para campos ausentes.')
   } else {
     let period = args
+    let bonus
     if (name === 'detalhar_live') {
-      const { rows } = await app.withTenant(user.tenant_id, db => db.query(`SELECT (iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date::text AS dia, status
+      const { rows } = await app.withTenant(user.tenant_id, db => db.query(`SELECT (iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date::text AS dia, status, tipo, premiacao
         FROM lives WHERE tenant_id = $1::uuid AND id = $2::uuid`, [user.tenant_id, args.live_id]))
       if (!rows[0]) throw Object.assign(new Error('Live não encontrada'), { statusCode: 404 })
       if (!['encerrada', 'em_andamento'].includes(rows[0].status)) throw Object.assign(new Error('Live sem métricas de execução'), { statusCode: 422 })
       period = { inicio: rows[0].dia, fim: rows[0].dia, status: rows[0].status, origem: 'live', live_id: args.live_id }
       resolvedPeriod = { inicio: period.inicio, fim: period.fim }
+      if (rows[0].tipo === 'afiliado' && authorizeMcpUser(user, identity.scope, 'livesWrite', identity.tokenVersion, identity.livesWriteTenantId)) {
+        bonus = { tipo: rows[0].tipo, premiacao: rows[0].premiacao == null ? null : Number(rows[0].premiacao) }
+      }
     }
     const facts = await loadFacts(app, user, period)
     if (period.status === 'em_andamento') avisos.push('Dados parciais registrados, não atualizados instantaneamente do TikTok. Horas podem usar o término previsto.')
@@ -192,6 +222,7 @@ export async function executeTool(app, identity, name, rawArgs) {
     else {
       dados = facts.find(f => f.id === args.live_id && f.origem === 'live')
       if (!dados) throw Object.assign(new Error('Live não encontrada'), { statusCode: 404 })
+      if (bonus) dados = { ...dados, ...bonus }
     }
     avisos.push('Dia atribuído ao início da live em São Paulo. GMV de vídeos segue vendas atribuídas; outras telas podem usar video_registros.')
     if (facts.some(f => f.gmv_registrado === false)) avisos.push('GMV ausente: totais completos ficam indisponíveis; gmv_conhecido é apenas o subtotal dos valores registrados.')

@@ -1,13 +1,25 @@
 import { Provider, errors } from 'oidc-provider'
-import { READ_ANALYTICS, READ_FINANCEIRO } from '../config/role_groups.js'
+import { z } from 'zod'
+import { MANAGE_LIVES, READ_ANALYTICS, READ_FINANCEIRO } from '../config/role_groups.js'
 import { artifactHash, createOAuthAdapter } from './oauth-adapter.js'
 
-export const SCOPES = { analytics: 'livelab:analytics:read', finance: 'livelab:finance:read' }
-export function authorizeMcpUser(user, scope, domain, tokenVersion) {
+export const SCOPES = {
+  analytics: 'livelab:analytics:read',
+  finance: 'livelab:finance:read',
+  livesWrite: 'livelab:lives:write',
+}
+const ROLES = { analytics: READ_ANALYTICS, finance: READ_FINANCEIRO, livesWrite: MANAGE_LIVES }
+
+export function supportedMcpScopes(config) {
+  return Object.values(config.livesWriteTenantId ? SCOPES : { analytics: SCOPES.analytics, finance: SCOPES.finance })
+}
+
+export function authorizeMcpUser(user, scope, domain, tokenVersion, livesWriteTenantId) {
   return Boolean(user?.ativo && user.tenant_id && user.papel !== 'automacao'
     && Number(user.token_version ?? 1) === Number(tokenVersion)
     && String(scope || '').split(' ').includes(SCOPES[domain])
-    && (domain === 'finance' ? READ_FINANCEIRO : READ_ANALYTICS).includes(user.papel))
+    && ROLES[domain]?.includes(user.papel)
+    && (domain !== 'livesWrite' || user.tenant_id === livesWriteTenantId))
 }
 
 export function readMcpConfig(env = process.env) {
@@ -28,7 +40,11 @@ export function readMcpConfig(env = process.env) {
     || !Array.isArray(jwks.keys) || !jwks.keys.length || jwks.keys.some(key => !key.d || !key.kid)) {
     throw new Error('Configuração MCP OAuth incompleta')
   }
-  return { enabled: true, origin: publicUrl.origin, issuer: `${publicUrl.origin}/oauth`,
+  const livesWriteTenant = env.MCP_LIVES_WRITE_TENANT_ID?.trim().toLowerCase()
+  if (livesWriteTenant && !z.string().uuid().safeParse(livesWriteTenant).success) {
+    throw new Error('MCP_LIVES_WRITE_TENANT_ID deve ser um UUID válido')
+  }
+  return { enabled: true, livesWriteTenantId: livesWriteTenant || undefined, origin: publicUrl.origin, issuer: `${publicUrl.origin}/oauth`,
     resource: `${publicUrl.origin}/mcp`, clientId: env.MCP_CHATGPT_CLIENT_ID,
     redirectUri: redirect.href, cookieKeys, jwks, storageKey: env.MCP_STORAGE_KEY }
 }
@@ -39,21 +55,21 @@ export async function loadMcpUser(db, id) {
 }
 
 export function createMcpProvider(app, config) {
-  let provider
-  provider = new Provider(config.issuer, {
+  const scopes = supportedMcpScopes(config)
+  const provider = new Provider(config.issuer, {
     adapter: createOAuthAdapter(app.db, config.storageKey), jwks: config.jwks,
     clients: [{ client_id: config.clientId, redirect_uris: [config.redirectUri],
       response_types: ['code'], grant_types: ['authorization_code', 'refresh_token'],
-      token_endpoint_auth_method: 'none', scope: `openid offline_access ${Object.values(SCOPES).join(' ')}` }],
+      token_endpoint_auth_method: 'none', scope: `openid offline_access ${scopes.join(' ')}` }],
     cookies: { keys: config.cookieKeys },
     pkce: { required: () => true, methods: ['S256'] },
-    scopes: ['openid', 'offline_access', ...Object.values(SCOPES)],
+    scopes: ['openid', 'offline_access', ...scopes],
     features: { devInteractions: { enabled: false }, revocation: { enabled: true },
       resourceIndicators: { enabled: true, defaultResource: () => config.resource,
         useGrantedResource: () => true,
         getResourceServerInfo: (_ctx, resource) => {
           if (resource !== config.resource) throw new errors.InvalidTarget()
-          return { scope: Object.values(SCOPES).join(' '), audience: config.resource, accessTokenFormat: 'opaque' }
+          return { scope: scopes.join(' '), audience: config.resource, accessTokenFormat: 'opaque' }
         } } },
     interactions: { url: (_ctx, interaction) => `/mcp/login/${interaction.uid}` },
     ttl: { AccessToken: 900, AuthorizationCode: 60, RefreshToken: 604800, Grant: 604800, Session: 3600, Interaction: 600 },
@@ -70,7 +86,7 @@ export function createMcpProvider(app, config) {
       const user = await loadMcpUser(app.db, token.accountId)
       const { rows } = await app.db.query('SELECT tenant_id, token_version FROM mcp_oauth_bindings WHERE grant_hash = $1', [artifactHash(token.grantId)])
       const binding = rows[0]
-      const allowed = Object.keys(SCOPES).some(domain => authorizeMcpUser(user, token.scope, domain, binding?.token_version))
+      const allowed = Object.keys(SCOPES).some(domain => authorizeMcpUser(user, token.scope, domain, binding?.token_version, config.livesWriteTenantId))
       if (!binding || binding.tenant_id !== user?.tenant_id || !allowed) throw new errors.InvalidGrant('Autorização revogada; conecte novamente')
       return { tenant_id: binding.tenant_id, token_version: binding.token_version }
     },
@@ -87,5 +103,5 @@ export async function authenticateMcpBearer(app, provider, config, header) {
   const user = await loadMcpUser(app.db, token.accountId)
   if (!user?.ativo || user.tenant_id !== token.extra?.tenant_id
     || Number(user.token_version ?? 1) !== Number(token.extra?.token_version)) return null
-  return { user, scope: token.scope, tokenVersion: token.extra.token_version }
+  return { user, scope: token.scope, tokenVersion: token.extra.token_version, livesWriteTenantId: config.livesWriteTenantId }
 }

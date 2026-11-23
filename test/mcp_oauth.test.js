@@ -10,6 +10,14 @@ describe('MCP OAuth policy', () => {
     expect(authorizeMcpUser({ ...user, papel: 'marketing' }, 'livelab:finance:read', 'finance', 3)).toBe(false)
     expect(authorizeMcpUser({ ...user, papel: 'financeiro_readonly' }, 'livelab:finance:read', 'finance', 3)).toBe(true)
   })
+  it('restringe a escrita de bonificação a gestão, consentimento e unidade piloto', () => {
+    const scope = 'livelab:lives:write'
+    expect(authorizeMcpUser(user, scope, 'livesWrite', 3, user.tenant_id)).toBe(true)
+    expect(authorizeMcpUser(user, scope, 'livesWrite', 3)).toBe(false)
+    expect(authorizeMcpUser(user, scope, 'livesWrite', 3, 'outra-unidade')).toBe(false)
+    expect(authorizeMcpUser({ ...user, papel: 'operacional' }, scope, 'livesWrite', 3, user.tenant_id)).toBe(false)
+    expect(authorizeMcpUser(user, 'livelab:analytics:read', 'livesWrite', 3, user.tenant_id)).toBe(false)
+  })
   it('nega bloqueio, mudança de senha, tenant ausente e identidade de automação', () => {
     for (const current of [{ ...user, ativo: false }, { ...user, token_version: 4 }, { ...user, tenant_id: null }, { ...user, papel: 'automacao' }]) {
       expect(authorizeMcpUser(current, 'livelab:analytics:read livelab:finance:read', 'analytics', 3)).toBe(false)

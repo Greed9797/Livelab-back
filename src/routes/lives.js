@@ -1,13 +1,13 @@
 import { syncAgendaEventForLive } from '../lib/live-agenda-sync.js'
 import { z } from 'zod'
 import { has as managerHas, stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
-import { READ_CABINES, WRITE_LIVES } from '../config/role_groups.js'
+import { AUTOMACAO, MANAGE_LIVES, READ_CABINES, WRITE_LIVES } from '../config/role_groups.js'
 import { origemDados } from '../plugins/auth.js'
 import { notify } from '../services/mailer.js'
 import { getRequestIp, logCabineEvent } from '../lib/cabine-events.js'
 import { calcularComissoesDaLive } from '../services/commission-engine.js'
 import { calcularComissaoApresentadora, isFimDeSemanaSP } from '../services/comissao.js'
-import { moneySchema } from '../lib/money.js'
+import { moneySchema, premiacaoSchema, liveBonusUpdateSchema } from '../lib/money.js'
 import { invalidateHomeDashboard } from './home.js'
 import { saoPauloDateInput, saoPauloDayBounds, saoPauloTimeInput, saoPauloTimestamp } from '../lib/timezone.js'
 import { tiktokUsernameField, tiktokUsernameSql, updateCanonicalTikTokUsername } from '../lib/tiktok-username.js'
@@ -71,7 +71,6 @@ const iniciarLiveSchema = z.object({
   previsto_fim: z.string().datetime({ offset: true }).optional().nullable(),
 })
 
-const premiacaoSchema = z.number().min(0).max(9_999_999_999.99).multipleOf(0.01)
 const premiacaoTipoError = 'A bonificação só se aplica a lives de afiliado.'
 
 const encerrarSchema = z.object({
@@ -706,7 +705,7 @@ export async function livesRoutes(app) {
   // entradas retroativas (atribuição de comissão é responsabilidade do gestor).
   const gestorRoleAccess = [
     app.authenticate,
-    app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'produtor_live', 'automacao']),
+    app.requirePapel([...MANAGE_LIVES, AUTOMACAO]),
   ]
   app.post('/v1/lives/manual', { preHandler: gestorRoleAccess }, async (request, reply) => {
     const parsed = liveManualSchema.safeParse(request.body)
@@ -962,6 +961,53 @@ export async function livesRoutes(app) {
       } catch (e) {
         await db.query('ROLLBACK')
         throw e
+      }
+    })
+  })
+
+  app.patch('/v1/lives/:id/premiacao', { preHandler: [app.authenticate, app.requirePapel(MANAGE_LIVES)] }, async (request, reply) => {
+    const id = z.string().uuid().safeParse(request.params.id)
+    const parsed = liveBonusUpdateSchema.safeParse(request.body)
+    if (!id.success || !parsed.success) return reply.code(400).send({ error: 'Informe a live e os valores válidos da bonificação.' })
+
+    const { premiacao, premiacao_anterior } = parsed.data
+    const { tenant_id } = request.user
+    return app.withTenant(tenant_id, async (db) => {
+      await db.query('BEGIN')
+      try {
+        const { rows: [live] } = await db.query(
+          `SELECT l.tipo, l.status, l.premiacao FROM lives l
+            WHERE l.id = $1 AND l.tenant_id = $2::uuid AND ${activeLiveSql('l')}
+              AND l.arquivada_em IS NULL FOR UPDATE`,
+          [id.data, tenant_id],
+        )
+        if (!live || live.status === 'cancelada' || live.tipo !== 'afiliado') {
+          await db.query('ROLLBACK')
+          if (!live) return reply.code(404).send({ error: 'Live não encontrada neste tenant.' })
+          return reply.code(422).send({ error: 'Selecione uma live de afiliado que não esteja cancelada.' })
+        }
+
+        const anterior = live.premiacao == null ? null : Number(live.premiacao)
+        if (anterior === premiacao) {
+          await db.query('COMMIT')
+          return { live_id: id.data, premiacao, alterada: false }
+        }
+        if (anterior !== premiacao_anterior) {
+          await db.query('ROLLBACK')
+          return reply.code(409).send({ error: 'A bonificação mudou. Consulte o valor atual antes de tentar novamente.' })
+        }
+        await db.query('UPDATE lives SET premiacao = $1 WHERE id = $2 AND tenant_id = $3::uuid', [premiacao, id.data, tenant_id])
+        await app.audit.log(request, {
+          action: 'live.update',
+          entity_type: 'live',
+          entity_id: id.data,
+          metadata: { diff: { premiacao: { before: anterior, after: premiacao } } },
+        }, { db, strict: true })
+        await db.query('COMMIT')
+        return { live_id: id.data, premiacao, alterada: true }
+      } catch (error) {
+        await db.query('ROLLBACK').catch(() => {})
+        throw error
       }
     })
   })

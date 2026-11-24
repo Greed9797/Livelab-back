@@ -256,7 +256,10 @@ export async function listarCadastros(db, {
   tenantId, tipo = null, status = null, q = null, geraReceita = null, incluirSistema = true, ocultarFicha = false,
 } = {}) {
   const values = [tenantId]
-  const filters = ['m.tenant_id = $1::uuid']
+  // Cliente excluído sai da carteira em qualquer visão, inclusive ?status=all: o DELETE
+  // não muda clientes.status (voltaria como "ativo") e o detalhe responde 404.
+  // `c` só existe para marca tipo='cliente'; nas demais o LEFT JOIN vem NULL e passa.
+  const filters = ['m.tenant_id = $1::uuid', 'c.deleted_at IS NULL']
   const push = (v) => `$${values.push(v)}`
   if (status === 'all') {
     // sem filtro

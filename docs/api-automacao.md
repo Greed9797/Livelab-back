@@ -191,7 +191,7 @@ comercial da marca `tipo = "cliente"`. As rotas antigas `/v1/clientes` e
 
 | Método | Rota | Quem | Para quê |
 |---|---|---|---|
-| `GET` | `/v1/cadastros` | `READ_MARCAS` (inclui a chave) | Lista. Filtros: `tipo` (`cliente`/`afiliada`/`propria`/`parceira`/`all`), `status` (padrão esconde `inativa`/`arquivada`; `all` mostra tudo), `q` (nome da marca, do cliente ou razão social), `gera_receita=true|false`, `sistema=false` (esconde a marca-sistema) |
+| `GET` | `/v1/cadastros` | `READ_MARCAS` (inclui a chave) | Lista. Filtros: `tipo` (`cliente`/`afiliada`/`propria`/`parceira`/`all`), `status` (padrão esconde `inativa`/`arquivada`; `all` mostra tudo; cliente excluído nunca aparece), `q` (nome da marca, do cliente ou razão social), `gera_receita=true|false`, `sistema=false` (esconde a marca-sistema) |
 | `GET` | `/v1/cadastros/:id` | `READ_MARCAS` (inclui a chave) | Um cadastro. Aceita `marca_id` **ou** `cliente_id` da ficha |
 | `POST` | `/v1/cadastros` | `WRITE_CLIENTES` (não a chave) | Cria. `tipo` padrão `cliente` (exige `celular`; cria ficha + marca). Outros tipos criam só a marca |
 | `PATCH` | `/v1/cadastros/:id` | `WRITE_CLIENTES` | Edita roteando cada campo à tabela certa |
